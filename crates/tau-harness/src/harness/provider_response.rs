@@ -390,15 +390,6 @@ impl Harness {
                     | ProviderStopReason::ToolCalls
                     | ProviderStopReason::Length
             );
-        if !standalone_compaction || standalone_success {
-            self.provider_runtime.cache_residency.finish_prompt(
-                &response.agent_prompt_id,
-                refresh_success,
-                response.usage.as_ref(),
-            );
-        }
-        let mut tool_calls = projection.tool_calls;
-        let assistant_text = projection.assistant_text;
         let input_tokens = response
             .usage
             .as_ref()
@@ -407,10 +398,6 @@ impl Harness {
             .usage
             .as_ref()
             .map(|usage| usage.prompt_cached_tokens);
-        let output_tokens = response
-            .usage
-            .as_ref()
-            .map(|usage| usage.response_received_tokens);
         let terminal_attempt = if standalone_compaction {
             self.prompt_coordination
                 .standalone_accounting
@@ -442,13 +429,50 @@ impl Harness {
         };
         response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
             .expect("terminal attempt is one-based");
-        let terminal_model = self
-            .prompt_coordination
+        response.context_limit_telemetry = self.prepare_finished_response_context_limit(&response);
+        let terminal_plan = if !standalone_compaction || standalone_success {
+            self.classify_reactive_context_recovery(&cid, &response, source)
+        } else {
+            ProviderTerminalPlan::Other
+        };
+        let reactive_recovery = matches!(
+            terminal_plan,
+            ProviderTerminalPlan::ReactiveContextRecovery(_)
+        );
+        if reactive_recovery {
+            Self::prepare_reactive_context_recovery_fields(&mut response);
+        }
+        let prepared_accounting =
+            self.prepare_provider_accounting(&mut response, !standalone_compaction);
+        let prepared_ordinary = (!standalone_compaction && !reactive_recovery)
+            .then(|| self.prepare_ordinary_provider_terminal(&cid, &mut response, &mut projection));
+        let prepared_standalone_accounting = standalone_compaction
+            .then(|| self.prepare_standalone_accounting(&response, standalone_success))
+            .flatten();
+        let prepared_standalone_terminal = standalone_terminal.map(|terminal| {
+            let ProviderTerminalPlan::StandaloneCompaction(plan) = terminal else {
+                unreachable!("standalone classification returned an unrelated family");
+            };
+            self.prepare_standalone_terminal(&cid, &response, plan)
+        });
+        // Every immediately output-bearing canonical field is now fixed.
+        // Applying the prepared effects preserves their established source
+        // order.
+        if !standalone_compaction || standalone_success {
+            self.provider_runtime.cache_residency.finish_prompt(
+                &response.agent_prompt_id,
+                refresh_success,
+                prepared_accounting
+                    .reported_usage
+                    .as_ref()
+                    .or(response.usage.as_ref()),
+            );
+        }
+        self.prompt_coordination
             .prompt_runtime
-            .models
-            .get(&response.agent_prompt_id)
-            .cloned();
-        self.attach_context_limit_telemetry(&mut response);
+            .context_limits
+            .remove(&response.agent_prompt_id);
+        let assistant_text = projection.assistant_text;
         let response_contains_compaction = projection.contains_compaction;
         let response_owner_is_selected = self
             .agent_runtime
@@ -487,42 +511,33 @@ impl Harness {
             })
             .flatten()
             .unwrap_or_default();
-        let compaction_policies = self
-            .prompt_coordination
+        self.prompt_coordination
             .prompt_runtime
             .compaction_policies
-            .remove(&response.agent_prompt_id)
-            .unwrap_or_default();
+            .remove(&response.agent_prompt_id);
         self.runtime_io
             .provider_terminal_timing
             .finish_stage(provider_terminal_timing::ProviderTerminalStage::Accounting);
-        let reported_input_tokens = input_tokens
-            .filter(|tokens| *tokens > 0)
-            .map(tau_proto::TokenCount::new);
         self.runtime_io
             .provider_terminal_timing
             .require_stage(provider_terminal_timing::ProviderTerminalStage::Classification);
         self.runtime_io
             .provider_terminal_timing
             .start_stage(provider_terminal_timing::ProviderTerminalStage::Classification);
-        let terminal_plan = if !standalone_compaction || standalone_success {
-            self.classify_reactive_context_recovery(&cid, &response, source)
-        } else {
-            ProviderTerminalPlan::Other
-        };
-        if matches!(
-            &terminal_plan,
-            ProviderTerminalPlan::ReactiveContextRecovery(_)
-        ) {
+        if reactive_recovery {
             self.runtime_io
                 .provider_terminal_timing
                 .finish_stage(provider_terminal_timing::ProviderTerminalStage::Classification);
-            if self.execute_provider_terminal_plan(&cid, &mut response, terminal_plan) {
-                self.runtime_io
-                    .provider_terminal_timing
-                    .finish_accepted_terminal();
-                return Ok(());
-            }
+            self.execute_provider_terminal_plan(
+                &cid,
+                &mut response,
+                terminal_plan,
+                prepared_accounting,
+            );
+            self.runtime_io
+                .provider_terminal_timing
+                .finish_accepted_terminal();
+            return Ok(());
         }
         self.prompt_coordination
             .prompt_runtime
@@ -574,26 +589,21 @@ impl Harness {
                 .remove(public_id.as_str());
         }
 
-        self.attach_finished_response_usage(
-            &mut response,
-            input_tokens,
-            cached_tokens,
-            output_tokens,
+        self.apply_finished_response_usage(
+            &response,
+            prepared_accounting.usage_prepared,
+            prepared_accounting.reported_cache_read_ceiling,
             !standalone_compaction,
         );
-        self.add_finished_response_estimated_cost(
+        self.apply_finished_response_estimated_cost(
             &cid,
-            &mut response,
+            &response,
             source,
             !standalone_compaction,
+            prepared_accounting.cost,
         );
         if standalone_compaction {
-            self.publish_standalone_execution_accounting(
-                &cid,
-                &response,
-                standalone_success,
-                source,
-            );
+            self.apply_standalone_accounting(&response, prepared_standalone_accounting);
         }
         let prompt_operation = self
             .prompt_coordination
@@ -611,24 +621,8 @@ impl Harness {
                 );
             self.reduce_standalone_compaction_terminal(EagerStandaloneCompactionTerminal {
                 cid: &cid,
-                plan: match standalone_terminal
-                    .expect("standalone compaction was classified before mutation")
-                {
-                    ProviderTerminalPlan::StandaloneCompaction(plan) => plan,
-                    ProviderTerminalPlan::ReactiveContextRecovery(_)
-                    | ProviderTerminalPlan::FinalStatusGated(_)
-                    | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
-                    | ProviderTerminalPlan::OutputLengthContinuationSource(_)
-                    | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
-                    | ProviderTerminalPlan::SideConversation(_)
-                    | ProviderTerminalPlan::ToolCalls(_)
-                    | ProviderTerminalPlan::OrdinaryNoTool(_)
-                    | ProviderTerminalPlan::Other => {
-                        unreachable!(
-                            "unrelated provider-terminal family reached standalone reduction"
-                        )
-                    }
-                },
+                plan: prepared_standalone_terminal
+                    .expect("standalone compaction was prepared before mutation"),
                 response: &response,
                 source,
             });
@@ -642,64 +636,47 @@ impl Harness {
                 .finish_accepted_terminal();
             return Ok(());
         }
-        let (mut requested_tool_calls, tool_calls_with_non_tool_stop) =
-            self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
-        // A length-stopped call is incomplete provider output. Preserve it for
-        // inspection, but never execute it or use synthetic closure to activate
-        // another inference. Suppress before deriving the output-length
-        // disposition so the continuation finish bit reflects the actual
-        // post-suppression tool continuation.
-        if response.stop_reason == ProviderStopReason::Length && requested_tool_calls {
-            requested_tool_calls = false;
-            tool_calls.clear();
-        }
-        self.derive_output_length_continuation(
-            &cid,
-            &mut response,
-            prompt_operation.0,
+        let prepared_ordinary_provider_terminal::PreparedOrdinaryProviderTerminal {
             requested_tool_calls,
-        );
-        if response_contains_compaction {
-            self.attach_finished_response_compaction_usage(&mut response, input_tokens);
+            missing_tool_calls,
+            mut normalized_tool_calls,
+            declaration,
+            output_length,
+            final_status_plan,
+            status_was_available,
+            final_status_challenged,
+            continues_for_pending_message_wake,
+            is_non_tool_ext_query,
+            successful,
+            automatic,
+        } = prepared_ordinary.expect("ordinary canonical terminal was prepared before effects");
+        if missing_tool_calls {
+            self.emit_info(&format!(
+                "agent response {} reported tool calls but contained none; treating it as end_turn",
+                response.agent_prompt_id
+            ));
         }
-
-        let is_non_tool_prompt_surface = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(&cid)
-            .is_some_and(Self::agent_uses_non_tool_prompt_surface);
-        let is_non_tool_ext_query = self.is_non_tool_extension_query(&cid);
-        let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
-        if requested_tool_calls {
-            let declaration = tau_proto::ObservationId::random();
-            normalized_tool_calls = self.normalize_finished_response_tool_calls(
-                &mut response,
-                &mut tool_calls,
-                is_non_tool_prompt_surface,
-                tool_calls_with_non_tool_stop,
-                declaration,
-            );
+        self.apply_output_length_preparation(&cid, output_length);
+        if let Some(declaration) = declaration {
+            for entry in &normalized_tool_calls.calls {
+                self.prompt_coordination
+                    .prompt_runtime
+                    .record_tool_call_prompt(
+                        entry.call.id.clone(),
+                        response.agent_prompt_id.clone(),
+                    );
+            }
             self.tool_routing
                 .tool_runtime
                 .pending_declaration_observations
                 .insert(response.agent_prompt_id.clone(), declaration);
         }
 
-        let successful = response.error.is_none()
-            && response.failure_kind.is_none()
-            && !matches!(
-                response.stop_reason,
-                ProviderStopReason::Length
-                    | ProviderStopReason::Error
-                    | ProviderStopReason::RepetitionDetected
-            );
-        let final_status_plan =
-            self.classify_final_status_provider_terminal(&cid, &response, requested_tool_calls);
-        let final_status_challenged = matches!(
-            final_status_plan,
-            ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Challenge { .. })
-        );
+        if let Some(status_was_available) = status_was_available
+            && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
+        {
+            agent.turn.terminal_status_was_available = status_was_available;
+        }
         if !requested_tool_calls
             && !final_status_challenged
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
@@ -708,47 +685,7 @@ impl Harness {
             agent.turn.terminal_notice_outer_turn_id = agent.turn.outer_turn.owned_id().cloned();
             agent.turn.terminal_context_size_alerts = context_size_alerts.clone();
         }
-        if final_status_challenged
-            && let tau_proto::OutputLengthDisposition::ContinuationTerminal {
-                outer_turn_finish_owed,
-                ..
-            } = &mut response.output_length_disposition
-        {
-            *outer_turn_finish_owed = false;
-        }
-        let continues_for_pending_message_wake = self
-            .finished_side_conversation_continues_for_pending_message_wake(
-                &cid,
-                &response,
-                requested_tool_calls,
-                is_non_tool_ext_query,
-            );
-        let eager_decision_eligible = !final_status_challenged
-            && !requested_tool_calls
-            && !response_contains_compaction
-            && !continues_for_pending_message_wake
-            && response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
-            && response.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
-            && !matches!(
-                response.output_length_disposition,
-                tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
-            );
-        if eager_decision_eligible {
-            response.automatic_compaction_decision = response
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.model.clone())
-                .or(terminal_model)
-                .and_then(|model| {
-                    self.eager_automatic_compaction_decision(
-                        &cid,
-                        model,
-                        reported_input_tokens,
-                        Some(response.agent_prompt_id.clone()),
-                        &compaction_policies,
-                    )
-                });
-        }
+        self.apply_automatic_compaction_preparation(&cid, automatic);
         let final_status_gated = !matches!(final_status_plan, ProviderTerminalPlan::Other);
         self.runtime_io
             .provider_terminal_timing
@@ -1250,6 +1187,7 @@ impl Harness {
             )
     }
 
+    #[cfg(test)]
     pub(super) fn attach_context_limit_telemetry(
         &mut self,
         response: &mut ProviderResponseFinished,
@@ -1403,6 +1341,7 @@ impl Harness {
         cid: &AgentId,
         response: &mut ProviderResponseFinished,
         plan: ProviderTerminalPlan,
+        accounting: prepared_provider_accounting::PreparedProviderAccounting,
     ) -> bool {
         let plan = match plan {
             ProviderTerminalPlan::ReactiveContextRecovery(plan) => plan,
@@ -1437,32 +1376,19 @@ impl Harness {
             ProviderTerminalPlan::Other => return false,
         };
         let ReactiveContextRecoveryPlan { checkpoint, source } = *plan;
-        response.recovery_disposition =
-            tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
-        if let Some(telemetry) = response.context_limit_telemetry.as_mut() {
-            telemetry.recovery_eligible = true;
-            telemetry.action = tau_proto::ContextLimitAction::ReactiveCompactionPlanned;
-        }
-        let input_tokens = response
-            .usage
-            .as_ref()
-            .map(|usage| usage.prompt_sent_tokens);
-        let cached_tokens = response
-            .usage
-            .as_ref()
-            .map(|usage| usage.prompt_cached_tokens);
-        let output_tokens = response
-            .usage
-            .as_ref()
-            .map(|usage| usage.response_received_tokens);
-        self.attach_finished_response_usage(
+        self.apply_finished_response_usage(
             response,
-            input_tokens,
-            cached_tokens,
-            output_tokens,
+            accounting.usage_prepared,
+            accounting.reported_cache_read_ceiling,
             true,
         );
-        self.add_finished_response_estimated_cost(cid, response, source.as_ref(), true);
+        self.apply_finished_response_estimated_cost(
+            cid,
+            response,
+            source.as_ref(),
+            true,
+            accounting.cost,
+        );
         self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
             && agent.dispatch.in_flight_prompt.as_ref() == Some(&response.agent_prompt_id)
@@ -1483,6 +1409,17 @@ impl Harness {
             false,
         );
         true
+    }
+
+    /// Attach reactive authority only to a response already classified
+    /// eligible.
+    fn prepare_reactive_context_recovery_fields(response: &mut ProviderResponseFinished) {
+        response.recovery_disposition =
+            tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+        if let Some(telemetry) = response.context_limit_telemetry.as_mut() {
+            telemetry.recovery_eligible = true;
+            telemetry.action = tau_proto::ContextLimitAction::ReactiveCompactionPlanned;
+        }
     }
 
     /// Reconciles durable planned recoveries after provider discovery makes
@@ -1969,11 +1906,20 @@ impl Harness {
             source,
         } = terminal;
         match plan {
-            StandaloneCompactionTerminalPlan::Accepted(replacement_window) => {
-                self.accept_standalone_compaction(cid, response, replacement_window, source);
+            prepared_standalone_terminal::PreparedStandaloneTerminal::Accepted(boundary) => {
+                self.accept_standalone_compaction(cid, response, boundary, source);
             }
-            StandaloneCompactionTerminalPlan::Rejected(reason) => {
-                self.reject_standalone_compaction(cid, response, reason, source);
+            prepared_standalone_terminal::PreparedStandaloneTerminal::Rejected {
+                reason,
+                failure,
+            } => {
+                self.reject_prepared_standalone_compaction(
+                    cid,
+                    response,
+                    reason,
+                    failure.map(|failure| *failure),
+                    source,
+                );
             }
         }
     }
@@ -1998,12 +1944,10 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-        replacement_window: tau_proto::ValidatedCompactionWindow,
+        prepared_boundary: Option<(tau_core::AgentEventParent, Box<Event>)>,
         source: Option<&tau_proto::ConnectionId>,
     ) {
-        let Some((_, parent, boundary)) =
-            self.standalone_compaction_boundary(cid, response, &replacement_window)
-        else {
+        let Some((parent, boundary)) = prepared_boundary else {
             self.emit_info("ignoring standalone compaction response without an active transaction");
             return;
         };
@@ -2034,7 +1978,7 @@ impl Harness {
         self.publish_event_for_agent_with_completion(
             cid,
             source,
-            boundary,
+            *boundary,
             Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent: match parent {
                     tau_core::AgentEventParent::Root => tau_proto::AgentHead::Root,
@@ -2123,6 +2067,25 @@ impl Harness {
         rejection: StandaloneCompactionRejection,
         source: Option<&tau_proto::ConnectionId>,
     ) {
+        let failure = (!matches!(
+            rejection,
+            StandaloneCompactionRejection::ContextWindowExceeded
+        ))
+        .then(|| self.prepare_standalone_failure(cid, response, rejection.durable_reason()))
+        .flatten();
+        self.reject_prepared_standalone_compaction(cid, response, rejection, failure, source);
+    }
+
+    /// Preserve rejection diagnostics and publication order while applying the
+    /// exact outcome prepared before terminal accounting effects.
+    fn reject_prepared_standalone_compaction(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        rejection: StandaloneCompactionRejection,
+        failure: Option<prepared_standalone_failure::PreparedStandaloneFailure>,
+        source: Option<&tau_proto::ConnectionId>,
+    ) {
         match rejection {
             StandaloneCompactionRejection::ProviderError => self.emit_info(&format!(
                 "provider failed standalone compaction for agent_prompt_id={}",
@@ -2168,7 +2131,9 @@ impl Harness {
             );
             return;
         }
-        self.fail_standalone_compaction(cid, response, rejection.durable_reason(), source);
+        if let Some(failure) = failure {
+            self.apply_standalone_failure(cid, response, failure, source);
+        }
     }
 
     pub(super) fn fail_standalone_compaction(
@@ -2178,6 +2143,19 @@ impl Harness {
         reason: tau_proto::StandaloneCompactionFailureReason,
         source: Option<&tau_proto::ConnectionId>,
     ) {
+        if let Some(prepared) = self.prepare_standalone_failure(cid, response, reason) {
+            self.apply_standalone_failure(cid, response, prepared, source);
+        }
+    }
+
+    /// Build the exact standalone failure without consuming continuation
+    /// identities, clearing snapshots, or publishing watcher changes.
+    pub(super) fn prepare_standalone_failure(
+        &self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        reason: tau_proto::StandaloneCompactionFailureReason,
+    ) -> Option<prepared_standalone_failure::PreparedStandaloneFailure> {
         let transaction = self
             .agent_runtime
             .agent_registry
@@ -2195,9 +2173,7 @@ impl Harness {
                 }
                 _ => None,
             });
-        let Some((transaction_id, cut, resume_through)) = transaction else {
-            return;
-        };
+        let (transaction_id, cut, resume_through) = transaction?;
         let context_irreducible = self
             .previous_useful_compaction_cut(
                 response.agent_id.as_str(),
@@ -2276,41 +2252,12 @@ impl Harness {
         } else {
             None
         };
-        if retreat_plan.is_some()
-            && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
-        {
-            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
-        }
         let output_length_continuation =
             if reason == tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded {
-                self.plan_local_summary_continuation(cid, response)
+                self.prepare_local_summary_continuation(cid, response)
             } else {
                 None
             };
-        // Rejection retains neither cache evidence nor context-recovery
-        // authority, but it must release the prompt-local snapshots
-        // allocated for dispatch.
-        self.provider_runtime
-            .cache_residency
-            .drop_prompt(&response.agent_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
-            .context_size_alerts
-            .remove(&response.agent_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
-            .compaction_policies
-            .remove(&response.agent_prompt_id);
-        self.clear_finished_response_prompt_route(&response.agent_prompt_id);
-        self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-        if retreat_plan.is_none() && output_length_continuation.is_none() {
-            self.settle_standalone_provider_watch_status(cid, response);
-        }
-        if retreat_plan.is_none() && output_length_continuation.is_none() {
-            self.emit_info_important(&format!(
-                "standalone compaction failed for agent `{cid}` ({reason:?}); retry with :compact, switch model/role, or rewind"
-            ));
-        }
         let batch_parent = self
             .selected_head_for_agent(cid)
             .unwrap_or(tau_proto::AgentHead::Root);
@@ -2323,10 +2270,8 @@ impl Harness {
         } else {
             reason
         };
-        self.publish_event_for_agent_with_completion(
-            cid,
-            source,
-            Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+        Some(prepared_standalone_failure::PreparedStandaloneFailure {
+            failed: tau_proto::AgentStandaloneCompactionFailed {
                 agent_id: response.agent_id.clone(),
                 transaction_id,
                 cut,
@@ -2358,7 +2303,57 @@ impl Harness {
                             backend,
                         })
                     }),
-            }),
+            },
+            batch_parent,
+            diagnostic_reason: reason,
+        })
+    }
+
+    /// Apply an admitted standalone failure at the original cleanup/publication
+    /// cut. Its successor, if any, still waits for the failure fact to commit.
+    pub(super) fn apply_standalone_failure(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        prepared: prepared_standalone_failure::PreparedStandaloneFailure,
+        source: Option<&tau_proto::ConnectionId>,
+    ) {
+        let prepared_standalone_failure::PreparedStandaloneFailure {
+            failed,
+            batch_parent,
+            diagnostic_reason: reason,
+        } = prepared;
+        let has_successor =
+            failed.context_retreat.is_some() || failed.output_length_continuation.is_some();
+        if has_successor && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
+        {
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
+        }
+        // Rejection retains neither cache evidence nor context-recovery
+        // authority, but it must release prompt-local dispatch snapshots.
+        self.provider_runtime
+            .cache_residency
+            .drop_prompt(&response.agent_prompt_id);
+        self.prompt_coordination
+            .prompt_runtime
+            .context_size_alerts
+            .remove(&response.agent_prompt_id);
+        self.prompt_coordination
+            .prompt_runtime
+            .compaction_policies
+            .remove(&response.agent_prompt_id);
+        self.clear_finished_response_prompt_route(&response.agent_prompt_id);
+        self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        if !has_successor {
+            self.settle_standalone_provider_watch_status(cid, response);
+            self.emit_info_important(&format!(
+                "standalone compaction failed for agent `{cid}` ({reason:?}); retry with :compact, switch model/role, or rewind"
+            ));
+        }
+        self.publish_event_for_agent_with_completion(
+            cid,
+            source,
+            Event::AgentStandaloneCompactionFailed(failed),
             Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent,
                 owned_publication: None,
@@ -2943,13 +2938,34 @@ impl Harness {
             .usage
             .as_ref()
             .and_then(|usage| usage.prompt_cache_read_ceiling_tokens);
+        let usage_prepared = prepared.is_some();
+        if let Some(usage) = prepared {
+            response.usage = Some(usage);
+        }
+        self.apply_finished_response_usage(
+            response,
+            usage_prepared,
+            reported_cache_read_ceiling,
+            update_live_totals,
+        );
+    }
+
+    /// Apply the prepared usage at the original accounting effect boundary.
+    pub(super) fn apply_finished_response_usage(
+        &mut self,
+        response: &ProviderResponseFinished,
+        usage_prepared: bool,
+        reported_cache_read_ceiling: Option<u64>,
+        update_live_totals: bool,
+    ) {
         // Preparation uses the captured dispatch model, not a possibly changed
         // selection. Only application consumes that prompt-local snapshot.
         self.prompt_coordination
             .prompt_runtime
             .models
             .remove(&response.agent_prompt_id);
-        if let Some(usage) = prepared {
+        if usage_prepared {
+            let usage = response.usage.as_ref().expect("prepared usage is attached");
             if let Some(rejected_ceiling) = reported_cache_read_ceiling
                 && usage.prompt_cache_read_ceiling_tokens.is_none()
             {
@@ -2976,7 +2992,6 @@ impl Harness {
                     .token_usage
                     .add_received(model, usage.response_received_tokens);
             }
-            response.usage = Some(usage);
         }
     }
 
@@ -3056,13 +3071,31 @@ impl Harness {
         update_live_totals: bool,
     ) {
         let prepared = self.prepare_finished_response_estimated_cost(response);
+        response.estimated_api_cost_rates = prepared.as_ref().map(|cost| cost.rates);
+        response.estimated_api_cost_increment = prepared.as_ref().map(|cost| cost.increment);
+        self.apply_finished_response_estimated_cost(
+            cid,
+            response,
+            source,
+            update_live_totals,
+            prepared,
+        );
+    }
+
+    /// Apply prepared pricing without rebuilding or changing canonical fields.
+    pub(super) fn apply_finished_response_estimated_cost(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        source: Option<&tau_proto::ConnectionId>,
+        update_live_totals: bool,
+        prepared: Option<prepared_provider_cost::PreparedProviderCost>,
+    ) {
         self.prompt_coordination
             .prompt_runtime
             .estimated_cost_rates
             .remove(&response.agent_prompt_id);
         let Some(prepared) = prepared else {
-            response.estimated_api_cost_rates = None;
-            response.estimated_api_cost_increment = None;
             self.emit_agent_stats_updated_from(cid, source);
             return;
         };
@@ -3075,8 +3108,6 @@ impl Harness {
                  using estimated API cost fallback"
             );
         }
-        response.estimated_api_cost_rates = Some(prepared.rates);
-        response.estimated_api_cost_increment = Some(prepared.increment);
         if update_live_totals {
             self.add_estimated_cost_increment(cid, prepared.increment, source);
         }
@@ -3090,81 +3121,8 @@ impl Harness {
         accepted: bool,
         _source: Option<&tau_proto::ConnectionId>,
     ) {
-        let Some(owner) = self
-            .prompt_coordination
-            .standalone_accounting
-            .owners
-            .get(&response.agent_prompt_id)
-            .cloned()
-        else {
-            tracing::error!(
-                target: "tau_harness",
-                agent_prompt_id = %response.agent_prompt_id,
-                "standalone backend terminal has no accounting owner"
-            );
-            return;
-        };
-        let identity = (response.agent_prompt_id.clone(), response.provider_attempt);
-        if self
-            .prompt_coordination
-            .standalone_accounting
-            .awaiting_corrections
-            .get(&response.agent_prompt_id)
-            == Some(&response.provider_attempt)
-        {
-            self.publish_standalone_execution_accounting_correction(&owner, response);
-            return;
-        }
-        if !self
-            .prompt_coordination
-            .standalone_accounting
-            .observed_attempts
-            .insert(identity.clone())
-        {
-            return;
-        }
-        let key = (
-            identity.0.clone(),
-            identity.1,
-            StandaloneAccountingPublicationPhase::Initial,
-        );
-        let usage = response.usage.clone().map_or(
-            tau_proto::StandaloneExecutionUsage::Unknown,
-            tau_proto::StandaloneExecutionUsage::Known,
-        );
-        self.publish_event_for_agent_with_completion(
-            &owner.cid,
-            Some(crate::harness::harness_connection_id()),
-            Event::ProviderStandaloneExecutionAccounted(
-                tau_proto::ProviderStandaloneExecutionAccounted {
-                    session_id: owner.session_id,
-                    agent_id: owner.agent_id,
-                    agent_prompt_id: response.agent_prompt_id.clone(),
-                    logical_attempt: response.provider_attempt,
-                    transaction_id: owner.transaction_id,
-                    model: owner.model,
-                    backend: response.backend.clone(),
-                    usage,
-                    estimated_api_cost_rates: Some(owner.estimated_cost_rates),
-                    estimated_api_cost_increment: response.estimated_api_cost_increment,
-                    output: if accepted {
-                        tau_proto::StandaloneExecutionOutput::Accepted
-                    } else {
-                        tau_proto::StandaloneExecutionOutput::Rejected
-                    },
-                    finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
-                },
-            ),
-            Some(AgentPublishCompletion::StandaloneExecutionAccounting {
-                key,
-                owned_publication: None,
-            }),
-            false,
-        );
-        self.prompt_coordination
-            .standalone_accounting
-            .owners
-            .remove(&response.agent_prompt_id);
+        let prepared = self.prepare_standalone_accounting(response, accepted);
+        self.apply_standalone_accounting(response, prepared);
     }
 
     /// Publish the request-counting unknown observation before an independent
@@ -3362,63 +3320,6 @@ impl Harness {
         );
     }
 
-    /// Queue the sole final correction for a cancellation-time observation.
-    fn publish_standalone_execution_accounting_correction(
-        &mut self,
-        owner: &StandaloneExecutionAccountingOwner,
-        response: &ProviderResponseFinished,
-    ) {
-        let identity = (response.agent_prompt_id.clone(), response.provider_attempt);
-        if !self
-            .prompt_coordination
-            .standalone_accounting
-            .observed_corrections
-            .insert(identity.clone())
-        {
-            return;
-        }
-        let corrected = tau_proto::ProviderStandaloneExecutionAccountingCorrected {
-            session_id: owner.session_id.clone(),
-            agent_id: owner.agent_id.clone(),
-            agent_prompt_id: response.agent_prompt_id.clone(),
-            logical_attempt: response.provider_attempt,
-            transaction_id: owner.transaction_id.clone(),
-            model: owner.model.clone(),
-            backend: response.backend.clone(),
-            usage: response.usage.clone().map_or(
-                tau_proto::StandaloneExecutionUsage::Unknown,
-                tau_proto::StandaloneExecutionUsage::Known,
-            ),
-            estimated_api_cost_rates: Some(owner.estimated_cost_rates),
-            estimated_api_cost_increment: response.estimated_api_cost_increment,
-            output: tau_proto::StandaloneExecutionOutput::Rejected,
-        };
-        self.prompt_coordination
-            .standalone_accounting
-            .owners
-            .remove(&response.agent_prompt_id);
-        if self
-            .prompt_coordination
-            .standalone_accounting
-            .folded
-            .get(&identity)
-            != Some(&FoldedStandaloneAccountingPhase::AwaitingCorrection)
-        {
-            self.prompt_coordination
-                .standalone_accounting
-                .pending_corrections
-                .insert(
-                    identity,
-                    PendingStandaloneAccountingCorrection {
-                        cid: owner.cid.clone(),
-                        corrected,
-                    },
-                );
-            return;
-        }
-        self.publish_standalone_execution_accounting_correction_event(&owner.cid, corrected);
-    }
-
     /// Publish a correction whose required initial observation already
     /// committed.
     pub(super) fn publish_standalone_execution_accounting_correction_event(
@@ -3581,26 +3482,6 @@ impl Harness {
             .or(response.compaction_output_tokens);
     }
 
-    pub(super) fn reconcile_finished_response_tool_call_stop(
-        &mut self,
-        response: &ProviderResponseFinished,
-        tool_calls: &[AgentToolCall],
-    ) -> (bool, bool) {
-        let mut requested_tool_calls = response_requests_tool_calls(response);
-        if requested_tool_calls && tool_calls.is_empty() {
-            self.emit_info(&format!(
-                "agent response {} reported tool calls but contained none; treating it as end_turn",
-                response.agent_prompt_id
-            ));
-            requested_tool_calls = false;
-        }
-        let tool_calls_with_non_tool_stop = !requested_tool_calls && !tool_calls.is_empty();
-        if tool_calls_with_non_tool_stop {
-            requested_tool_calls = true;
-        }
-        (requested_tool_calls, tool_calls_with_non_tool_stop)
-    }
-
     pub(super) fn is_non_tool_extension_query(&self, cid: &AgentId) -> bool {
         self.agent_runtime
             .agent_registry
@@ -3625,6 +3506,7 @@ impl Harness {
         agent.identity.peer_entrypoint_endpoint
     }
 
+    #[cfg(test)]
     pub(super) fn normalize_finished_response_tool_calls(
         &mut self,
         response: &mut ProviderResponseFinished,
@@ -3864,7 +3746,7 @@ impl Harness {
 
     /// Return whether a side-conversation terminal will continue in the same
     /// outer turn to process a pending agent-message wake.
-    fn finished_side_conversation_continues_for_pending_message_wake(
+    pub(super) fn finished_side_conversation_continues_for_pending_message_wake(
         &self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
@@ -4218,6 +4100,7 @@ impl Harness {
     }
 
     /// Derive the current reasoning-only run's replay-safe continuation plan.
+    #[cfg(test)]
     pub(super) fn derive_output_length_continuation(
         &mut self,
         cid: &AgentId,
@@ -4227,6 +4110,17 @@ impl Harness {
     ) {
         let prepared =
             self.prepare_output_length_continuation(cid, response, operation, requested_tool_calls);
+        response.output_length_disposition = prepared.disposition.clone();
+        self.apply_output_length_preparation(cid, prepared);
+    }
+
+    /// Install exactly the continuation identity and plan admitted by
+    /// preparation.
+    pub(super) fn apply_output_length_preparation(
+        &mut self,
+        cid: &AgentId,
+        prepared: prepared_output_length_continuation::PreparedOutputLengthContinuation,
+    ) {
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             if let Some(next_prompt_index) = prepared.next_prompt_index {
                 agent.dispatch.next_prompt_index = next_prompt_index;
@@ -4236,7 +4130,6 @@ impl Harness {
                     path_crate_agent::OutputLengthContinuationState::Planned(plan);
             }
         }
-        response.output_length_disposition = prepared.disposition;
     }
 
     /// Projects canonical output-length fields without reserving identities or
@@ -4505,16 +4398,17 @@ impl Harness {
         );
     }
 
-    /// Apply the common successful-terminal gate before ordinary or delegated
-    /// completion can project the candidate response.
-    pub(super) fn classify_final_status_provider_terminal(
-        &mut self,
+    /// Classify final-status ownership without changing the status snapshot
+    /// used by later outer-turn policy evaluation. Tool terminals leave it
+    /// unchanged.
+    pub(super) fn prepare_final_status_provider_terminal(
+        &self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
         requested_tool_calls: bool,
-    ) -> ProviderTerminalPlan {
+    ) -> (ProviderTerminalPlan, Option<bool>) {
         if requested_tool_calls {
-            return ProviderTerminalPlan::Other;
+            return (ProviderTerminalPlan::Other, None);
         }
         let successful = response.error.is_none()
             && response.failure_kind.is_none()
@@ -4534,10 +4428,7 @@ impl Harness {
                     .iter()
                     .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
             });
-        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.turn.terminal_status_was_available = status_was_available;
-        }
-        match self
+        let plan = match self
             .agent_runtime
             .agent_registry
             .agents
@@ -4557,7 +4448,8 @@ impl Harness {
                 ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Accept)
             }
             None => ProviderTerminalPlan::Other,
-        }
+        };
+        (plan, Some(status_was_available))
     }
 
     /// Classify the commit-gated automatic-compaction or pending-message-wake

@@ -4,6 +4,173 @@ use tau_config::settings::{CompactionPolicyThreshold, ContextPolicyPoint};
 
 use super::*;
 use crate::harness::AgentToolCall;
+use crate::harness::terminal_response_projection::TerminalResponseProjection;
+
+/// The complete prepared ordinary payload must equal the eventual canonical
+/// fact, without charging usage, consuming snapshots, or reserving a
+/// continuation while its envelope is still being considered for admission.
+#[test]
+fn complete_ordinary_preparation_matches_canonical_publication_without_effects() {
+    for stop in [
+        tau_proto::ProviderStopReason::EndTurn,
+        tau_proto::ProviderStopReason::Length,
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path()).expect("start");
+        h.submit_user_prompt(test_session_id("s1"), "finish".to_owned())
+            .expect("submit");
+        let source = read_nth_prompt_created(&h, 0);
+        let cid = h
+            .agent_id_for_prompt(&source.agent_prompt_id)
+            .expect("owner");
+        let mut raw = reasoning_only_length_response(&source, 7);
+        raw.stop_reason = stop;
+        let mut candidate = raw.clone();
+        let mut projection = TerminalResponseProjection::from_response(&candidate);
+        let before_stats = h.session_runtime.current_session_state.token_usage.clone();
+        let before_events = event_log_events(&h).len();
+        let before_index = h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .next_prompt_index;
+        let before_status = h.agent_runtime.agent_registry.agents[&cid]
+            .turn
+            .terminal_status_was_available;
+        let accounting = h.prepare_provider_accounting(&mut candidate, true);
+        let prepared = h.prepare_ordinary_provider_terminal(&cid, &mut candidate, &mut projection);
+        assert!(accounting.usage_prepared);
+        assert!(!prepared.requested_tool_calls);
+        assert_eq!(
+            prepared.output_length.plan.is_some(),
+            stop == tau_proto::ProviderStopReason::Length
+        );
+        assert_eq!(
+            h.session_runtime.current_session_state.token_usage,
+            before_stats
+        );
+        assert_eq!(event_log_events(&h).len(), before_events);
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .next_prompt_index,
+            before_index
+        );
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .turn
+                .terminal_status_was_available,
+            before_status
+        );
+        assert_eq!(
+            h.prompt_coordination.prompt_runtime.models[&source.agent_prompt_id],
+            source.model
+        );
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .estimated_cost_rates
+                .contains_key(&source.agent_prompt_id)
+        );
+        h.handle_provider_response_finished(raw).expect("terminal");
+        let canonical = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == source.agent_prompt_id =>
+                {
+                    Some(response)
+                }
+                _ => None,
+            })
+            .expect("canonical fact");
+        assert_eq!(canonical, candidate);
+        assert!(
+            !h.prompt_coordination
+                .prompt_runtime
+                .models
+                .contains_key(&source.agent_prompt_id)
+        );
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// A missing continuation checkpoint still consumes its historical identity
+/// before eager-compaction shaping; admission must see that exact later
+/// identity, including saturation, without temporarily mutating the agent.
+#[test]
+fn complete_preparation_projects_continuation_cursor_into_automatic_decision() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    h.submit_user_prompt(test_session_id("s1"), "finish".to_owned())
+        .expect("submit");
+    let source = read_nth_prompt_created(&h, 0);
+    let cid = h
+        .agent_id_for_prompt(&source.agent_prompt_id)
+        .expect("owner");
+    let mut raw = reasoning_only_length_response(&source, 7);
+    raw.agent_prompt_id = test_agent_prompt_id("missing-checkpoint");
+    let usage = raw.usage.as_mut().expect("usage");
+    usage.model = Some(source.model);
+    usage.prompt_sent_tokens = 100;
+    h.prompt_coordination
+        .prompt_runtime
+        .compaction_policies
+        .insert(
+            raw.agent_prompt_id.clone(),
+            [(
+                "threshold".to_owned(),
+                tau_config::settings::CompactionPolicy {
+                    enable: true,
+                    threshold: CompactionPolicyThreshold::Tokens(50),
+                    when: tau_config::settings::ContextPolicyWhen {
+                        at: ContextPolicyPoint::OuterTurnFinished,
+                        statuses: None,
+                    },
+                },
+            )]
+            .into(),
+        );
+    for index in [41_u64, u64::MAX] {
+        h.agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .dispatch
+            .next_prompt_index = index;
+        let mut candidate = raw.clone();
+        let mut projection = TerminalResponseProjection::from_response(&candidate);
+        let prepared = h.prepare_ordinary_provider_terminal(&cid, &mut candidate, &mut projection);
+        assert!(prepared.output_length.plan.is_none());
+        assert_eq!(
+            prepared.output_length.next_prompt_index,
+            Some(index.saturating_add(1))
+        );
+        assert_eq!(
+            candidate
+                .automatic_compaction_decision
+                .as_ref()
+                .expect("decision")
+                .transaction_id,
+            tau_proto::CompactionTransactionId::parse(format!("ct-{}", index.saturating_add(1)))
+                .expect("transaction")
+        );
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .next_prompt_index,
+            index
+        );
+        h.apply_output_length_preparation(&cid, prepared.output_length);
+        h.apply_automatic_compaction_preparation(&cid, prepared.automatic);
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .next_prompt_index,
+            index.saturating_add(2)
+        );
+    }
+    h.shutdown().expect("shutdown");
+}
 
 /// Preparing output-length authority must not spend its prompt identity or
 /// install ownership; attachment must use exactly the prepared checkpoint.

@@ -3,9 +3,10 @@
 use super::*;
 
 impl Harness {
-    /// Pre-mint an eligible local-summary successor without publishing effects.
-    pub(super) fn plan_local_summary_continuation(
-        &mut self,
+    /// Project an eligible local-summary successor without consuming its
+    /// identity.
+    pub(super) fn prepare_local_summary_continuation(
+        &self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
     ) -> Option<tau_proto::LocalSummaryContinuationPlan> {
@@ -21,7 +22,7 @@ impl Harness {
         if text.is_empty() && reasoning == 0 {
             return None;
         }
-        let agent = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
         let next = agent.dispatch.next_prompt_index;
         let plan = tau_proto::LocalSummaryContinuationPlan {
             transaction_id: tau_proto::CompactionTransactionId::parse(format!("ct-{next}")).ok()?,
@@ -31,7 +32,6 @@ impl Harness {
             ))
             .ok()?,
         };
-        agent.dispatch.next_prompt_index = next.saturating_add(1);
         Some(plan)
     }
 

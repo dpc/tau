@@ -1359,6 +1359,17 @@ impl Harness {
             provider_prompt_id,
             policies,
         );
+        let decision = prepared.decision.clone();
+        self.apply_automatic_compaction_preparation(cid, prepared);
+        decision
+    }
+
+    /// Apply the diagnostic and cursor consumption after canonical preparation.
+    pub(super) fn apply_automatic_compaction_preparation(
+        &mut self,
+        cid: &AgentId,
+        prepared: prepared_automatic_compaction_decision::PreparedAutomaticCompactionDecision,
+    ) {
         if let Some(diagnostic) = prepared.diagnostic {
             tracing::debug!(
                 target: "tau_harness",
@@ -1373,7 +1384,6 @@ impl Harness {
         {
             agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
         }
-        prepared.decision
     }
 
     /// Projects eager-compaction authority and diagnostics without consuming a
@@ -1385,6 +1395,27 @@ impl Harness {
         reported_input: Option<tau_proto::TokenCount>,
         provider_prompt_id: Option<tau_proto::AgentPromptId>,
         policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
+    ) -> prepared_automatic_compaction_decision::PreparedAutomaticCompactionDecision {
+        self.prepare_automatic_compaction_decision_after_terminal(
+            cid,
+            model,
+            reported_input,
+            provider_prompt_id,
+            policies,
+            terminal_policy_projection::TerminalPolicyProjection::default(),
+        )
+    }
+
+    /// Prepare against the status and identity cursor projected by earlier
+    /// terminal shaping, without installing either projection in the agent.
+    pub(super) fn prepare_automatic_compaction_decision_after_terminal(
+        &self,
+        cid: &AgentId,
+        model: ModelId,
+        reported_input: Option<tau_proto::TokenCount>,
+        provider_prompt_id: Option<tau_proto::AgentPromptId>,
+        policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
+        projection: terminal_policy_projection::TerminalPolicyProjection,
     ) -> prepared_automatic_compaction_decision::PreparedAutomaticCompactionDecision {
         use prepared_automatic_compaction_decision::{
             MatchedCompactionPolicies, PreparedAutomaticCompactionDecision,
@@ -1426,7 +1457,9 @@ impl Harness {
             return prepared;
         }
         let logical_status = Self::finalizing_outer_turn_policy_status(
-            conv.turn.terminal_status_was_available,
+            projection
+                .status_was_available
+                .unwrap_or(conv.turn.terminal_status_was_available),
             conv.turn.work_status.phase(),
         );
         let matches = policies
@@ -1488,7 +1521,9 @@ impl Harness {
         };
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!(
             "ct-{}",
-            conv.dispatch.next_prompt_index
+            projection
+                .next_prompt_index
+                .unwrap_or(conv.dispatch.next_prompt_index)
         ))
         .expect("generated compaction transaction id is valid");
         prepared.decision = Some(tau_proto::AutomaticCompactionDecision {

@@ -835,3 +835,4 @@ mod extension_lifecycle;
 mod provider_field_preparation;
 mod provider_lifecycle;
 mod session_lifecycle;
+mod standalone_terminal_preparation;

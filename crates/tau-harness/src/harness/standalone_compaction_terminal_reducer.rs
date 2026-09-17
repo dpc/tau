@@ -2,14 +2,14 @@
 
 use tau_proto::{ConnectionId, ProviderResponseFinished};
 
-use super::provider_terminal_plan::StandaloneCompactionTerminalPlan;
+use super::prepared_standalone_terminal::PreparedStandaloneTerminal;
 
 /// Exact eager reducer input for one classified standalone-compaction terminal.
 pub(crate) struct EagerStandaloneCompactionTerminal<'a> {
     /// Conversation whose active standalone transaction owns the terminal.
     pub(super) cid: &'a tau_proto::AgentId,
     /// Typed accepted or rejected terminal decision.
-    pub(super) plan: StandaloneCompactionTerminalPlan,
+    pub(super) plan: PreparedStandaloneTerminal,
     /// Fully prepared canonical provider terminal.
     pub(super) response: &'a ProviderResponseFinished,
     /// Provider connection retained for derived-fact attribution.
