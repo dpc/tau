@@ -499,6 +499,15 @@ fn prewarm() -> tau_proto::AgentPromptPrewarmRequested {
     }
 }
 
+/// Builds one bounded cache refresh around the standard prewarm request.
+fn cache_refresh(id: &str) -> tau_proto::AgentCacheRefreshRequested {
+    tau_proto::AgentCacheRefreshRequested {
+        refresh_id: tau_proto::ProviderCacheRefreshId::parse(id).expect("refresh id"),
+        prompt: prewarm(),
+        stop_after_millis: NonZeroU32::new(1_000).expect("nonzero"),
+    }
+}
+
 /// A silent prewarm and a duplicate request must remain off the provider loop;
 /// dispatching the real prompt cancels the warm work and completes normally.
 #[test]
@@ -640,6 +649,392 @@ fn cache_refresh_reports_correlated_terminal() {
     });
     input.close();
     runtime.join().expect("provider exits");
+}
+
+/// Runs the retained-cooldown regression at or after its exact boundary.
+fn assert_expired_cooldown_admits_maintenance(recover_before_maintenance: bool) {
+    let cooldown_delay = {
+        let mut retry_state = PromptRetryState::default();
+        retry_state.next_delay(RetryClass::UsageWindow, "sp-1")
+    };
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let (prompt_finished_tx, prompt_finished_rx) = mpsc::sync_channel(1);
+    let prompt_executor: PromptExecutor = Arc::new(move |execution| {
+        if executor_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::UsageWindow),
+                    live_detail: None,
+                    canonical_unauthorized: false,
+                    terminal_backend: None,
+                },
+            )
+            .expect("install retained cooldown evidence");
+            return;
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .send_report(HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "automatic recovery",
+                )),
+            ))
+            .expect("finish automatic recovery");
+        prompt_finished_tx
+            .send(())
+            .expect("report automatic recovery");
+    });
+    let (maintenance_tx, maintenance_rx) = mpsc::channel();
+    let prewarm_executor: PrewarmExecutor = Arc::new(move |execution| {
+        maintenance_tx
+            .send(execution.refresh_id.map(|id| id.to_string()))
+            .expect("report admitted maintenance");
+        tau_proto::ProviderCacheRefreshStatus::Succeeded
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_input = input.clone();
+    let runtime_output = output.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors_and_clock(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move |_| prompt_profiles.clone(),
+            1,
+            RuntimeExecutors {
+                prompt: prompt_executor,
+                prewarm: prewarm_executor,
+                retry_clock: runtime_clock,
+            },
+        )
+        .expect("run retained-cooldown provider");
+    });
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdatedReported(update))
+                    if update.agent_prompt_id.as_str() == "sp-1"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    let advance = if recover_before_maintenance {
+        cooldown_delay
+            .checked_add(RESET_BOUNDARY_JITTER_MAX)
+            .and_then(|duration| duration.checked_add(Duration::from_millis(1)))
+            .expect("test duration")
+    } else {
+        cooldown_delay
+    };
+    clock.advance(advance);
+    if recover_before_maintenance {
+        prompt_finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("automatic retry succeeds after its jittered due time");
+    }
+
+    input.push(encode_frames(&[
+        live_event(12, Event::AgentPromptPrewarmRequested(prewarm())),
+        live_event(
+            13,
+            Event::AgentCacheRefreshRequested(cache_refresh("expired-refresh")),
+        ),
+    ]));
+    let admitted = path_std_collections::BTreeSet::from([
+        maintenance_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first maintenance executor"),
+        maintenance_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second maintenance executor"),
+    ]);
+    assert_eq!(
+        admitted,
+        path_std_collections::BTreeSet::from([None, Some("expired-refresh".to_owned())])
+    );
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderCacheRefreshFinishedReported(finished))
+                    if finished.refresh_id.as_str() == "expired-refresh"
+                        && finished.status
+                            == tau_proto::ProviderCacheRefreshStatus::Succeeded
+            )
+        })
+    });
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderCacheRefreshFinishedReported(finished))
+                        if finished.refresh_id.as_str() == "expired-refresh"
+                )
+            })
+            .count(),
+        1,
+        "refresh retains exactly one correlated terminal"
+    );
+    if !recover_before_maintenance {
+        assert!(
+            prompt_finished_rx.try_recv().is_err(),
+            "maintenance admission must not release independently parked work"
+        );
+        clock.advance(
+            RESET_BOUNDARY_JITTER_MAX
+                .checked_add(Duration::from_millis(1))
+                .expect("test duration"),
+        );
+        prompt_finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("automatic retry later observes its independent due time");
+    }
+    input.close();
+    runtime.join().expect("retained-cooldown provider exits");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+/// Equality with the cooldown boundary is expired for both maintenance paths.
+#[test]
+fn maintenance_admits_at_retained_cooldown_boundary() {
+    assert_expired_cooldown_admits_maintenance(false);
+}
+
+/// A successful automatic retry leaves expired evidence that must not block
+/// either optional maintenance path indefinitely.
+#[test]
+fn maintenance_admits_after_retained_cooldown_boundary() {
+    assert_expired_cooldown_admits_maintenance(true);
+}
+
+/// Selects which optional-maintenance entry point observes identity rotation.
+#[derive(Clone, Copy)]
+enum MaintenanceKind {
+    /// Silent prompt prewarm.
+    Prewarm,
+    /// Correlated cache refresh.
+    CacheRefresh,
+}
+
+/// Exercises active-cooldown rejection and identity reconciliation through one
+/// real optional-maintenance event path.
+fn assert_maintenance_reconciles_identity(kind: MaintenanceKind) {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (prompt_finished_tx, prompt_finished_rx) = mpsc::sync_channel(1);
+    let prompt_executor: PromptExecutor = Arc::new(move |execution| {
+        if execution.job.retry_state.attempts == 0 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Throttle)
+                        .with_retry_after(Some(Duration::from_secs(86_400))),
+                    live_detail: None,
+                    canonical_unauthorized: false,
+                    terminal_backend: None,
+                },
+            )
+            .expect("park old-identity prompt");
+            return;
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .send_report(HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "released after identity rotation",
+                )),
+            ))
+            .expect("finish released old-identity prompt");
+        prompt_finished_tx
+            .send(())
+            .expect("report released old-identity prompt");
+    });
+    let (maintenance_tx, maintenance_rx) = mpsc::channel();
+    let prewarm_executor: PrewarmExecutor = Arc::new(move |execution| {
+        maintenance_tx
+            .send(execution.refresh_id.map(|id| id.to_string()))
+            .expect("report maintenance execution");
+        tau_proto::ProviderCacheRefreshStatus::Succeeded
+    });
+    let profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(chatgpt_auth())));
+    let startup_profiles = profiles.lock().expect("profiles").clone();
+    let load_profiles = Arc::clone(&profiles);
+    let output = SharedWriter::default();
+    let runtime_input = input.clone();
+    let runtime_output = output.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors_and_clock(
+            runtime_input,
+            runtime_output,
+            startup_profiles,
+            move |_| load_profiles.lock().expect("profiles").clone(),
+            1,
+            RuntimeExecutors {
+                prompt: prompt_executor,
+                prewarm: prewarm_executor,
+                retry_clock: runtime_clock,
+            },
+        )
+        .expect("run identity-reconciliation provider");
+    });
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdatedReported(update))
+                    if update.agent_prompt_id.as_str() == "sp-1"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+
+    match kind {
+        MaintenanceKind::Prewarm => input.push(encode_frames(&[
+            live_event(12, Event::AgentPromptPrewarmRequested(prewarm())),
+            live_event(
+                13,
+                Event::AgentCacheRefreshRequested(cache_refresh("active-barrier")),
+            ),
+        ])),
+        MaintenanceKind::CacheRefresh => input.push(encode_frames(&[live_event(
+            12,
+            Event::AgentCacheRefreshRequested(cache_refresh("active-refresh")),
+        )])),
+    }
+    let active_refresh = match kind {
+        MaintenanceKind::Prewarm => "active-barrier",
+        MaintenanceKind::CacheRefresh => "active-refresh",
+    };
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderCacheRefreshFinishedReported(finished))
+                    if finished.refresh_id.as_str() == active_refresh
+                        && finished.status == tau_proto::ProviderCacheRefreshStatus::Failed
+            )
+        })
+    });
+    assert!(
+        maintenance_rx.try_recv().is_err(),
+        "unchanged active identity must not enter maintenance executor"
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderCacheRefreshFinishedReported(finished))
+                        if finished.refresh_id.as_str() == active_refresh
+                )
+            })
+            .count(),
+        1,
+        "active refresh rejection has one terminal"
+    );
+
+    {
+        let mut profiles = profiles.lock().expect("profiles");
+        let BuiltinProviderProfile::Chatgpt(profile) = profiles
+            .providers
+            .get_mut(&ProviderName::new("chatgpt"))
+            .expect("chatgpt profile")
+        else {
+            panic!("expected ChatGPT profile");
+        };
+        profile.auth.access_token = "maintenance-rotated-access".to_owned();
+    }
+    let rotated_refresh = "rotated-refresh";
+    match kind {
+        MaintenanceKind::Prewarm => input.push(encode_frames(&[live_event(
+            14,
+            Event::AgentPromptPrewarmRequested(prewarm()),
+        )])),
+        MaintenanceKind::CacheRefresh => input.push(encode_frames(&[live_event(
+            14,
+            Event::AgentCacheRefreshRequested(cache_refresh(rotated_refresh)),
+        )])),
+    }
+    let expected_execution = match kind {
+        MaintenanceKind::Prewarm => None,
+        MaintenanceKind::CacheRefresh => Some(rotated_refresh.to_owned()),
+    };
+    assert_eq!(
+        maintenance_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("rotated identity enters maintenance executor"),
+        expected_execution
+    );
+    clock.advance(
+        RETRY_BASE_DELAY
+            .checked_add(RESET_BOUNDARY_JITTER_MAX)
+            .and_then(|duration| duration.checked_add(Duration::from_millis(1)))
+            .expect("test duration"),
+    );
+    prompt_finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("identity reconciliation releases exact old cooldown generation");
+    if matches!(kind, MaintenanceKind::CacheRefresh) {
+        wait_for_runtime_frames(&output, |frames| {
+            frames.iter().any(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderCacheRefreshFinishedReported(finished))
+                        if finished.refresh_id.as_str() == rotated_refresh
+                            && finished.status
+                                == tau_proto::ProviderCacheRefreshStatus::Succeeded
+                )
+            })
+        });
+    }
+    input.close();
+    runtime
+        .join()
+        .expect("identity-reconciliation provider exits");
+}
+
+/// Prewarm reconciles a newly resolved identity before applying cooldown
+/// admission and preserves the unchanged-identity active block.
+#[test]
+fn prewarm_reconciles_identity_before_cooldown_admission() {
+    assert_maintenance_reconciles_identity(MaintenanceKind::Prewarm);
+}
+
+/// Cache refresh reconciles a newly resolved identity before applying cooldown
+/// admission and preserves its single active-cooldown failure terminal.
+#[test]
+fn cache_refresh_reconciles_identity_before_cooldown_admission() {
+    assert_maintenance_reconciles_identity(MaintenanceKind::CacheRefresh);
 }
 
 /// Directed cancellation is consumed before the following real prompt on the

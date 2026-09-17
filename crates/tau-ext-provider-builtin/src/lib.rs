@@ -3612,18 +3612,18 @@ where
             }
             return Ok(());
         };
-        if self.shared_cooldowns.contains_key(&model.provider) {
+        let identity = backend_profile_identity(&PromptBackend::Responses(config.clone()));
+        self.reconcile_provider_profile(&model.provider, identity);
+        if matches!(
+            self.shared_cooldowns.get(&model.provider),
+            Some(cooldown) if cooldown.not_before > self.retry_clock.now()
+        ) {
             tracing::debug!(
-                target: LOG_TARGET,
-                provider = %model.provider,
+                target: LOG_TARGET, provider = %model.provider,
                 "skipping prompt prewarm during Provider cooldown",
             );
             return Ok(());
         }
-        self.reconcile_provider_profile(
-            &model.provider,
-            backend_profile_identity(&PromptBackend::Responses(config.clone())),
-        );
         self.reconcile_prewarm_profile(&model.provider, &config);
         let key = PrewarmKey {
             provider: model.provider,
@@ -3671,7 +3671,6 @@ where
         });
         Ok(())
     }
-
     fn cache_refresh_backend(
         &mut self,
         refresh: tau_proto::AgentCacheRefreshRequested,
@@ -3707,17 +3706,18 @@ where
                 tau_proto::ProviderCacheRefreshStatus::Unsupported,
             );
         };
-        if self.shared_cooldowns.contains_key(&model.provider) {
+        let identity = backend_profile_identity(&PromptBackend::Responses(config.clone()));
+        self.reconcile_provider_profile(&model.provider, identity);
+        if matches!(
+            self.shared_cooldowns.get(&model.provider),
+            Some(cooldown) if cooldown.not_before > self.retry_clock.now()
+        ) {
             return send_cache_refresh_terminal(
                 handle,
                 refresh_id,
                 tau_proto::ProviderCacheRefreshStatus::Failed,
             );
         }
-        self.reconcile_provider_profile(
-            &model.provider,
-            backend_profile_identity(&PromptBackend::Responses(config.clone())),
-        );
         self.reconcile_prewarm_profile(&model.provider, &config);
         let key = PrewarmKey {
             provider: model.provider,
