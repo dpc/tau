@@ -3401,6 +3401,10 @@ fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
 /// opaque reasoning, with no assistant message or tool call. Every other
 /// Length remains a visible semantic failure without reserving or dispatching
 /// anything, and no non-Inference operation becomes replay authority.
+///
+/// The fixture stays memory-only because this matrix covers eligibility and
+/// reconstructs every row through `AgentTree`; dedicated crash-cut and restart
+/// tests cover asynchronous persistence durability.
 #[test]
 fn output_length_eligibility_matrix_is_exact() {
     use std::time::Instant;
@@ -3739,7 +3743,7 @@ fn output_length_eligibility_matrix_is_exact() {
         let stage_started = Instant::now();
         progress!("output-length eligibility row {index}: fixture enter");
         let td = TempDir::new().expect("tempdir");
-        let mut h = echo_harness(td.path()).expect("start");
+        let mut h = echo_harness_memory_only(td.path()).expect("start");
         progress!(
             "output-length eligibility row {index}: fixture exit after {:?}",
             stage_started.elapsed()
@@ -3820,7 +3824,7 @@ fn output_length_eligibility_matrix_is_exact() {
             .session_runtime
             .agent_store
             .agent_events(source.agent_id.as_str())
-            .expect("durable events")
+            .expect("agent events")
             .iter()
             .filter(|record| {
                 matches!(
@@ -3866,7 +3870,7 @@ fn output_length_eligibility_matrix_is_exact() {
             .session_runtime
             .agent_store
             .agent_events(source.agent_id.as_str())
-            .expect("durable events")
+            .expect("agent events")
             .to_vec();
         tau_core::AgentTree::try_from_events(source.agent_id.clone(), &records)
             .unwrap_or_else(|error| panic!("row {index} ({}) cold replay: {error}", case.name));
