@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -68,10 +68,9 @@ impl DaemonGuard {
         if let Some(ca_bundle) = std::env::var_os("TAU_E2E_PROVIDER_CA_BUNDLE") {
             command.env("TAU_PROVIDER_CA_BUNDLE", ca_bundle);
         }
-        let mut child = command.spawn()?;
+        let (mut child, stderr_file) = create_diagnostic_then_spawn(&mut command, &stderr_path)?;
         let pgid = Pid::from_raw(child.id().try_into()?);
         let stderr = child.stderr.take().ok_or("daemon stderr pipe is absent")?;
-        let stderr_file = File::create(&stderr_path)?;
         let (stderr_done_tx, stderr_done_rx) = mpsc::sync_channel(1);
         let stderr_worker = std::thread::spawn(move || {
             let _ = stderr_done_tx.send(bounded_drain(stderr, stderr_file));
@@ -179,6 +178,17 @@ impl Drop for DaemonGuard {
     }
 }
 
+/// Creates the daemon diagnostic before starting the command that will write to
+/// it.
+fn create_diagnostic_then_spawn(
+    command: &mut Command,
+    stderr_path: &Path,
+) -> std::io::Result<(Child, File)> {
+    let stderr_file = File::create(stderr_path)?;
+    let child = command.spawn()?;
+    Ok((child, stderr_file))
+}
+
 /// Drains all child diagnostics while retaining only a bounded prefix.
 fn bounded_drain(mut source: impl Read, mut destination: impl Write) -> std::io::Result<()> {
     let mut retained = (&mut source).take(MAX_STDERR_BYTES);
@@ -191,3 +201,7 @@ fn bounded_drain(mut source: impl Read, mut destination: impl Write) -> std::io:
 fn process_group_exists(pgid: Pid) -> bool {
     killpg(pgid, None).is_ok()
 }
+
+#[cfg(test)]
+#[path = "daemon_guard/tests.rs"]
+mod tests;
