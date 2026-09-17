@@ -3430,8 +3430,13 @@ pub(super) fn parse_wait_args_with_bounds(
     let mut tool_call_id_count = 0_u8;
     let mut tool_call_ids_count = 0_u8;
     let mut timeout_minutes_count = 0_u8;
+    let mut unsupported_argument = None;
     for (k, v) in entries {
-        let CborValue::Text(name) = k else { continue };
+        let CborValue::Text(name) = k else {
+            unsupported_argument
+                .get_or_insert_with(|| "wait argument names must be strings".to_owned());
+            continue;
+        };
         match name.as_str() {
             "tool_call_id" => {
                 tool_call_id_count = tool_call_id_count.saturating_add(1);
@@ -3446,7 +3451,10 @@ pub(super) fn parse_wait_args_with_bounds(
                 timeout_minutes_value.get_or_insert(v);
             }
             "any_input" => legacy_any_input = true,
-            _ => {}
+            _ => {
+                unsupported_argument
+                    .get_or_insert_with(|| format!("unsupported wait argument `{name}`"));
+            }
         }
     }
     if legacy_any_input {
@@ -3454,6 +3462,9 @@ pub(super) fn parse_wait_args_with_bounds(
             "`any_input` is no longer supported; use `timeout_minutes` with a positive integer"
                 .to_owned(),
         );
+    }
+    if let Some(message) = unsupported_argument {
+        return Err(message);
     }
     let selected_modes = usize::from(tool_call_id_value.is_some())
         + usize::from(tool_call_ids_value.is_some())

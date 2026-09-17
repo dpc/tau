@@ -902,7 +902,7 @@ fn wait_result_display_uses_wait_descriptor_with_source_tool_name() {
     assert!(display.payload.is_none());
 }
 
-/// `wait({})` is now the shorthand for waiting on any background
+/// `wait({})` is the only argument-free shorthand for waiting on any background
 /// completion scoped to the current conversation.
 #[test]
 fn wait_args_omitted_tool_call_id_parse_as_any_background() {
@@ -910,11 +910,46 @@ fn wait_args_omitted_tool_call_id_parse_as_any_background() {
         parse_wait_args(&wait_args_empty()),
         Ok(WaitTarget::AnyBackground)
     );
-    let unrelated = CborValue::Map(vec![(
-        CborValue::Text("unused".to_owned()),
-        CborValue::Text("ignored".to_owned()),
+}
+
+/// Unsupported text properties, including extras beside a valid selector, must
+/// fail instead of silently selecting a broader wait mode.
+#[test]
+fn wait_args_reject_unknown_properties() {
+    let unknown = CborValue::Map(vec![(
+        CborValue::Text("tool_cal_id".to_owned()),
+        CborValue::Text("build".to_owned()),
     )]);
-    assert_eq!(parse_wait_args(&unrelated), Ok(WaitTarget::AnyBackground));
+    assert_eq!(
+        parse_wait_args(&unknown),
+        Err("unsupported wait argument `tool_cal_id`".to_owned())
+    );
+
+    let extra = CborValue::Map(vec![
+        (
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text("build".to_owned()),
+        ),
+        (CborValue::Text("unused".to_owned()), CborValue::Bool(true)),
+    ]);
+    assert_eq!(
+        parse_wait_args(&extra),
+        Err("unsupported wait argument `unused`".to_owned())
+    );
+}
+
+/// CBOR maps with non-text keys cannot name supported wait selectors and must
+/// not degrade into a bare background wait.
+#[test]
+fn wait_args_reject_non_text_property_names() {
+    let arguments = CborValue::Map(vec![(
+        CborValue::Integer(1.into()),
+        CborValue::Text("build".to_owned()),
+    )]);
+    assert_eq!(
+        parse_wait_args(&arguments),
+        Err("wait argument names must be strings".to_owned())
+    );
 }
 
 /// A bare wait with no candidates points callers at the explicit input mode
@@ -942,6 +977,65 @@ fn wait_args_reject_non_string_and_empty_tool_call_id() {
         parse_wait_args(&wait_args_exact("   ")),
         Err("`tool_call_id` must not be empty".to_owned())
     );
+}
+
+/// Public timeout normalization shares invocation validation, so unsupported
+/// properties must not be normalized as a background wait.
+#[test]
+fn public_wait_timeout_normalization_rejects_unknown_properties() {
+    let arguments = CborValue::Map(vec![(
+        CborValue::Text("tool_cal_id".to_owned()),
+        CborValue::Text("build".to_owned()),
+    )]);
+    assert_eq!(
+        super::super::normalized_wait_timeout_minutes(&arguments),
+        Err("unsupported wait argument `tool_cal_id`".to_owned())
+    );
+}
+
+/// Invalid wait arguments are rejected before mode execution, preserving a
+/// queued completion for a later valid bare wait by the same owner.
+#[test]
+fn invalid_wait_arguments_do_not_consume_queued_completion() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke("build".into(), slow_tool_name(), owner.clone());
+    assert!(
+        tracker
+            .record_background_result(
+                background_result("build", "done"),
+                owner.clone(),
+                observation()
+            )
+            .is_empty()
+    );
+
+    let invalid_arguments = CborValue::Map(vec![(
+        CborValue::Text("tool_cal_id".to_owned()),
+        CborValue::Text("build".to_owned()),
+    )]);
+    let rejected = tracker.handle_wait_invoke(
+        &owner,
+        "invalid-wait".into(),
+        wait_tool_name(),
+        &invalid_arguments,
+        observation(),
+    );
+    assert_eq!(
+        reply_error(start_reply(rejected)).0,
+        "unsupported wait argument `tool_cal_id`"
+    );
+
+    let result = reply_result(start_reply(start_wait_any(
+        &mut tracker,
+        &owner,
+        "valid-wait",
+    )));
+    assert_eq!(
+        cbor_map_text(&result, ORIGINAL_TOOL_CALL_ID_HEADER),
+        Some("build")
+    );
+    assert_eq!(cbor_map_text(&result, "output"), Some("done"));
 }
 
 /// Input waits accept positive whole minutes, clamp to the default one through

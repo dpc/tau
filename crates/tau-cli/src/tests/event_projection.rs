@@ -1565,10 +1565,11 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
     assert!(replay_vt.screen_contains(80, "wait input 1/3600s timeout"));
 }
 
-/// The CLI must use the harness wait parser rather than a stricter structural
-/// approximation, so accepted ignored fields do not hide the effective limit.
+/// The CLI must use the harness wait parser rather than a looser structural
+/// approximation, so rejected extra fields cannot fabricate an input-wait
+/// limit.
 #[test]
-fn input_wait_with_ignored_extra_field_keeps_timeout_limit() {
+fn input_wait_with_unsupported_extra_field_has_no_timeout_limit() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1595,8 +1596,9 @@ fn input_wait_with_ignored_extra_field_keeps_timeout_limit() {
     );
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "wait input"));
-    assert!(vt.screen_contains(80, "/300s"));
+    assert!(vt.screen_contains(80, "wait 5m"));
+    assert!(!vt.screen_contains(80, "wait input"));
+    assert!(!vt.screen_contains(80, "/300s"));
 }
 
 /// Exact waits must not infer activating-input mode from a target tool name
