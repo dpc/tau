@@ -99,10 +99,10 @@ impl IndexState {
             .decode(&index.key)
             .map_err(|_| "cache_index_malformed")?;
         let key: [u8; 32] = decoded.try_into().map_err(|_| "cache_index_malformed")?;
+        if !structural_evidence_valid(&index.requests, &index.responses) {
+            return Err("cache_index_malformed");
+        }
         for request in &mut index.requests {
-            if !super::exact_geometry::selection_metadata_valid(request) {
-                return Err("cache_index_malformed");
-            }
             request.indexed = true;
         }
         for response in &mut index.responses {
@@ -124,10 +124,7 @@ impl IndexState {
         requests: &[ExactRequest],
         responses: &[ExactResponse],
     ) -> Result<(), &'static str> {
-        if requests
-            .iter()
-            .any(|request| !super::exact_geometry::selection_metadata_valid(request))
-        {
+        if !structural_evidence_valid(requests, responses) {
             return Err("cache_index_malformed");
         }
         let index = IndexFile {
@@ -156,6 +153,55 @@ impl IndexState {
             .map_err(|_| "cache_index_replace_failed")?;
         Ok(())
     }
+}
+
+/// Validates the closed, fixed-size request and response representation.
+fn structural_evidence_valid(requests: &[ExactRequest], responses: &[ExactResponse]) -> bool {
+    requests.iter().all(|request| {
+        super::exact_geometry::selection_metadata_valid(request)
+            && matches!(request.adapter.as_str(), "responses" | "chat_completions")
+            && request.request_form.as_deref().is_none_or(|request_form| {
+                matches!(
+                    request_form,
+                    "full" | "anchored_suffix" | "repair_full" | "other"
+                )
+            })
+            && request.items.len() == request.prefixes.len()
+            && fingerprint_valid(&request.instance)
+            && request.attempt.as_deref().is_none_or(fingerprint_valid)
+            && fingerprint_valid(&request.body)
+            && request
+                .instructions
+                .as_deref()
+                .is_none_or(fingerprint_valid)
+            && fingerprint_valid(&request.tools)
+            && fingerprint_valid(&request.controls)
+            && fingerprint_valid(&request.other)
+            && fingerprint_valid(&request.route)
+            && request.cache_key.as_deref().is_none_or(fingerprint_valid)
+            && request
+                .previous_response
+                .as_deref()
+                .is_none_or(fingerprint_valid)
+            && request.items.iter().all(|value| fingerprint_valid(value))
+            && request
+                .prefixes
+                .iter()
+                .all(|value| fingerprint_valid(value))
+    }) && responses.iter().all(|response| {
+        fingerprint_valid(&response.instance)
+            && response.attempt.as_deref().is_none_or(fingerprint_valid)
+            && fingerprint_valid(&response.response)
+    })
+}
+
+/// Recognizes the lowercase hexadecimal encoding emitted for keyed
+/// fingerprints.
+fn fingerprint_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Ensures a reused key was not read from a shared or substituted file.

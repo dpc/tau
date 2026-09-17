@@ -1,6 +1,44 @@
 //! Owner-private index replacement and key-retention tests.
 
+use serde_json::{Value, json};
+
 use super::*;
+use crate::cache::exact_geometry::{request, response};
+
+/// Builds request and response evidence through the same producer path used by
+/// cache inspection, avoiding impossible synthetic fingerprint fixtures.
+fn producer_evidence(key: &FingerprintKey) -> (ExactRequest, ExactResponse) {
+    let capture = json!({
+        "session_id": "session",
+        "agent_id": "agent",
+        "agent_prompt_id": "prompt",
+        "backend": "responses",
+        "transport": "http-sse",
+        "model": "fixture-model",
+        "attempt_id": "0123456789abcdef0123456789abcdef",
+        "wire_dispatch_index": 1,
+        "provider_response_id": "response",
+        "body": {
+            "input": [{"role": "user", "content": "private"}],
+            "instructions": "private",
+            "tools": [],
+            "prompt_cache_key": "private",
+            "previous_response_id": "response"
+        }
+    });
+    (
+        request(key, "instance", &capture).expect("request evidence"),
+        response(key, "instance", &capture).expect("response evidence"),
+    )
+}
+
+/// Rewrites one committed index value without changing its private mode.
+fn mutate_committed_index(path: &Path, mutate: impl FnOnce(&mut Value)) {
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read index")).expect("parse index");
+    mutate(&mut value);
+    std::fs::write(path, serde_json::to_vec(&value).expect("encode index")).expect("rewrite index");
+}
 
 /// A committed index is mode-private, reopens with the same key, and marks
 /// loaded evidence as indexed without retaining source bodies.
@@ -10,34 +48,13 @@ fn index_round_trip_reuses_only_the_same_private_index_key() {
     let path = root.path().join("cache.index");
     let state = IndexState::open(&path, "build", 1024 * 1024).expect("fresh index");
     let key = state.key.0;
-    let request = ExactRequest {
-        session: "session".into(),
-        agent: "agent".into(),
-        prompt: "prompt".into(),
-        instance: "i".repeat(64),
-        attempt: Some("a".repeat(64)),
-        dispatch: Some(1),
-        adapter: "responses".into(),
-        body: "b".repeat(64),
-        instructions: None,
-        tools: "t".repeat(64),
-        controls: "c".repeat(64),
-        other: "o".repeat(64),
-        route: "r".repeat(64),
-        cache_key: None,
-        previous_response: None,
-        items: vec!["x".repeat(64)],
-        prefixes: vec!["p".repeat(64)],
-        complete: true,
-        indexed: false,
-        recorded_at_unix_micros: Some(1),
-        request_form: Some("full".into()),
-        model: Some("fixture-model".into()),
-        operation: Some("inference".into()),
-        attempt_ordinal: Some(1),
-    };
+    let (request, response) = producer_evidence(&state.key);
     state
-        .commit("build", std::slice::from_ref(&request), &[])
+        .commit(
+            "build",
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&response),
+        )
         .expect("commit private index");
     #[cfg(unix)]
     {
@@ -50,6 +67,7 @@ fn index_round_trip_reuses_only_the_same_private_index_key() {
     let loaded = IndexState::open(&path, "build", 1024 * 1024).expect("reopen index");
     assert_eq!(loaded.key.0, key);
     assert!(loaded.requests[0].indexed);
+    assert!(loaded.responses[0].indexed);
 }
 
 /// Index replacement rejects unbounded selection metadata instead of
@@ -59,32 +77,8 @@ fn index_rejects_unbounded_selection_metadata() {
     let root = tempfile::tempdir().expect("index directory");
     let path = root.path().join("cache.index");
     let state = IndexState::open(&path, "build", 1024 * 1024).expect("fresh index");
-    let mut request = ExactRequest {
-        session: "session".into(),
-        agent: "agent".into(),
-        prompt: "prompt".into(),
-        instance: "i".repeat(64),
-        attempt: Some("a".repeat(64)),
-        dispatch: Some(1),
-        adapter: "responses".into(),
-        body: "b".repeat(64),
-        instructions: None,
-        tools: "t".repeat(64),
-        controls: "c".repeat(64),
-        other: "o".repeat(64),
-        route: "r".repeat(64),
-        cache_key: None,
-        previous_response: None,
-        items: Vec::new(),
-        prefixes: Vec::new(),
-        complete: true,
-        indexed: false,
-        recorded_at_unix_micros: Some(1),
-        request_form: Some("full".into()),
-        model: Some("x".repeat(129)),
-        operation: Some("inference".into()),
-        attempt_ordinal: Some(1),
-    };
+    let (mut request, _) = producer_evidence(&state.key);
+    request.model = Some("x".repeat(129));
     assert_eq!(
         state.commit("build", std::slice::from_ref(&request), &[]),
         Err("cache_index_malformed")
@@ -96,6 +90,82 @@ fn index_rejects_unbounded_selection_metadata() {
         Err("cache_index_malformed")
     );
     assert!(!path.exists());
+}
+
+/// Loading fails closed when a private matching-build index contains structural
+/// values that the evidence producer cannot emit.
+#[test]
+fn index_open_rejects_impossible_structural_evidence() {
+    let root = tempfile::tempdir().expect("index directory");
+    let path = root.path().join("cache.index");
+    let state = IndexState::open(&path, "build", 1024 * 1024).expect("fresh index");
+    let (request, response) = producer_evidence(&state.key);
+
+    let mutations: &[fn(&mut Value)] = &[
+        |value| value["requests"][0]["adapter"] = "arbitrary".into(),
+        |value| value["requests"][0]["request_form"] = "arbitrary".into(),
+        |value| value["requests"][0]["body"] = "0".into(),
+        |value| value["requests"][0]["tools"] = "A".repeat(64).into(),
+        |value| value["responses"][0]["response"] = "0".into(),
+        |value| value["responses"][0]["instance"] = "g".repeat(64).into(),
+        |value| value["requests"][0]["prefixes"] = json!([]),
+    ];
+    for mutate in mutations {
+        state
+            .commit(
+                "build",
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&response),
+            )
+            .expect("restore valid index");
+        mutate_committed_index(&path, mutate);
+        assert_eq!(
+            IndexState::open(&path, "build", 1024 * 1024)
+                .err()
+                .expect("reject malformed index"),
+            "cache_index_malformed"
+        );
+    }
+}
+
+/// Commit applies the same structural validator before replacement, preserving
+/// the prior valid index when proposed evidence is impossible.
+#[test]
+fn index_commit_rejects_impossible_structure_without_replacement() {
+    let root = tempfile::tempdir().expect("index directory");
+    let path = root.path().join("cache.index");
+    let state = IndexState::open(&path, "build", 1024 * 1024).expect("fresh index");
+    let (request, response) = producer_evidence(&state.key);
+    state
+        .commit(
+            "build",
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&response),
+        )
+        .expect("commit valid index");
+    let before = std::fs::read(&path).expect("read valid index");
+
+    let mut invalid_request = request.clone();
+    invalid_request.adapter = "arbitrary".into();
+    assert_eq!(
+        state.commit(
+            "build",
+            std::slice::from_ref(&invalid_request),
+            std::slice::from_ref(&response),
+        ),
+        Err("cache_index_malformed")
+    );
+    let mut invalid_response = response;
+    invalid_response.response = "0".into();
+    assert_eq!(
+        state.commit(
+            "build",
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&invalid_response),
+        ),
+        Err("cache_index_malformed")
+    );
+    assert_eq!(std::fs::read(&path).expect("read retained index"), before);
 }
 
 /// Shared permissions and symlink substitution fail closed rather than loading
