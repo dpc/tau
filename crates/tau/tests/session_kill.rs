@@ -38,25 +38,27 @@ fn spawn_session(root: &Path, session_id: &str) -> Child {
         .expect("spawn session server")
 }
 
-/// Waits until session discovery reports every requested exact identifier.
-fn wait_for_sessions(root: &Path, expected: &[&str]) {
+/// Waits until session discovery reports one exact identifier while proving
+/// that its foreground server remains alive during startup.
+fn wait_for_session(root: &Path, expected: &str, child: &mut Child) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        assert_eq!(
+            child.try_wait().expect("query starting server"),
+            None,
+            "session server exited before becoming discoverable"
+        );
         let output = command(root)
             .args(["session", "list"])
             .output()
             .expect("list sessions");
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if output.status.success()
-            && expected
-                .iter()
-                .all(|id| stdout.lines().any(|line| line == *id))
-        {
+        if output.status.success() && stdout.lines().any(|line| line == expected) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "sessions did not become discoverable; stdout={stdout:?}, stderr={:?}",
+            "session {expected:?} did not become discoverable; stdout={stdout:?}, stderr={:?}",
             String::from_utf8_lossy(&output.stderr)
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -82,8 +84,9 @@ fn wait_for_success(child: &mut Child) {
 fn exact_session_kill_preserves_history_and_other_sessions() {
     let root = support::bounded_runtime_tempdir();
     let mut target = spawn_session(root.path(), "kill-target");
+    wait_for_session(root.path(), "kill-target", &mut target);
     let mut other = spawn_session(root.path(), "kill-other");
-    wait_for_sessions(root.path(), &["kill-target", "kill-other"]);
+    wait_for_session(root.path(), "kill-other", &mut other);
 
     let missing = command(root.path())
         .args(["session", "kill", "does-not-exist"])
@@ -156,7 +159,7 @@ fn inaccessible_session_socket_is_not_bypassed() {
 
     let root = support::bounded_runtime_tempdir();
     let mut server = spawn_session(root.path(), "kill-inaccessible");
-    wait_for_sessions(root.path(), &["kill-inaccessible"]);
+    wait_for_session(root.path(), "kill-inaccessible", &mut server);
     let sockets_dir = support::isolated_runtime_dir(root.path()).join("tau/harnesses/sockets");
     let socket = std::fs::read_dir(&sockets_dir)
         .expect("read sockets directory")
@@ -250,7 +253,7 @@ fn session_kill_waits_for_the_exact_daemon_process_exit() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn delayed-shutdown server");
-    wait_for_sessions(root.path(), &["kill-waits"]);
+    wait_for_session(root.path(), "kill-waits", &mut server);
     let mut kill = command(root.path())
         .args(["session", "kill", "kill-waits"])
         .stdout(Stdio::piped())
