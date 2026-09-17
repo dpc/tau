@@ -1,5 +1,6 @@
-use std::io::{Cursor, Write};
+use std::io::{self, Cursor, Write};
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -622,6 +623,98 @@ impl Drop for DropSignalWriter {
     }
 }
 
+/// Panic payload used to prove runner cleanup resumes the original unwind.
+#[derive(Debug)]
+struct RunnerPanic(&'static str);
+
+/// Reader that panics on its first protocol read.
+struct PanickingReader;
+
+impl std::io::Read for PanickingReader {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        std::panic::panic_any(RunnerPanic("reader"));
+    }
+}
+
+/// Behavior selected for the runner-unwind callback fixture.
+#[derive(Clone, Copy)]
+enum RunnerCallbackBehavior {
+    /// Return a distinguished handler error.
+    Error,
+    /// Panic with the fixture's identifiable payload.
+    Panic,
+}
+
+/// State used to retain a handle and trigger shutdown-only writer failure.
+struct RunnerCallbackState {
+    /// Sends a handle clone out of the callback for post-unwind assertions.
+    retained_handle: mpsc::Sender<ClientHandle>,
+    /// Makes the writer's next flush fail after callback dispatch begins.
+    fail_shutdown: Arc<AtomicBool>,
+    /// Whether this callback should enable the controlled shutdown failure.
+    trigger_shutdown_failure: bool,
+}
+
+/// Extension whose tool callback either returns an error or panics.
+struct RunnerCallbackExtension {
+    /// Callback result selected by the test scenario.
+    behavior: RunnerCallbackBehavior,
+}
+
+impl TauExtension for RunnerCallbackExtension {
+    type State = RunnerCallbackState;
+
+    fn name(&self) -> &'static str {
+        "runner-callback"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("runner_callback"), move |cx| {
+            cx.state
+                .retained_handle
+                .send(cx.handle())
+                .expect("retain callback handle");
+            if cx.state.trigger_shutdown_failure {
+                cx.state.fail_shutdown.store(true, Ordering::SeqCst);
+            }
+            match self.behavior {
+                RunnerCallbackBehavior::Error => Err(ClientError::handler("runner callback error")),
+                RunnerCallbackBehavior::Panic => {
+                    std::panic::panic_any(RunnerPanic("callback"));
+                }
+            }
+        });
+    }
+}
+
+/// Writer that reports destruction and can fail flush only after a callback.
+struct RunnerCleanupWriter {
+    /// Reports that writer-thread ownership has ended.
+    dropped: mpsc::Sender<()>,
+    /// When set, makes flush return the controlled shutdown failure.
+    fail_flush: Arc<AtomicBool>,
+}
+
+impl Write for RunnerCleanupWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.fail_flush.load(Ordering::SeqCst) {
+            Err(io::Error::other("controlled shutdown failure"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for RunnerCleanupWriter {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(());
+    }
+}
+
 struct HandlerErrorState {
     /// Sends a cloned handle out to the test so the writer channel remains
     /// open.
@@ -910,6 +1003,156 @@ fn encode_output_messages(input: &[HarnessOutputMessage]) -> Vec<u8> {
     }
     input_writer.flush().expect("flush input");
     input_bytes
+}
+
+/// Runs one callback cleanup scenario and returns its retained handle, writer
+/// drop signal, and runner outcome.
+fn run_callback_cleanup_scenario(
+    behavior: RunnerCallbackBehavior,
+    trigger_shutdown_failure: bool,
+) -> (
+    ClientHandle,
+    mpsc::Receiver<()>,
+    std::thread::Result<ClientResult<RunnerCallbackState>>,
+) {
+    let input = encode_output_messages(&[configure_message(), tool_started("runner_callback")]);
+    let (handle_tx, handle_rx) = mpsc::channel();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let fail_shutdown = Arc::new(AtomicBool::new(false));
+    let state = RunnerCallbackState {
+        retained_handle: handle_tx,
+        fail_shutdown: Arc::clone(&fail_shutdown),
+        trigger_shutdown_failure,
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        TauExtensionRunner::new(RunnerCallbackExtension { behavior }).run(
+            Cursor::new(input),
+            RunnerCleanupWriter {
+                dropped: dropped_tx,
+                fail_flush: fail_shutdown,
+            },
+            state,
+        )
+    }));
+    let retained_handle = handle_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("callback retained a handle");
+    (retained_handle, dropped_rx, result)
+}
+
+/// Asserts an unwind preserved the fixture's exact panic payload.
+fn assert_runner_panic(result: std::thread::Result<ClientResult<RunnerCallbackState>>, name: &str) {
+    let payload = match result {
+        Err(payload) => payload,
+        Ok(_) => panic!("runner must resume the callback panic"),
+    };
+    let panic = payload
+        .downcast_ref::<RunnerPanic>()
+        .expect("runner must preserve the original panic payload type");
+    assert_eq!(panic.0, name);
+}
+
+/// Executes one runner cleanup regression inside its killable child process.
+fn run_runner_cleanup_child(scenario: &str) {
+    match scenario {
+        "reader-panic" => {
+            let (dropped_tx, dropped_rx) = mpsc::channel();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                TauExtensionRunner::new(StartupExtension).run(
+                    PanickingReader,
+                    RunnerCleanupWriter {
+                        dropped: dropped_tx,
+                        fail_flush: Arc::new(AtomicBool::new(false)),
+                    },
+                    (),
+                )
+            }));
+            let payload = result.expect_err("runner must resume the reader panic");
+            let panic = payload
+                .downcast_ref::<RunnerPanic>()
+                .expect("runner must preserve the original reader panic type");
+            assert_eq!(panic.0, "reader");
+            dropped_rx
+                .try_recv()
+                .expect("writer dropped before reader panic recovery");
+        }
+        "callback-panic" => {
+            let (retained_handle, dropped_rx, result) =
+                run_callback_cleanup_scenario(RunnerCallbackBehavior::Panic, false);
+            assert_runner_panic(result, "callback");
+            dropped_rx
+                .try_recv()
+                .expect("writer dropped before callback panic recovery");
+            assert!(matches!(
+                retained_handle.shutdown(),
+                Err(ClientError::WriterClosed)
+            ));
+        }
+        "error-precedence" => {
+            let (_retained_handle, dropped_rx, result) =
+                run_callback_cleanup_scenario(RunnerCallbackBehavior::Error, true);
+            let error = match result.expect("error path must not panic") {
+                Err(error) => error,
+                Ok(_) => panic!("callback error must stop the runner"),
+            };
+            assert!(matches!(
+                error,
+                ClientError::Handler(message) if message == "runner callback error"
+            ));
+            dropped_rx
+                .try_recv()
+                .expect("writer dropped after controlled shutdown failure");
+        }
+        "panic-precedence" => {
+            let (_retained_handle, dropped_rx, result) =
+                run_callback_cleanup_scenario(RunnerCallbackBehavior::Panic, true);
+            assert_runner_panic(result, "callback");
+            dropped_rx
+                .try_recv()
+                .expect("writer dropped after controlled shutdown failure");
+        }
+        other => panic!("unknown runner cleanup child scenario: {other}"),
+    }
+}
+
+/// Ensures reader and callback panics cannot strand the scoped writer, cleanup
+/// finishes before panic recovery, and existing loop-error precedence remains
+/// intact when shutdown also fails. Each case runs in a killable child so a
+/// regression deadlock cannot hang the parent test process.
+#[test]
+fn runner_unwind_cleanup_is_bounded_and_preserves_precedence() {
+    const CHILD_ENV: &str = "TAU_CLIENT_RUNNER_CLEANUP_CHILD";
+    const TEST_NAME: &str = "tests::runner_unwind_cleanup_is_bounded_and_preserves_precedence";
+    if let Ok(scenario) = std::env::var(CHILD_ENV) {
+        run_runner_cleanup_child(&scenario);
+        return;
+    }
+
+    for scenario in [
+        "reader-panic",
+        "callback-panic",
+        "error-precedence",
+        "panic-precedence",
+    ] {
+        let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, scenario)
+            .spawn()
+            .expect("spawn runner cleanup child");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll runner cleanup child") {
+                assert!(status.success(), "runner cleanup child failed: {scenario}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("kill stuck runner cleanup child");
+                child.wait().expect("reap stuck runner cleanup child");
+                panic!("runner cleanup child timed out: {scenario}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 fn write_initial_configure(stream: &UnixStream) {

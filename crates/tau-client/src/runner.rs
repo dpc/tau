@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use crate::builder::ExtensionBuilder;
 use crate::manual_runtime::DispatchOutcome;
@@ -74,18 +75,27 @@ where
 
         std::thread::scope(|scope| {
             let writer_thread = scope.spawn(move || run_writer(writer, receiver));
-            let run_result = run_client_loop(reader, state, builder, handle.clone());
+            // This catch exists only to run writer cleanup before immediately
+            // resuming the original panic. It does not make extension state
+            // safe to reuse after unwinding, so avoid imposing
+            // public UnwindSafe bounds.
+            let run_result = catch_unwind(AssertUnwindSafe(|| {
+                run_client_loop(reader, state, builder, handle.clone())
+            }));
             let shutdown_result = handle.shutdown();
             let writer_result = writer_thread
                 .join()
                 .map_err(|_| ClientError::WriterPanicked)
                 .and_then(|result| result);
 
-            match (run_result, shutdown_result, writer_result) {
-                (Ok((state, _)), Ok(()), Ok(())) => Ok(state),
-                (Err(error), _, _) => Err(error),
-                (_, Err(error), _) => Err(error),
-                (_, _, Err(error)) => Err(error),
+            match run_result {
+                Err(payload) => resume_unwind(payload),
+                Ok(run_result) => match (run_result, shutdown_result, writer_result) {
+                    (Ok((state, _)), Ok(()), Ok(())) => Ok(state),
+                    (Err(error), _, _) => Err(error),
+                    (_, Err(error), _) => Err(error),
+                    (_, _, Err(error)) => Err(error),
+                },
             }
         })
     }
