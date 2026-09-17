@@ -59,6 +59,8 @@ impl SharedWriter {
                     marker: marker.to_vec(),
                     marker_seen: false,
                     published: false,
+                    result_seen: false,
+                    result_published: false,
                 }),
                 Condvar::new(),
             )),
@@ -74,13 +76,17 @@ struct ReadinessState {
     marker_seen: bool,
     /// Whether a flush completed after the marker was emitted.
     published: bool,
+    /// Whether emitted bytes contain a tool-result terminal.
+    result_seen: bool,
+    /// Whether a flush completed after the tool-result terminal was emitted.
+    result_published: bool,
 }
 
 impl std::io::Write for SharedWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let mut bytes = self.bytes.lock().expect("output lock");
         bytes.extend_from_slice(buffer);
-        let (state, _) = &*self.readiness;
+        let (state, wake) = &*self.readiness;
         let mut state = state.lock().expect("readiness state");
         if !state.marker.is_empty()
             && bytes
@@ -88,7 +94,11 @@ impl std::io::Write for SharedWriter {
                 .any(|window| window == state.marker)
         {
             state.marker_seen = true;
+            wake.notify_all();
         }
+        state.result_seen |= bytes
+            .windows(b"tool.result_reported".len())
+            .any(|window| window == b"tool.result_reported");
         Ok(buffer.len())
     }
 
@@ -97,8 +107,11 @@ impl std::io::Write for SharedWriter {
         let mut state = state.lock().expect("readiness state");
         if state.marker_seen {
             state.published = true;
-            wake.notify_all();
         }
+        if state.result_seen {
+            state.result_published = true;
+        }
+        wake.notify_all();
         Ok(())
     }
 }
@@ -115,6 +128,25 @@ impl SharedWriter {
     }
 }
 
+/// Waits until the exact readiness frame has been flushed to the protocol
+/// writer.
+fn wait_for_readiness(readiness: &Arc<(Mutex<ReadinessState>, Condvar)>) {
+    let (state, wake) = &**readiness;
+    let mut state = state.lock().expect("readiness state");
+    while !state.published {
+        state = wake.wait(state).expect("readiness wait");
+    }
+}
+
+/// Waits until a tool-result terminal has been flushed to the protocol writer.
+fn wait_for_result(readiness: &Arc<(Mutex<ReadinessState>, Condvar)>) {
+    let (state, wake) = &**readiness;
+    let mut state = state.lock().expect("readiness state");
+    while !state.result_published {
+        state = wake.wait(state).expect("result wait");
+    }
+}
+
 /// Production writer blocked by the first saturation filler frame.
 struct SaturationWriter {
     /// Serialized output bytes.
@@ -123,22 +155,38 @@ struct SaturationWriter {
     gate: Arc<(Mutex<bool>, Condvar)>,
     /// Announces that production output is blocked.
     entered: mpsc::Sender<()>,
+    /// Announces that the hold readiness frame reached production output.
+    ready: mpsc::Sender<()>,
     /// Prevents repeated blocking.
     blocked: bool,
+    /// Prevents repeated readiness announcements.
+    ready_sent: bool,
 }
 
 impl std::io::Write for SaturationWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut output = self.bytes.lock().expect("output bytes");
+        output.extend(bytes);
+        if !self.ready_sent
+            && [NO_SIDE_EFFECT_READY_MARKER, RELEASE_HOLD_READY_MARKER]
+                .iter()
+                .any(|marker| output.windows(marker.len()).any(|window| window == *marker))
+        {
+            self.ready_sent = true;
+            let _ = self.ready.send(());
+        }
         if !self.blocked && bytes.windows(9).any(|window| window == b"term.bell") {
             self.blocked = true;
             let _ = self.entered.send(());
+            drop(output);
             let (lock, wake) = &*self.gate;
             let mut closed = lock.lock().expect("writer gate");
             while *closed {
                 closed = wake.wait(closed).expect("writer gate wait");
             }
+        } else {
+            drop(output);
         }
-        self.bytes.lock().expect("output bytes").extend(bytes);
         Ok(bytes.len())
     }
 
@@ -477,6 +525,38 @@ struct ReadinessGatedReader {
     readiness: Arc<(Mutex<ReadinessState>, Condvar)>,
     /// Whether readiness released the suffix.
     released: bool,
+}
+
+/// Reader that withholds its suffix until a concurrent fixture action
+/// announces completion.
+struct SignalGatedReader {
+    /// Configuration and tool invocation available immediately.
+    prefix: Cursor<Vec<u8>>,
+    /// Terminal protocol suffix released by the fixture action.
+    suffix: Cursor<Vec<u8>>,
+    /// Completion notification from the concurrent fixture action.
+    ready: mpsc::Receiver<()>,
+    /// Whether the action released the suffix.
+    released: bool,
+}
+
+impl Read for SignalGatedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.prefix.read(buffer)?;
+        if count != 0 {
+            return Ok(count);
+        }
+        if !self.released {
+            self.ready.recv().map_err(|_| {
+                Error::new(
+                    ErrorKind::BrokenPipe,
+                    "fixture action ended before releasing protocol suffix",
+                )
+            })?;
+            self.released = true;
+        }
+        self.suffix.read(buffer)
+    }
 }
 
 impl Read for ReadinessGatedReader {
@@ -1340,6 +1420,7 @@ fn saturated_hold_terminal(
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let gate = Arc::new((Mutex::new(true), Condvar::new()));
     let (entered_tx, entered_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let (overloaded_tx, overloaded_rx) = mpsc::channel();
     *SATURATION_HOOK.lock().expect("saturation hook") =
         Some(("saturated-call".into(), overloaded_tx));
@@ -1354,7 +1435,9 @@ fn saturated_hold_terminal(
                 bytes: output_bytes,
                 gate: output_gate,
                 entered: entered_tx,
+                ready: ready_tx,
                 blocked: false,
+                ready_sent: false,
             },
             &mut rng,
             timeout,
@@ -1367,6 +1450,7 @@ fn saturated_hold_terminal(
         .write_message(&invoke_restart_with_id("saturated-call"))
         .expect("start deterministic hold");
     input.flush().expect("flush hold start");
+    ready_rx.recv().expect("hold readiness output");
     action(&mut input);
     entered_rx
         .recv_timeout(Duration::from_secs(2))
@@ -1448,17 +1532,10 @@ fn release_success_survives_production_fifo_saturation() {
         release_config(&socket, "nonce"),
         HOLD_TERMINAL_TIMEOUT,
         move |_| {
-            for _ in 0..100 {
-                if UnixStream::connect(&socket_for_release).is_ok() {
-                    send_release_frame(
-                        &socket_for_release,
-                        b"{\"call_id\":\"saturated-call\",\"release_nonce\":\"nonce\"}\n",
-                    );
-                    return;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            panic!("release socket did not become ready");
+            send_release_frame(
+                &socket_for_release,
+                b"{\"call_id\":\"saturated-call\",\"release_nonce\":\"nonce\"}\n",
+            );
         },
     );
     let terminals = frames
@@ -1520,8 +1597,8 @@ fn mandatory_hold_terminal_failure_exits_extension_loop() {
     );
 }
 
-/// Verifies an early client cannot release before readiness publication and
-/// malformed, mismatched, and boundary-sized frames cannot release afterward.
+/// Verifies malformed, mismatched, and boundary-sized frames cannot release
+/// the hold, while the exact typed frame succeeds after readiness.
 #[test]
 fn hold_until_success_release_requires_exact_typed_frame() {
     let socket_path = unique_socket_path("exact");
@@ -1530,21 +1607,20 @@ fn hold_until_success_release_requires_exact_typed_frame() {
         invoke_restart(),
     ]);
     let suffix = restart_input(&[disconnect()]);
-    let reader = DelayedReader {
+    let (client_done, client_finished) = mpsc::channel();
+    let reader = SignalGatedReader {
         prefix: Cursor::new(prefix),
         suffix: Cursor::new(suffix),
-        delayed: false,
+        ready: client_finished,
+        released: false,
     };
-    let output = SharedWriter::default();
+    let output = SharedWriter::with_readiness_marker(RELEASE_HOLD_READY_MARKER);
     let output_bytes = Arc::clone(&output.bytes);
+    let readiness = output.readiness_barrier();
+    let result = Arc::clone(&readiness);
     let client_path = socket_path.clone();
     let client = std::thread::spawn(move || {
-        for _ in 0..100 {
-            if client_path.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        wait_for_readiness(&readiness);
         send_release_frame(&client_path, b"{not-json}\n");
         send_release_frame(
             &client_path,
@@ -1571,6 +1647,8 @@ fn hold_until_success_release_requires_exact_typed_frame() {
             &client_path,
             b"{\"call_id\":\"call-1\",\"release_nonce\":\"fixture-nonce\"}\n",
         );
+        wait_for_result(&result);
+        client_done.send(()).expect("release protocol suffix");
     });
     let mut rng = StdRng::seed_from_u64(1);
     run_with_rng(reader, output, &mut rng).expect("run release fixture");
@@ -1612,33 +1690,33 @@ fn release_hold_saturation_cancels_and_cleans_up_without_success() {
         invoke_restart(),
     ]);
     let suffix = restart_input(&[cancel_restart("call-1"), disconnect()]);
-    let reader = DelayedReader {
+    let (clients_ready, clients_established) = mpsc::channel();
+    let reader = SignalGatedReader {
         prefix: Cursor::new(prefix),
         suffix: Cursor::new(suffix),
-        delayed: false,
+        ready: clients_established,
+        released: false,
     };
+    let output = SharedWriter::with_readiness_marker(RELEASE_HOLD_READY_MARKER);
+    let readiness = output.readiness_barrier();
+    let (release_clients, clients_released) = mpsc::channel();
     let client_path = socket_path.clone();
     let client = std::thread::spawn(move || {
-        for _ in 0..100 {
-            if client_path.exists() {
-                let mut streams = Vec::new();
-                for _ in 0..32 {
-                    if let Ok(mut stream) = UnixStream::connect(&client_path) {
-                        let _ = stream.write_all(b"{\"call_id\":");
-                        streams.push(stream);
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(300));
-                drop(streams);
-                return;
+        wait_for_readiness(&readiness);
+        let mut streams = Vec::new();
+        for _ in 0..32 {
+            if let Ok(mut stream) = UnixStream::connect(&client_path) {
+                let _ = stream.write_all(b"{\"call_id\":");
+                streams.push(stream);
             }
-            std::thread::sleep(Duration::from_millis(2));
         }
-        panic!("release socket never became ready");
+        clients_ready.send(()).expect("release cancellation suffix");
+        clients_released.recv().expect("release partial clients");
+        drop(streams);
     });
-    let output = SharedWriter::default();
     let mut rng = StdRng::seed_from_u64(1);
     run_with_rng(reader, output.clone(), &mut rng).expect("run cancellation fixture");
+    release_clients.send(()).expect("release partial clients");
     client.join().expect("partial release client");
     let frames = decode_output(output.snapshot());
     assert!(frames.iter().any(|frame| matches!(
