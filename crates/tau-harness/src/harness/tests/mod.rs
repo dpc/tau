@@ -410,7 +410,8 @@ fn finish_test_agent_context_wait(h: &mut Harness, agent_id: &tau_proto::AgentId
 }
 
 /// Ensures build timestamps used for built-in skill freshness parse to exact
-/// instants and reject malformed inputs before collision comparison.
+/// instants and reject malformed formats and Gregorian calendar dates before
+/// collision comparison.
 #[test]
 fn build_last_modified_parser_validates_packaged_format() {
     assert_eq!(
@@ -421,10 +422,29 @@ fn build_last_modified_parser_validates_packaged_format() {
         super::parse_build_last_modified("2024-06-12 09:30"),
         Some(std::time::UNIX_EPOCH + Duration::from_secs(1_718_184_600))
     );
+    let leap_day_2000 = super::parse_build_last_modified("2000-02-29 00:00");
+    let march_first_2000 =
+        super::parse_build_last_modified("2000-03-01 00:00").expect("valid Gregorian date");
+    assert_eq!(
+        leap_day_2000,
+        Some(march_first_2000 - Duration::from_secs(24 * 60 * 60))
+    );
+    let leap_day_2024 = super::parse_build_last_modified("2024-02-29 00:00");
+    let march_first_2024 =
+        super::parse_build_last_modified("2024-03-01 00:00").expect("valid Gregorian date");
+    assert_eq!(
+        leap_day_2024,
+        Some(march_first_2024 - Duration::from_secs(24 * 60 * 60))
+    );
     assert!(super::parse_build_last_modified("2024/06/12 09:30").is_none());
     assert!(super::parse_build_last_modified("2024-1x-12 09:30").is_none());
     assert!(super::parse_build_last_modified("2024-06-aa 09:30").is_none());
     assert!(super::parse_build_last_modified("2024-13-12 09:30").is_none());
+    assert!(super::parse_build_last_modified("2024-04-31 00:00").is_none());
+    assert!(super::parse_build_last_modified("2024-02-30 00:00").is_none());
+    assert!(super::parse_build_last_modified("2024-02-31 00:00").is_none());
+    assert!(super::parse_build_last_modified("2023-02-29 00:00").is_none());
+    assert!(super::parse_build_last_modified("2100-02-29 00:00").is_none());
     assert!(super::parse_build_last_modified("2024-06-12 24:00").is_none());
 }
 

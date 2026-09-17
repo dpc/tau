@@ -1301,12 +1301,18 @@ fn parse_build_last_modified(value: &str) -> Option<SystemTime> {
     let day = parse_ascii_i64(value.get(8..10)?)?;
     let hour = parse_ascii_u64(value.get(11..13)?)?;
     let minute = parse_ascii_u64(value.get(14..16)?)?;
+    let days_in_month = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
     if bytes[4] != b'-'
         || bytes[7] != b'-'
         || bytes[10] != b' '
         || bytes[13] != b':'
         || !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || !(1..=days_in_month).contains(&day)
         || 24 <= hour
         || 60 <= minute
     {
