@@ -253,6 +253,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_EXTENSION_ACTIVATION_MESSAGES: usize = 1_024;
 const MAX_EXTENSION_ACTIVATION_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EXTENSION_CONFIG_ERROR_BYTES: usize = 4 * 1024;
+const EXTENSION_CONFIG_ERROR_TRUNCATION_MARKER: &str = "… [truncated]";
 const MAX_EXTENSION_RESTART_NOTICE_BYTES: usize = 256;
 const EXTENSION_RESTART_DELAY: Duration = Duration::from_secs(1);
 const MAX_EXTENSION_RESTART_ATTEMPTS: u32 = 3;
@@ -433,12 +434,12 @@ fn bounded_extension_config_error(mut message: String) -> String {
     if message.len() <= MAX_EXTENSION_CONFIG_ERROR_BYTES {
         return message;
     }
-    let mut end = MAX_EXTENSION_CONFIG_ERROR_BYTES;
+    let mut end = MAX_EXTENSION_CONFIG_ERROR_BYTES - EXTENSION_CONFIG_ERROR_TRUNCATION_MARKER.len();
     while !message.is_char_boundary(end) {
         end -= 1;
     }
     message.truncate(end);
-    message.push_str("… [truncated]");
+    message.push_str(EXTENSION_CONFIG_ERROR_TRUNCATION_MARKER);
     message
 }
 

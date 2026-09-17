@@ -2495,6 +2495,7 @@ mod agent_list;
 mod agent_unload;
 mod agent_watch_wait;
 mod artifacts;
+mod config_error;
 mod dedup;
 mod dispatch;
 mod interception;
