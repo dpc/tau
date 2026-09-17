@@ -287,9 +287,13 @@ fn prompt_event(text: &str) -> Event {
 }
 
 fn tool_started(tool_name: &str, args: CborValue) -> Event {
+    tool_started_with_call_id("call_1", tool_name, args)
+}
+
+fn tool_started_with_call_id(call_id: &str, tool_name: &str, args: CborValue) -> Event {
     Event::ToolStarted(tau_proto::ToolStarted {
         invocation_policy: tau_proto::ToolInvocationPolicy::default(),
-        call_id: tau_proto::ToolCallId::new("call_1"),
+        call_id: tau_proto::ToolCallId::new(call_id),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments: args,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -1330,7 +1334,8 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
         Some(tau_proto::ToolNamePrefix::parse("work").expect("valid prefix"));
     let live = HarnessOutputMessage::deliver_live(
         UnixMicros::new(1),
-        tool_started(
+        tool_started_with_call_id(
+            "echo-call",
             "work_echo_args",
             CborValue::Map(vec![(
                 CborValue::Text("text".to_owned()),
@@ -1340,7 +1345,7 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
     );
     let replay = HarnessOutputMessage::deliver_replay(
         UnixMicros::new(2),
-        tool_started("work_echo_args", CborValue::Map(Vec::new())),
+        tool_started_with_call_id("echo-call", "work_echo_args", CborValue::Map(Vec::new())),
     );
 
     let frames = run_frames(&[configure, live, replay]);
@@ -1361,6 +1366,7 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
         results[0].result,
         CborValue::Text("saw hello via echo_args".to_owned())
     );
+    assert_eq!(results[0].call_id.as_str(), "echo-call");
     assert_eq!(results[0].tool_name.as_str(), "work_echo_args");
     assert!(frames.iter().all(|frame| !matches!(
         requested_notice(frame),
@@ -1385,7 +1391,8 @@ fn tool_handler_throw_emits_tool_error_and_keeps_running() {
     );
     let fail = HarnessOutputMessage::deliver_live(
         UnixMicros::new(1),
-        tool_started(
+        tool_started_with_call_id(
+            "maybe-fail",
             "maybe",
             CborValue::Map(vec![(
                 CborValue::Text("fail".to_owned()),
@@ -1395,7 +1402,8 @@ fn tool_handler_throw_emits_tool_error_and_keeps_running() {
     );
     let ok = HarnessOutputMessage::deliver_live(
         UnixMicros::new(2),
-        tool_started(
+        tool_started_with_call_id(
+            "maybe-ok",
             "maybe",
             CborValue::Map(vec![(
                 CborValue::Text("fail".to_owned()),
@@ -1406,15 +1414,41 @@ fn tool_handler_throw_emits_tool_error_and_keeps_running() {
 
     let frames = run_frames(&[configure_with_script(&script), fail, ok]);
 
-    assert!(
-        frames
-            .iter()
-            .any(|frame| matches!(emitted_event(frame), Some(Event::ToolErrorReported(_))))
+    let mut terminals = BTreeMap::new();
+    for frame in &frames {
+        let terminal = match emitted_event(frame) {
+            Some(Event::ToolErrorReported(error)) => {
+                (error.call_id.as_str(), Err(error.message.clone()))
+            }
+            Some(Event::ToolResultReported(result)) => {
+                (result.call_id.as_str(), Ok(result.result.clone()))
+            }
+            _ => continue,
+        };
+        assert!(
+            matches!(terminal.0, "maybe-fail" | "maybe-ok"),
+            "unexpected terminal call ID `{}`",
+            terminal.0
+        );
+        assert!(
+            terminals.insert(terminal.0, terminal.1).is_none(),
+            "duplicate terminal for call ID `{}`",
+            terminal.0
+        );
+    }
+    assert_eq!(terminals.len(), 2, "one terminal per expected call ID");
+    assert!(matches!(
+        terminals.remove("maybe-fail"),
+        Some(Err(message)) if message.contains("boom")
+    ));
+    assert_eq!(
+        terminals.remove("maybe-ok"),
+        Some(Ok(CborValue::Text("ok".to_owned())))
     );
-    assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::ToolResultReported(result)) if result.result == CborValue::Text("ok".to_owned())
-    )));
+    assert!(
+        terminals.is_empty(),
+        "all terminals must have expected call IDs"
+    );
 }
 
 /// Synchronous results, synchronous errors, and shell-owned terminals must all
@@ -1877,14 +1911,19 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
             missing_cwd.display()
         ),
     );
+    let cases = [
+        ("absolute", "shell-absolute"),
+        ("relative", "shell-relative"),
+        ("empty", "shell-empty"),
+        ("missing", "shell-missing"),
+        ("absent", "shell-absent"),
+    ];
     let mut inputs = vec![configure_with_script(&script)];
-    for (index, case) in ["absolute", "relative", "empty", "missing", "absent"]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, (case, call_id)) in cases.into_iter().enumerate() {
         inputs.push(HarnessOutputMessage::deliver_live(
             UnixMicros::new((index + 1) as u64),
-            tool_started(
+            tool_started_with_call_id(
+                call_id,
                 "shell_contract",
                 CborValue::Map(vec![(
                     CborValue::Text("case".to_owned()),
@@ -1895,31 +1934,49 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
     }
     let frames = run_frames(&inputs);
 
-    let results: Vec<_> = frames
-        .iter()
-        .filter_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolResultReported(result)) => Some(&result.result),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(results.len(), 5);
-    let cwd_result = results
-        .iter()
-        .find_map(|result| match result {
-            CborValue::Map(fields)
-                if fields.iter().any(|(key, value)| {
+    let mut terminals = BTreeMap::new();
+    for frame in &frames {
+        match emitted_event(frame) {
+            Some(Event::ToolResultReported(result)) => {
+                let call_id = result.call_id.as_str();
+                assert!(
                     matches!(
-                        (key, value),
-                        (CborValue::Text(key), CborValue::Text(output))
-                            if key == "output" && output.contains("ok")
-                    )
-                }) =>
-            {
-                Some(fields)
+                        call_id,
+                        "shell-absolute"
+                            | "shell-relative"
+                            | "shell-empty"
+                            | "shell-missing"
+                            | "shell-absent"
+                    ),
+                    "unexpected terminal call ID `{call_id}`"
+                );
+                assert!(
+                    terminals.insert(call_id, result.result.clone()).is_none(),
+                    "duplicate terminal for call ID `{call_id}`"
+                );
             }
-            _ => None,
-        })
-        .expect("absolute cwd shell result");
+            Some(Event::ToolErrorReported(error)) => {
+                panic!(
+                    "unexpected ToolError for call ID `{}`: {}",
+                    error.call_id.as_str(),
+                    error.message
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        terminals.len(),
+        cases.len(),
+        "one terminal per expected call ID"
+    );
+
+    let CborValue::Map(cwd_result) = terminals
+        .remove("shell-absolute")
+        .expect("absolute cwd shell result")
+    else {
+        panic!("absolute cwd shell result must be a map");
+    };
     assert!(cwd_result.iter().any(|(key, value)| matches!(
         (key, value),
         (CborValue::Text(key), CborValue::Bool(false)) if key == "success"
@@ -1933,40 +1990,38 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
         (CborValue::Text(key), CborValue::Text(output))
             if key == "output" && output.contains("ok") && output.contains("[stderr]\nerr")
     )));
-    assert!(results.iter().any(|result| matches!(
-        result,
-        CborValue::Map(fields) if fields.iter().any(|(key, value)| matches!(
+
+    for (call_id, expected_output) in [("shell-relative", "relative"), ("shell-absent", "absent")] {
+        let CborValue::Map(fields) = terminals
+            .remove(call_id)
+            .unwrap_or_else(|| panic!("missing result for call ID `{call_id}`"))
+        else {
+            panic!("result for call ID `{call_id}` must be a map");
+        };
+        assert!(fields.iter().any(|(key, value)| matches!(
             (key, value),
             (CborValue::Text(key), CborValue::Text(output))
-                if key == "output" && output == "relative"
-        ))
-    )));
-    assert!(results.iter().any(|result| matches!(
-        result,
-        CborValue::Map(fields) if fields.iter().any(|(key, value)| matches!(
+                if key == "output" && output == expected_output
+        )));
+    }
+
+    for call_id in ["shell-empty", "shell-missing"] {
+        let CborValue::Map(fields) = terminals
+            .remove(call_id)
+            .unwrap_or_else(|| panic!("missing result for call ID `{call_id}`"))
+        else {
+            panic!("result for call ID `{call_id}` must be a map");
+        };
+        assert!(fields.iter().any(|(key, value)| matches!(
             (key, value),
-            (CborValue::Text(key), CborValue::Text(output))
-                if key == "output" && output == "absent"
-        ))
-    )));
-    let start_errors = results
-        .iter()
-        .filter_map(|result| match result {
-            CborValue::Map(fields)
-                if fields.iter().any(|(key, value)| {
-                    matches!(
-                        (key, value),
-                        (CborValue::Text(key), CborValue::Text(reason))
-                            if key == "termination_reason" && reason == "start_error"
-                    )
-                }) =>
-            {
-                Some(fields)
-            }
-            _ => None,
-        })
-        .count();
-    assert_eq!(start_errors, 2, "empty and missing cwd stay start errors");
+            (CborValue::Text(key), CborValue::Text(reason))
+                if key == "termination_reason" && reason == "start_error"
+        )));
+    }
+    assert!(
+        terminals.is_empty(),
+        "all terminals must have expected call IDs"
+    );
 }
 
 /// An oversized timeout rejects its tool call without spawning the requested
