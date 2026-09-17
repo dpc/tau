@@ -698,11 +698,13 @@ fn stream_capacity_pressure_reports_exact_registration_boundary() {
     assert_eq!(status.recovered.expect("registration rollback").streams, 0);
 }
 
-/// A waiter parked before an unprovable rollback must observe its failure only
-/// after the matching generation is poisoned, so no later admission can pass.
+/// An ordinary session whose rollback cannot be proven must retain deletion
+/// exclusion without retaining append authority, then release both lock and
+/// bounded capacity through the normal exact-generation lifecycle.
 #[test]
-fn rollback_failure_poison_rejects_later_admission() {
+fn rollback_failure_retains_only_session_lock_until_release() {
     let root = tempfile::tempdir().expect("temporary root");
+    let sessions_dir = root.path().join("sessions");
     let backend = Arc::new(WriteFaultBackend::new());
     let owner = Arc::new(
         SemanticPersistenceOwner::with_test_backend(
@@ -711,14 +713,15 @@ fn rollback_failure_poison_rejects_later_admission() {
         )
         .expect("owner"),
     );
-    let mut store =
-        SessionStore::open_managed(root.path().join("sessions"), owner.clone()).expect("store");
+    let baseline = owner.ledger_for_test().1;
+    let mut store = SessionStore::open_managed(&sessions_dir, owner.clone()).expect("store");
     store
         .prepare_session("managed-session", SessionPreparationMode::New)
         .expect("prepare");
     backend.hold_writes.store(true, Ordering::SeqCst);
     backend.fail_next_write.store(true, Ordering::SeqCst);
     backend.fail_next_truncate.store(true, Ordering::SeqCst);
+    owner.arm_rollback_poison_pause_for_test();
     store
         .append_session_event_at(
             "managed-session",
@@ -728,6 +731,18 @@ fn rollback_failure_poison_rejects_later_admission() {
         )
         .expect("first live fact was accepted before worker poison");
     backend.wait_until_write_held();
+    store
+        .append_session_event_at(
+            "managed-session",
+            None,
+            tau_proto::Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+                session_id: tau_proto::SessionId::parse("managed-session").expect("session"),
+                agent_id: tau_proto::AgentId::parse("managed-agent").expect("agent"),
+            }),
+            tau_proto::UnixMicros::new(8),
+        )
+        .expect("already queued frame was accepted before poison");
+    let writes_before_poison = backend.write_call.load(Ordering::SeqCst);
     let (ready_send, ready_receive) = mpsc::sync_channel(0);
     let waiter_owner = Arc::clone(&owner);
     let waiter = thread::spawn(move || {
@@ -745,20 +760,54 @@ fn rollback_failure_poison_rejects_later_admission() {
         waiter.join().expect("failure waiter"),
         "parked waiter observed exact rollback failure"
     );
+    assert!(
+        owner.wait_for_rollback_poison_pause_for_test(Duration::from_secs(2)),
+        "worker paused after retaining the poisoned session lock"
+    );
     assert_eq!(
         owner.rollback_failure_lifecycle_at_publication_for_test(),
         Some(StreamLifecycle::Poisoned),
         "failure insertion and poison transition share one state cut"
+    );
+    assert!(
+        crate::session_is_locked(&sessions_dir, "managed-session").expect("probe session lock"),
+        "another owner or retention pass must remain excluded after poison"
     );
     let error = store
         .append_session_event_at(
             "managed-session",
             None,
             loaded_event("managed-session"),
-            tau_proto::UnixMicros::new(8),
+            tau_proto::UnixMicros::new(9),
         )
         .expect_err("poison rejects later admission before projection mutation");
     assert!(error.to_string().contains("poisoned"));
+    let leases = store.managed_persistence_leases("managed-session");
+    let release_owner = Arc::clone(&owner);
+    let release = thread::spawn(move || release_owner.release(&leases, Duration::from_secs(2)));
+    assert!(
+        owner.wait_for_release_command_for_test(Duration::from_secs(2)),
+        "release transitioned the poisoned generation to Closing before queued dispatch"
+    );
+    owner.release_rollback_poison_pause_for_test();
+    release
+        .join()
+        .expect("release thread")
+        .expect("poisoned generation and queued frame release normally");
+    assert_eq!(
+        backend.write_call.load(Ordering::SeqCst),
+        writes_before_poison,
+        "queued frame must not regain append authority while release closes poison"
+    );
+    assert!(
+        !crate::session_is_locked(&sessions_dir, "managed-session").expect("probe released lock"),
+        "normal exact-generation release relinquishes deletion exclusion"
+    );
+    assert_eq!(
+        owner.ledger_for_test(),
+        (0, baseline, 0),
+        "release frees queued-frame and stream capacity"
+    );
 }
 
 fn loaded_event(session_id: &str) -> tau_proto::Event {

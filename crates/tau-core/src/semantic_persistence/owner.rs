@@ -467,6 +467,9 @@ pub(crate) struct Shared {
     /// Deterministic pause immediately before due derived work is selected.
     #[cfg(test)]
     pub(crate) derived_work_pause: DerivedWorkPause,
+    /// Deterministic pause after rollback poison discards append authority.
+    #[cfg(test)]
+    pub(crate) rollback_poison_pause: RollbackPoisonPause,
 }
 
 /// Test-only worker pause at the command-versus-derived-work scheduling cut.
@@ -485,6 +488,27 @@ pub(crate) struct DerivedWorkPauseState {
     /// Whether the next due derived-work cut should pause.
     pub(crate) armed: bool,
     /// Whether the worker has reached the armed cut.
+    pub(crate) reached: bool,
+    /// Whether the test has released the paused worker.
+    pub(crate) released: bool,
+}
+
+/// Test-only worker pause after rollback poison and before FIFO continuation.
+#[cfg(test)]
+pub(crate) struct RollbackPoisonPause {
+    /// Armed, reached, and released state for one pause.
+    pub(crate) state: Mutex<RollbackPoisonPauseState>,
+    /// Waiters observing or releasing the pause.
+    pub(crate) wake: Condvar,
+}
+
+/// Named state for one deterministic post-poison worker pause.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RollbackPoisonPauseState {
+    /// Whether the next rollback poison should pause.
+    pub(crate) armed: bool,
+    /// Whether the worker has retained the lock and reached the pause.
     pub(crate) reached: bool,
     /// Whether the test has released the paused worker.
     pub(crate) released: bool,
@@ -658,6 +682,11 @@ impl SemanticPersistenceOwner {
                 state: Mutex::new(DerivedWorkPauseState::default()),
                 wake: Condvar::new(),
             },
+            #[cfg(test)]
+            rollback_poison_pause: RollbackPoisonPause {
+                state: Mutex::new(RollbackPoisonPauseState::default()),
+                wake: Condvar::new(),
+            },
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -815,6 +844,52 @@ impl SemanticPersistenceOwner {
             .unwrap_or_else(|error| error.into_inner());
         state.released = true;
         self.shared.derived_work_pause.wake.notify_all();
+    }
+
+    /// Arms one deterministic worker pause after rollback poison.
+    #[cfg(test)]
+    pub(crate) fn arm_rollback_poison_pause_for_test(&self) {
+        let mut state = self
+            .shared
+            .rollback_poison_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *state = RollbackPoisonPauseState {
+            armed: true,
+            ..RollbackPoisonPauseState::default()
+        };
+    }
+
+    /// Waits until rollback poison has retained its lock and paused the worker.
+    #[cfg(test)]
+    pub(crate) fn wait_for_rollback_poison_pause_for_test(&self, timeout: Duration) -> bool {
+        let state = self
+            .shared
+            .rollback_poison_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (state, _) = self
+            .shared
+            .rollback_poison_pause
+            .wake
+            .wait_timeout_while(state, timeout, |state| !state.reached)
+            .unwrap_or_else(|error| error.into_inner());
+        state.reached
+    }
+
+    /// Releases the worker from the post-rollback-poison pause.
+    #[cfg(test)]
+    pub(crate) fn release_rollback_poison_pause_for_test(&self) {
+        let mut state = self
+            .shared
+            .rollback_poison_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.released = true;
+        self.shared.rollback_poison_pause.wake.notify_all();
     }
 
     /// Waits until one release command is durably present in the worker queue.

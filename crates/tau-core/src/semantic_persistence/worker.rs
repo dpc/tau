@@ -20,7 +20,7 @@ use serde::de::DeserializeOwned;
 use super::backend::{ExistingPathKind, PersistenceBackend};
 use super::identity::{PersistenceGeneration, StreamIdentity};
 #[cfg(test)]
-use super::owner::DerivedWorkPauseState;
+use super::owner::{DerivedWorkPauseState, RollbackPoisonPauseState};
 use super::owner::{
     FrameAdmissionToken, PersistenceAdmissionError, PersistenceFailureKind, RetentionCharge,
     Shared, StagedFrame, invalidate_worker, report_failure, report_rollback_failure_and_poison,
@@ -221,6 +221,14 @@ struct PreparedStream {
     session_meta: Option<crate::SessionMeta>,
 }
 
+/// Deletion-exclusion ownership retained after an ordinary session is poisoned.
+struct PoisonedSessionLock {
+    /// Exact generation whose unusable append state was discarded.
+    generation: PersistenceGeneration,
+    /// Original exclusive session lock retained until normal release.
+    _lock: File,
+}
+
 /// Restartable non-destructive creation owned only by the worker.
 #[derive(Default)]
 struct NewAgentCreation {
@@ -313,6 +321,7 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
         shared: Arc::downgrade(&shared),
     };
     let mut streams = HashMap::<StreamIdentity, PreparedStream>::new();
+    let mut poisoned_session_locks = HashMap::<StreamIdentity, PoisonedSessionLock>::new();
     let mut creations = HashMap::<StreamIdentity, NewAgentCreation>::new();
     let mut debts = VecDeque::<DurabilityDebt>::new();
     let mut touches = VecDeque::<TouchDebt>::new();
@@ -339,6 +348,7 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
                 process_command(
                     &shared,
                     &mut streams,
+                    &mut poisoned_session_locks,
                     &mut debts,
                     &mut touches,
                     &mut durability_barrier,
@@ -412,6 +422,7 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
             process_command(
                 &shared,
                 &mut streams,
+                &mut poisoned_session_locks,
                 &mut debts,
                 &mut touches,
                 &mut durability_barrier,
@@ -428,6 +439,7 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
             process_command(
                 &shared,
                 &mut streams,
+                &mut poisoned_session_locks,
                 &mut debts,
                 &mut touches,
                 &mut durability_barrier,
@@ -460,7 +472,13 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
             continue;
         };
         derived_since_frame = false;
-        match append_job(&shared, &mut streams, &mut creations, job) {
+        match append_job(
+            &shared,
+            &mut streams,
+            &mut poisoned_session_locks,
+            &mut creations,
+            job,
+        ) {
             AppendDisposition::Complete => {
                 let completed = head.take().expect("head exists");
                 record_frame_disposition(
@@ -521,6 +539,28 @@ fn pause_before_due_derived_work_for_test(
     *state = DerivedWorkPauseState::default();
 }
 
+#[cfg(test)]
+fn pause_after_rollback_poison_for_test(shared: &Shared) {
+    let mut state = shared
+        .rollback_poison_pause
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !state.armed {
+        return;
+    }
+    state.reached = true;
+    shared.rollback_poison_pause.wake.notify_all();
+    while !state.released {
+        state = shared
+            .rollback_poison_pause
+            .wake
+            .wait(state)
+            .unwrap_or_else(|error| error.into_inner());
+    }
+    *state = RollbackPoisonPauseState::default();
+}
+
 fn record_frame_disposition(
     shared: &Shared,
     touches: &mut VecDeque<TouchDebt>,
@@ -551,6 +591,7 @@ fn record_frame_disposition(
 fn process_command(
     shared: &Shared,
     streams: &mut HashMap<StreamIdentity, PreparedStream>,
+    poisoned_session_locks: &mut HashMap<StreamIdentity, PoisonedSessionLock>,
     debts: &mut VecDeque<DurabilityDebt>,
     touches: &mut VecDeque<TouchDebt>,
     _durability_barrier: &mut Option<SyncSender<Result<(), PersistenceAdmissionError>>>,
@@ -657,6 +698,12 @@ fn process_command(
             });
             for identity in &identities {
                 streams.remove(&identity.stream);
+                if poisoned_session_locks
+                    .get(&identity.stream)
+                    .is_some_and(|lock| lock.generation == identity.generation)
+                {
+                    poisoned_session_locks.remove(&identity.stream);
+                }
                 set_lifecycle(
                     shared,
                     &identity.stream,
@@ -1063,6 +1110,7 @@ fn unix_seconds() -> u64 {
 fn append_job(
     shared: &Shared,
     streams: &mut HashMap<StreamIdentity, PreparedStream>,
+    poisoned_session_locks: &mut HashMap<StreamIdentity, PoisonedSessionLock>,
     creations: &mut HashMap<StreamIdentity, NewAgentCreation>,
     job: &mut FrameJob,
 ) -> AppendDisposition {
@@ -1127,7 +1175,11 @@ fn append_job(
         Some(_) => return AppendDisposition::Terminal,
     }
     let Some(stream) = streams.get_mut(job.stream()) else {
-        return AppendDisposition::Retry;
+        return if lifecycle == Some(StreamLifecycle::Closing) {
+            AppendDisposition::Terminal
+        } else {
+            AppendDisposition::Retry
+        };
     };
     if stream.generation != job.generation() {
         return AppendDisposition::Terminal;
@@ -1157,7 +1209,26 @@ fn append_job(
         Err(FrameAppendError::RolledBack) => return AppendDisposition::Retry,
         Err(FrameAppendError::RollbackFailed) => {
             report_rollback_failure_and_poison(shared, Arc::clone(&job.identity));
-            streams.remove(job.stream());
+            let removed = streams.remove(job.stream());
+            if let Some(PreparedStream {
+                generation,
+                _lock,
+                session_meta: Some(_),
+                ..
+            }) = removed
+                && matches!(job.stream(), StreamIdentity::Session(_))
+            {
+                let previous = poisoned_session_locks.insert(
+                    job.stream().clone(),
+                    PoisonedSessionLock { generation, _lock },
+                );
+                assert!(
+                    previous.is_none(),
+                    "one registered session generation owns at most one retained poison lock"
+                );
+            }
+            #[cfg(test)]
+            pause_after_rollback_poison_for_test(shared);
             return AppendDisposition::Terminal;
         }
     };
