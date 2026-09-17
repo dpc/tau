@@ -28,6 +28,7 @@ mod reasoning_effort_mapping;
 mod receipt_observation;
 mod report_sink;
 mod responses;
+mod retry_status;
 mod setup_store;
 mod startup;
 mod startup_identity;
@@ -94,6 +95,12 @@ use responses::{
     PromptAttemptOutcome as ResponsesAttemptOutcome,
     models_for_provider as responses_models_for_provider,
     run_prompt_attempt as run_responses_prompt_attempt,
+};
+use retry_status::emit_retry_status;
+#[cfg(test)]
+use retry_status::{
+    retry_class_provider_category, retry_status_text, saturating_retry_attempt,
+    saturating_retry_delay,
 };
 use serde::{Deserialize, Serialize};
 use startup::run_inner_with_executors_and_clock_with_settings;
@@ -2777,6 +2784,8 @@ where
                     .lock()
                     .expect("lock provider settings snapshot") = profiles.clone();
                 let provider_count = profiles.providers.len();
+                cx.state.configuration.extension_instance =
+                    Some(cx.configure.instance_name.clone());
                 cx.state
                     .images
                     .configure(&profiles, cx.configure, &cx.handle)?;
@@ -3029,15 +3038,24 @@ struct ProviderDiagnosticsState {
     output_queue: Option<Arc<WorkerQueueState>>,
 }
 
+/// Configure-owned identity and startup-stable settings used by the runtime.
+#[derive(Default)]
+struct ProviderConfigurationState {
+    /// Configured extension instance that owns this runtime's Secret scope.
+    extension_instance: Option<tau_proto::ExtensionName>,
+    /// Per-profile Responses mode captured at process startup.
+    startup_responses_modes: BTreeMap<ProviderName, CodexMode>,
+}
+
 /// Live provider event loop state after the Tau extension handshake completes.
 struct ProviderRuntime<F> {
     /// Ordinary image tool calls and correlated artifact publication.
     images: image_tools::ImageTools,
+    /// Configure-owned runtime identity and startup-stable response modes.
+    configuration: ProviderConfigurationState,
     /// Clones either the complete validated settings snapshot or one indexed
     /// provider for runtime auth/model resolution.
     load_prompt_profiles: F,
-    /// Per-profile Responses mode captured at process startup.
-    startup_responses_modes: BTreeMap<ProviderName, CodexMode>,
     /// Maximum number of prompt workers that may run at once.
     prompt_concurrency_limit: usize,
     /// Starts provider backend execution for one prompt job.
@@ -3117,7 +3135,7 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<BuiltinProviderProfiles> {
         let mut profiles = (self.load_prompt_profiles)(None);
-        profiles.apply_startup_responses_modes(&self.startup_responses_modes);
+        profiles.apply_startup_responses_modes(&self.configuration.startup_responses_modes);
         if let Some(client) = &self.extension_data_client {
             let observations = hydrate_profile_credentials(client, &mut profiles);
             self.publish_models_if_changed(&profiles, observations, handle)?;
@@ -3136,7 +3154,7 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<BuiltinProviderProfiles> {
         let mut profiles = (self.load_prompt_profiles)(Some(provider));
-        profiles.apply_startup_responses_modes(&self.startup_responses_modes);
+        profiles.apply_startup_responses_modes(&self.configuration.startup_responses_modes);
         if let Some(client) = &self.extension_data_client {
             let observations = hydrate_profile_credentials(client, &mut profiles);
             self.publish_selected_models_if_changed(provider, &profiles, observations, handle)?;
@@ -3235,7 +3253,7 @@ where
     /// Captures ChatGPT route modes from the profiles resolved at extension
     /// startup.
     fn set_startup_responses_modes(&mut self, modes: BTreeMap<ProviderName, CodexMode>) {
-        self.startup_responses_modes = modes;
+        self.configuration.startup_responses_modes = modes;
     }
 
     fn set_worker_waker(&mut self, waker: ManualRuntimeWaker) {
@@ -3960,7 +3978,7 @@ where
         }
         let settings_started_at = receipt_observation.as_ref().map(|_| Instant::now());
         let mut profiles = (self.load_prompt_profiles)(Some(&prompt.model.provider));
-        profiles.apply_startup_responses_modes(&self.startup_responses_modes);
+        profiles.apply_startup_responses_modes(&self.configuration.startup_responses_modes);
         if let (Some(observation), Some(started_at)) =
             (receipt_observation.as_mut(), settings_started_at)
         {
@@ -4061,7 +4079,15 @@ where
         {
             let now = self.retry_clock.now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
-            emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
+            emit_retry_status(
+                &job,
+                self.configuration.extension_instance.as_ref(),
+                cooldown.class,
+                due,
+                now,
+                None,
+                handle,
+            )?;
             if let Some(observation) = job.receipt_observation.as_mut() {
                 let depth = self
                     .retry_scheduler
@@ -4099,7 +4125,7 @@ where
         let provider = kind.prompt().model.provider.clone();
         let profiles = load_fresh_retry_profiles(
             &mut self.load_prompt_profiles,
-            &self.startup_responses_modes,
+            &self.configuration.startup_responses_modes,
             &provider,
         );
         let Some(client) = self.extension_data_client.as_ref() else {
@@ -5100,6 +5126,7 @@ where
                     );
                     emit_retry_status(
                         &job,
+                        self.configuration.extension_instance.as_ref(),
                         decision.class,
                         due,
                         now,
@@ -5385,7 +5412,15 @@ where
             None,
             |mut job, now, cooldown| {
                 let due = cooldown_due_for_job(cooldown.not_before, &job);
-                emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
+                emit_retry_status(
+                    &job,
+                    self.configuration.extension_instance.as_ref(),
+                    cooldown.class,
+                    due,
+                    now,
+                    None,
+                    handle,
+                )?;
                 if let Some(observation) = job.receipt_observation.as_mut() {
                     observation.slot_dequeued();
                     observation.cooldown_queued(
@@ -7735,88 +7770,6 @@ fn finish_queued_canceled(
     )
     .map_err(|error| ClientError::handler(error.to_string()))?;
     Ok(true)
-}
-
-fn emit_retry_status(
-    job: &PromptJob,
-    class: RetryClass,
-    due: Instant,
-    now: Instant,
-    live_detail: Option<&str>,
-    handle: &ClientHandle,
-) -> ClientResult<()> {
-    let text = retry_status_text(job, class, due, now, live_detail);
-    handle.send(HarnessInputMessage::emit_transient(
-        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
-            agent_prompt_id: job.agent_prompt_id.clone(),
-            agent_id: job.prompt.agent_id.clone(),
-            deltas: Vec::new(),
-            compaction: None,
-            status: Some(ProviderResponseStatusUpdate {
-                text,
-                clear_response: true,
-                retry: Some(tau_proto::ProviderRetryStatus {
-                    category: retry_class_provider_category(class),
-                    attempt: saturating_retry_attempt(job.retry_state.attempts),
-                    next_retry_delay_secs: saturating_retry_delay(
-                        due.checked_duration_since(now).unwrap_or(Duration::ZERO),
-                    ),
-                }),
-                native_tool: None,
-            }),
-            response_stats: None,
-            originator: job.prompt.originator.clone(),
-        }),
-    ))
-}
-
-/// Builds the initiating user's transient status for one scheduled retry.
-fn retry_status_text(
-    job: &PromptJob,
-    class: RetryClass,
-    due: Instant,
-    now: Instant,
-    live_detail: Option<&str>,
-) -> String {
-    let delay = due.checked_duration_since(now).unwrap_or(Duration::ZERO);
-    let delay_text = tau_proto::format_approximate_duration_secs(delay.as_secs());
-    let reason = match &job.backend {
-        PromptBackend::Unavailable {
-            login_required: Some(provider),
-        } => format!("provider {provider} is not logged in; run tau provider login {provider}"),
-        PromptBackend::Unavailable {
-            login_required: None,
-        }
-        | PromptBackend::Responses(_)
-        | PromptBackend::ChatCompletions { .. }
-        | PromptBackend::PublicResponses { .. } => live_detail
-            .map(|detail| format!("{}: {detail}", class.public_reason()))
-            .unwrap_or_else(|| class.public_reason().to_owned()),
-    };
-    format!(
-        "{}; next attempt in about {} (attempt {}). Tau will keep trying; cancel the prompt to stop.",
-        reason, delay_text, job.retry_state.attempts,
-    )
-}
-
-fn retry_class_provider_category(class: RetryClass) -> tau_proto::ProviderRetryCategory {
-    match class {
-        RetryClass::Transport => tau_proto::ProviderRetryCategory::Transport,
-        RetryClass::Overload => tau_proto::ProviderRetryCategory::Overload,
-        RetryClass::Throttle => tau_proto::ProviderRetryCategory::Throttle,
-        RetryClass::UsageWindow => tau_proto::ProviderRetryCategory::UsageWindow,
-        RetryClass::Account => tau_proto::ProviderRetryCategory::Account,
-        RetryClass::Auth => tau_proto::ProviderRetryCategory::Auth,
-        RetryClass::Unknown => tau_proto::ProviderRetryCategory::Unknown,
-    }
-}
-
-fn saturating_retry_attempt(attempt: u64) -> u32 {
-    u32::try_from(attempt).unwrap_or(u32::MAX)
-}
-
-fn saturating_retry_delay(delay: Duration) -> u32 {
-    u32::try_from(delay.as_secs()).unwrap_or(u32::MAX)
 }
 
 /// Consume one provider work envelope and discard its transport-only tool

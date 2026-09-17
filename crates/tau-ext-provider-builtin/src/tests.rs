@@ -4102,8 +4102,8 @@ pub(super) fn observation_test_runtime()
     let (worker_tx, worker_rx) = mpsc::channel();
     ProviderRuntime {
         images: ImageTools::default(),
+        configuration: ProviderConfigurationState::default(),
         load_prompt_profiles: |_: Option<&ProviderName>| BuiltinProviderProfiles::default(),
-        startup_responses_modes: BTreeMap::new(),
         prompt_concurrency_limit: 0,
         prompt_executor: production_prompt_executor(),
         prewarm_executor: production_prewarm_executor(),

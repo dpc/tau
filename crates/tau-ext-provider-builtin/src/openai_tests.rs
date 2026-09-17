@@ -6462,30 +6462,65 @@ fn missing_chatgpt_login_status_is_actionable_and_redacted() {
             .missing_login(&job.prompt.model.provider)
             .then(|| job.prompt.model.provider.clone()),
     });
-    job.retry_state.attempts = 1;
-    let initial = retry_status_text(
+    for (instance, command) in [
+        ("provider-builtin", "tau provider login chatgpt-fedi"),
+        (
+            "provider-work",
+            "tau provider --extension provider-work login chatgpt-fedi",
+        ),
+    ] {
+        let instance = tau_proto::ExtensionName::parse(instance).expect("configured instance");
+        job.retry_state.attempts = 1;
+        let initial = retry_status_text(
+            &job,
+            Some(&instance),
+            RetryClass::Auth,
+            now + Duration::from_secs(1),
+            now,
+            None,
+        );
+        job.retry_state.attempts = 2;
+        let retry = retry_status_text(
+            &job,
+            Some(&instance),
+            RetryClass::Auth,
+            now + Duration::from_secs(1),
+            now,
+            Some(secret_backend_detail),
+        );
+        assert_eq!(
+            initial,
+            format!(
+                "provider chatgpt-fedi is not logged in; run {command}; next attempt in about 1s (attempt 1). Tau will keep trying; cancel the prompt to stop."
+            )
+        );
+        assert_eq!(
+            retry,
+            format!(
+                "provider chatgpt-fedi is not logged in; run {command}; next attempt in about 1s (attempt 2). Tau will keep trying; cancel the prompt to stop."
+            )
+        );
+        assert!(!initial.contains(secret_backend_detail));
+        assert!(!retry.contains(secret_backend_detail));
+    }
+    let unconfigured = retry_status_text(
         &job,
-        RetryClass::Auth,
-        now + Duration::from_secs(1),
-        now,
         None,
-    );
-    job.retry_state.attempts = 2;
-    let retry = retry_status_text(
-        &job,
         RetryClass::Auth,
         now + Duration::from_secs(1),
         now,
         Some(secret_backend_detail),
     );
-    for text in [&initial, &retry] {
-        assert!(text.contains("provider chatgpt-fedi is not logged in"));
-        assert!(text.contains("tau provider login chatgpt-fedi"));
-        assert!(!text.contains(secret_backend_detail));
-        assert!(text.contains("Tau will keep trying; cancel the prompt to stop."));
-    }
-    assert!(initial.contains("attempt 1"));
-    assert!(retry.contains("attempt 2"));
+    assert_eq!(
+        unconfigured,
+        format!(
+            "{}; next attempt in about 1s (attempt 2). Tau will keep trying; cancel the prompt to stop.",
+            RetryClass::Auth.public_reason(),
+        ),
+        "missing runtime identity must not guess a default instance"
+    );
+    assert!(!unconfigured.contains(secret_backend_detail));
+    assert!(!unconfigured.contains("tau provider"));
 
     let mut generic_job = scheduled_job("missing-api-key", api_key_provider.as_str());
     generic_job.prompt.model.model = ModelName::new("model");
@@ -6510,6 +6545,7 @@ fn missing_chatgpt_login_status_is_actionable_and_redacted() {
     ));
     let generic = retry_status_text(
         &generic_job,
+        Some(&tau_proto::ExtensionName::parse("provider-builtin").expect("default instance")),
         RetryClass::Auth,
         now + Duration::from_secs(1),
         now,
@@ -6524,6 +6560,99 @@ fn missing_chatgpt_login_status_is_actionable_and_redacted() {
         "unclassified Secret failures retain the generic status rather than a login claim"
     );
     assert!(!generic.contains(secret_backend_detail));
+}
+
+/// Proves the configured extension instance crosses the real runtime handshake
+/// and selects the instance-qualified command in emitted missing-login status.
+#[test]
+fn configured_instance_reaches_runtime_missing_login_status() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[
+        HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
+            tool_prefix: None,
+            config: tau_proto::CborValue::Map(Vec::new()),
+            instance_name: tau_proto::ExtensionName::parse("provider-work")
+                .expect("configured instance"),
+            state_dir: None,
+            secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
+        }),
+        live_event(11, Event::AgentPromptCreated(prompt())),
+    ]));
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        send_worker_message(
+            &execution.output_tx,
+            &execution.output_waker,
+            WorkerMessage::Retry {
+                job: execution.job,
+                decision: RetryDecision::new(RetryClass::Auth),
+                live_detail: None,
+                canonical_unauthorized: false,
+                terminal_backend: None,
+            },
+        )
+        .expect("report missing-login retry");
+    });
+    let mut profiles = BuiltinProviderProfiles::default();
+    profiles
+        .missing_logins
+        .insert(ProviderName::new(CHATGPT_PROVIDER_NAME));
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_input = input.clone();
+    let runtime_output = output.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors_and_clock(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move |_| prompt_profiles.clone(),
+            1,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: Arc::new(VirtualRetryClock::new(Instant::now())),
+            },
+        )
+        .expect("run configured missing-login provider");
+    });
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdatedReported(update))
+                    if update.status.as_ref().is_some_and(|status| {
+                        status.text.contains(
+                            "run tau provider --extension provider-work login chatgpt"
+                        )
+                    })
+            )
+        })
+    });
+    let status = frames
+        .iter()
+        .find_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseUpdatedReported(update)) => update.status.as_ref(),
+            _ => None,
+        })
+        .expect("missing-login retry status");
+    assert!(
+        status
+            .text
+            .contains("run tau provider --extension provider-work login chatgpt")
+    );
+    assert!(!status.text.contains("run tau provider login chatgpt"));
+    assert!(matches!(
+        status.retry,
+        Some(tau_proto::ProviderRetryStatus {
+            category: tau_proto::ProviderRetryCategory::Auth,
+            attempt: 1,
+            ..
+        })
+    ));
+    input.close();
+    runtime.join().expect("configured provider exits");
 }
 
 /// A queued targeted cancel consumes its marker after terminal commit so the

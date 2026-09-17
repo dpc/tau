@@ -12,9 +12,9 @@ use crate::image_tools::ImageTools;
 use crate::{
     BuiltinProviderProfiles, CancellationState, CodexRuntime, EXTENSION_NAME,
     OAuthRefreshRejectionCache, PrewarmSupervisor, PromptCredentialAdmissionState,
-    ProviderDiagnosticsState, ProviderExtension, ProviderRuntime, QuotaCoordinator,
-    RuntimeExecutors, RuntimeStartup, WorkerMessage, WorkerQueueState, models_for_profiles,
-    run_provider_loop, validate_configure_settings,
+    ProviderConfigurationState, ProviderDiagnosticsState, ProviderExtension, ProviderRuntime,
+    QuotaCoordinator, RuntimeExecutors, RuntimeStartup, WorkerMessage, WorkerQueueState,
+    models_for_profiles, run_provider_loop, validate_configure_settings,
 };
 
 /// Runs the extension with injected executors and settings.
@@ -105,8 +105,11 @@ where
     }
     let runtime = ProviderRuntime {
         images: ImageTools::default(),
+        configuration: ProviderConfigurationState {
+            extension_instance: None,
+            startup_responses_modes,
+        },
         load_prompt_profiles,
-        startup_responses_modes,
         prompt_concurrency_limit,
         prompt_executor: executors.prompt,
         prewarm_executor: executors.prewarm,
