@@ -58,7 +58,10 @@ pub use event_payload::EventPayload;
 pub use extension_trait::{ExtensionPlugin, TauExtension};
 pub use inspection::{ConfiguredConnection, prepare_inspection};
 pub use intercept_decision::InterceptDecision;
-pub use logging::{DEFAULT_FILTER, ENV_VAR, init_logging, init_logging_for};
+pub use logging::{
+    DEFAULT_FILTER, ENV_VAR, diagnostic_build_revision, init_logging, init_logging_for,
+    initialize_diagnostic_build_revision,
+};
 pub use manual_runtime::{
     DispatchOutcome, ExtensionDataClient, ExtensionDataRpcError, LocalInputObservation,
     ManualExtensionRuntime, ManualRuntimeInput, ManualRuntimePoll, ManualRuntimeWaker,

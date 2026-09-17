@@ -67,6 +67,13 @@ const MAX_INPUT_BATCH: usize = 64;
 /// extension from continuing.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_client::init_logging_for("tau_ext_utils");
+    tracing::info!(
+        target: "tau_ext_utils",
+        package = env!("CARGO_PKG_NAME"),
+        version = env!("CARGO_PKG_VERSION"),
+        revision = tau_client::diagnostic_build_revision(),
+        "extension startup identity"
+    );
     run(std::io::stdin(), std::io::stdout())
 }
 

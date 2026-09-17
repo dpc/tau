@@ -535,6 +535,13 @@ impl IdleHookConfig {
 /// are not returned from this function.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_client::init_logging_for(LOG_TARGET);
+    tracing::info!(
+        target: LOG_TARGET,
+        package = env!("CARGO_PKG_NAME"),
+        version = env!("CARGO_PKG_VERSION"),
+        revision = tau_client::diagnostic_build_revision(),
+        "extension startup identity"
+    );
     run(std::io::stdin(), std::io::stdout())
 }
 

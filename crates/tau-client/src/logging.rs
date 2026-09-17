@@ -1,4 +1,13 @@
+use std::sync::OnceLock;
+
 use tracing_subscriber::{EnvFilter, fmt as path_tracing_subscriber_fmt};
+
+/// Fallback when the current executable did not supply its own source revision.
+const UNKNOWN_BUILD_REVISION: &str = "unknown";
+
+/// Current executable's process-local source revision, when supplied at
+/// startup.
+static DIAGNOSTIC_BUILD_REVISION: OnceLock<String> = OnceLock::new();
 
 /// Environment variable controlling extension log filtering.
 ///
@@ -25,6 +34,30 @@ pub fn init_logging() {
 /// operator can override this completely with [`ENV_VAR`].
 pub fn init_logging_for(log_target: &'static str) {
     install_subscriber(&format!("{log_target}=info,warn"));
+}
+
+/// Supplies the current executable's source revision for startup diagnostics.
+///
+/// This process-local value must come from the executable's own bundled
+/// metadata, never inherited environment state. Repeated initialization keeps
+/// the first value and cannot fail extension startup.
+#[doc(hidden)]
+pub fn initialize_diagnostic_build_revision(revision: String) {
+    let _ = DIAGNOSTIC_BUILD_REVISION.set(revision);
+}
+
+/// Returns the current executable's source revision for startup diagnostics.
+///
+/// Standalone extension executables that have not supplied their own metadata
+/// truthfully report `unknown`.
+#[doc(hidden)]
+pub fn diagnostic_build_revision() -> &'static str {
+    diagnostic_build_revision_from(DIAGNOSTIC_BUILD_REVISION.get().map(String::as_str))
+}
+
+/// Resolves optional executable metadata without consulting inherited state.
+fn diagnostic_build_revision_from(revision: Option<&str>) -> &str {
+    revision.unwrap_or(UNKNOWN_BUILD_REVISION)
 }
 
 /// Installs the stderr subscriber used by first-party extension binaries.

@@ -500,6 +500,13 @@ fn followed_by_letter(bytes: &[u8], i: usize) -> bool {
 /// Runs the dummy extension on standard input and standard output.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_client::init_logging_for("tau_ext_test_dummy");
+    tracing::info!(
+        target: "tau_ext_test_dummy",
+        package = env!("CARGO_PKG_NAME"),
+        version = env!("CARGO_PKG_VERSION"),
+        revision = tau_client::diagnostic_build_revision(),
+        "extension startup identity"
+    );
     run(std::io::stdin(), std::io::stdout())
 }
 

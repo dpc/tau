@@ -30,6 +30,7 @@ mod report_sink;
 mod responses;
 mod setup_store;
 mod startup;
+mod startup_identity;
 mod worker_report_sink;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -2486,6 +2487,7 @@ fn run_openai_codex_login(
 /// Runs the extension on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_client::init_logging_for(LOG_TARGET);
+    startup_identity::log();
     run(std::io::stdin(), std::io::stdout())
 }
 

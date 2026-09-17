@@ -126,3 +126,20 @@ fn dependency_debug_prefix_and_global_warn_fallback_are_effective() {
     assert!(!output.contains("hidden unrelated debug"));
     assert!(output.contains("global warning fallback"));
 }
+
+/// Proves standalone extensions report an explicit absence of revision evidence
+/// rather than inheriting a parent process build label.
+#[test]
+fn missing_executable_metadata_reports_unknown_without_environment_fallback() {
+    assert_eq!(diagnostic_build_revision_from(None), "unknown");
+}
+
+/// Proves bundled executable metadata is preserved exactly for extension
+/// startup diagnostics.
+#[test]
+fn executable_metadata_supplies_the_diagnostic_revision() {
+    assert_eq!(
+        diagnostic_build_revision_from(Some("source-revision")),
+        "source-revision"
+    );
+}
