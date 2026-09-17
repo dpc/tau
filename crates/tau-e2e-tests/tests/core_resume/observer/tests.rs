@@ -133,14 +133,21 @@ fn delayed_session_replay_keeps_one_accepted_observer_connection() {
     ));
 }
 
-/// Ensures an already-expired caller deadline fails the accepted observer
-/// connection exactly once instead of starting a fresh connection window.
+/// Ensures an expired replay receive fails the accepted observer connection
+/// exactly once instead of starting a fresh connection window.
+///
+/// The companion delayed-replay test proves that production supplies the
+/// caller's unchanged absolute deadline to this receive.
 #[test]
-fn expired_session_replay_deadline_does_not_reconnect() {
+fn expired_session_replay_receive_does_not_reconnect() {
     let tempdir = tempfile::TempDir::new().expect("temporary observer root");
     let socket = tempdir.path().join("observer.sock");
     let listener = UnixListener::bind(&socket).expect("bind observer listener");
     let reconnect_probe = listener.try_clone().expect("clone listener");
+    let (subscribed_tx, subscribed_rx) = mpsc::sync_channel(1);
+    let (server_release_tx, server_release_rx) = mpsc::sync_channel(1);
+    let (replay_waiting_tx, replay_waiting_rx) = mpsc::sync_channel(1);
+    let (replay_release_tx, replay_release_rx) = mpsc::sync_channel(1);
     let server_expected = SessionId::parse("observer-expired-replay").expect("valid session id");
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept observer");
@@ -164,24 +171,31 @@ fn expired_session_replay_deadline_does_not_reconnect() {
             reader.read_message().expect("read subscribe"),
             Some(HarnessInputMessage::Subscribe(_))
         ));
-        std::thread::sleep(Duration::from_millis(150));
+        subscribed_tx.send(()).expect("report subscription");
+        server_release_rx.recv().expect("release server");
     });
     let expected = SessionId::parse("observer-expired-replay").expect("valid session id");
-    let error = match SideObserver::connect(
-        &socket,
-        &expected,
-        tempdir.path().join("observer.json"),
-        Instant::now() + Duration::from_millis(100),
-    ) {
-        Ok(_) => panic!("expired replay deadline must fail"),
-        Err(error) => error,
-    };
-    server.join().expect("server thread joins");
-    assert_eq!(
-        error.to_string(),
-        "timed out waiting for side-observer event while waiting for side-observer \
-         SessionStarted for `observer-expired-replay`"
-    );
+    let observer_expected = expected.clone();
+    let artifact = tempdir.path().join("observer.json");
+    let handshake_deadline = Instant::now() + Duration::from_secs(5);
+    let observer = thread::spawn(move || {
+        SideObserver::connect_with_prompt_drafts_using_replay_receiver(
+            &socket,
+            &observer_expected,
+            artifact,
+            handshake_deadline,
+            false,
+            |observer, _| {
+                replay_waiting_tx.send(()).expect("report replay receive");
+                replay_release_rx.recv().expect("release replay receive");
+                observer.recv_one(Instant::now())
+            },
+        )
+        .map_err(|error| error.to_string())
+    });
+
+    subscribed_rx.recv().expect("observer subscribed");
+    replay_waiting_rx.recv().expect("observer waits for replay");
     reconnect_probe
         .set_nonblocking(true)
         .expect("set reconnect probe nonblocking");
@@ -190,6 +204,25 @@ fn expired_session_replay_deadline_does_not_reconnect() {
             reconnect_probe.accept(),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
         ),
+        "accepted observer opened a second connection before replay expired"
+    );
+    replay_release_tx.send(()).expect("expire replay receive");
+    let error = match observer.join().expect("observer thread joins") {
+        Ok(_) => panic!("expired replay receive must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        "timed out waiting for side-observer event while waiting for side-observer \
+         SessionStarted for `observer-expired-replay`"
+    );
+    assert!(
+        matches!(
+            reconnect_probe.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ),
         "expired accepted observer opened a second connection"
     );
+    server_release_tx.send(()).expect("release server");
+    server.join().expect("server thread joins");
 }
