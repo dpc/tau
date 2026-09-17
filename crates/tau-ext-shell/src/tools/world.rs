@@ -28,6 +28,9 @@ const CASSETTE_VERSION: u32 = 0;
 pub(crate) struct ShellWorld {
     mode: WorldMode,
     cwd: std::path::PathBuf,
+    /// Exact path whose next removal fails in this test-only world instance.
+    #[cfg(test)]
+    remove_file_failure: Option<std::path::PathBuf>,
 }
 
 enum WorldMode {
@@ -54,7 +57,14 @@ impl ShellWorld {
         Self {
             mode: WorldMode::Real,
             cwd: std::env::current_dir().unwrap_or_else(|_| path_std_path::PathBuf::from(".")),
+            remove_file_failure: None,
         }
+    }
+
+    /// Configures this test world to fail once before removing the exact path.
+    #[cfg(test)]
+    pub(crate) fn fail_next_remove_file_for(&mut self, path: std::path::PathBuf) {
+        self.remove_file_failure = Some(path);
     }
 
     #[cfg(test)]
@@ -79,6 +89,8 @@ impl ShellWorld {
             return Ok(Self {
                 mode: WorldMode::Real,
                 cwd,
+                #[cfg(test)]
+                remove_file_failure: None,
             });
         };
         let key = call_id.to_owned();
@@ -94,6 +106,8 @@ impl ShellWorld {
                     next_op: 0,
                 },
                 cwd,
+                #[cfg(test)]
+                remove_file_failure: None,
             });
         }
         if config.mode == tau_vcr::VcrMode::ReplayOnly {
@@ -111,6 +125,8 @@ impl ShellWorld {
                 side_output: None,
             },
             cwd,
+            #[cfg(test)]
+            remove_file_failure: None,
         })
     }
 
@@ -399,6 +415,15 @@ impl ShellWorld {
     }
 
     pub(crate) fn remove_file(&mut self, path: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if self.remove_file_failure.as_deref() == Some(path) {
+            self.remove_file_failure = None;
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "test-only injected remove_file failure",
+            ));
+        }
+
         match &mut self.mode {
             WorldMode::Real => std::fs::remove_file(path),
             WorldMode::Recording { cassette, .. } => {

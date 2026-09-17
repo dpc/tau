@@ -12,6 +12,40 @@ fn ls_args(path: &std::path::Path) -> CborValue {
     )])
 }
 
+/// Confines the test-only removal failure to one exact path in one world so
+/// ordinary real-file removal remains available to other paths and instances.
+#[test]
+fn remove_file_failure_injection_is_path_and_instance_scoped() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let injected_path = tempdir.path().join("injected.txt");
+    let other_path = tempdir.path().join("other.txt");
+    std::fs::write(&injected_path, "injected\n").expect("write injected file");
+    std::fs::write(&other_path, "other\n").expect("write other file");
+
+    let mut injected_world = ShellWorld::real();
+    injected_world.fail_next_remove_file_for(injected_path.clone());
+    let mut other_world = ShellWorld::real();
+    other_world
+        .remove_file(&injected_path)
+        .expect("other world should not inherit the injected failure");
+    std::fs::write(&injected_path, "injected\n").expect("restore injected file");
+    injected_world
+        .remove_file(&other_path)
+        .expect("other path should not use the injected failure");
+
+    let error = injected_world
+        .remove_file(&injected_path)
+        .expect_err("configured path should fail before removal");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::read_to_string(&injected_path).expect("read injected file"),
+        "injected\n"
+    );
+    injected_world
+        .remove_file(&injected_path)
+        .expect("configured failure should apply only once");
+}
+
 /// Protects bounded mutation/read paths from blocking indefinitely on Unix
 /// special files such as FIFOs.
 #[cfg(unix)]
