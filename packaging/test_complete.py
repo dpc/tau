@@ -189,7 +189,7 @@ class PublicationTests(SourceFixture, unittest.TestCase):
                     "runtime_qualification": "not-performed",
                 }, "source": source, "source_file_sha256": dict.fromkeys(files, "a" * 64),
                     "third_party_notices_sha256": "b" * 64,
-                    "sdk_lock_versions": {n: ["0.5.0" if core else "0.4.0"]
+                    "sdk_lock_versions": {n: ["0.6.0" if core else "0.4.0"]
                                           for n in ("dpc-tau-client", "dpc-tau-proto")},
                                    "package_version": version, "package_revision": revision})
             prefix = f"tau-1.2.3-{arch}"

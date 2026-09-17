@@ -3,16 +3,24 @@
 Publishing `dpc-tau` requires publishing its internal Rust crate closure first.
 Package preparation does not authorize uploads, tags, or GitHub releases.
 
-## Tau 0.1.1 preparation
+## Tau 0.1.1 release record
 
-The application, CLI, and changed internal dependency closure are now **0.1.1**.
+The application, CLI, and changed internal dependency closure were released as
+**0.1.1**.
 The CLI owns the embedded `tau --version` string, so both application and CLI
-must advance together. Unchanged internal packages remain at workspace version **0.1.0**; the SDK remains
-**0.5.0**. Release tooling reads `crates/tau/Cargo.toml`, not the workspace
-default, for the application release version.
+advanced together. Unchanged internal packages remained at workspace version
+**0.1.0**; that tagged application release used SDK **0.5.0** and protocol 7.2.
+Release tooling reads `crates/tau/Cargo.toml`, not the workspace default, for
+the application release version.
 
-The complete 0.1.0 application closure has been published and the isolated
-registry install passed. This preparation requires seven new uploads, in order:
+Subsequent workspace development advances the SDK to **0.6.0** and protocol
+7.4. Tagged release verification for current Tau sources therefore requires
+`dpc-tau-proto` and `dpc-tau-client` 0.6.0 in the core binary lock metadata.
+The separately maintained extension inputs remain on their independently
+pinned SDK versions until those projects publish updates.
+
+The complete 0.1.0 application closure was published and the isolated registry
+install passed. The 0.1.1 release required seven new uploads, in order:
 `dpc-tau-skills`, `dpc-tau-ext-shell`, `dpc-tau-harness`,
 `dpc-tau-harness-tools`, `dpc-tau-test-support`, `dpc-tau-cli`, and `dpc-tau`,
 all at 0.1.1. Correcting the embedded extension documentation changes skills
@@ -22,11 +30,9 @@ and is needed to verify the CLI package's dev-dependencies. This is the exact
 reverse dependency closure, not a workspace-wide version bump. Do not republish
 or replace any existing version.
 
-This is a release prerequisite, not authorization to publish: complete native
-extension packaging and qualification must pass before the coordinated 0.1.1
-publication. The updated external pins select SDK 0.4.0 / protocol 7.0 sources;
-they do not change the extensions' upstream 0.1.0 Cargo versions or the harness
-protocol 7.2.
+The updated external pins selected SDK 0.4.0 / protocol 7.0 sources; they did
+not change the extensions' upstream 0.1.0 Cargo versions or the released
+harness protocol 7.2.
 
 ## Complete dependency closure
 
@@ -55,7 +61,7 @@ unpublished dependency exists in the registry.
 
 ## Publication order
 
-The current dependencies-first order is:
+The Tau 0.1.1 dependencies-first order was:
 
 ```text
 dpc-tau-actions                  0.1.0
@@ -93,23 +99,23 @@ dpc-tau-cli                      0.1.1 (new)
 dpc-tau                          0.1.1 (new)
 ```
 
-All entries other than the seven new 0.1.1 versions are already published as of
+All entries other than the seven then-new 0.1.1 versions were already published as of
 September 14, 2026.
 
-The published `dpc-tau-proto` and `dpc-tau-client` `0.4.0` archives cannot be
-reused for this source. The workspace protocol is now 7.2. Protocol 7.1 added
+The published `dpc-tau-proto` and `dpc-tau-client` `0.4.0` archives could not be
+reused for the Tau 0.1.1 source. Its workspace protocol was 7.2. Protocol 7.1 added
 public inter-session notice types and fields, and protocol 7.2 added public
 per-agent effort control fields; all are absent from registry proto `0.4.0`.
 Those source-breaking additions require proto `0.5.0`; client `0.5.0` pins and
-publishes that new protocol line even though its own Rust source is otherwise
+published that new protocol line even though its own Rust source was otherwise
 unchanged.
 
 Separately maintained extensions pinned to registry SDK `0.4.0` continue to
-advertise protocol 7.0. A protocol 7.2 harness admits that same-major minor
-skew best-effort with a warning, but those binaries do not gain protocol 7.1
-notices or protocol 7.2 effort controls. Exact `=0.4.0` Cargo pins also prevent
-their source from resolving SDK `0.5.0` until each external project deliberately
-updates. Updating those repositories is outside this release preparation.
+advertise protocol 7.0. Newer protocol-7 harnesses admit that same-major minor
+skew best-effort with a warning, but those binaries do not gain later protocol
+features. Exact `=0.4.0` Cargo pins also prevent their source from resolving a
+newer SDK until each external project deliberately updates. Updating those
+repositories remains outside the application release procedure.
 
 ## Upload-time procedure
 

@@ -20,6 +20,15 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+The protocol `7.4` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
+`0.6.0`, with their unchanged leaf dependencies remaining at
+`dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Since the
+`0.5.0` release, protocol 7.3 added public context-visibility, discovery
+diagnostic, and eligible-skill projection fields and types, while protocol 7.4
+added optional compaction activity counts. These accumulated public field and
+type additions change Rust struct construction, so the source API moves to the
+new `0.6` minor line.
+
 The protocol `7.2` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.5.0`, with their unchanged leaf dependencies remaining at
 `dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Since the
@@ -81,15 +90,21 @@ manifests, and builds a small consumer outside the workspace against the exact
 archives. Its consumer uses temporary Cargo patches unless `--registry` is
 selected.
 
-For the protocol `7.2` release, the leaf versions are already published.
-First dry-run and upload `dpc-tau-proto` `0.5.0`. Cargo cannot package the
+For the protocol `7.4` release, the leaf versions are already published.
+First dry-run and upload `dpc-tau-proto` `0.6.0`. Cargo cannot package the
 dependent client against an unpublished registry proto without bypassing
-verification, so wait for proto `0.5.0` to resolve. Then run the package
-readiness check, dry-run and upload `dpc-tau-client` `0.5.0`. Each
+verification, so wait for proto `0.6.0` to resolve. Then run the package
+readiness check, dry-run and upload `dpc-tau-client` `0.6.0`. Each
 `cargo publish --dry-run` must immediately precede its upload; do not upload a
 package whose current dry-run fails.
 
 After the complete set is available, run
 `./.config/selfci/check-sdk-packages.sh --registry` to repeat the exact-version
-consumer check without patches. Registry upload requires separate explicit
-authorization; package readiness does not authorize publication.
+consumer check without patches.
+
+Only after both registry releases and the registry-only consumer check succeed,
+create `dpc-tau-proto-v0.6.0` and `dpc-tau-client-v0.6.0` at the exact
+published source revision. Push both tags and verify their remote targets.
+Never create either tag for a failed or partial registry release. Registry
+upload and tag publication require separate explicit authorization; package
+readiness does not authorize either operation.
