@@ -6,14 +6,12 @@ mod daemon_guard;
 #[path = "provider_builtin_retry/lifecycle.rs"]
 mod lifecycle;
 
-use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::{io, thread};
 
 use daemon_guard::DaemonGuard;
 use lifecycle::Lifecycle;
-use nix::poll::{PollFd, PollFlags, poll};
-use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use tau_e2e_tests::{
     CapturedChatRequest, DurableSnapshot, PROVIDER_BUILTIN_SESSION, ProviderBuiltinFixture,
 };
@@ -22,7 +20,7 @@ use tau_proto::{
     RetryPromptRequestId, RetryPromptStatus, Subscribe, UiCreateAgent, UiPromptSubmitted,
     UiRetryPrompt,
 };
-use tau_socket::{SocketPeer, SocketReceive};
+use tau_socket::{SocketPeer, SocketReceive, SocketTransportError};
 
 const P1: &str = "first retry prompt";
 const P2: &str = "later prompt";
@@ -663,8 +661,14 @@ fn provider_builtin_binary() -> Result<Option<PathBuf>, Box<dyn std::error::Erro
 /// Connects one observer UI and subscribes to the fixture's typed lifecycle
 /// facts.
 fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error::Error>> {
-    wait_for_socket(socket)?;
-    let mut peer = SocketPeer::connect(socket)?;
+    let deadline = Instant::now() + EVENT_WATCHDOG;
+    let mut peer = connect_peer_until(
+        socket,
+        deadline,
+        |path| SocketPeer::connect(path),
+        Instant::now,
+        thread::yield_now,
+    )?;
     peer.send(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
         protocol_version: tau_proto::PROTOCOL_VERSION,
@@ -691,34 +695,235 @@ fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error::Error>> {
     Ok(peer)
 }
 
-/// Waits for the daemon's socket creation notification without polling.
-fn wait_for_socket(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = socket.parent().ok_or("daemon socket has no parent")?;
-    let filename = socket.file_name().ok_or("daemon socket has no filename")?;
-    let inotify = Inotify::init(InitFlags::IN_CLOEXEC | InitFlags::IN_NONBLOCK)?;
-    inotify.add_watch(
-        parent,
-        AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO,
-    )?;
-    if socket.exists() {
-        return Ok(());
-    }
-    let deadline = Instant::now() + EVENT_WATCHDOG;
+/// Connects one actual peer under an absolute deadline, retrying only startup
+/// failures that occur before a connection is accepted.
+fn connect_peer_until(
+    socket: &Path,
+    deadline: Instant,
+    mut connect: impl FnMut(&Path) -> Result<SocketPeer, SocketTransportError>,
+    mut now: impl FnMut() -> Instant,
+    mut yield_after_failure: impl FnMut(),
+) -> Result<SocketPeer, Box<dyn std::error::Error>> {
+    let mut last_error = None;
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let timeout_ms = u16::try_from(remaining.as_millis().min(u128::from(u16::MAX)))?;
-        let mut descriptors = [PollFd::new(inotify.as_fd(), PollFlags::POLLIN)];
-        if poll(&mut descriptors, timeout_ms)? == 0 {
-            return Err("timed out waiting for daemon socket creation".into());
+        if now() >= deadline {
+            let detail = last_error.as_ref().map_or_else(
+                || "no connection attempt completed".to_owned(),
+                ToString::to_string,
+            );
+            return Err(format!(
+                "timed out connecting to daemon socket {}: last error: {detail}",
+                socket.display()
+            )
+            .into());
         }
-        if inotify
-            .read_events()?
-            .iter()
-            .any(|event| event.name.as_deref() == Some(filename))
-        {
-            return Ok(());
+        match connect(socket) {
+            Ok(peer) => return Ok(peer),
+            Err(error) if is_retryable_connect_error(&error) => {
+                last_error = Some(error);
+                yield_after_failure();
+            }
+            Err(error) => return Err(error.into()),
         }
     }
+}
+
+/// Reports whether a transport failure happened before connection acceptance
+/// and can therefore be retried without discarding a successful peer.
+fn is_retryable_connect_error(error: &SocketTransportError) -> bool {
+    matches!(
+        error,
+        SocketTransportError::Connect { source, .. }
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            )
+    )
+}
+
+/// Ensures a bound pathname cannot release startup until an actual connection
+/// succeeds, and that the retained successful peer carries protocol traffic.
+#[test]
+fn ui_connect_retries_bound_socket_until_listening_and_retains_peer() {
+    use std::io::BufReader;
+    use std::os::fd::AsFd as _;
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+
+    use rustix_v1::net::{AddressFamily, SocketAddrUnix, SocketType};
+
+    let temp = tempfile::tempdir().expect("create socket directory");
+    let socket = temp.path().join("daemon.sock");
+    let raw_listener = rustix_v1::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
+        .expect("create unlistening Unix socket");
+    let address = SocketAddrUnix::new(&socket).expect("create Unix socket address");
+    rustix_v1::net::bind(raw_listener.as_fd(), &address).expect("bind Unix socket pathname");
+
+    let (refused_tx, refused_rx) = mpsc::sync_channel(0);
+    let (listening_tx, listening_rx) = mpsc::sync_channel(0);
+    let server = thread::spawn(move || {
+        refused_rx
+            .recv()
+            .expect("client must observe refusal before listen");
+        rustix_v1::net::listen(raw_listener.as_fd(), 1).expect("listen after observed refusal");
+        listening_tx
+            .send(())
+            .expect("release retry after listener is ready");
+        let listener = UnixListener::from(raw_listener);
+        let (stream, _) = listener.accept().expect("accept retained client");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(stream));
+        assert!(matches!(
+            reader.read_message().expect("read retained-peer Hello"),
+            Some(HarnessInputMessage::Hello(Hello {
+                client_kind: ClientKind::Ui,
+                ..
+            }))
+        ));
+    });
+
+    let mut refusal_release = Some((refused_tx, listening_rx));
+    let mut peer = connect_peer_until(
+        &socket,
+        Instant::now() + Duration::from_secs(5),
+        |path| {
+            let result = SocketPeer::connect(path);
+            if matches!(
+                &result,
+                Err(SocketTransportError::Connect { source, .. })
+                    if source.kind() == io::ErrorKind::ConnectionRefused
+            ) {
+                let (refused_tx, listening_rx) = refusal_release
+                    .take()
+                    .expect("only the first refusal releases listen");
+                refused_tx
+                    .send(())
+                    .expect("report bound-before-listen refusal");
+                listening_rx
+                    .recv()
+                    .expect("listener must become ready before retry");
+            }
+            result
+        },
+        Instant::now,
+        thread::yield_now,
+    )
+    .expect("retry must return the first successful peer");
+
+    peer.send(&HarnessInputMessage::Hello(Hello {
+        declaration_inspection: false,
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: tau_proto::ExtensionName::parse("provider-builtin-connect-test")
+            .expect("valid test client name"),
+        client_kind: ClientKind::Ui,
+        expected_session_id: None,
+        capabilities: Default::default(),
+    }))
+    .expect("send traffic through retained peer");
+    server.join().expect("join retained-peer server");
+}
+
+/// Ensures an initially absent socket is retried only after a real `NotFound`
+/// result and returns the connection accepted by the subsequently bound
+/// listener.
+#[test]
+fn ui_connect_retries_initially_absent_socket() {
+    use std::os::unix::net::UnixListener;
+
+    let temp = tempfile::tempdir().expect("create socket directory");
+    let socket = temp.path().join("daemon.sock");
+    let mut listener = None;
+    let mut attempts = 0;
+    let peer = connect_peer_until(
+        &socket,
+        Instant::now() + Duration::from_secs(5),
+        |path| {
+            attempts += 1;
+            let result = SocketPeer::connect(path);
+            if attempts == 1 {
+                assert!(matches!(
+                    &result,
+                    Err(SocketTransportError::Connect { source, .. })
+                        if source.kind() == io::ErrorKind::NotFound
+                ));
+                listener = Some(UnixListener::bind(path).expect("bind listener after absence"));
+            }
+            result
+        },
+        Instant::now,
+        thread::yield_now,
+    )
+    .expect("absent socket must become connectable");
+
+    assert_eq!(attempts, 2);
+    listener
+        .expect("listener created after first attempt")
+        .accept()
+        .expect("accept returned peer");
+    drop(peer);
+}
+
+/// Ensures failures after connection establishment are never retried as daemon
+/// startup transients.
+#[test]
+fn ui_connect_fails_nonretryable_transport_error_immediately() {
+    let socket = Path::new("/nonretryable-provider-builtin.sock");
+    let mut attempts = 0;
+    let error = match connect_peer_until(
+        socket,
+        Instant::now() + Duration::from_secs(5),
+        |_| {
+            attempts += 1;
+            Err(SocketTransportError::Clone {
+                source: io::Error::other("injected clone failure"),
+            })
+        },
+        Instant::now,
+        || panic!("non-retryable errors must not yield"),
+    ) {
+        Ok(_) => panic!("clone failure must be terminal"),
+        Err(error) => error,
+    };
+
+    assert_eq!(attempts, 1);
+    assert!(error.to_string().contains("injected clone failure"));
+}
+
+/// Ensures deadline expiry reports both the socket path and the last retryable
+/// connection failure without another connection attempt.
+#[test]
+fn ui_connect_deadline_reports_last_retryable_error() {
+    let socket = Path::new("/expired-provider-builtin.sock");
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(1);
+    let mut now_calls = 0;
+    let mut attempts = 0;
+    let error = match connect_peer_until(
+        socket,
+        deadline,
+        |path| {
+            attempts += 1;
+            Err(SocketTransportError::Connect {
+                path: path.to_owned(),
+                source: io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "injected startup refusal",
+                ),
+            })
+        },
+        || {
+            now_calls += 1;
+            if now_calls == 1 { start } else { deadline }
+        },
+        || {},
+    ) {
+        Ok(_) => panic!("expired deadline must fail"),
+        Err(error) => error,
+    };
+    let diagnostic = error.to_string();
+
+    assert_eq!(attempts, 1);
+    assert!(diagnostic.contains("/expired-provider-builtin.sock"));
+    assert!(diagnostic.contains("injected startup refusal"));
 }
 
 /// Sends the one initial durable user prompt.
