@@ -189,6 +189,50 @@ fn message_read_boundaries_preserve_pairs_and_reject_predispatch_samples() {
     );
 }
 
+/// Dropping an unfinished TRACE attempt must emit one failed observation that
+/// closes both caller-owned stages instead of silently losing their durations.
+#[test]
+fn dropping_unfinished_trace_emits_failed_observation_with_open_stages() {
+    let capture = CaptureLayer::default();
+    let subscriber = Registry::default().with(capture.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        let mut trace = AttemptTrace::selected(Backend::PublicResponses, Transport::HttpSse)
+            .expect("TRACE target enabled");
+        let stage_started_at = Instant::now() - Duration::from_millis(1);
+        trace.connect_upgrade_started_at = Some(stage_started_at);
+        trace.enqueue_started_at = Some(stage_started_at);
+    });
+
+    let events = capture.0.lock().expect("capture lock");
+    assert_eq!(events.len(), 1, "one dropped attempt emits exactly once");
+    let event = &events[0];
+    let outcome = event
+        .fields
+        .iter()
+        .find(|field| field.name == "outcome")
+        .expect("outcome field");
+    assert_eq!(outcome.kind, "str");
+    assert_eq!(outcome.value.as_deref(), Some("failed"));
+    for stage in ["connect_upgrade_us", "enqueue_us"] {
+        let field = event
+            .fields
+            .iter()
+            .find(|field| field.name == stage)
+            .expect("open stage field");
+        assert_eq!(field.kind, "u64");
+        let elapsed_us = field
+            .value
+            .as_deref()
+            .expect("scalar stage value")
+            .parse::<u64>()
+            .expect("valid unsigned stage duration");
+        assert!(
+            elapsed_us >= 1_000,
+            "{stage} must account for the backdated open interval, got {elapsed_us} us"
+        );
+    }
+}
+
 /// The production callsite exposes one exact fixed scalar/class schema and no
 /// field capable of acquiring a prompt, identifier, endpoint, or raw error.
 #[test]
