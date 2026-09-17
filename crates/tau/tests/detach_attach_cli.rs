@@ -1982,6 +1982,7 @@ impl PtyChild {
             let mut buffer = [0_u8; 4096];
             loop {
                 match output_reader.read(&mut buffer) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
                         if output_tx.send(buffer[..read].to_vec()).is_err() {

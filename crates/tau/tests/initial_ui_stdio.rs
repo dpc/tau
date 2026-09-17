@@ -53,6 +53,44 @@ fn wait_for_clean_exit(child: &mut Child) {
     }
 }
 
+/// Captures the daemon's owned runtime claim before disconnect, so the test can
+/// observe retirement of that exact lifecycle artifact.
+fn wait_for_runtime_claim(runtime_dir: &Path) -> std::path::PathBuf {
+    let claims = runtime_dir.join("tau/harnesses/claims");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(claim) = std::fs::read_dir(&claims).ok().and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "lock")
+                })
+        }) {
+            return claim;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "initial-UI daemon did not publish its runtime claim"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Waits for canonical shutdown to retire the daemon's exact runtime claim
+/// before applying the tight process-reap bound.
+fn wait_for_runtime_claim_retirement(claim: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while claim.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "initial-UI daemon did not retire its runtime claim after disconnect"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Builds an initial-UI harness command isolated from the test runner's
 /// configuration and launch environment.
 fn initial_ui_stdio_command(
@@ -192,6 +230,7 @@ fn initial_ui_introduction_notice_requires_conversational_launch() {
             }
         }
         assert_eq!(introductions, expected);
+        let claim = wait_for_runtime_claim(&runtime_dir);
 
         writer
             .write_message(&HarnessInputMessage::Disconnect(Disconnect {
@@ -200,6 +239,7 @@ fn initial_ui_introduction_notice_requires_conversational_launch() {
             .expect("write disconnect");
         writer.flush().expect("flush disconnect");
         drop(writer);
+        wait_for_runtime_claim_retirement(&claim);
         wait_for_clean_exit(&mut child);
         reader_thread.join().expect("reader thread");
     }
