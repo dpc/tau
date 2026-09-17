@@ -1,6 +1,8 @@
 use std::fs::Permissions;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
@@ -753,6 +755,239 @@ fn snapshot_pairs_active_settings_with_matching_credentials_only() {
     let empty = store.snapshot(&extension()).expect("empty snapshot");
     assert!(empty.profiles.is_empty());
     assert!(empty.credentials.is_empty());
+}
+
+/// Proves setup inspection accepts empty and exact-limit credential records,
+/// rejects one excess byte, and preserves missing-slot omission.
+#[test]
+fn credential_read_enforces_secret_file_limit_and_boundaries() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let secret_limit =
+        usize::try_from(MAX_SECRET_DATA_FILE_BYTES).expect("Secret limit fits usize");
+    let identity = identity();
+    let oauth = credential_path(temp.path(), ProviderCredentialSlot::OAuth);
+    std::fs::create_dir_all(oauth.parent().expect("credential parent")).expect("credential parent");
+
+    for expected in [Vec::new(), b"small".to_vec(), vec![b'x'; secret_limit]] {
+        std::fs::write(&oauth, &expected).expect("credential fixture");
+        assert_eq!(
+            store
+                .credential(&extension(), &identity, ProviderCredentialSlot::OAuth)
+                .expect("bounded credential"),
+            expected
+        );
+    }
+
+    std::fs::write(&oauth, vec![b'y'; secret_limit + 1]).expect("oversized credential");
+    let error = store
+        .credential(&extension(), &identity, ProviderCredentialSlot::OAuth)
+        .expect_err("oversized credential must fail");
+    assert_eq!(error.kind(), ErrorKind::InvalidData);
+    assert!(
+        !error
+            .to_string()
+            .contains(temp.path().to_string_lossy().as_ref())
+    );
+
+    std::fs::remove_file(oauth).expect("remove oversized credential");
+    let error = store
+        .credential(&extension(), &identity, ProviderCredentialSlot::OAuth)
+        .expect_err("missing credential");
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+}
+
+/// Proves both closed slots reject non-regular leaves, abort the whole active
+/// snapshot, and release the instance and Secret locks after the error.
+#[cfg(unix)]
+#[test]
+fn snapshot_rejects_non_regular_slots_and_releases_lifecycle_locks() {
+    use fs2::FileExt as _;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store.apply(&plan()).expect("active profile");
+    let oauth = credential_path(temp.path(), ProviderCredentialSlot::OAuth);
+    let api_key = credential_path(temp.path(), ProviderCredentialSlot::ApiKey);
+    let original_oauth = std::fs::read(&oauth).expect("original OAuth credential");
+
+    for malformed in [&api_key, &oauth] {
+        if malformed.exists() {
+            std::fs::remove_file(malformed).expect("remove regular slot");
+        }
+        std::fs::create_dir(malformed).expect("malformed directory slot");
+
+        let error = match store.snapshot(&extension()) {
+            Ok(_) => panic!("non-regular slot must fail the snapshot"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        let diagnostic = error.to_string();
+        assert!(!diagnostic.contains("typed-secret"));
+        assert!(!diagnostic.contains(temp.path().to_string_lossy().as_ref()));
+
+        let settings_lock =
+            ProviderSettingsInstanceLock::try_acquire_existing(temp.path(), "provider-work")
+                .expect("instance lock attempt");
+        assert!(matches!(
+            settings_lock,
+            ProviderSettingsLockAttempt::Acquired(_)
+        ));
+        drop(settings_lock);
+        let secret_root = temp.path().join("secrets/ext/provider-work");
+        let secret_lock = open_directory_no_follow(&secret_root).expect("Secret directory");
+        secret_lock
+            .try_lock_exclusive()
+            .expect("Secret lock released after snapshot error");
+        fs2::FileExt::unlock(&secret_lock).expect("unlock Secret directory");
+
+        std::fs::remove_dir(malformed).expect("remove malformed directory");
+        if malformed == &oauth {
+            std::fs::write(&oauth, &original_oauth).expect("restore OAuth credential");
+        }
+        let snapshot = store.snapshot(&extension()).expect("recovered snapshot");
+        assert_eq!(
+            snapshot
+                .credentials
+                .get(&(identity(), ProviderCredentialSlot::OAuth)),
+            Some(&original_oauth)
+        );
+        assert!(
+            !snapshot
+                .credentials
+                .contains_key(&(identity(), ProviderCredentialSlot::ApiKey))
+        );
+    }
+}
+
+/// Proves stable leaf and ancestor symlinks cannot redirect setup credential
+/// inspection to another regular file.
+#[cfg(unix)]
+#[test]
+fn credential_read_rejects_leaf_and_ancestor_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let oauth = credential_path(temp.path(), ProviderCredentialSlot::OAuth);
+    std::fs::create_dir_all(oauth.parent().expect("credential parent")).expect("credential parent");
+    let outside = temp.path().join("outside-secret");
+    std::fs::write(&outside, b"outside").expect("outside fixture");
+    symlink(&outside, &oauth).expect("leaf symlink");
+    assert!(
+        store
+            .credential(&extension(), &identity(), ProviderCredentialSlot::OAuth)
+            .is_err()
+    );
+
+    std::fs::remove_file(&oauth).expect("remove leaf symlink");
+    let provider_dir = oauth.parent().expect("provider directory");
+    std::fs::remove_dir(provider_dir).expect("remove provider directory");
+    let outside_dir = temp.path().join("outside-provider");
+    std::fs::create_dir(&outside_dir).expect("outside provider directory");
+    std::fs::write(outside_dir.join("oauth.json"), b"outside").expect("outside credential");
+    symlink(&outside_dir, provider_dir).expect("ancestor symlink");
+    assert!(
+        store
+            .credential(&extension(), &identity(), ProviderCredentialSlot::OAuth)
+            .is_err()
+    );
+}
+
+/// Proves a writerless FIFO in the unused closed slot fails the whole snapshot
+/// without allowing a blocking open to hang the test process.
+#[cfg(unix)]
+#[test]
+fn snapshot_rejects_writerless_fifo_without_blocking() {
+    const CHILD_MARKER: &str = "TAU_SETUP_STORE_FIFO_CHILD";
+    const ROOT_ENV: &str = "TAU_SETUP_STORE_FIFO_ROOT";
+    const TEST_NAME: &str = "setup_store::tests::snapshot_rejects_writerless_fifo_without_blocking";
+
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("child root"));
+        let error = match SetupStore::open_in(&root).snapshot(&extension()) {
+            Ok(_) => panic!("writerless FIFO must fail the snapshot"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(!error.to_string().contains(root.to_string_lossy().as_ref()));
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store.apply(&plan()).expect("active profile");
+    let fifo = credential_path(temp.path(), ProviderCredentialSlot::ApiKey);
+    make_fifo(&fifo);
+
+    let child = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD_MARKER, "1")
+        .env(ROOT_ENV, temp.path())
+        .spawn()
+        .expect("spawn isolated FIFO snapshot");
+    let status = wait_for_killable_child(child, Duration::from_secs(10))
+        .expect("isolated FIFO snapshot timed out");
+    assert!(status.success(), "isolated FIFO snapshot failed: {status}");
+
+    std::fs::remove_file(fifo).expect("remove FIFO");
+    let snapshot = store
+        .snapshot(&extension())
+        .expect("snapshot after FIFO removal");
+    assert_eq!(snapshot.credentials.len(), 1);
+}
+
+/// Returns the canonical test credential path for one closed slot.
+fn credential_path(root: &Path, slot: ProviderCredentialSlot) -> std::path::PathBuf {
+    root.join("secrets/ext/provider-work")
+        .join(slot.path(&identity()).as_str())
+}
+
+/// Creates one private writerless FIFO fixture.
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    let status = Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(path)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed: {status}");
+}
+
+/// Waits for an isolated child without polling; on timeout it kills and reaps
+/// the child before returning.
+#[cfg(unix)]
+fn wait_for_killable_child(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Option<ExitStatus> {
+    let pid = child.id();
+    let (sender, receiver) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let status = child.wait();
+        sender.send(status).expect("send child status");
+    });
+    let status = match receiver.recv_timeout(timeout) {
+        Ok(status) => Some(status.expect("wait for isolated child")),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let kill = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status()
+                .expect("run kill for timed-out isolated child");
+            assert!(
+                kill.success(),
+                "kill timed-out isolated child failed: {kill}"
+            );
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("reap killed isolated child")
+                .expect("wait for killed isolated child");
+            None
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("isolated child waiter disconnected"),
+    };
+    waiter.join().expect("join isolated child waiter");
+    status
 }
 
 /// Proves login publishes only the host-local Secret and leaves a portable

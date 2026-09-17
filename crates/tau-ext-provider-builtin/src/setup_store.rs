@@ -1,6 +1,7 @@
 //! CLI-owned provider registration storage.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 use std::sync::mpsc::Sender;
@@ -965,8 +966,53 @@ impl SetupStore {
         .map_err(path_std_io::Error::other)?;
         let relative = PathBuf::from(slot.path(identity).as_str());
         reject_existing_symlink_components(&root, &relative)?;
-        path_std_fs::read(root.join(relative))
+        read_credential_file(&root.join(relative))
     }
+}
+
+/// Reads one bounded regular credential file without following its leaf.
+fn read_credential_file(path: &Path) -> path_std_io::Result<Vec<u8>> {
+    let file = open_credential_file(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidInput,
+            "credential record is not a regular file",
+        ));
+    }
+    if MAX_SECRET_DATA_FILE_BYTES < metadata.len() {
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            format!("credential record exceeds the {MAX_SECRET_DATA_FILE_BYTES}-byte Secret limit"),
+        ));
+    }
+    let mut contents = Vec::new();
+    file.take(MAX_SECRET_DATA_FILE_BYTES + 1)
+        .read_to_end(&mut contents)?;
+    if MAX_SECRET_DATA_FILE_BYTES < contents.len() as u64 {
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            format!("credential record exceeds the {MAX_SECRET_DATA_FILE_BYTES}-byte Secret limit"),
+        ));
+    }
+    Ok(contents)
+}
+
+/// Opens one credential leaf read-only without following symlinks.
+#[cfg(unix)]
+fn open_credential_file(path: &Path) -> path_std_io::Result<path_std_fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    path_std_fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens one credential leaf read-only on non-Unix platforms.
+#[cfg(not(unix))]
+fn open_credential_file(path: &Path) -> path_std_io::Result<path_std_fs::File> {
+    path_std_fs::File::open(path)
 }
 
 /// Parses the closed credential selection needed to locate one profile's Secret
