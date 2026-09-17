@@ -3403,6 +3403,18 @@ fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
 /// anything, and no non-Inference operation becomes replay authority.
 #[test]
 fn output_length_eligibility_matrix_is_exact() {
+    use std::time::Instant;
+
+    // Write directly so nextest retains the last marker when it kills libtest
+    // before libtest can flush its own captured output.
+    macro_rules! progress {
+        ($($arg:tt)*) => {{
+            use std::io::Write as _;
+            writeln!(std::io::stderr().lock(), $($arg)*)
+                .expect("write output-length eligibility diagnostic");
+        }};
+    }
+
     struct Case {
         name: &'static str,
         output_items: Vec<ContextItem>,
@@ -3716,9 +3728,25 @@ fn output_length_eligibility_matrix_is_exact() {
             expect_plan: false,
         },
     ];
+    let test_started = Instant::now();
     for (index, case) in cases.into_iter().enumerate() {
+        let row_started = Instant::now();
+        progress!(
+            "output-length eligibility row {index}: enter at {:?}",
+            test_started.elapsed()
+        );
+
+        let stage_started = Instant::now();
+        progress!("output-length eligibility row {index}: fixture enter");
         let td = TempDir::new().expect("tempdir");
         let mut h = echo_harness(td.path()).expect("start");
+        progress!(
+            "output-length eligibility row {index}: fixture exit after {:?}",
+            stage_started.elapsed()
+        );
+
+        let stage_started = Instant::now();
+        progress!("output-length eligibility row {index}: setup enter");
         // Register the eligibility tool so any erroneous dispatch would be
         // observable in the frames and pending-tool state.
         connect_test_tool(&mut h, "eligibility-tool");
@@ -3729,6 +3757,13 @@ fn output_length_eligibility_matrix_is_exact() {
         h.submit_user_prompt(test_session_id("s1"), format!("eligibility row {index}"))
             .expect("submit");
         let source = read_nth_prompt_created(&h, 0);
+        progress!(
+            "output-length eligibility row {index}: setup exit after {:?}",
+            stage_started.elapsed()
+        );
+
+        let stage_started = Instant::now();
+        progress!("output-length eligibility row {index}: terminal enter");
         if let Some(operation) = case.operation {
             h.prompt_coordination
                 .prompt_runtime
@@ -3774,6 +3809,13 @@ fn output_length_eligibility_matrix_is_exact() {
             ws_pool_delta: None,
         })
         .expect("length terminal accepted");
+        progress!(
+            "output-length eligibility row {index}: terminal exit after {:?}",
+            stage_started.elapsed()
+        );
+
+        let stage_started = Instant::now();
+        progress!("output-length eligibility row {index}: assertions enter");
         let planned = h
             .session_runtime
             .agent_store
@@ -3828,7 +3870,28 @@ fn output_length_eligibility_matrix_is_exact() {
             .to_vec();
         tau_core::AgentTree::try_from_events(source.agent_id.clone(), &records)
             .unwrap_or_else(|error| panic!("row {index} ({}) cold replay: {error}", case.name));
+        progress!(
+            "output-length eligibility row {index}: assertions exit after {:?}",
+            stage_started.elapsed()
+        );
+
+        let stage_started = Instant::now();
+        progress!("output-length eligibility row {index}: shutdown enter");
         h.shutdown().expect("shutdown");
+        progress!(
+            "output-length eligibility row {index}: shutdown exit after {:?}",
+            stage_started.elapsed()
+        );
+
+        let stage_started = Instant::now();
+        progress!("output-length eligibility row {index}: drop enter");
+        drop(h);
+        drop(td);
+        progress!(
+            "output-length eligibility row {index}: drop exit after {:?}; row exit after {:?}",
+            stage_started.elapsed(),
+            row_started.elapsed()
+        );
     }
 }
 
