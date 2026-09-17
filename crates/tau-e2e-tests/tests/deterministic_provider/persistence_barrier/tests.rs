@@ -399,8 +399,8 @@ fn persistence_barrier_rejects_oversized_record() {
     sender.join().expect("sender");
 }
 
-/// Applies one absolute deadline to a held-open partial record instead of
-/// renewing the timeout after each read.
+/// Classifies a held-open partial record when real socket polling reaches the
+/// observer deadline.
 #[test]
 fn persistence_barrier_bounds_held_open_partial_record() {
     let (_tempdir, path, barrier) = test_barrier();

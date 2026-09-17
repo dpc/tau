@@ -80,6 +80,17 @@ impl ProtocolReader {
         process_fd: BorrowedFd<'_>,
         deadline: Instant,
     ) -> Result<String, ProtocolReadFailure> {
+        self.read_line_with_readiness(process_fd, deadline, wait_for_readiness)
+    }
+
+    /// Reads one line while delegating descriptor readiness to the supplied
+    /// operation.
+    fn read_line_with_readiness(
+        &mut self,
+        process_fd: BorrowedFd<'_>,
+        deadline: Instant,
+        mut readiness: impl FnMut(BorrowedFd<'_>, BorrowedFd<'_>, Instant) -> Result<Readiness, IoError>,
+    ) -> Result<String, ProtocolReadFailure> {
         loop {
             if let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
                 if MAX_PROTOCOL_LINE_BYTES < newline {
@@ -92,7 +103,7 @@ impl ProtocolReader {
             if self.buffered.len() > MAX_PROTOCOL_LINE_BYTES {
                 return Err(ProtocolReadFailure::Oversized);
             }
-            match wait_for_readiness(self.stream.as_fd(), process_fd, deadline)
+            match readiness(self.stream.as_fd(), process_fd, deadline)
                 .map_err(ProtocolReadFailure::Io)?
             {
                 Readiness::ProcessExit => return Err(ProtocolReadFailure::ProcessExit),
@@ -173,3 +184,6 @@ impl fmt::Display for ProtocolReadFailure {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
