@@ -33,6 +33,24 @@ fn published(root: &str, action_id: &str, instance_id: u64) -> ActionSchemaPubli
     }
 }
 
+fn owned_publication(
+    extension_name: &str,
+    instance_id: u64,
+    root_description: &str,
+    child_name: &str,
+    action_id: &str,
+) -> ActionSchemaPublished {
+    let mut schema = schema(":shared", action_id);
+    schema.roots[0].description = root_description.to_owned();
+    schema.roots[0].children[0].name = child_name.to_owned();
+    ActionSchemaPublished {
+        extension_name: tau_proto::ExtensionName::parse(extension_name)
+            .expect("test owner name must satisfy its grammar"),
+        instance_id: instance_id.into(),
+        schema,
+    }
+}
+
 fn nested_schema() -> ActionSchema {
     ActionSchema {
         version: ACTION_SCHEMA_VERSION,
@@ -322,6 +340,75 @@ fn ignores_roots_that_collide_with_builtin_commands() {
 
     assert!(!state.is_known_action_line(":quit list"));
     assert!(state.dynamic_completions().0.is_empty());
+}
+
+/// Shared dynamic roots must select the lowest logical owner independently of
+/// publication order, use that owner's schema for dispatch and completion, and
+/// promote the remaining owner when the selected owner exits.
+#[test]
+fn shared_roots_follow_logical_owner_order_and_promote_on_removal() {
+    let cases = [
+        (
+            ("alpha-owner", 10, "Alpha actions", "alpha", "alpha.run"),
+            ("zeta-owner", 2, "Zeta actions", "zeta", "zeta.run"),
+        ),
+        (
+            ("same-owner", 2, "Instance two", "two", "same.two"),
+            ("same-owner", 10, "Instance ten", "ten", "same.ten"),
+        ),
+    ];
+
+    for (winner, remaining) in cases {
+        for reverse_publication_order in [false, true] {
+            let state = ActionCommandState::new([":quit"]);
+            let winner_publication =
+                owned_publication(winner.0, winner.1, winner.2, winner.3, winner.4);
+            let remaining_publication = owned_publication(
+                remaining.0,
+                remaining.1,
+                remaining.2,
+                remaining.3,
+                remaining.4,
+            );
+            if reverse_publication_order {
+                state.apply_schema_published(&remaining_publication);
+                state.apply_schema_published(&winner_publication);
+            } else {
+                state.apply_schema_published(&winner_publication);
+                state.apply_schema_published(&remaining_publication);
+            }
+
+            assert_selected_owner(&state, winner);
+            state.remove_extension(
+                &winner_publication.extension_name,
+                winner_publication.instance_id,
+            );
+            assert_selected_owner(&state, remaining);
+        }
+    }
+}
+
+fn assert_selected_owner(state: &ActionCommandState, expected: (&str, u64, &str, &str, &str)) {
+    let dispatch = state
+        .parse_line(&format!(":shared {}", expected.3))
+        .expect("shared root must remain selected")
+        .expect("selected owner's child must parse");
+    assert_eq!(dispatch.extension_name.as_ref(), expected.0);
+    assert_eq!(dispatch.instance_id, ExtensionInstanceId::from(expected.1));
+    assert_eq!(dispatch.parsed.action_id, expected.4);
+
+    let data = tau_cli_term::CompletionData::new();
+    let (commands, arg_completers) = state.dynamic_completions();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(
+        commands[0].description,
+        format!("{} ({})", expected.2, expected.0)
+    );
+    data.set_dynamic_commands_and_arg_completers(commands, arg_completers);
+    let candidates =
+        tau_cli_term::completion::build_candidates(&[], &data, ":shared ", ":shared ".len());
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].label, expected.3);
 }
 
 #[test]

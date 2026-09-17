@@ -169,6 +169,9 @@ impl ActionCommandState {
 
     fn rebuild_roots(inner: &mut ActionCommandInner) {
         let mut roots = BTreeMap::new();
+        // Ordered owner iteration plus first insertion preserves the
+        // lowest-owner collision precedence specified by
+        // SPEC-action-declarations-and-outcomes.
         for (owner, schema) in inner.schemas.values() {
             for root in &schema.roots {
                 roots
