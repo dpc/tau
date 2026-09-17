@@ -486,6 +486,7 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
         EventName::TOOL_STARTED,
         EventName::TOOL_ERROR,
         EventName::TOOL_PROGRESS,
+        EventName::TOOL_BACKGROUND_RESULT_DISPLAY,
         EventName::AGENT_STANDALONE_COMPACTION_STARTED,
         EventName::AGENT_STANDALONE_COMPACTION_FAILED,
         EventName::AGENT_COMPACTED,

@@ -91,7 +91,8 @@ fn run_core_shell_four_sibling_commands(
     create_agent_without_prompt(&mut peer)?;
     let agent_id = wait_agent_and_context_ready(&mut peer, false, fixture.shell_base())?;
     submit_prompt(&mut peer, &agent_id, "core-shell-parallel-lane", PROMPT)?;
-    let final_response = recv_end_turn(&mut peer)?;
+    let final_response =
+        recv_end_turn_with_sibling_handoff(&mut peer, &call_ids, fixture.shell_base())?;
     assert_eq!(assistant_text(&final_response.output_items), RESPONSE);
     disconnect_ui(&mut peer)?;
     daemon.finish()?;
@@ -201,7 +202,7 @@ fn run_core_shell_four_sibling_commands(
     assert_eq!(
         background_results,
         call_ids.iter().rev().collect::<Vec<_>>(),
-        "staggered probes must complete in reverse request order"
+        "fixture-released probes must complete in reverse request order"
     );
     assert_eq!(
         background_results
@@ -261,6 +262,10 @@ fn run_core_shell_four_sibling_commands(
         .iter()
         .map(|call_id| shell_interval(&events, call_id))
         .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        intervals.windows(2).all(|pair| pair[0].end > pair[1].end),
+        "completion handoff must end siblings in reverse request order: {intervals:?}"
+    );
     let latest_start = intervals
         .iter()
         .map(|interval| interval.start)
@@ -618,6 +623,64 @@ fn recv_end_turn(
             return Ok(finished);
         }
     }
+}
+
+fn recv_end_turn_with_sibling_handoff(
+    peer: &mut tau_socket::SocketPeer,
+    call_ids: &[tau_proto::ToolCallId; 4],
+    release_directory: &std::path::Path,
+) -> Result<tau_proto::ProviderResponseFinished, Box<dyn std::error::Error>> {
+    let mut next_completion = call_ids.len();
+    loop {
+        match recv_event(peer)? {
+            Event::ToolBackgroundResultDisplay(result) if call_ids.contains(&result.call_id) => {
+                release_next_sibling(
+                    &result.call_id,
+                    call_ids,
+                    release_directory,
+                    &mut next_completion,
+                )?;
+            }
+            Event::ProviderResponseFinished(finished)
+                if finished.stop_reason == ProviderStopReason::EndTurn =>
+            {
+                if next_completion != 0 {
+                    return Err(format!(
+                        "end turn preceded {next_completion} sibling background results"
+                    )
+                    .into());
+                }
+                return Ok(finished);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn release_next_sibling(
+    completed_call_id: &tau_proto::ToolCallId,
+    call_ids: &[tau_proto::ToolCallId; 4],
+    release_directory: &std::path::Path,
+    next_completion: &mut usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expected_index = next_completion
+        .checked_sub(1)
+        .ok_or("received an extra sibling background result")?;
+    let expected_call_id = &call_ids[expected_index];
+    if completed_call_id != expected_call_id {
+        return Err(format!(
+            "sibling background result order changed: expected `{expected_call_id}`, got `{completed_call_id}`"
+        )
+        .into());
+    }
+    *next_completion = expected_index;
+    if 0 < expected_index {
+        std::fs::write(
+            release_directory.join(format!(".tau-parallel-release-{expected_index}")),
+            b"release",
+        )?;
+    }
+    Ok(())
 }
 
 fn assistant_text(items: &[tau_proto::ContextItem]) -> String {
