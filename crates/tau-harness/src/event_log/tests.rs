@@ -114,20 +114,24 @@ fn artifact_egress_is_bounded_until_acknowledgement_or_retirement() {
     for _ in 0..8 {
         assert_eq!(log.append_egress(frame(), &[target]), vec![target]);
     }
+    assert_eq!(log.work().1, (8, 0));
     for _ in 0..32 {
         assert!(log.append_egress(frame(), &[target]).is_empty());
     }
     assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 8);
+    assert_eq!(log.work().1, (8, 0), "rejected append is silent");
     let pending = log.next_egress(consumer).expect("writer ownership");
     // Merely acquiring a frame does not acknowledge it.
     assert!(log.append_egress(frame(), &[target]).is_empty());
     log.acknowledge_egress(consumer, &pending);
     log.acknowledge_egress(consumer, &pending);
     assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 7);
+    assert_eq!(log.work().1, (8, 1), "stale acknowledgement is silent");
     assert_eq!(log.append_egress(frame(), &[target]), vec![target]);
     log.retire_consumer(consumer);
     log.retire_consumer(consumer);
     assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 0);
+    assert_eq!(log.work().1, (10, 2), "repeated retirement is silent");
     assert!(log.inner.lock().expect("log").retained.is_empty());
     let replacement = log.register_consumer();
     let replacement = tau_core::SharedDeliveryTarget::new(log.group(), replacement);
@@ -484,9 +488,231 @@ fn sparse_target_scan_batches_cursor_prune_observation_and_notification() {
             scan_position_visits: 65,
             catch_up_waits: 0,
             tail_waits: 0,
+            ..EventLogWork::default()
         }
     );
-    assert_eq!(notifications, 1);
+    assert_eq!(notifications, (0, 1));
+}
+
+/// Wait-entry observations share the predicate mutex, so the caller cannot
+/// mistake thread startup for a thread actually entering its condition wait.
+fn wait_for_work(log: &EventLog, ready: impl Fn(&EventLogWork) -> bool) {
+    let inner = log.inner.lock().expect("log");
+    let (inner, _) = log
+        .waiter_entered
+        .wait_timeout_while(inner, Duration::from_secs(2), |inner| !ready(&inner.work))
+        .expect("wait entry");
+    assert!(ready(&inner.work), "waiter did not enter predicate wait");
+}
+
+/// Append must still wake non-target followers to advance continuity, whereas
+/// selection and unrelated skips must not release a target's real flush
+/// barrier. Count notification calls, never OS wake returns (which may be
+/// spurious).
+#[test]
+fn follower_and_progress_notifications_preserve_flush_barriers() {
+    let log = EventLog::new();
+    let a = log.register_consumer();
+    let b = log.register_consumer();
+    let follower_a = {
+        let log = Arc::clone(&log);
+        std::thread::spawn(move || log.next_egress(a))
+    };
+    assert!(log.wait_for_tail_wait(1, Duration::from_secs(2)));
+    let follower_b = {
+        let log = Arc::clone(&log);
+        std::thread::spawn(move || log.next_egress(b))
+    };
+    // The mutex also serializes either follower's final tail predicate with
+    // this append; correctness does not depend on whether B parked already.
+    let _ = log.append_egress(
+        routed_notice("only A"),
+        &[tau_core::SharedDeliveryTarget::new(log.group(), a)],
+    );
+    let pending = follower_a.join().expect("A follower").expect("A target");
+    // B publishes its progress notification after unlocking, then enters the
+    // tail wait. Observe both the cursor and notification before checking
+    // counts, including when append beat B's first predicate check.
+    {
+        let inner = log.inner.lock().expect("log");
+        let (inner, _) = log
+            .waiter_entered
+            .wait_timeout_while(inner, Duration::from_secs(2), |inner| {
+                inner.consumers[&b].cursor.0 != 1
+                    || log.progress_notifications.load(Ordering::Relaxed) != 1
+            })
+            .expect("B progress");
+        assert_eq!(inner.consumers[&b].cursor.0, 1);
+        assert_eq!(log.progress_notifications.load(Ordering::Relaxed), 1);
+    }
+    assert_eq!(log.work().1, (1, 1), "append then non-target skip");
+
+    let (tx, rx) = sync_channel(2);
+    let flushers = (0..2)
+        .map(|_| {
+            let log = Arc::clone(&log);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                log.flush_consumer(a);
+                tx.send(()).expect("flush completion");
+            })
+        })
+        .collect::<Vec<_>>();
+    wait_for_work(&log, |work| work.flush_waiters == 2);
+    assert!(rx.try_recv().is_err(), "selection did not acknowledge A");
+    log.acknowledge_egress(a, &pending);
+    for flusher in flushers {
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("flush released");
+        flusher.join().expect("flusher");
+    }
+    assert_eq!(log.work().1, (1, 2), "ack notifies only progress");
+    log.acknowledge_egress(a, &pending);
+    assert_eq!(log.work().1, (1, 2), "stale ack is silent");
+    log.retire_consumer_after_io(b);
+    assert!(follower_b.join().expect("B follower").is_none());
+    assert_eq!(log.work().1, (2, 3));
+}
+
+/// Both lifecycle wait classes must finish whether retirement precedes wait
+/// entry or follows it; paused followers must also observe resume and close.
+#[test]
+fn lifecycle_controls_notify_only_their_predicate_classes() {
+    for close in [false, true] {
+        let log = EventLog::new();
+        let consumer = log.register_consumer();
+        assert_eq!(log.work().1, (0, 0));
+        log.set_catch_up_paused(consumer, true);
+        let follower = {
+            let log = Arc::clone(&log);
+            std::thread::spawn(move || log.next_egress(consumer))
+        };
+        assert!(log.wait_for_catch_up_wait(1, Duration::from_secs(2)));
+        let retirement = {
+            let log = Arc::clone(&log);
+            std::thread::spawn(move || {
+                log.wait_for_consumer_retirement(consumer, Duration::from_secs(2))
+            })
+        };
+        wait_for_work(&log, |work| work.retirement_waits >= 1);
+        if close {
+            log.close_consumer_after_current(consumer);
+        } else {
+            log.set_catch_up_paused(consumer, false);
+            assert!(log.wait_for_tail_wait(1, Duration::from_secs(2)));
+            log.retire_consumer_after_io(consumer);
+        }
+        assert!(follower.join().expect("follower").is_none());
+        assert!(retirement.join().expect("retirement waiter"));
+        assert_eq!(log.work().1, (3, 1));
+        assert!(log.wait_for_consumer_retirement(consumer, Duration::ZERO));
+        log.flush_consumer(consumer);
+        log.retire_consumer(consumer);
+        log.retire_consumer_after_io(consumer);
+        log.close_consumer_after_current(consumer);
+        log.set_catch_up_paused(consumer, false);
+        assert_eq!(log.work().1, (3, 1), "absent controls are silent");
+    }
+}
+
+/// Append cannot change an active minimum; ahead-of-front cursor changes and
+/// retirement cannot unpin it. Retirement visits only the cursor's suffix and
+/// repeated retirement does no work, while the last minimum prunes immediately.
+#[test]
+fn bookkeeping_elides_only_provably_irrelevant_work() {
+    let log = EventLog::new();
+    let slow = log.register_consumer();
+    for _ in 0..16 {
+        let _ = log.append_egress(routed_notice("old prefix"), &[]);
+    }
+    let fast = log.register_consumer();
+    let target = tau_core::SharedDeliveryTarget::new(log.group(), fast);
+    log.reset_work();
+    let _ = log.append_egress(routed_notice("fast"), &[target]);
+    assert_eq!(log.work().0.prune_consumer_visits, 0);
+    let pending = log.next_egress(fast).expect("fast target");
+    log.acknowledge_egress(fast, &pending);
+    let _ = log.append_egress(routed_notice("skip"), &[]);
+    let _ = log.append_egress(routed_notice("fast again"), &[target]);
+    let pending = log.next_egress(fast).expect("next fast target");
+    assert_eq!(pending.seq.0, 18);
+    assert_eq!(log.work().0.prune_calls, 0, "ahead ack and skip");
+    log.retire_consumer_after_io(fast);
+    let (work, _) = log.work();
+    assert_eq!(work.prune_calls, 0);
+    assert_eq!(work.retirement_position_visits, 1);
+    assert_eq!(log.inner.lock().expect("log").retained.len(), 19);
+    log.reset_work();
+    log.retire_consumer_after_io(fast);
+    assert_eq!(log.work(), (EventLogWork::default(), (0, 0)));
+    log.retire_consumer_after_io(slow);
+    assert!(log.inner.lock().expect("log").retained.is_empty());
+    assert_eq!(log.work().0.prune_calls, 1);
+    log.reset_work();
+    let _ = log.append_egress(routed_notice("no consumers"), &[target]);
+    assert!(log.inner.lock().expect("log").retained.is_empty());
+    assert_eq!(log.work().0.prune_calls, 0);
+    assert_eq!(log.work().1, (1, 0));
+}
+
+/// A tied minimum still needs the full minimum scan: its first advance cannot
+/// prune, but advancing the final owner must immediately reclaim the prefix.
+#[test]
+fn tied_minimum_prunes_only_after_its_final_owner_advances() {
+    let log = EventLog::new();
+    let consumers = [log.register_consumer(), log.register_consumer()];
+    let targets = consumers.map(|id| tau_core::SharedDeliveryTarget::new(log.group(), id));
+    let _ = log.append_egress(routed_notice("shared"), &targets);
+    log.reset_work();
+    for (index, consumer) in consumers.into_iter().enumerate() {
+        let pending = log.next_egress(consumer).expect("shared target");
+        log.acknowledge_egress(consumer, &pending);
+        assert_eq!(
+            log.inner.lock().expect("log").retained.len(),
+            usize::from(index == 0)
+        );
+    }
+    assert_eq!(log.work().0.prune_calls, 2);
+    assert_eq!(log.work().0.prune_consumer_visits, 4);
+    assert_eq!(log.work().1, (0, 2));
+}
+
+/// Close retirement must visit post-boundary artifact targets too, but charge
+/// release belongs only to the final target even across duplicate cleanup.
+#[test]
+fn close_retirement_releases_shared_artifact_charge_exactly_once() {
+    let log = EventLog::new();
+    let slow = log.register_consumer();
+    let _ = log.append_egress(routed_notice("pinned prefix"), &[]);
+    let closing = log.register_consumer();
+    log.close_consumer_after_current(closing);
+    let targets = [slow, closing].map(|id| tau_core::SharedDeliveryTarget::new(log.group(), id));
+    let _ = log.append_egress(
+        tau_core::RoutedFrame::new(
+            None,
+            tau_proto::HarnessOutputMessage::ArtifactResult(Box::new(tau_proto::ArtifactResult {
+                request_id: "post-close".parse().expect("request ID"),
+                result: Ok(tau_proto::ArtifactValue::Chunk {
+                    offset: 0,
+                    bytes: vec![1],
+                    eof: true,
+                }),
+            })),
+        ),
+        &targets,
+    );
+    log.reset_work();
+    assert!(log.next_egress(closing).is_none());
+    assert_eq!(log.work().0.retirement_position_visits, 1);
+    assert_eq!(log.work().0.prune_calls, 0);
+    assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 1);
+    log.retire_consumer_after_io(closing);
+    assert_eq!(log.work().0.retirement_position_visits, 1);
+    let pending = log.next_egress(slow).expect("remaining artifact target");
+    log.acknowledge_egress(slow, &pending);
+    assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 0);
+    log.retire_consumer_after_io(slow);
+    assert_eq!(log.inner.lock().expect("log").artifact_egress_count, 0);
 }
 
 /// Reaching a captured close boundary through only non-target positions must
@@ -516,9 +742,11 @@ fn sparse_close_boundary_retires_with_one_prune_observation_and_notification() {
             scan_position_visits: 32,
             catch_up_waits: 0,
             tail_waits: 0,
+            retirement_position_visits: 33,
+            ..EventLogWork::default()
         }
     );
-    assert_eq!(notifications, 1);
+    assert_eq!(notifications, (1, 1));
     assert!(log.inner.lock().expect("log").retained.is_empty());
 }
 
@@ -563,11 +791,11 @@ fn sparse_tail_scan_resumes_for_later_target() {
     follower.join().expect("follower thread");
     assert_eq!(pending.seq.0, 32);
     let (work, notifications) = log.work();
-    assert_eq!(work.prune_calls, 2);
-    assert_eq!(work.prune_consumer_visits, 2);
+    assert_eq!(work.prune_calls, 1);
+    assert_eq!(work.prune_consumer_visits, 1);
     assert_eq!(work.observe_calls, 3);
     assert_eq!(work.scan_position_visits, 33);
-    assert_eq!(notifications, 2);
+    assert_eq!(notifications, (1, 1));
 }
 
 /// A flush barrier remains behind a selected frame until successful
@@ -636,7 +864,7 @@ fn sparse_scan_preserves_consumer_retirement_and_minimum_cursor_pruning() {
     assert_eq!(work.prune_calls, 1);
     assert_eq!(work.prune_consumer_visits, 1);
     assert_eq!(work.observe_calls, 1);
-    assert_eq!(notifications, 1);
+    assert_eq!(notifications, (1, 1));
     let inner = log.inner.lock().expect("log");
     assert_eq!(inner.retained.len(), 1);
     assert_eq!(inner.retained[0].seq.0, 16);
@@ -732,7 +960,7 @@ fn benchmark_sparse_egress_scan_work() {
             assert_eq!(work.prune_calls, 1);
             assert_eq!(work.prune_consumer_visits, consumer_count);
             assert_eq!(work.observe_calls, 1);
-            assert_eq!(notifications, 1);
+            assert_eq!(notifications, (0, 1));
             eprintln!(
                 "sparse EventLog scan: U={untargeted_count} C={consumer_count} \
                  position_visits={} consumer_visits={} observations={} elapsed={elapsed:?}",
@@ -807,19 +1035,20 @@ proptest! {
         }
     }
 
-    /// Random two-consumer live publication, delivery, and replay-pause traces
-    /// must preserve independent cursors, target visibility, and minimum-cursor
-    /// retention after every transition.
+    /// Random live publication, delivery, pause, retirement, replacement and
+    /// close traces must preserve frozen generations, including post-close
+    /// obligations, and exact minimum-cursor retention after every transition.
     #[test]
     fn randomized_multi_consumer_live_replay_matches_reference_model(
-        actions in prop::collection::vec(0_u8..8, 1..192)
+        actions in prop::collection::vec(0_u8..14, 1..192)
     ) {
         let log = EventLog::new();
-        let consumers = [log.register_consumer(), log.register_consumer()];
+        let mut consumers = [Some(log.register_consumer()), Some(log.register_consumer())];
         let group = log.group();
         let mut tail = 0_u64;
         let mut cursors = [0_u64; 2];
         let mut paused = [false; 2];
+        let mut close_after = [None; 2];
         let mut target_masks = Vec::<u8>::new();
 
         for action in actions {
@@ -829,44 +1058,94 @@ proptest! {
                         .iter()
                         .enumerate()
                         .filter(|(index, _)| mask & (1 << index) != 0)
-                        .map(|(_, consumer)| {
-                            tau_core::SharedDeliveryTarget::new(group, *consumer)
+                        .filter_map(|(_, consumer)| {
+                            consumer.map(|consumer| tau_core::SharedDeliveryTarget::new(group, consumer))
                         })
                         .collect::<Vec<_>>();
                     let _ = log.append_egress(routed_notice("model"), &targets);
-                    target_masks.push(mask);
+                    let active_mask = consumers.iter().enumerate().fold(0, |mask, (index, consumer)| {
+                        mask | if consumer.is_some() { 1 << index } else { 0 }
+                    });
+                    target_masks.push(mask & active_mask);
                     tail = tail.saturating_add(1);
                 }
                 deliver @ 4..=5 => {
                     let index = usize::from(deliver - 4);
-                    if !paused[index]
-                        && let Some(expected) = target_masks
+                    if let Some(consumer) = consumers[index]
+                        && !paused[index]
+                    {
+                        let boundary = close_after[index].unwrap_or(tail);
+                        let expected = target_masks
                             .iter()
                             .enumerate()
+                            .take(usize::try_from(boundary).expect("boundary fits usize"))
                             .skip(usize::try_from(cursors[index]).expect("cursor fits usize"))
                             .find_map(|(seq, mask)| {
                                 (mask & (1 << index) != 0)
                                     .then(|| u64::try_from(seq).expect("sequence fits u64"))
-                            })
-                    {
-                        let pending = log
-                            .next_egress(consumers[index])
-                            .expect("modeled target");
-                        prop_assert_eq!(pending.seq.0, expected);
-                        log.acknowledge_egress(consumers[index], &pending);
-                        cursors[index] = expected.saturating_add(1);
+                            });
+                        if let Some(expected) = expected {
+                            let pending = log.next_egress(consumer).expect("modeled target");
+                            prop_assert_eq!(pending.seq.0, expected);
+                            log.acknowledge_egress(consumer, &pending);
+                            cursors[index] = expected.saturating_add(1);
+                        } else if close_after[index].is_some() {
+                            prop_assert!(log.next_egress(consumer).is_none());
+                            consumers[index] = None;
+                            for mask in &mut target_masks {
+                                *mask &= !(1 << index);
+                            }
+                        }
                     }
                 }
                 toggle @ 6..=7 => {
                     let index = usize::from(toggle - 6);
-                    paused[index] = !paused[index];
-                    log.set_catch_up_paused(consumers[index], paused[index]);
+                    if let Some(consumer) = consumers[index] {
+                        paused[index] = !paused[index];
+                        log.set_catch_up_paused(consumer, paused[index]);
+                    }
+                }
+                retire @ 8..=9 => {
+                    let index = usize::from(retire - 8);
+                    if let Some(consumer) = consumers[index].take() {
+                        log.retire_consumer_after_io(consumer);
+                        // Repeated writer/lifecycle cleanup is deliberately inert.
+                        log.retire_consumer_after_io(consumer);
+                        for mask in &mut target_masks {
+                            *mask &= !(1 << index);
+                        }
+                    }
+                }
+                replace @ 10..=11 => {
+                    let index = usize::from(replace - 10);
+                    if let Some(consumer) = consumers[index].take() {
+                        log.retire_consumer_after_io(consumer);
+                    }
+                    for mask in &mut target_masks {
+                        *mask &= !(1 << index);
+                    }
+                    consumers[index] = Some(log.register_consumer());
+                    cursors[index] = tail;
+                    paused[index] = false;
+                    close_after[index] = None;
+                }
+                close @ 12..=13 => {
+                    let index = usize::from(close - 12);
+                    if let Some(consumer) = consumers[index] {
+                        log.close_consumer_after_current(consumer);
+                        close_after[index] = Some(tail);
+                        paused[index] = false;
+                        // Sink cleanup must not steal terminal close ownership.
+                        log.retire_consumer(consumer);
+                    }
                 }
                 _ => unreachable!("action strategy is bounded"),
             }
 
             let inner = log.inner.lock().expect("model snapshot");
-            let first = cursors.into_iter().min().expect("two cursors");
+            let first = consumers.iter().enumerate()
+                .filter(|(_, consumer)| consumer.is_some())
+                .map(|(index, _)| cursors[index]).min().unwrap_or(tail);
             prop_assert_eq!(inner.next_egress_seq.0, tail);
             prop_assert_eq!(
                 inner.retained.front().map(|position| position.seq.0),
@@ -876,10 +1155,13 @@ proptest! {
                 inner.retained.len(),
                 usize::try_from(tail.saturating_sub(first)).expect("retained length fits usize")
             );
+            prop_assert_eq!(inner.consumers.len(), consumers.iter().flatten().count());
             for (index, consumer) in consumers.iter().enumerate() {
+                let Some(consumer) = consumer else { continue; };
                 let state = inner.consumers.get(consumer).expect("modeled consumer");
                 prop_assert_eq!(state.cursor.0, cursors[index]);
                 prop_assert_eq!(state.catch_up_paused, paused[index]);
+                prop_assert_eq!(state.close_after.map(|position| position.0), close_after[index]);
             }
             for position in &inner.retained {
                 let expected_pending = consumers
@@ -892,7 +1174,7 @@ proptest! {
                             != 0
                             && cursors[*index] <= position.seq.0
                     })
-                    .map(|(_, consumer)| *consumer)
+                    .filter_map(|(_, consumer)| *consumer)
                     .collect::<HashSet<_>>();
                 prop_assert_eq!(&position.pending_targets, &expected_pending);
                 prop_assert_eq!(position.payload.is_some(), !expected_pending.is_empty());
