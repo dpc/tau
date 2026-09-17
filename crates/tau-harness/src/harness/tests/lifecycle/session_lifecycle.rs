@@ -1,6 +1,7 @@
 //! Tests for session lifecycle behavior.
 
 use super::*;
+use crate::harness::HarnessCommand;
 
 /// Ensures stale or malformed shell finish events cannot inject output into the
 /// wrong session when an explicit target agent belongs to another session.
@@ -434,6 +435,56 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
                 && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
                 && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message == "optional extension optional-diagnostic did not initialize"
+    )));
+}
+
+/// A cleanup warning arriving through the startup command lane remains
+/// nonfatal, identifies the offending file, and replays to a later UI attach.
+#[test]
+fn artifact_cleanup_corruption_warning_is_visible_after_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let offending = sp.join("artifacts/operations/corrupt/receipt.json");
+
+    h.handle_harness_command(HarnessCommand::ArtifactCleanupCorruption(vec![
+        offending.clone(),
+    ]))
+    .expect("nonfatal cleanup warning");
+
+    assert!(event_log_contains_source_event(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::HARNESS_INTERNAL_WARNING
+                    && info.purpose == tau_proto::NoticePurpose::Alert
+                    && info.message.contains(&offending.display().to_string())
+                    && info.message.contains("cleanup continued")
+        )
+    ));
+
+    let ui_conn: tau_proto::ConnectionId =
+        crate::test_connection_id("late-ui-artifact-cleanup-warning");
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+    let frames = ui_sink.lock().expect("ui sink");
+    assert!(frames.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::HarnessNotice(info))
+            if info.level == tau_proto::NoticeLevel::Warning
+                && info.kind == tau_proto::notice_kind::HARNESS_INTERNAL_WARNING
+                && info.purpose == tau_proto::NoticePurpose::Alert
+                && info.message.contains(&offending.display().to_string())
     )));
 }
 

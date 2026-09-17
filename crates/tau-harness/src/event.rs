@@ -29,6 +29,8 @@ pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 pub(crate) enum HarnessCommand {
     /// Route one bounded, transient artifact RPC completion.
     ArtifactCompleted(Box<crate::artifact_worker::ArtifactCompleted>),
+    /// Surface corrupt artifact bookkeeping preserved by startup cleanup.
+    ArtifactCleanupCorruption(Vec<std::path::PathBuf>),
     /// Stop the foreground daemon after retiring listener admission.
     Shutdown(ShutdownCause),
     /// Observe persistence transitions and retry exact retained publications.

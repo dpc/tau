@@ -568,6 +568,20 @@ impl Harness {
             HarnessCommand::ArtifactCompleted(command) => {
                 self.send_artifact_result(&command.connection, command.result);
             }
+            HarnessCommand::ArtifactCleanupCorruption(paths) => {
+                for path in paths {
+                    self.emit_notice(
+                        tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                        tau_proto::NoticeLevel::Warning,
+                        tau_proto::NoticePurpose::Alert,
+                        &format!(
+                            "shared artifact cleanup preserved corrupt bookkeeping at `{}`; \
+                             cleanup continued; inspect the affected artifact entry for manual cleanup",
+                            path.display()
+                        ),
+                    );
+                }
+            }
             HarnessCommand::Shutdown(_) => {}
             HarnessCommand::SemanticPersistenceProgress => {
                 self.observe_semantic_persistence_progress();

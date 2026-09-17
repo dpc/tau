@@ -406,6 +406,7 @@ impl Harness {
         }
         crate::retention_cleanup::spawn_retention_cleanup(
             crate::retention_cleanup::RetentionCleanup {
+                harness_tx: tx.clone(),
                 memory_only: storage_mode.is_memory_only(),
                 artifact_retention: harness_settings.artifact_retention(),
                 state_dir: state_dir.clone(),
@@ -897,6 +898,7 @@ impl Harness {
         )?;
         crate::retention_cleanup::spawn_retention_cleanup(
             crate::retention_cleanup::RetentionCleanup {
+                harness_tx: harness.runtime_io.tx.clone(),
                 memory_only: storage_mode.is_memory_only(),
                 artifact_retention: harness
                     .config

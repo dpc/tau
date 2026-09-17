@@ -3,7 +3,9 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -13,11 +15,14 @@ use tau_proto::SessionId;
 use crate::agent_cleanup::AgentCleanupSummary;
 use crate::artifact_store::ArtifactStore;
 use crate::diagnostic_cleanup::DiagnosticCleanupSummary;
+use crate::event::{HarnessCommand, HarnessEvent};
 use crate::session_cleanup::SessionCleanupSummary;
 
 /// Immutable startup retention inputs.
 #[derive(Clone)]
 pub(crate) struct RetentionCleanup {
+    /// Central harness event channel used for visible nonfatal warnings.
+    pub(crate) harness_tx: Sender<HarnessEvent>,
     /// Actual harness storage boundary; ephemeral sessions still allow
     /// artifacts.
     pub(crate) memory_only: bool,
@@ -65,11 +70,19 @@ fn run_retention_cleanup(cleanup: RetentionCleanup, now: SystemTime) {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        match store.cleanup(cleanup.artifact_retention, seconds) {
+        let mut corrupt_paths = BTreeSet::new();
+        match store.cleanup_reporting(cleanup.artifact_retention, seconds, |path| {
+            corrupt_paths.insert(path.to_path_buf());
+        }) {
             Ok(()) | Err(tau_proto::ArtifactError::Busy) => {}
             Err(error) => {
                 tracing::warn!(target: "tau_harness::retention_cleanup", %error, "shared artifact cleanup did not complete")
             }
+        }
+        if !corrupt_paths.is_empty() {
+            let _ = cleanup.harness_tx.send(HarnessEvent::Command(
+                HarnessCommand::ArtifactCleanupCorruption(corrupt_paths.into_iter().collect()),
+            ));
         }
     }
     run_retention_cleanup_with_session_cleanup(

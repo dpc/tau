@@ -309,6 +309,104 @@ fn cleanup_preserves_future_and_corrupt_metadata() {
     );
 }
 
+/// A corrupt receipt must not obstruct original retention in the later cleanup
+/// domain, and the preserved receipt path remains available for diagnostics.
+#[test]
+fn corrupt_receipt_reports_integrity_after_expired_original_cleanup() {
+    let temp = tempfile::tempdir().expect("private root");
+    let mut store = ArtifactStore::new(temp.path());
+    let (_, descriptor) = put(&mut store, "tool/one", "one", b"expired", 1);
+    let corrupt_operation = store.root.join("operations").join(new_id());
+    private_dir(&corrupt_operation).expect("corrupt operation directory");
+    let receipt_path = corrupt_operation.join("receipt.json");
+    fs::write(&receipt_path, b"{broken").expect("corrupt receipt");
+    let mut reported = Vec::new();
+
+    assert_eq!(
+        store.cleanup_reporting(Some(Duration::from_secs(1)), 10, |path| {
+            reported.push(path.to_path_buf());
+        }),
+        Err(ArtifactError::Integrity)
+    );
+
+    assert_eq!(reported, vec![receipt_path.clone()]);
+    assert!(receipt_path.exists());
+    assert_eq!(
+        store.descriptor(&descriptor.key),
+        Err(ArtifactError::Unavailable)
+    );
+}
+
+/// A missing receipt remains an ordinary fail-fast filesystem error and must
+/// not permit cleanup to detach an otherwise expired original afterward.
+#[test]
+fn missing_receipt_stops_before_original_cleanup() {
+    let temp = tempfile::tempdir().expect("private root");
+    let mut store = ArtifactStore::new(temp.path());
+    let (_, descriptor) = put(&mut store, "tool/one", "one", b"expired", 1);
+    private_dir(&store.root.join("operations").join(new_id()))
+        .expect("incomplete operation directory");
+    let mut reported = Vec::new();
+
+    assert_eq!(
+        store.cleanup_reporting(Some(Duration::from_secs(1)), 10, |path| {
+            reported.push(path.to_path_buf());
+        }),
+        Err(ArtifactError::Unavailable)
+    );
+
+    assert!(reported.is_empty());
+    assert!(store.descriptor(&descriptor.key).is_ok());
+}
+
+/// Corrupt original metadata encountered before an expired healthy sibling is
+/// preserved and reported without preventing that sibling's removal.
+#[test]
+fn corrupt_original_continues_to_later_expired_sibling() {
+    let temp = tempfile::tempdir().expect("private root");
+    let mut store = ArtifactStore::new(temp.path());
+    let (_, first) = put(&mut store, "tool/one", "one", b"first", 1);
+    let (_, second) = put(&mut store, "tool/one", "one", b"second", 1);
+    let mut enumerated = fs::read_dir(store.root.join("blake3"))
+        .expect("object directory")
+        .map(|entry| entry.expect("object entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(enumerated.len(), 2);
+    let corrupt_name = enumerated.remove(0);
+    let corrupt_key = [&first, &second]
+        .into_iter()
+        .find(|descriptor| {
+            artifact_digest(&descriptor.key).expect("valid digest")
+                == corrupt_name.to_string_lossy()
+        })
+        .expect("enumerated corrupt descriptor");
+    let expired_key = [&first, &second]
+        .into_iter()
+        .find(|descriptor| descriptor.key != corrupt_key.key)
+        .expect("healthy sibling descriptor");
+    let metadata_path = store
+        .root
+        .join("blake3")
+        .join(corrupt_name)
+        .join("meta.json");
+    fs::write(&metadata_path, b"{broken").expect("corrupt metadata");
+    let mut reported = Vec::new();
+
+    assert_eq!(
+        store.cleanup_reporting(Some(Duration::from_secs(1)), 10, |path| {
+            reported.push(path.to_path_buf());
+        }),
+        Err(ArtifactError::Integrity)
+    );
+
+    assert_eq!(reported, vec![metadata_path.clone()]);
+    assert!(metadata_path.exists());
+    assert_eq!(
+        store.descriptor(&expired_key.key),
+        Err(ArtifactError::Unavailable)
+    );
+}
+
 fn put_corrupt_duplicate(store: &mut ArtifactStore) -> Result<ArtifactValue, ArtifactError> {
     let ArtifactValue::Upload { upload } =
         store.begin("tool/one", "one", tau_proto::ArtifactSize::new(6)?)?

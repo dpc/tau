@@ -1,4 +1,5 @@
 use std::io as path_std_io;
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
 use tau_core::{AgentEventParent, AgentStore, SessionStore};
@@ -6,6 +7,7 @@ use tau_proto::{AgentId, Event, SessionAgentLoaded, SessionId, UnixMicros};
 use tempfile::TempDir;
 
 use crate::artifact_store::ArtifactStore;
+use crate::event::{HarnessCommand, HarnessEvent};
 
 /// A persistent harness with both journal domains ephemeral still cleans shared
 /// artifacts while leaving durable session and agent trees untouched.
@@ -40,6 +42,7 @@ fn artifact_cleanup_runs_with_ephemeral_session_and_agent_persistence() {
     };
     super::run_retention_cleanup(
         super::RetentionCleanup {
+            harness_tx: mpsc::channel().0,
             memory_only: false,
             artifact_retention: Some(Duration::from_secs(1)),
             state_dir: temp.path().to_path_buf(),
@@ -66,6 +69,50 @@ fn artifact_cleanup_runs_with_ephemeral_session_and_agent_persistence() {
     );
     assert!(temp.path().join("sessions/owner-session").exists());
     assert!(temp.path().join("agents/owned-agent").exists());
+}
+
+/// Artifact corruption produces one bounded internal warning command carrying
+/// only the preserved bookkeeping path while later cleanup domains continue.
+#[test]
+fn artifact_cleanup_reports_corrupt_bookkeeping_path() {
+    let temp = TempDir::new().expect("temp state");
+    let operation = temp.path().join("artifacts/operations/corrupt");
+    std::fs::create_dir_all(&operation).expect("operation directory");
+    std::fs::create_dir_all(temp.path().join("artifacts/blake3")).expect("object directory");
+    std::fs::create_dir_all(temp.path().join("artifacts/.cleanup")).expect("cleanup directory");
+    let receipt = operation.join("receipt.json");
+    std::fs::write(&receipt, b"{broken").expect("corrupt receipt");
+    let (tx, rx) = mpsc::channel();
+
+    super::run_retention_cleanup(
+        super::RetentionCleanup {
+            harness_tx: tx,
+            memory_only: false,
+            artifact_retention: None,
+            state_dir: temp.path().to_path_buf(),
+            sessions_dir: temp.path().join("sessions"),
+            session_persistence: tau_core::SessionPersistenceMode::Ephemeral,
+            agent_persistence: tau_core::AgentPersistenceMode::Ephemeral,
+            current_session: "current".parse().expect("session"),
+            session_retention: None,
+            agent_retention: None,
+            diagnostic_retention: None,
+        },
+        SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+    );
+
+    let HarnessEvent::Command(HarnessCommand::ArtifactCleanupCorruption(paths)) =
+        rx.try_recv().expect("corruption warning command")
+    else {
+        panic!("artifact cleanup warning");
+    };
+    assert_eq!(paths, vec![receipt]);
+    assert!(
+        temp.path()
+            .join("artifacts/operations/corrupt/receipt.json")
+            .exists()
+    );
+    assert!(rx.try_recv().is_err());
 }
 
 fn seed_agent_and_session(temp: &TempDir) -> AgentId {
@@ -126,6 +173,7 @@ fn session_deletion_precedes_agent_reference_authority() {
     let agent_id = seed_agent_and_session(&temp);
     super::run_retention_cleanup(
         super::RetentionCleanup {
+            harness_tx: mpsc::channel().0,
             memory_only: false,
             artifact_retention: None,
             state_dir: temp.path().to_path_buf(),
@@ -156,6 +204,7 @@ fn disabled_agent_policy_preserves_live_agent_tree() {
     std::fs::create_dir_all(&detached_session).expect("detached session staging");
     super::run_retention_cleanup(
         super::RetentionCleanup {
+            harness_tx: mpsc::channel().0,
             memory_only: false,
             artifact_retention: None,
             state_dir: temp.path().to_path_buf(),
@@ -182,6 +231,7 @@ fn uncertain_session_detach_suppresses_agent_deletion_until_restart_finalization
     let temp = TempDir::new().expect("temp state");
     let agent_id = seed_agent_and_session(&temp);
     let cleanup = super::RetentionCleanup {
+        harness_tx: mpsc::channel().0,
         memory_only: false,
         artifact_retention: None,
         state_dir: temp.path().to_path_buf(),

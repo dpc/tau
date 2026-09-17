@@ -10,15 +10,28 @@ impl ArtifactStore {
     ///
     /// Call only in persistent mode. Missing roots remain untouched. Unknown or
     /// malformed entries are preserved and counted as failures.
+    #[cfg(test)]
     pub(crate) fn cleanup(
         &self,
         retention: Option<Duration>,
         now: u64,
     ) -> Result<(), ArtifactError> {
+        self.cleanup_reporting(retention, now, |_| {})
+    }
+
+    /// Runs cleanup while reporting each corrupt bookkeeping file that was
+    /// preserved so startup can surface a nonfatal warning.
+    pub(crate) fn cleanup_reporting(
+        &self,
+        retention: Option<Duration>,
+        now: u64,
+        mut report_corrupt: impl FnMut(&Path),
+    ) -> Result<(), ArtifactError> {
         if !self.root.exists() {
             return Ok(());
         }
         let _lock = self.lock(true)?;
+        let mut found_corruption = false;
         let cleanup = self.root.join(".cleanup");
         // Recover a detach whose process may have died before parent sync.
         sync_dir(&self.root.join("operations"))?;
@@ -51,8 +64,17 @@ impl ArtifactStore {
             if name.starts_with(".staging-") {
                 self.detach(&entry.path())?;
             } else if artifact_identifier(&name) {
-                let receipt: Receipt = read_json(&entry.path().join("receipt.json"))?;
-                if receipt.version == 1 && now >= receipt.expires_at {
+                let receipt_path = entry.path().join("receipt.json");
+                let receipt: Receipt = match read_json::<Receipt>(&receipt_path) {
+                    Ok(receipt) if receipt.version == 1 => receipt,
+                    Ok(_) | Err(ArtifactError::Integrity) => {
+                        found_corruption = true;
+                        report_corrupt(&receipt_path);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                if now >= receipt.expires_at {
                     self.detach(&entry.path())?;
                 }
             }
@@ -74,7 +96,16 @@ impl ArtifactStore {
             let Ok(key) = ArtifactKey::parse(format!("blake3:{name}")) else {
                 continue;
             };
-            let metadata = self.metadata(&key)?;
+            let metadata_path = entry.path().join("meta.json");
+            let metadata = match self.metadata(&key) {
+                Ok(metadata) => metadata,
+                Err(ArtifactError::Integrity) => {
+                    found_corruption = true;
+                    report_corrupt(&metadata_path);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if retention.is_some_and(|age| {
                 now.checked_sub(metadata.last_put_at)
                     .is_some_and(|elapsed| elapsed >= age.as_secs())
@@ -84,7 +115,11 @@ impl ArtifactStore {
                 self.detach(&entry.path())?;
             }
         }
-        Ok(())
+        if found_corruption {
+            Err(ArtifactError::Integrity)
+        } else {
+            Ok(())
+        }
     }
 
     fn detach(&self, path: &Path) -> Result<(), ArtifactError> {
