@@ -1254,25 +1254,37 @@ impl Harness {
         &mut self,
         response: &mut ProviderResponseFinished,
     ) {
+        let telemetry = self.prepare_finished_response_context_limit(response);
+        self.prompt_coordination
+            .prompt_runtime
+            .context_limits
+            .remove(&response.agent_prompt_id);
+        if let Some(telemetry) = telemetry {
+            response.context_limit_telemetry = Some(telemetry);
+        }
+    }
+
+    /// Prepare dispatch-owned telemetry without consuming its prompt snapshot.
+    pub(super) fn prepare_finished_response_context_limit(
+        &self,
+        response: &ProviderResponseFinished,
+    ) -> Option<tau_proto::ContextLimitTelemetry> {
+        if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded) {
+            return None;
+        }
         let snapshot = self
             .prompt_coordination
             .prompt_runtime
             .context_limits
-            .remove(&response.agent_prompt_id);
-        if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded) {
-            return;
-        }
-        let Some(snapshot) = snapshot else {
-            return;
-        };
+            .get(&response.agent_prompt_id)?;
         let provider_input_tokens = response
             .usage
             .as_ref()
             .map(|usage| tau_proto::TokenCount::new(usage.prompt_sent_tokens));
         let observation =
             context_limit_observation(provider_input_tokens, snapshot.advertised_context_window);
-        response.context_limit_telemetry = Some(tau_proto::ContextLimitTelemetry {
-            model: snapshot.model,
+        Some(tau_proto::ContextLimitTelemetry {
+            model: snapshot.model.clone(),
             operation: snapshot.operation,
             transcript_delta_bytes: snapshot.transcript_delta_bytes,
             advertised_context_window: snapshot.advertised_context_window,
@@ -1282,7 +1294,7 @@ impl Harness {
             recovery_eligible: false,
             action: tau_proto::ContextLimitAction::Terminal,
             observation,
-        });
+        })
     }
 
     /// Classify one terminal exhaustively at the reactive-recovery family
@@ -2920,80 +2932,120 @@ impl Harness {
         output_tokens: Option<u64>,
         update_live_totals: bool,
     ) {
+        let prepared = self.prepare_finished_response_usage(
+            response,
+            input_tokens,
+            cached_tokens,
+            output_tokens,
+            update_live_totals,
+        );
         let reported_cache_read_ceiling = response
             .usage
             .as_ref()
             .and_then(|usage| usage.prompt_cache_read_ceiling_tokens);
-        // Save the model that ran this turn before the
-        // `prompt_models` entry is consumed below — we'll need it
-        // again to anchor the stateful-chain state, and re-reading
-        // `selected_model` later would lie if the user switched
-        // models mid-turn.
-        let turn_model = self
-            .prompt_coordination
+        // Preparation uses the captured dispatch model, not a possibly changed
+        // selection. Only application consumes that prompt-local snapshot.
+        self.prompt_coordination
             .prompt_runtime
             .models
             .remove(&response.agent_prompt_id);
-        if let Some(ref model) = turn_model
-            && (input_tokens.is_some() || cached_tokens.is_some() || output_tokens.is_some())
-        {
-            let sent_tokens = input_tokens.unwrap_or(0);
-            let cached_tokens = cached_tokens.unwrap_or(0);
-            let received_tokens = output_tokens.unwrap_or(0);
-            let cache = response
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.cache.as_deref())
-                .map(|cache| {
-                    let mut cache = *cache;
-                    cache.read_tokens = Some(cache.read_tokens.unwrap_or(cached_tokens));
-                    Box::new(cache)
-                });
-            let cached_tokens = cache
-                .as_deref()
-                .and_then(|cache| cache.read_tokens)
-                .unwrap_or(cached_tokens);
-            let cache_read_ceiling = validate_cache_read_ceiling(
-                sent_tokens,
-                cached_tokens,
-                reported_cache_read_ceiling,
-            );
+        if let Some(usage) = prepared {
             if let Some(rejected_ceiling) = reported_cache_read_ceiling
-                && cache_read_ceiling.is_none()
+                && usage.prompt_cache_read_ceiling_tokens.is_none()
             {
                 tracing::warn!(
                     target: "tau_harness",
                     agent_prompt_id = %response.agent_prompt_id,
-                    prompt_sent_tokens = sent_tokens,
-                    prompt_cached_tokens = cached_tokens,
+                    prompt_sent_tokens = usage.prompt_sent_tokens,
+                    prompt_cached_tokens = usage.prompt_cached_tokens,
                     prompt_cache_read_ceiling_tokens = rejected_ceiling,
                     "discarding invalid provider cache-read ceiling"
                 );
             }
             if update_live_totals {
+                let model = usage
+                    .model
+                    .as_ref()
+                    .expect("prepared usage has its dispatch model");
                 self.session_runtime
                     .current_session_state
                     .token_usage
-                    .add_sent(model, sent_tokens, cached_tokens);
+                    .add_sent(model, usage.prompt_sent_tokens, usage.prompt_cached_tokens);
                 self.session_runtime
                     .current_session_state
                     .token_usage
-                    .add_received(model, received_tokens);
+                    .add_received(model, usage.response_received_tokens);
             }
-            response.usage = Some(ProviderTokenUsage {
-                model: Some(model.clone()),
-                prompt_sent_tokens: sent_tokens,
-                prompt_cached_tokens: cached_tokens,
-                prompt_cache_read_ceiling_tokens: cache_read_ceiling,
-                cache,
-                response_received_tokens: received_tokens,
-                stats: self
-                    .session_runtime
-                    .current_session_state
-                    .token_usage
-                    .clone(),
-            });
+            response.usage = Some(usage);
         }
+    }
+
+    /// Prepare the exact usage payload, including projected cumulative
+    /// counters, without consuming dispatch identity, changing totals, or
+    /// emitting warnings.
+    ///
+    /// `None` means the existing attachment path must leave reported usage
+    /// alone: no dispatch model or no observed counters were available.
+    /// Standalone accounting passes `false` because its committed fact owns
+    /// the live totals.
+    pub(super) fn prepare_finished_response_usage(
+        &self,
+        response: &ProviderResponseFinished,
+        input_tokens: Option<u64>,
+        cached_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        update_live_totals: bool,
+    ) -> Option<ProviderTokenUsage> {
+        let model = self
+            .prompt_coordination
+            .prompt_runtime
+            .models
+            .get(&response.agent_prompt_id)?;
+        if input_tokens.is_none() && cached_tokens.is_none() && output_tokens.is_none() {
+            return None;
+        }
+        let sent_tokens = input_tokens.unwrap_or(0);
+        let cached_tokens = cached_tokens.unwrap_or(0);
+        let received_tokens = output_tokens.unwrap_or(0);
+        let cache = response
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.cache.as_deref())
+            .map(|cache| {
+                let mut cache = *cache;
+                cache.read_tokens = Some(cache.read_tokens.unwrap_or(cached_tokens));
+                Box::new(cache)
+            });
+        let cached_tokens = cache
+            .as_deref()
+            .and_then(|cache| cache.read_tokens)
+            .unwrap_or(cached_tokens);
+        let cache_read_ceiling = validate_cache_read_ceiling(
+            sent_tokens,
+            cached_tokens,
+            response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.prompt_cache_read_ceiling_tokens),
+        );
+        let mut stats = self
+            .session_runtime
+            .current_session_state
+            .token_usage
+            .clone();
+        if update_live_totals {
+            stats.add_sent(model, sent_tokens, cached_tokens);
+            stats.add_received(model, received_tokens);
+        }
+        Some(ProviderTokenUsage {
+            model: Some(model.clone()),
+            prompt_sent_tokens: sent_tokens,
+            prompt_cached_tokens: cached_tokens,
+            prompt_cache_read_ceiling_tokens: cache_read_ceiling,
+            cache,
+            response_received_tokens: received_tokens,
+            stats,
+        })
     }
 
     pub(super) fn add_finished_response_estimated_cost(
@@ -3003,40 +3055,30 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
         update_live_totals: bool,
     ) {
-        let captured_rates = self
-            .prompt_coordination
+        let prepared = self.prepare_finished_response_estimated_cost(response);
+        self.prompt_coordination
             .prompt_runtime
             .estimated_cost_rates
             .remove(&response.agent_prompt_id);
-        let Some(usage) = response.usage.as_ref() else {
+        let Some(prepared) = prepared else {
             response.estimated_api_cost_rates = None;
             response.estimated_api_cost_increment = None;
             self.emit_agent_stats_updated_from(cid, source);
             return;
         };
-        let rates = captured_rates
-            .or_else(|| {
-                self.prompt_coordination
-                    .standalone_accounting
-                    .owners
-                    .get(&response.agent_prompt_id)
-                    .map(|owner| owner.estimated_cost_rates)
-            })
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    target: "tau_harness",
-                    agent_prompt_id = %response.agent_prompt_id,
-                    model = ?usage.model,
-                    "accepted provider response has no dispatch pricing snapshot; \
-                     using estimated API cost fallback"
-                );
-                tau_proto::ESTIMATED_API_COST_FALLBACK
-            });
-        let increment = tau_proto::EstimatedApiCost::for_usage(usage, rates);
-        response.estimated_api_cost_rates = Some(rates);
-        response.estimated_api_cost_increment = Some(increment);
+        if prepared.used_fallback {
+            tracing::warn!(
+                target: "tau_harness",
+                agent_prompt_id = %response.agent_prompt_id,
+                model = ?response.usage.as_ref().and_then(|usage| usage.model.as_ref()),
+                "accepted provider response has no dispatch pricing snapshot; \
+                 using estimated API cost fallback"
+            );
+        }
+        response.estimated_api_cost_rates = Some(prepared.rates);
+        response.estimated_api_cost_increment = Some(prepared.increment);
         if update_live_totals {
-            self.add_estimated_cost_increment(cid, increment, source);
+            self.add_estimated_cost_increment(cid, prepared.increment, source);
         }
     }
 

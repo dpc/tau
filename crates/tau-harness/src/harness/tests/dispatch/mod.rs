@@ -2781,6 +2781,7 @@ mod extension_routing;
 mod internal_tool_dispatch;
 mod loop_guard;
 mod prompt_lifecycle;
+mod provider_accounting_preparation;
 mod provider_responses;
 mod provider_switch;
 mod rendered_previews;
