@@ -1392,19 +1392,37 @@ fn agent_store_loaded_tool_call_ids_match_live_and_cold_multi_agent_trees() {
 
 /// A fixed-seed multi-agent history keeps the incremental index identical to
 /// the previous full-tree reference after every live fold and cold load.
+///
+/// The oracle writes canonical cold-replay records directly because it tests
+/// the runtime-only index, not asynchronous persistence durability. Dedicated
+/// semantic-persistence tests cover the worker's durability barriers.
 #[test]
 fn loaded_tool_call_id_index_differential_matches_full_scan() {
     let agents_dir = temp_dir("agents-loaded-tool-call-id-differential");
-    let mut store = AgentStore::open_fixture(&agents_dir).expect("open agent store");
+    let mut store = AgentStore::open_memory_only(&agents_dir);
     let mut seed = 0x4d59_5df4_d0f3_3173_u64;
     let mut agent_ids = Vec::new();
     for index in 0..64 {
         seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         let agent_id = format!("agent-{index}");
         let call_id = format!("call-{}", seed % 17);
+        let event = provider_tool_call(&agent_id, &call_id);
+        let fold_semantics = crate::AgentJournalFoldSemantics::for_new_event(&event);
         store
-            .append_agent_event(&agent_id, None, provider_tool_call(&agent_id, &call_id))
+            .append_agent_event(&agent_id, None, event.clone())
             .expect("append differential tool call");
+        append_raw_cbor(
+            &agents_dir.join(&agent_id).join("events.cbor"),
+            &PersistedAgentEvent {
+                observation_id: tau_proto::ObservationId::random(),
+                seq: PersistedAgentEventSeq::new(0),
+                source: None,
+                event,
+                parent: AgentEventParent::InheritHead,
+                fold_semantics,
+                recorded_at: tau_proto::UnixMicros::now(),
+            },
+        );
         assert_eq!(
             store.loaded_tool_call_ids(),
             &full_scan_loaded_tool_call_ids(&store)

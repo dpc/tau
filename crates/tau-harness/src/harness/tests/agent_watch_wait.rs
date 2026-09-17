@@ -571,10 +571,12 @@ fn overdue_wait_threshold_catchup_is_bounded_per_scheduler_cycle() {
 
 /// Pruning the sole remaining recipient of an in-progress threshold completes
 /// that threshold without rewinding onto an already-materialized subscription.
+/// The fixture stays memory-only because this oracle covers cursor scheduling;
+/// cold-resume tests separately cover durable watch and long-wait state.
 #[test]
 fn pruning_partial_long_wait_batch_preserves_exactly_once_cursor() {
     let td = TempDir::new().expect("tempdir");
-    let mut harness = echo_harness(td.path().join("state")).expect("start");
+    let mut harness = echo_harness_memory_only(td.path().join("state")).expect("start");
     let watched_cid = ensure_test_user_agent(&mut harness);
     let watched_id = durable_agent_id_for_conversation(&harness, &watched_cid).to_string();
     let mut watcher_ids = Vec::new();
