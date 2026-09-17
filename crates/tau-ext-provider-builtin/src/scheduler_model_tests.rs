@@ -211,8 +211,14 @@ impl ReferenceModel {
                             .map_or(entry.independent_due, |shared| {
                                 entry.independent_due.max(shared + jitter_ticks(*prompt))
                             });
+                        entry.shared_boundary = Some(boundary);
+                    } else {
+                        entry.shared_boundary = Some(
+                            entry
+                                .shared_boundary
+                                .map_or(boundary, |shared| shared.max(boundary)),
+                        );
                     }
-                    entry.shared_boundary = Some(boundary);
                     entry.generation = Some(u64::from(generation));
                 }
                 Vec::new()
@@ -912,6 +918,209 @@ fn minimized_quota_release_trace_is_replayable() {
         ModelCommand::Advance { ticks: u16::MAX },
     ];
     check_trace(PR_SEEDS[0], &trace).expect("saved rrqmwy model trace");
+}
+
+/// Ensures newer cooldown evidence adopts its generation without shortening an
+/// active shared boundary, and that the retained boundary still gates dispatch.
+#[test]
+fn shorter_active_cooldown_extension_retains_effective_deadline() {
+    let epoch = Instant::now();
+    let provider = ProviderName::new(PROVIDERS[0]);
+    let mut sut = RetrySchedulerState::default();
+    let job = scheduled_job(PROMPTS[0], provider.as_str());
+    let shorter_due = cooldown_due_for_job(epoch, &job);
+    let retained_boundary = epoch + Duration::from_millis(19);
+    let retained_due = cooldown_due_for_job(retained_boundary, &job);
+
+    assert!(
+        sut.step(SchedulerCommand::Schedule {
+            independent_due: epoch,
+            cooldown: Some(CooldownConstraint {
+                generation: 1,
+                boundary: retained_boundary,
+            }),
+            job: Box::new(job),
+        })
+        .is_empty()
+    );
+    assert!(
+        sut.step(SchedulerCommand::ExtendCooldown {
+            provider,
+            due: epoch,
+            generation: 2,
+        })
+        .is_empty()
+    );
+
+    let scheduled = sut.queue.prompts.iter().next().expect("scheduled prompt");
+    assert_eq!(scheduled.due, retained_due);
+    assert_eq!(scheduled.cooldown_generation, Some(2));
+    assert!(
+        sut.advance(shorter_due).is_empty(),
+        "prompt must remain parked at the rejected shorter deadline"
+    );
+    let actions = sut.advance(retained_due);
+    assert!(matches!(
+        actions.as_slice(),
+        [RetrySchedulerAction::Due(job)] if job.agent_prompt_id.as_str() == PROMPTS[0]
+    ));
+}
+
+/// Ensures cooldown extension remains provider-scoped and monotonic, preserves
+/// independent deadlines, and retains exact-generation release semantics.
+#[test]
+fn cooldown_extension_and_release_preserve_separate_lower_bounds() {
+    let epoch = Instant::now();
+    let limited = ProviderName::new(PROVIDERS[0]);
+    let healthy = ProviderName::new(PROVIDERS[1]);
+    let initial_boundary = epoch + Duration::from_millis(20);
+    let dominant_independent_due = epoch + Duration::from_secs(30);
+    let mut sut = RetrySchedulerState::default();
+
+    for (prompt, provider, independent_due, boundary) in [
+        (PROMPTS[0], limited.clone(), epoch, initial_boundary),
+        (
+            PROMPTS[1],
+            limited.clone(),
+            dominant_independent_due,
+            initial_boundary,
+        ),
+        (
+            PROMPTS[2],
+            healthy,
+            epoch,
+            epoch + Duration::from_millis(11),
+        ),
+    ] {
+        assert!(
+            sut.step(SchedulerCommand::Schedule {
+                independent_due,
+                cooldown: Some(CooldownConstraint {
+                    generation: 1,
+                    boundary,
+                }),
+                job: Box::new(scheduled_job(prompt, provider.as_str())),
+            })
+            .is_empty()
+        );
+    }
+
+    let state = |sut: &RetrySchedulerState, prompt: &str| {
+        let scheduled = sut
+            .queue
+            .prompts
+            .iter()
+            .find(|scheduled| scheduled.job.agent_prompt_id.as_str() == prompt)
+            .expect("scheduled prompt");
+        (
+            scheduled.due,
+            scheduled.independent_due,
+            scheduled.cooldown_generation,
+        )
+    };
+    let initial_limited = state(&sut, PROMPTS[0]).0;
+    let initial_dominant = state(&sut, PROMPTS[1]).0;
+    let initial_unrelated = state(&sut, PROMPTS[2]);
+
+    for (generation, boundary) in [(2, epoch), (3, initial_boundary)] {
+        assert!(
+            sut.step(SchedulerCommand::ExtendCooldown {
+                provider: limited.clone(),
+                due: boundary,
+                generation,
+            })
+            .is_empty()
+        );
+        assert_eq!(
+            state(&sut, PROMPTS[0]),
+            (initial_limited, epoch, Some(generation))
+        );
+        assert_eq!(
+            state(&sut, PROMPTS[1]),
+            (initial_dominant, dominant_independent_due, Some(generation))
+        );
+        assert_eq!(state(&sut, PROMPTS[2]), initial_unrelated);
+    }
+
+    let longer_boundary = epoch + Duration::from_millis(30);
+    assert!(
+        sut.step(SchedulerCommand::ExtendCooldown {
+            provider: limited.clone(),
+            due: longer_boundary,
+            generation: 4,
+        })
+        .is_empty()
+    );
+    let longer_due =
+        cooldown_due_for_job(longer_boundary, &scheduled_job(PROMPTS[0], PROVIDERS[0]));
+    assert_eq!(state(&sut, PROMPTS[0]), (longer_due, epoch, Some(4)));
+    assert_eq!(
+        state(&sut, PROMPTS[1]),
+        (initial_dominant, dominant_independent_due, Some(4))
+    );
+    assert_eq!(state(&sut, PROMPTS[2]), initial_unrelated);
+
+    assert!(
+        sut.step(SchedulerCommand::ReleaseCooldown {
+            provider: limited.clone(),
+            generation: 1,
+            now: epoch,
+        })
+        .is_empty()
+    );
+    assert_eq!(state(&sut, PROMPTS[0]), (longer_due, epoch, Some(4)));
+
+    let release_at = epoch + Duration::from_millis(5);
+    assert!(
+        sut.step(SchedulerCommand::ReleaseCooldown {
+            provider: limited.clone(),
+            generation: 4,
+            now: release_at,
+        })
+        .is_empty()
+    );
+    let released_due = cooldown_due_for_job(release_at, &scheduled_job(PROMPTS[0], PROVIDERS[0]));
+    assert_eq!(state(&sut, PROMPTS[0]), (released_due, epoch, None));
+    assert_eq!(
+        state(&sut, PROMPTS[1]),
+        (dominant_independent_due, dominant_independent_due, None)
+    );
+
+    assert!(
+        sut.step(SchedulerCommand::ExtendCooldown {
+            provider: limited.clone(),
+            due: epoch,
+            generation: 5,
+        })
+        .is_empty()
+    );
+    assert_eq!(
+        state(&sut, PROMPTS[0]),
+        (released_due, released_due, Some(5)),
+        "a new constraint must retain the no-generation anti-herd boundary"
+    );
+
+    let post_release_boundary = epoch + Duration::from_millis(10);
+    assert!(
+        sut.step(SchedulerCommand::ExtendCooldown {
+            provider: limited,
+            due: post_release_boundary,
+            generation: 6,
+        })
+        .is_empty()
+    );
+    let post_release_due = cooldown_due_for_job(
+        post_release_boundary,
+        &scheduled_job(PROMPTS[0], PROVIDERS[0]),
+    );
+    assert_eq!(
+        state(&sut, PROMPTS[0]),
+        (post_release_due, released_due, Some(6))
+    );
+    assert!(
+        post_release_due < longer_due,
+        "released long evidence must not constrain a later generation"
+    );
 }
 
 /// Locks the two timer/manual ownership orderings and duplicate-command

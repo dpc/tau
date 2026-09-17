@@ -6285,13 +6285,19 @@ impl RetryScheduleQueue {
         }
         for scheduled in &mut prompts {
             if scheduled.job.prompt.model.provider == *provider {
-                if scheduled.cooldown_generation.is_none() {
+                let retained_due = scheduled
+                    .cooldown_generation
+                    .is_some()
+                    .then_some(scheduled.due);
+                if retained_due.is_none() {
                     scheduled.independent_due = scheduled.due;
                 }
                 scheduled.cooldown_generation = Some(generation);
-                scheduled.due = scheduled
+                let extended_due = scheduled
                     .independent_due
                     .max(cooldown_due_for_job(due, &scheduled.job));
+                scheduled.due =
+                    retained_due.map_or(extended_due, |retained| retained.max(extended_due));
             }
         }
         self.prompts = BinaryHeap::from(prompts);
