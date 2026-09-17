@@ -411,7 +411,7 @@ turn, for five main and two worker turns across both boots and six lane actions
 total. Probes for the unloaded and vanished ephemeral identities must produce no
 provider prompt or action.
 S4 consumes two sequential start pairs and two automatic-watch actions in
-Boot A: eight main turns and one turn in each distinct worker lane.
+Boot A: six main turns and one turn in each distinct worker lane.
 Boot B consumes one fresh turn per worker in reverse creation order, with no
 main turn. Each accepted worker prompt produces live non-replay `active` stats,
 and the same-daemon roster retains `active` after both workers return idle. Exact
