@@ -95,6 +95,10 @@ fn disabled_target_selects_no_attempt_state() {
         .finish();
     tracing::subscriber::with_default(subscriber, || {
         assert!(AttemptTrace::selected(Backend::Codex, Transport::Websocket).is_none());
+        assert!(
+            AttemptTrace::selected_for_capture(Backend::Codex, Transport::Websocket, false)
+                .is_none()
+        );
     });
 }
 
@@ -109,6 +113,7 @@ fn capture_selection_uses_small_fixed_state_without_trace_output() {
         let mut trace =
             AttemptTrace::selected_for_capture(Backend::Codex, Transport::Websocket, true)
                 .expect("capture selects state");
+        assert!(!trace.trace_enabled);
         let state_bytes = std::mem::size_of::<AttemptTrace>();
         assert!(
             state_bytes <= 384,
