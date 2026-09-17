@@ -33,11 +33,12 @@ pub(crate) fn replace_file(
         if old.is_empty() {
             return Err(ToolFailure::new("oldText must not be empty"));
         }
-        let matches: Vec<_> = normalized.text.match_indices(&old).collect();
-        if matches.len() != 1 {
+        let Some(start) = normalized.text.find(&old) else {
+            return Err(ToolFailure::new("each oldText must match exactly once"));
+        };
+        if normalized.text.rfind(&old) != Some(start) {
             return Err(ToolFailure::new("each oldText must match exactly once"));
         }
-        let (start, _) = matches[0];
         let end = start + old.len();
         replacements.push(Replacement {
             start: normalized.source_offsets[start],

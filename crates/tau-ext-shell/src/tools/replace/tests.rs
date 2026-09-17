@@ -89,10 +89,10 @@ fn replace_uses_nearby_crlf_for_a_target_without_an_ending() {
     );
 }
 
-/// Ensures duplicate and overlapping snapshot targets fail without exposing
-/// request text or modifying the existing file.
+/// Ensures separate edit entries cannot select duplicate or overlapping ranges
+/// in the shared source snapshot.
 #[test]
-fn replace_rejects_non_unique_and_overlapping_targets_without_writing() {
+fn replace_rejects_cross_entry_overlaps_without_writing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("source.txt");
     std::fs::write(&path, "abcdef").expect("write source");
@@ -113,6 +113,103 @@ fn replace_rejects_non_unique_and_overlapping_targets_without_writing() {
         std::fs::read_to_string(&path).expect("read source"),
         "abcdef"
     );
+}
+
+/// Ensures a target repeated at disjoint source positions is rejected as
+/// ambiguous and leaves the source unchanged.
+#[test]
+fn replace_rejects_repeated_source_target_without_writing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("source.txt");
+    std::fs::write(&path, b"aba").expect("write source");
+    let mut world = ShellWorld::real();
+
+    let error = replace_file(&request(&path, &[("a", "X")]), &mut world)
+        .expect_err("repeated target must fail");
+
+    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(std::fs::read(&path).expect("read source"), b"aba");
+}
+
+/// Ensures overlapping ASCII occurrences count separately for exact-match
+/// uniqueness instead of accepting the first non-overlapping iterator match.
+#[test]
+fn replace_rejects_overlapping_ascii_occurrences_without_writing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("source.txt");
+    std::fs::write(&path, b"aaa").expect("write source");
+    let mut world = ShellWorld::real();
+
+    let error = replace_file(&request(&path, &[("aa", "X")]), &mut world)
+        .expect_err("overlapping target occurrences must fail");
+
+    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(std::fs::read(&path).expect("read source"), b"aaa");
+}
+
+/// Ensures overlapping multibyte occurrences reject without slicing through a
+/// UTF-8 scalar boundary and leave the original bytes unchanged.
+#[test]
+fn replace_rejects_overlapping_multibyte_occurrences_without_writing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("source.txt");
+    let source = "ééé".as_bytes();
+    std::fs::write(&path, source).expect("write source");
+    let mut world = ShellWorld::real();
+
+    let error = replace_file(&request(&path, &[("éé", "X")]), &mut world)
+        .expect_err("overlapping multibyte target occurrences must fail");
+
+    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(std::fs::read(&path).expect("read source"), source);
+}
+
+/// Ensures line-ending normalization still detects overlapping logical
+/// occurrences and preserves the original CRLF bytes on rejection.
+#[test]
+fn replace_rejects_overlap_after_line_ending_normalization_without_writing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("source.txt");
+    let source = b"\r\n\r\n\r\n";
+    std::fs::write(&path, source).expect("write source");
+    let mut world = ShellWorld::real();
+
+    let error = replace_file(&request(&path, &[("\n\n", "X")]), &mut world)
+        .expect_err("normalized overlapping target occurrences must fail");
+
+    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(std::fs::read(&path).expect("read source"), source);
+}
+
+/// Ensures a later ambiguous target rejects before an earlier valid edit is
+/// written, preserving request-level atomic validation.
+#[test]
+fn replace_is_atomic_when_a_later_target_is_ambiguous() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("source.txt");
+    std::fs::write(&path, b"one aaa").expect("write source");
+    let mut world = ShellWorld::real();
+
+    let error = replace_file(&request(&path, &[("one", "ONE"), ("aa", "X")]), &mut world)
+        .expect_err("later ambiguous target must fail");
+
+    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(std::fs::read(&path).expect("read source"), b"one aaa");
+}
+
+/// Ensures repeated multibyte scalars remain replaceable when the complete
+/// target has only one possible start.
+#[test]
+fn replace_accepts_unique_multibyte_target() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("source.txt");
+    std::fs::write(&path, "éé").expect("write source");
+    let mut world = ShellWorld::real();
+
+    replace_file(&request(&path, &[("éé", "X")]), &mut world)
+        .expect("unique multibyte target must replace");
+
+    assert_eq!(std::fs::read(&path).expect("read result"), b"X");
 }
 
 /// Ensures a textual no-op returns compact result metadata without writing a
