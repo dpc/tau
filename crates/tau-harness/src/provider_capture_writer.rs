@@ -141,6 +141,14 @@ fn run_worker(
 
 /// Write opaque compressed bytes to one harness-derived path.
 fn write_capture(job: &CaptureWriteJob) -> io::Result<()> {
+    write_capture_with(job, |file, bytes| file.write_all(bytes))
+}
+
+/// Write one capture through an injectable final-file operation.
+fn write_capture_with(
+    job: &CaptureWriteJob,
+    write: impl FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
     ensure_real_directory(&job.session_dir)?;
     let debug_dir = job.session_dir.join("debug");
     let captures_dir = debug_dir.join("provider-requests");
@@ -156,8 +164,20 @@ fn write_capture(job: &CaptureWriteJob) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    file.write_all(&job.zstd)
+    let mut file = options.open(&path)?;
+    let Err(write_error) = write(&mut file, &job.zstd) else {
+        return Ok(());
+    };
+    drop(file);
+    if let Err(cleanup_error) = fs::remove_file(&path) {
+        tracing::warn!(
+            target: "tau_harness::provider_capture",
+            filename = %job.filename.as_str(),
+            error_kind = ?cleanup_error.kind(),
+            "failed to remove partial provider debug capture"
+        );
+    }
+    Err(write_error)
 }
 
 /// Create or validate one owner-private, non-symlink capture directory.

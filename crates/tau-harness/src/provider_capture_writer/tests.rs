@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::mpsc;
 
 use tempfile::TempDir;
@@ -154,6 +155,59 @@ fn rejects_missing_session_root() {
     let missing = temp.path().join("missing");
     assert!(write_capture(&job(&missing, b"opaque")).is_err());
     assert!(!missing.exists());
+}
+
+/// A write that stores a prefix before failing must remove the exact final
+/// capture while returning the original write failure.
+#[test]
+fn partial_write_failure_removes_created_capture() {
+    let temp = TempDir::new().expect("temp");
+    let session = temp.path().join("session");
+    fs::create_dir(&session).expect("session");
+    let capture = job(&session, b"partial capture");
+    let path = session.join("debug/provider-requests/provider/1-prompt-http-sse-request.json.zst");
+
+    let error = write_capture_with(&capture, |file, bytes| {
+        file.write_all(&bytes[..7]).expect("partial write");
+        Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "injected write failure",
+        ))
+    })
+    .expect_err("write must fail");
+
+    assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+    assert_eq!(error.to_string(), "injected write failure");
+    assert!(!path.exists());
+    assert!(
+        fs::read_dir(path.parent().expect("capture parent"))
+            .expect("capture directory")
+            .next()
+            .is_none()
+    );
+}
+
+/// A create-new collision belongs to the pre-existing file, so a failed
+/// capture attempt must neither write nor remove it.
+#[test]
+fn create_new_collision_preserves_existing_capture() {
+    let temp = TempDir::new().expect("temp");
+    let session = temp.path().join("session");
+    let instance = session.join("debug/provider-requests/provider");
+    fs::create_dir_all(&instance).expect("capture tree");
+    let path = instance.join("1-prompt-http-sse-request.json.zst");
+    fs::write(&path, b"existing capture").expect("collision fixture");
+
+    let error = write_capture_with(&job(&session, b"replacement"), |_, _| {
+        panic!("write operation must not run after create-new collision")
+    })
+    .expect_err("collision must fail");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        fs::read(path).expect("existing capture"),
+        b"existing capture"
+    );
 }
 
 /// Proves symlinks at the session, debug, or provider-requests boundary cannot
