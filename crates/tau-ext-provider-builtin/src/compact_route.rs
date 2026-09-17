@@ -2,8 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tau_proto::{ProviderModelInfo, ProviderName};
+use tau_proto::{ModelId, ProviderModelInfo, ProviderName};
 use tau_provider_codex::{CompactOutcome, InferenceProfileIdentity};
+
+use crate::{BuiltinProviderProfile, BuiltinProviderProfiles};
 
 /// Switch implementation once, only after definitive native absence. Neither
 /// cancellation nor post-progress failure can produce this typed outcome.
@@ -60,4 +62,27 @@ pub(super) fn apply_compact_route_downgrades(
             model.standalone_compaction_threshold = None;
         }
     }
+}
+
+/// Selects only ChatGPT models for native-compaction identity discovery.
+///
+/// The generic prompt resolver consumes non-ChatGPT profiles when selecting a
+/// backend, so passing sibling catalogs through this loop would corrupt the
+/// complete replacement declaration emitted after a new negative identity.
+pub(super) fn compact_identity_models(profiles: &BuiltinProviderProfiles) -> Vec<ModelId> {
+    profiles
+        .providers
+        .iter()
+        .filter_map(|(provider, profile)| {
+            let BuiltinProviderProfile::Chatgpt(profile) = profile else {
+                return None;
+            };
+            Some(tau_provider_codex::models_for_provider_mode(
+                provider,
+                profile.responses_mode(),
+            ))
+        })
+        .flatten()
+        .map(|model| model.id)
+        .collect()
 }

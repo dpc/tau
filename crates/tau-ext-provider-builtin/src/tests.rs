@@ -76,6 +76,163 @@ fn compact_route_downgrade_republishes_honest_capability() {
     );
 }
 
+/// Compact-route identity discovery must not consume mixed-family sibling
+/// catalogs before publishing the complete replacement declaration.
+#[test]
+fn compact_route_identity_discovery_preserves_mixed_family_catalogs() {
+    let unavailable = ProviderName::new("chatgpt");
+    let available = ProviderName::new("other-chatgpt");
+    let chat_completions = ProviderName::new("chat-completions");
+    let openrouter = ProviderName::new("openrouter");
+    let responses = ProviderName::new("responses");
+    let auth = prompt_async_test_auth();
+    let other_auth = OpenAiAuth {
+        access_token: oauth_test_jwt("account-b"),
+        refresh_token: "other-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_add(3_600_000),
+        account_id: Some("account-b".to_owned()),
+    };
+    let mut profiles = BuiltinProviderProfiles {
+        credentials: BTreeMap::from([
+            (
+                unavailable.clone(),
+                ProviderCredential::Stored(oauth_test_credential_reference()),
+            ),
+            (
+                available.clone(),
+                ProviderCredential::Stored(oauth_test_credential_reference()),
+            ),
+        ]),
+        providers: BTreeMap::from([
+            (
+                unavailable.clone(),
+                BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    image_generation: false,
+                    auth,
+                    responses: Default::default(),
+                    cache_diagnostics: Default::default(),
+                }),
+            ),
+            (
+                available.clone(),
+                BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    image_generation: false,
+                    auth: other_auth,
+                    responses: Default::default(),
+                    cache_diagnostics: Default::default(),
+                }),
+            ),
+            (
+                chat_completions.clone(),
+                BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+                    base_url: "http://localhost.invalid/v1".to_owned(),
+                    models: vec![test_chat_model("local-model")],
+                    tags: vec![tau_proto::ModelTag::new("local")],
+                    ..Default::default()
+                }),
+            ),
+            (
+                openrouter.clone(),
+                BuiltinProviderProfile::OpenRouter(OpenRouterProfile {
+                    api_key: "openrouter-key".to_owned(),
+                    models: vec![test_chat_model("remote/model")],
+                    ..Default::default()
+                }),
+            ),
+            (
+                responses.clone(),
+                serde_json::from_value(serde_json::json!({
+                    "kind": "responses",
+                    "base_url": "http://responses.invalid/v1",
+                    "api_key": "responses-key",
+                    "tags": ["public"],
+                    "models": [{
+                        "id": "response-model",
+                        "display_name": "Response model",
+                        "context_window": 64000
+                    }]
+                }))
+                .expect("valid public Responses profile"),
+            ),
+        ]),
+        missing_logins: Default::default(),
+    };
+    let before = models_for_profiles(&profiles);
+    let sibling_before = before
+        .iter()
+        .filter(|model| {
+            [
+                chat_completions.clone(),
+                openrouter.clone(),
+                responses.clone(),
+            ]
+            .contains(&model.id.provider)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let available_before = before
+        .iter()
+        .filter(|model| model.id.provider == available)
+        .cloned()
+        .collect::<Vec<_>>();
+    let native_default_models = before
+        .iter()
+        .filter(|model| {
+            model.id.provider == unavailable && model.standalone_compaction_threshold.is_some()
+        })
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    assert!(!native_default_models.is_empty());
+    let mut identities = HashMap::new();
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
+
+    for model in compact_identity_models(&profiles) {
+        let Some(PromptBackend::Responses(config)) = resolve_prompt_backend(
+            &model,
+            &mut profiles,
+            &mut refresh_rejections,
+            &test_network_policy(),
+            None,
+        ) else {
+            continue;
+        };
+        identities.insert(model.provider, config.inference_identity());
+    }
+
+    let unavailable_identity = identities[&unavailable];
+    let unavailable_identities = HashSet::from([unavailable_identity]);
+    let mut replacement = models_for_profiles(&profiles);
+    apply_compact_route_downgrades(&mut replacement, &identities, &unavailable_identities);
+    let sibling_after = replacement
+        .iter()
+        .filter(|model| {
+            [
+                chat_completions.clone(),
+                openrouter.clone(),
+                responses.clone(),
+            ]
+            .contains(&model.id.provider)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let available_after = replacement
+        .iter()
+        .filter(|model| model.id.provider == available)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    assert_eq!(sibling_after, sibling_before);
+    assert_eq!(available_after, available_before);
+    for model_id in native_default_models {
+        let model = replacement
+            .iter()
+            .find(|model| model.id == model_id)
+            .expect("downgraded ChatGPT model remains declared");
+        assert!(model.supports_standalone_compaction);
+        assert!(model.standalone_compaction_threshold.is_none());
+    }
+}
+
 /// Only the typed pre-content native-absence outcome permits a local attempt.
 /// The switch reports new negative evidence once and never recursively retries
 /// a local failure; native success, retry, cancellation, and terminal failure

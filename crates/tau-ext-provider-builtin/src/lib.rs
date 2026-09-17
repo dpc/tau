@@ -119,7 +119,9 @@ use tau_proto::{
 use tau_provider::local_summary_compaction::ConfigError as SummaryCompactionConfigError;
 mod compact_progress;
 mod compact_route;
-use compact_route::{apply_compact_route_downgrades, compact_with_local_fallback};
+use compact_route::{
+    apply_compact_route_downgrades, compact_identity_models, compact_with_local_fallback,
+};
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
     AttemptOutcome as CodexAttemptOutcome, ChatGptRetryIdentity, CodexError, CodexMode,
@@ -4946,17 +4948,16 @@ where
                         .providers
                         .values()
                         .any(|profile| matches!(profile, BuiltinProviderProfile::Chatgpt(_)));
-                    let provider_models = models_for_profiles(&profiles);
-                    for model in provider_models {
+                    for model in compact_identity_models(&profiles) {
                         if let Some(PromptBackend::Responses(config)) = resolve_prompt_backend(
-                            &model.id,
+                            &model,
                             &mut profiles,
                             &mut self.oauth_refresh_rejections,
                             self.codex_runtime.network(),
                             self.extension_data_client.as_ref(),
                         ) {
                             self.compact_profile_identities
-                                .insert(model.id.provider.clone(), config.inference_identity());
+                                .insert(model.provider, config.inference_identity());
                         }
                     }
                     self.observe_all_oauth_resolutions(observes_oauth_refresh, handle)?;
