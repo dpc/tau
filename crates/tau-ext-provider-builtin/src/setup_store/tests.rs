@@ -267,6 +267,25 @@ fn plan() -> ProviderSetupPlan {
     }
 }
 
+fn replacement_plan() -> ProviderSetupPlan {
+    let replacement_identity =
+        ProviderCredentialIdentity::parse("fedcba9876543210fedcba9876543210").expect("identity");
+    let mut replacement = plan();
+    replacement.settings = String::from_utf8(replacement.settings)
+        .expect("settings text")
+        .replace(
+            "0123456789abcdef0123456789abcdef",
+            replacement_identity.as_str(),
+        )
+        .into_bytes();
+    let CredentialSetup::Stored { secret, .. } = &mut replacement.credential else {
+        panic!("test profile stores credentials");
+    };
+    secret.path = ProviderCredentialSlot::OAuth.path(&replacement_identity);
+    secret.contents = SecretBytes::new(b"replacement-secret".to_vec());
+    replacement
+}
+
 fn named_plan() -> ProviderSetupPlan {
     ProviderSetupPlan {
         settings: br#"{"kind":"chat_completions","credential":{"kind":"api_key","identity":"0123456789abcdef0123456789abcdef","source":{"kind":"named_secret","name":"setup_key"}}}"#.to_vec(),
@@ -508,6 +527,115 @@ fn replacing_profile_retires_superseded_credential_identity() {
             .expect("remove replacement")
     );
     assert!(!replacement_credential.exists());
+}
+
+/// Proves config replacement reaches its parent-directory durability barrier
+/// after the new profile and credential are visible but before retiring the
+/// superseded credential.
+#[test]
+fn config_replacement_syncs_parent_before_retiring_superseded_credential() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let old = plan();
+    store
+        .apply_to(&old, ProfileTarget::Config)
+        .expect("initial config setup");
+    let old_credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
+    let replacement = replacement_plan();
+    let replacement_credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/fedcba9876543210fedcba9876543210/oauth.json");
+    let profile = temp
+        .path()
+        .join("config/providers/provider-work/chatgpt.json");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = Arc::new(Barrier::new(2));
+    let worker_store = SetupStore::open_in(temp.path())
+        .with_config_persisted_pause(entered_tx, Arc::clone(&release));
+    let worker =
+        std::thread::spawn(move || worker_store.apply_to(&replacement, ProfileTarget::Config));
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("replacement must reach config parent barrier");
+    assert!(old_credential.exists());
+    assert!(replacement_credential.exists());
+    assert!(
+        std::fs::read_to_string(&profile)
+            .expect("visible replacement profile")
+            .contains("fedcba9876543210fedcba9876543210")
+    );
+    release.wait();
+    worker
+        .join()
+        .expect("replacement thread")
+        .expect("config replacement");
+
+    assert!(!old_credential.exists());
+    assert!(replacement_credential.exists());
+}
+
+/// Proves a real config-parent open failure at the post-persist durability
+/// barrier propagates without retiring either the old or new credential.
+#[test]
+fn config_parent_sync_failure_preserves_both_credentials() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store
+        .apply_to(&plan(), ProfileTarget::Config)
+        .expect("initial config setup");
+    let old_credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
+    let replacement = replacement_plan();
+    let replacement_credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/fedcba9876543210fedcba9876543210/oauth.json");
+    let profile_parent = temp.path().join("config/providers/provider-work");
+    let moved_parent = temp.path().join("config/providers/provider-work-moved");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = Arc::new(Barrier::new(2));
+    let worker_store = SetupStore::open_in(temp.path())
+        .with_config_persisted_pause(entered_tx, Arc::clone(&release));
+    let worker =
+        std::thread::spawn(move || worker_store.apply_to(&replacement, ProfileTarget::Config));
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("replacement must reach config parent barrier");
+    assert_eq!(
+        std::fs::read(&old_credential).expect("old credential before barrier failure"),
+        b"typed-secret"
+    );
+    assert_eq!(
+        std::fs::read(&replacement_credential)
+            .expect("replacement credential before barrier failure"),
+        b"replacement-secret"
+    );
+    std::fs::rename(&profile_parent, &moved_parent).expect("move published config parent");
+    release.wait();
+    let error = worker
+        .join()
+        .expect("replacement thread")
+        .expect_err("config parent open must fail");
+
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert_eq!(
+        std::fs::read(old_credential).expect("old credential after barrier failure"),
+        b"typed-secret"
+    );
+    assert_eq!(
+        std::fs::read(replacement_credential)
+            .expect("replacement credential after barrier failure"),
+        b"replacement-secret"
+    );
+    assert!(
+        std::fs::read_to_string(moved_parent.join("chatgpt.json"))
+            .expect("already published replacement profile")
+            .contains("fedcba9876543210fedcba9876543210")
+    );
 }
 
 /// Ensures dotfiles output cannot strand a config profile's opaque credential

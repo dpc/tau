@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::sync::mpsc::Sender;
 use std::{fs as path_std_fs, io as path_std_io};
 
 use tau_config::provider_settings::{
@@ -163,6 +165,10 @@ pub(crate) struct SetupStore {
         std::sync::Arc<std::sync::Barrier>,
         std::sync::Arc<std::sync::Barrier>,
     )>,
+    /// Test-only notification and barrier that pause after config replacement
+    /// publication and before synchronizing its parent directory.
+    #[cfg(test)]
+    config_persisted: Option<(Sender<()>, std::sync::Arc<std::sync::Barrier>)>,
 }
 
 impl SetupStore {
@@ -189,6 +195,8 @@ impl SetupStore {
             contention: None,
             #[cfg(test)]
             acquired: None,
+            #[cfg(test)]
+            config_persisted: None,
         })
     }
 
@@ -201,6 +209,7 @@ impl SetupStore {
             max_profile_files: MAX_PROVIDER_PROFILE_FILES,
             contention: None,
             acquired: None,
+            config_persisted: None,
         }
     }
 
@@ -224,6 +233,16 @@ impl SetupStore {
         release: std::sync::Arc<std::sync::Barrier>,
     ) -> Self {
         self.acquired = Some((entered, release));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_config_persisted_pause(
+        mut self,
+        entered: Sender<()>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    ) -> Self {
+        self.config_persisted = Some((entered, release));
         self
     }
 
@@ -377,7 +396,7 @@ impl SetupStore {
             }
             ProfileTarget::Config => {
                 path_std_fs::create_dir_all(&config_root)?;
-                atomic_write(&config_path, &plan.settings)?;
+                self.atomic_write(&config_path, &plan.settings)?;
                 Some(config_path)
             }
             ProfileTarget::Stdout => None,
@@ -389,6 +408,30 @@ impl SetupStore {
             self.remove_credential(&plan.extension_instance, &reference)?;
         }
         Ok(path)
+    }
+
+    /// Atomically replaces one config profile, then makes its parent namespace
+    /// durable before callers may retire the superseded credential.
+    fn atomic_write(&self, path: &Path, contents: &[u8]) -> path_std_io::Result<()> {
+        let parent = path.parent().ok_or_else(|| {
+            path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidInput,
+                "profile path has no parent",
+            )
+        })?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        use std::io::Write as _;
+        temporary.write_all(contents)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        #[cfg(test)]
+        if let Some((entered, release)) = &self.config_persisted {
+            entered
+                .send(())
+                .expect("config-persisted test observer must remain available");
+            release.wait();
+        }
+        path_std_fs::File::open(parent)?.sync_all()
     }
 
     /// Retires one superseded closed credential record after its replacement
@@ -952,21 +995,6 @@ fn path_exists(path: &Path) -> path_std_io::Result<bool> {
         Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
-}
-
-fn atomic_write(path: &Path, contents: &[u8]) -> path_std_io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        path_std_io::Error::new(
-            path_std_io::ErrorKind::InvalidInput,
-            "profile path has no parent",
-        )
-    })?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    use std::io::Write as _;
-    temporary.write_all(contents)?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
 }
 
 #[cfg(unix)]
