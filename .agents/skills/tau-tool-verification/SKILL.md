@@ -171,6 +171,13 @@ verify ordinary cleanup only after both 32 later relevant calls and roughly 15
 minutes, plus independent graceful shutdown and safe crash cleanup.
 Caller-requested result limits and grep'"'"'s per-line shortening retain their
 native limit metadata and do not by themselves imply a saved artifact.
+For `find`, verify the exact notice-only overflow boundary: 101 matches with a
+limit of 100 and 101-byte rendered names select 10,199 native bytes. The final
+body must stay within 10 KiB, preserve each visible pathname as a whole record
+or an explicit truncation marker, include both result-limit and visible-limit
+notices, report exact native totals, and save exactly the selected 100-record
+native rendering (not the sentinel or notices). Also verify the neighboring
+no-sentinel, already-over-budget, and multibyte-path cases.
 
 For complete terminal-frame budgeting, verify an oversized `read_image` result
 fails as typed content without base64/text fallback. For an oversized

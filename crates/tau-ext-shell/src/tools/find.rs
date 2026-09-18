@@ -13,7 +13,9 @@ use tau_proto::CborValue;
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, text_stats};
 use crate::tools::CancellableToolRun;
-use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented};
+use crate::truncate::{
+    MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, Truncated, truncate_line_oriented_lines_with_byte_limit,
+};
 
 pub(crate) const DEFAULT_FIND_LIMIT: usize = 1000;
 const MAX_FIND_LIMIT: usize = MAX_OUTPUT_LINES;
@@ -202,22 +204,16 @@ fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput 
     let displayed: Vec<String> = matches.into_iter().take(request.limit).collect();
     let limit_reached = observed_matches > displayed.len();
     let full_output_text = displayed.join("\n");
-    let truncated = truncate_line_oriented(&full_output_text);
-    let mut output_text = if truncated.was_truncated {
-        truncated.content
-    } else {
-        full_output_text.clone()
-    };
-
     let mut notices = Vec::new();
     if limit_reached {
         notices.push(limit_reached_notice(request.limit));
     }
+    let mut truncated = truncate_find_records(&displayed, full_output_text.len(), &notices);
     if truncated.was_truncated {
         notices.push("10 KiB/2000 line visible output limit reached.".to_owned());
+        truncated = truncate_find_records(&displayed, full_output_text.len(), &notices);
     }
-
-    output_text = append_notices_within_cap(output_text, &notices);
+    let output_text = append_notices(truncated.content, &notices);
 
     let mut display = crate::display::ok_display(request.display_args);
     display.stats = text_stats(&output_text);
@@ -270,24 +266,33 @@ fn limit_reached_notice(limit: usize) -> String {
     }
 }
 
-fn append_notices_within_cap(mut output_text: String, notices: &[String]) -> String {
+fn truncate_find_records(
+    displayed: &[String],
+    total_bytes: usize,
+    notices: &[String],
+) -> Truncated {
+    let notice_bytes = rendered_notices(notices).len();
+    let record_budget = MAX_OUTPUT_BYTES
+        .checked_sub(notice_bytes)
+        .expect("find notices fit the visible output budget");
+    truncate_line_oriented_lines_with_byte_limit(
+        displayed.iter().map(String::as_str),
+        displayed.len(),
+        total_bytes,
+        record_budget,
+    )
+}
+
+fn rendered_notices(notices: &[String]) -> String {
     if notices.is_empty() {
-        return output_text;
+        return String::new();
     }
-    let notice = format!("\n\n[{}]", notices.join(" "));
-    if output_text.len().saturating_add(notice.len()) <= MAX_OUTPUT_BYTES {
-        output_text.push_str(&notice);
-        return output_text;
-    }
-    let Some(budget) = MAX_OUTPUT_BYTES.checked_sub(notice.len()) else {
-        return notice.chars().take(MAX_OUTPUT_BYTES).collect();
-    };
-    let mut end = budget.min(output_text.len());
-    while !output_text.is_char_boundary(end) {
-        end -= 1;
-    }
-    output_text.truncate(end);
-    output_text.push_str(&notice);
+
+    format!("\n\n[{}]", notices.join(" "))
+}
+
+fn append_notices(mut output_text: String, notices: &[String]) -> String {
+    output_text.push_str(&rendered_notices(notices));
     output_text
 }
 

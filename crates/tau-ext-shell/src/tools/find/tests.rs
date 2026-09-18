@@ -12,6 +12,53 @@ fn args(limit: CborValue) -> CborValue {
     ])
 }
 
+fn find_request(limit: usize) -> FindRequest {
+    FindRequest {
+        pattern: "*".to_owned(),
+        path: PathBuf::from("."),
+        limit,
+        display_args: "fixture".to_owned(),
+    }
+}
+
+fn map_text<'a>(result: &'a CborValue, field: &str) -> Option<&'a str> {
+    let CborValue::Map(entries) = result else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match (key, value) {
+        (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.as_str()),
+        _ => None,
+    })
+}
+
+fn map_int(result: &CborValue, field: &str) -> Option<i64> {
+    let CborValue::Map(entries) = result else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match (key, value) {
+        (CborValue::Text(key), CborValue::Integer(value)) if key == field => {
+            i128::from(*value).try_into().ok()
+        }
+        _ => None,
+    })
+}
+
+fn map_bool(result: &CborValue, field: &str) -> Option<bool> {
+    let CborValue::Map(entries) = result else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match (key, value) {
+        (CborValue::Text(key), CborValue::Bool(value)) if key == field => Some(*value),
+        _ => None,
+    })
+}
+
+fn fixed_width_paths(count: usize, suffix: &str) -> Vec<String> {
+    (0..count)
+        .map(|index| format!("{index:03}{suffix}"))
+        .collect()
+}
+
 /// Ensures find rejects wrong-typed limits instead of silently using the
 /// default result cap.
 #[test]
@@ -105,7 +152,7 @@ fn find_limit_bounds_collected_matches() {
     ]);
 
     let result = run_find(&args).expect("find").result;
-    let CborValue::Map(entries) = result else {
+    let CborValue::Map(entries) = &result else {
         panic!("expected result map");
     };
     let output = entries
@@ -138,6 +185,9 @@ fn find_limit_bounds_collected_matches() {
     assert_eq!(matches, 1);
     assert!(limit_reached);
     assert!(output.contains("1 results limit reached"));
+    assert_eq!(map_bool(&result, "truncated"), None);
+    assert_eq!(map_text(&result, "full_output_path"), None);
+    assert_eq!(map_bool(&result, "saved_output_unavailable"), None);
 }
 
 /// Ensures large caller limits cannot force collection far beyond the
@@ -243,17 +293,111 @@ fn find_escapes_control_characters_in_paths() {
 
     assert_eq!(output, "line\\nbreak.txt");
 }
-/// Ensures find notices are included without exceeding the documented 10
-/// KiB output budget.
+/// Ensures a result-limit notice that causes the visible budget overflow
+/// rerenders whole records, reports exact native totals, and saves the original
+/// selected records rather than a notice or sentinel.
 #[test]
-fn find_notices_stay_within_output_cap() {
-    let notice = "10 KiB/2000 line visible output limit reached.".to_owned();
-    let suffix_len = format!("\n\n[{notice}]").len();
-    let output = append_notices_within_cap(
-        format!("{}étail", "x".repeat(MAX_OUTPUT_BYTES - suffix_len - 1)),
-        std::slice::from_ref(&notice),
-    );
+fn find_notice_overflow_preserves_whole_records_and_exact_artifact() {
+    let matches = fixed_width_paths(101, &"x".repeat(98));
+    let selected = matches[..100].to_vec();
+    let full_output = selected.join("\n");
+    assert_eq!(full_output.len(), 10_199);
+
+    let rendered = render_find_output(find_request(100), matches).result;
+    let output = map_text(&rendered, "output").expect("output");
+    let visible_records = output
+        .split_once("\n\n[")
+        .expect("notices")
+        .0
+        .lines()
+        .collect::<Vec<_>>();
 
     assert!(output.len() <= MAX_OUTPUT_BYTES);
-    assert!(output.contains(&notice));
+    assert!(output.contains("100 results limit reached"));
+    assert!(output.contains("10 KiB/2000 line visible output limit reached."));
+    assert!(visible_records.iter().all(|record| {
+        *record == "(truncated)" || selected.iter().any(|selected| selected == record)
+    }));
+    assert_eq!(map_int(&rendered, "matches"), Some(100));
+    assert_eq!(map_bool(&rendered, "limit_reached"), Some(true));
+    assert_eq!(map_bool(&rendered, "truncated"), Some(true));
+    assert_eq!(map_int(&rendered, "total_lines"), Some(100));
+    assert_eq!(map_int(&rendered, "total_bytes"), Some(10_199));
+
+    if let Some(path) = map_text(&rendered, "full_output_path") {
+        assert_eq!(
+            std::fs::read_to_string(path).expect("saved find output"),
+            full_output
+        );
+    } else {
+        assert_eq!(map_bool(&rendered, "saved_output_unavailable"), Some(true));
+    }
+}
+
+/// Ensures the same 10,199-byte selected records remain unchanged when no
+/// sentinel requires a result-limit notice.
+#[test]
+fn find_native_output_at_notice_boundary_fits_without_sentinel() {
+    let matches = fixed_width_paths(100, &"x".repeat(98));
+    let expected = matches.join("\n");
+
+    let rendered = render_find_output(find_request(100), matches).result;
+
+    assert_eq!(map_text(&rendered, "output"), Some(expected.as_str()));
+    assert_eq!(map_bool(&rendered, "limit_reached"), None);
+    assert_eq!(map_bool(&rendered, "truncated"), None);
+    assert_eq!(map_text(&rendered, "full_output_path"), None);
+}
+
+/// Ensures records that already exceed the native cap are rerendered from the
+/// originals after both notices are known, with honest recovery metadata.
+#[test]
+fn find_preexisting_overflow_preserves_native_recovery_output() {
+    let matches = fixed_width_paths(101, &"x".repeat(118));
+    let expected = matches[..100].join("\n");
+    assert!(MAX_OUTPUT_BYTES < expected.len());
+
+    let rendered = render_find_output(find_request(100), matches).result;
+    let output = map_text(&rendered, "output").expect("output");
+
+    assert!(output.len() <= MAX_OUTPUT_BYTES);
+    assert!(output.contains("100 results limit reached"));
+    assert!(output.contains("10 KiB/2000 line visible output limit reached."));
+    assert_eq!(map_bool(&rendered, "truncated"), Some(true));
+    assert_eq!(
+        map_int(&rendered, "total_bytes"),
+        Some(expected.len() as i64)
+    );
+    if let Some(path) = map_text(&rendered, "full_output_path") {
+        assert_eq!(
+            std::fs::read_to_string(path).expect("saved find output"),
+            expected
+        );
+    } else {
+        assert_eq!(map_bool(&rendered, "saved_output_unavailable"), Some(true));
+    }
+}
+
+/// Ensures notice budgeting never cuts a multibyte pathname at a UTF-8
+/// boundary or fabricates a partial logical record.
+#[test]
+fn find_notice_overflow_preserves_multibyte_record_boundaries() {
+    let matches = fixed_width_paths(101, &"é".repeat(49));
+    let selected = matches[..100].to_vec();
+    assert_eq!(selected.join("\n").len(), 10_199);
+
+    let rendered = render_find_output(find_request(100), matches).result;
+    let output = map_text(&rendered, "output").expect("output");
+    let visible_records = output
+        .split_once("\n\n[")
+        .expect("notices")
+        .0
+        .lines()
+        .collect::<Vec<_>>();
+
+    assert!(output.len() <= MAX_OUTPUT_BYTES);
+    assert!(visible_records.iter().all(|record| {
+        *record == "(truncated)" || selected.iter().any(|selected| selected == record)
+    }));
+    assert_eq!(map_bool(&rendered, "truncated"), Some(true));
 }
