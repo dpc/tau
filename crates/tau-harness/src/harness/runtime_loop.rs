@@ -274,7 +274,8 @@ impl Harness {
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
             if on_time_ready {
-                self.handle_expired_extension_startup_deadlines(Instant::now())?;
+                let protected = self.protected_extension_startup_connections();
+                self.handle_expired_extension_startup_deadlines_except(Instant::now(), &protected)?;
             }
             self.ensure_extension_startup_deadlines(wait_started_at);
         }

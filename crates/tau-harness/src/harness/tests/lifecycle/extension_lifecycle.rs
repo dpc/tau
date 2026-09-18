@@ -4601,6 +4601,76 @@ fn ready_blocked_behind_hello_retains_decode_deadline_authority() {
     assert_eq!(ready.join().expect("Ready sender joins"), Ok(()));
 }
 
+/// Ensures handling one on-time Ready does not expire another on-time Ready
+/// that is queued behind it in the real one-slot component ingress.
+#[test]
+fn ready_blocked_behind_ready_retains_decode_deadline_authority() {
+    for (case, blocked_is_required) in [("required", true), ("optional", false)] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        let first = crate::test_connection_id(format!("queued-ready-first-{case}"));
+        let blocked = crate::test_connection_id(format!("queued-ready-blocked-{case}"));
+        let _first_sink = connect_handshaking_tool(&mut h, first.as_str());
+        let _blocked_sink = connect_handshaking_tool(&mut h, blocked.as_str());
+        h.extensions
+            .entries
+            .get_mut(&blocked)
+            .expect("blocked extension entry")
+            .require = blocked_is_required;
+        let deadline = Instant::now() - Duration::from_secs(1);
+        h.extensions.startup_deadlines.insert(
+            first.clone(),
+            StartupDeadline {
+                deadline,
+                name: crate::test_extension_name(format!("queued-ready-first-{case}")),
+                require: true,
+            },
+        );
+        h.extensions.startup_deadlines.insert(
+            blocked.clone(),
+            StartupDeadline {
+                deadline,
+                name: crate::test_extension_name(format!("queued-ready-blocked-{case}")),
+                require: blocked_is_required,
+            },
+        );
+        h.runtime_io
+            .component_ingress_tx
+            .send_for_test(HarnessEvent::from_connection_observed_at_for_test(
+                first.clone(),
+                HarnessInputMessage::Ready(Default::default()),
+                deadline,
+            ))
+            .expect("occupy ingress with first Ready");
+        let blocked_sender = h.runtime_io.component_ingress_tx.clone();
+        let blocked_connection = blocked.clone();
+        let ready = std::thread::spawn(move || {
+            blocked_sender.send_for_test(HarnessEvent::from_connection_observed_at_for_test(
+                blocked_connection,
+                HarnessInputMessage::Ready(Default::default()),
+                deadline,
+            ))
+        });
+        h.runtime_io.component_ingress.wait_for_blocked_sender();
+
+        let result = h.wait_for_extensions_ready_at(deadline - STARTUP_TIMEOUT);
+        let sender_result = ready.join().expect("blocked Ready sender joins");
+
+        assert_eq!(sender_result, Ok(()));
+        result.expect("both decoded Ready frames retain deadline authority");
+        assert_eq!(h.extensions.entries[&first].state, ExtensionState::Ready);
+        assert_eq!(h.extensions.entries[&blocked].state, ExtensionState::Ready);
+        assert!(!h.extensions.startup_deadlines.contains_key(&first));
+        assert!(!h.extensions.startup_deadlines.contains_key(&blocked));
+        assert!(!event_log_events(&h).iter().any(|event| matches!(
+            event,
+            Event::HarnessNotice(notice)
+                if notice.message.contains(blocked.as_str())
+                    && notice.message.contains("startup_timeout_seconds")
+        )));
+    }
+}
+
 /// Ensures one pending on-time Ready protects only its exact connection and
 /// cannot defer a silent required peer's earlier independent deadline.
 #[test]
