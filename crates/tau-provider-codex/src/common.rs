@@ -866,6 +866,17 @@ fn add_serialized<T: serde::Serialize>(current: u64, value: Option<&T>) -> u64 {
     })
 }
 
+/// Returns the owned URL and title bytes retained by semantic citations.
+pub(crate) fn citation_retained_payload_bytes(citations: &[ContentPart]) -> u64 {
+    citations.iter().fold(0, |bytes, part| match part {
+        ContentPart::UrlCitation { citation } => {
+            let bytes = add_len(bytes, citation.url().len());
+            add_len(bytes, citation.title().len())
+        }
+        _ => bytes,
+    })
+}
+
 impl StreamState {
     /// Construct an empty provider response accumulator.
     pub(crate) fn new() -> Self {
@@ -1659,10 +1670,13 @@ impl StreamState {
 pub(crate) fn output_item_retained_payload_bytes(item: &OutputItemAccumulator) -> u64 {
     match item {
         OutputItemAccumulator::Empty | OutputItemAccumulator::Compaction(None) => 0,
-        OutputItemAccumulator::Message(message) => add_optional_string(
-            message.text.len() as u64,
-            message.responses_raw_json.as_ref(),
-        ),
+        OutputItemAccumulator::Message(message) => {
+            let bytes = add_optional_string(
+                message.text.len() as u64,
+                message.responses_raw_json.as_ref(),
+            );
+            bytes.saturating_add(citation_retained_payload_bytes(&message.citations))
+        }
         OutputItemAccumulator::ToolCall(call) => {
             let bytes = add_len(0, call.id.len());
             let bytes = add_len(bytes, call.name.len());

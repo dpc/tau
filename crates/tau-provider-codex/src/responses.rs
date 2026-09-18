@@ -30,8 +30,8 @@ use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 use self::codex_response_wake_generation::CodexResponseWakeGeneration;
 use crate::canonical_identifier::CanonicalIdentifierFamily;
 use crate::common::{
-    LlmError, OutputItemAccumulator, PromptPayload, StreamState, cbor_to_json, effort_wire,
-    json_to_cbor, output_item_retained_payload_bytes,
+    LlmError, OutputItemAccumulator, PromptPayload, StreamState, cbor_to_json,
+    citation_retained_payload_bytes, effort_wire, json_to_cbor, output_item_retained_payload_bytes,
 };
 use crate::decoded_event::DecodedEvent;
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
@@ -1334,13 +1334,14 @@ fn projected_text_or_tool_bytes(
         event_type,
         "response.output_text.delta" | "response.output_text.done"
     ) {
-        let retained_raw = match old_item {
-            Some(OutputItemAccumulator::Message(message)) => {
-                message.responses_raw_json.as_ref().map_or(0, String::len)
+        let retained_non_text_payload = match old_item {
+            Some(OutputItemAccumulator::Message(_)) => {
+                old_payload.saturating_sub(u64::try_from(old_message_len).unwrap_or(u64::MAX))
             }
             _ => 0,
         };
-        let new_payload = new_message_len.saturating_add(retained_raw) as u64;
+        let new_payload = retained_non_text_payload
+            .saturating_add(u64::try_from(new_message_len).unwrap_or(u64::MAX));
         return Some(
             state
                 .admitted_retained_state_bytes()
@@ -1465,7 +1466,17 @@ fn projected_output_item_bytes(
                     .and_then(|message| message.responses_raw_json.as_ref())
                     .map_or(0, String::len)
             };
-            ((text_len.saturating_add(raw_len)) as u64, text_len as u64)
+            let citation_len = if done {
+                citation_retained_payload_bytes(&citations_from_message_item(item))
+            } else {
+                old_message.map_or(0, |message| {
+                    citation_retained_payload_bytes(&message.citations)
+                })
+            };
+            (
+                (text_len.saturating_add(raw_len) as u64).saturating_add(citation_len),
+                text_len as u64,
+            )
         }
         "message" => {
             materializes = false;

@@ -2445,6 +2445,309 @@ fn retained_state_budget_accepts_equality_and_rejects_before_mutation() {
     assert_eq!(updates, 0);
 }
 
+/// Citation admission charges canonical URL and UTF-8 title bytes independently
+/// of the raw message sidecar, accepts exact equality, and rejects first
+/// excess.
+#[test]
+fn citation_retained_bytes_are_admitted_before_message_mutation() {
+    let text = "é";
+    let title = "Café";
+    let item = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{
+            "type": "output_text",
+            "text": text,
+            "annotations": [{
+                "type": "url_citation",
+                "start_index": 0,
+                "end_index": 1,
+                "url": "https://example.com/é",
+                "title": title
+            }]
+        }]
+    });
+    let raw = item.to_string();
+    let event = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": item
+    });
+    let canonical_url = "https://example.com/%C3%A9";
+    let citation_bytes = (canonical_url.len() + title.len()) as u64;
+    let expected = std::mem::size_of::<OutputItemAccumulator>() as u64
+        + (text.len() as u64 * 2)
+        + raw.len() as u64
+        + citation_bytes;
+
+    assert_eq!(
+        projected_retained_state_bytes(&StreamState::new(), &event, Some(&raw))
+            .expect("project cited message"),
+        expected
+    );
+
+    let mut exact = StreamState::new();
+    apply_ws_json_event_with_limit(&mut exact, &event, Some(&raw), expected, &mut |_| {})
+        .expect("exact citation-retained limit");
+    assert_eq!(exact.admitted_retained_state_bytes(), expected);
+    assert_eq!(exact.logical_retained_bytes(), expected);
+    assert!(matches!(
+        &exact.output_items[0],
+        OutputItemAccumulator::Message(message)
+            if matches!(
+                message.citations.as_slice(),
+                [tau_proto::ContentPart::UrlCitation { citation }]
+                    if citation.url() == canonical_url && citation.title() == title
+            )
+    ));
+
+    let mut excess = StreamState::new();
+    let mut updates = 0;
+    assert!(matches!(
+        apply_ws_json_event_with_limit(
+            &mut excess,
+            &event,
+            Some(&raw),
+            expected - 1,
+            &mut |_| updates += 1
+        ),
+        Err(LlmError::InvalidResponse(message)) if message == RESPONSE_RESOURCE_LIMIT_ERROR
+    ));
+    assert!(excess.output_items.is_empty());
+    assert_eq!(excess.admitted_retained_state_bytes(), 0);
+    assert_eq!(updates, 0);
+}
+
+/// Message replacement recomputes validated citation bytes, while incremental
+/// item and text updates preserve them until another output family takes the
+/// slot.
+#[test]
+fn citation_retained_bytes_follow_message_transitions() {
+    let cited_item = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "phase": "commentary",
+        "content": [{
+            "type": "output_text",
+            "text": "a",
+            "annotations": [{
+                "type": "url_citation",
+                "start_index": 0,
+                "end_index": 1,
+                "url": "https://example.com/first",
+                "title": "初"
+            }]
+        }]
+    });
+    let cited_raw = cited_item.to_string();
+    let cited_event = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": cited_item
+    });
+    let mut state = StreamState::new();
+    apply_ws_json_event_with_limit(
+        &mut state,
+        &cited_event,
+        Some(&cited_raw),
+        u64::MAX,
+        &mut |_| {},
+    )
+    .expect("insert cited message");
+    let cited_bytes = ("https://example.com/first".len() + "初".len()) as u64;
+    assert_eq!(
+        state.logical_retained_bytes(),
+        std::mem::size_of::<OutputItemAccumulator>() as u64
+            + 2
+            + cited_raw.len() as u64
+            + cited_bytes
+    );
+
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {"type": "message", "role": "assistant", "phase": "final_answer"}
+    });
+    let before_added = state.admitted_retained_state_bytes();
+    assert_eq!(
+        projected_retained_state_bytes(&state, &added, None).expect("project non-done message"),
+        before_added
+    );
+    apply_ws_json_event_with_limit(&mut state, &added, None, u64::MAX, &mut |_| {})
+        .expect("preserve citations through non-done message");
+    assert_eq!(state.logical_retained_bytes(), before_added);
+
+    for event in [
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "delta": "!"
+        }),
+        serde_json::json!({
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "text": "ok"
+        }),
+    ] {
+        let projected =
+            projected_retained_state_bytes(&state, &event, None).expect("project text update");
+        apply_ws_json_event_with_limit(&mut state, &event, None, u64::MAX, &mut |_| {})
+            .expect("preserve citations through text update");
+        assert_eq!(state.admitted_retained_state_bytes(), projected);
+        assert_eq!(state.logical_retained_bytes(), projected);
+        assert!(matches!(
+            &state.output_items[0],
+            OutputItemAccumulator::Message(message)
+                if matches!(
+                    message.citations.as_slice(),
+                    [tau_proto::ContentPart::UrlCitation { .. }]
+                )
+        ));
+    }
+
+    for (url, title) in [
+        (Some("https://example.com/replacement"), Some("new")),
+        (Some("javascript:unsafe"), Some("invalid")),
+        (None, None),
+    ] {
+        let annotations = match (url, title) {
+            (Some(url), Some(title)) => serde_json::json!([{
+                "type": "url_citation",
+                "start_index": 0,
+                "end_index": 1,
+                "url": url,
+                "title": title
+            }]),
+            _ => serde_json::json!([]),
+        };
+        let item = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "z",
+                "annotations": annotations
+            }]
+        });
+        let raw = item.to_string();
+        let event = serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": item
+        });
+        let expected_citation_bytes = match url {
+            Some("https://example.com/replacement") => {
+                ("https://example.com/replacement".len() + "new".len()) as u64
+            }
+            _ => 0,
+        };
+        let expected = std::mem::size_of::<OutputItemAccumulator>() as u64
+            + 2
+            + raw.len() as u64
+            + expected_citation_bytes;
+        assert_eq!(
+            projected_retained_state_bytes(&state, &event, Some(&raw))
+                .expect("project replacement message"),
+            expected
+        );
+        apply_ws_json_event_with_limit(&mut state, &event, Some(&raw), u64::MAX, &mut |_| {})
+            .expect("replace message citations");
+        assert_eq!(state.admitted_retained_state_bytes(), expected);
+        assert_eq!(state.logical_retained_bytes(), expected);
+    }
+
+    apply_ws_json_event_with_limit(
+        &mut state,
+        &cited_event,
+        Some(&cited_raw),
+        u64::MAX,
+        &mut |_| {},
+    )
+    .expect("restore cited message before item-family replacement");
+    assert!(matches!(
+        &state.output_items[0],
+        OutputItemAccumulator::Message(message)
+            if matches!(
+                message.citations.as_slice(),
+                [tau_proto::ContentPart::UrlCitation { .. }]
+            )
+    ));
+
+    let tool = serde_json::json!({
+        "type": "function_call",
+        "call_id": "call",
+        "name": "tool",
+        "arguments": "{}"
+    });
+    let replacement = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": tool
+    });
+    let projected = projected_retained_state_bytes(&state, &replacement, None)
+        .expect("project tool replacement");
+    apply_ws_json_event_with_limit(&mut state, &replacement, None, u64::MAX, &mut |_| {})
+        .expect("replace cited message with tool");
+    assert!(matches!(
+        state.output_items[0],
+        OutputItemAccumulator::ToolCall(_)
+    ));
+    assert_eq!(state.admitted_retained_state_bytes(), projected);
+    assert_eq!(state.logical_retained_bytes(), projected);
+
+    let text_delta = serde_json::json!({
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "delta": "x"
+    });
+    let projected = projected_retained_state_bytes(&state, &text_delta, None)
+        .expect("project tool replacement");
+    apply_ws_json_event_with_limit(&mut state, &text_delta, None, projected, &mut |_| {})
+        .expect("replace tool with text at exact limit");
+    assert!(matches!(
+        state.output_items[0],
+        OutputItemAccumulator::Message(_)
+    ));
+    assert_eq!(state.admitted_retained_state_bytes(), projected);
+    assert_eq!(state.logical_retained_bytes(), projected);
+
+    let opaque_item = serde_json::json!({"type": "future_item", "payload": "retained"});
+    let opaque_raw = opaque_item.to_string();
+    let opaque_event = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": opaque_item
+    });
+    apply_ws_json_event_with_limit(
+        &mut state,
+        &opaque_event,
+        Some(&opaque_raw),
+        u64::MAX,
+        &mut |_| {},
+    )
+    .expect("replace text with opaque item");
+    assert!(matches!(
+        state.output_items[0],
+        OutputItemAccumulator::UnknownProviderItem(_)
+    ));
+
+    let text_done = serde_json::json!({
+        "type": "response.output_text.done",
+        "output_index": 0,
+        "text": "done"
+    });
+    let projected = projected_retained_state_bytes(&state, &text_done, None)
+        .expect("project opaque replacement");
+    apply_ws_json_event_with_limit(&mut state, &text_done, None, projected, &mut |_| {})
+        .expect("replace opaque item with text at exact limit");
+    assert!(matches!(
+        state.output_items[0],
+        OutputItemAccumulator::Message(_)
+    ));
+    assert_eq!(state.admitted_retained_state_bytes(), projected);
+    assert_eq!(state.logical_retained_bytes(), projected);
+}
+
 /// Missing raw JSON on completed opaque output is a shape error before retained
 /// state accounting, even when the same event would exceed a zero byte limit.
 #[test]
