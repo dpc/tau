@@ -154,7 +154,13 @@ reader or migration.
 ## Developer scratch access
 
 `tau dev tmux` grants provider access only to explicit `(extension instance,
-provider)` pairs. It copies exactly the selected credential-free settings file
-and, for a stored-credential profile, its provider Secret subtree into private
-scratch roots. An explicit keyless profile has no Secret subtree to copy. The
-helper never mounts or reads credentials in place from the real state tree.
+provider)` pairs. It copies the selected credential-free settings file and, for
+a stored-credential profile, its provider Secret subtree into private scratch
+roots. When an API-key profile names a configured secret source, the helper
+removes that binding only from the scratch settings after copying the
+materialized credential. The resulting direct-entry snapshot preserves the
+credential identity, slot, and all other profile settings across scratch
+startup and restart without importing source declarations or tracking later
+source changes. Real settings and credentials remain unchanged. An explicit
+keyless profile has no Secret subtree to copy. The helper never mounts or reads
+credentials in place from the real state tree.

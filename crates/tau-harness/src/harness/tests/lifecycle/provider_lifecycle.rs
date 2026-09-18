@@ -993,6 +993,44 @@ fn provider_startup_missing_declaration_suppresses_stale_credential() {
     ));
 }
 
+/// Proves direct-entry API-key records remain unchanged across repeated
+/// startup snapshots, which protects detached dev-tmux scratch credentials.
+#[test]
+fn provider_startup_direct_entry_preserves_credential_across_restarts() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let settings =
+        tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
+            .expect("settings");
+    std::fs::create_dir_all(&settings).expect("settings root");
+    std::fs::write(
+        settings.join("deepseek.json"),
+        br#"{"kind":"chat_completions","credential":{"kind":"api_key","identity":"0123456789abcdef0123456789abcdef"}}"#,
+    )
+    .expect("settings");
+    let credential = state
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json");
+    std::fs::create_dir_all(credential.parent().expect("parent")).expect("credential root");
+    let original = br#"{"version":0,"kind":"api_key","value":"scratch-snapshot"}"#;
+    std::fs::write(&credential, original).expect("credential");
+
+    for _ in 0..2 {
+        let snapshot = provider_startup::snapshot_and_materialize_named_provider_credentials(
+            &builtin_provider_startup_config(None),
+            None,
+            &state,
+            &SecretSources::default(),
+        )
+        .expect("startup snapshot");
+        assert!(!snapshot.bound_names.contains_key("provider-work"));
+        assert!(snapshot.diagnostics.is_empty());
+        assert_eq!(
+            std::fs::read(&credential).expect("credential after startup"),
+            original
+        );
+    }
+}
+
 /// Proves provider snapshot failures follow the extension's required/optional
 /// startup policy instead of unconditionally aborting the harness.
 #[cfg(unix)]

@@ -272,6 +272,12 @@ and must not write through pre-existing symlinks, non-regular files, or
 externally linked entries. Missing or empty testing configuration must be
 surfaced as a warning and must continue with no provider credentials in the
 scratch environment.
+An opted-in materialized API-key profile that names a secret source becomes a
+scratch-only direct-entry snapshot: the helper removes only the scratch
+binding after copying the credential, preserving identity, slot, and all other
+settings while leaving real files unchanged. It does not import declarations,
+general configuration, or external secret material, and normal harness
+missing-declaration invalidation remains unchanged.
 
 The manual boundary and observable helper behavior are recorded in
 [`SPEC-tau-cli-dev-tmux`](SPEC-tau-cli-dev-tmux.md).

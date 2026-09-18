@@ -145,6 +145,149 @@ fn provider_allowlist_copies_external_config_profile_symlink() {
     );
 }
 
+/// Proves a state-owned named-source API-key profile becomes a scratch-only
+/// direct-entry snapshot without changing its real settings or credential.
+#[test]
+fn provider_allowlist_detaches_state_named_source_only_in_scratch() {
+    assert_named_source_becomes_scratch_snapshot(false);
+}
+
+/// Proves a config-owned named-source API-key profile becomes a scratch-only
+/// direct-entry snapshot without changing its real settings or credential.
+#[test]
+fn provider_allowlist_detaches_config_named_source_only_in_scratch() {
+    assert_named_source_becomes_scratch_snapshot(true);
+}
+
+fn assert_named_source_becomes_scratch_snapshot(config_owned: bool) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("config");
+    let state = temp.path().join("state");
+    let scratch = temp.path().join("scratch");
+    let allowed = target("provider-builtin", "deepseek");
+    let identity = "0123456789abcdef0123456789abcdef";
+    let original_settings = format!(
+        r#"{{"kind":"chat_completions","base_url":"https://example.invalid","credential":{{"kind":"api_key","identity":"{identity}","source":{{"kind":"named_secret","name":"provider_key"}}}}}}"#
+    );
+    let settings = if config_owned {
+        extension_provider_config_dir_of(&config, allowed.extension.as_str())
+            .expect("config root")
+            .join("deepseek.json")
+    } else {
+        extension_provider_settings_dir_of(&state, allowed.extension.as_str())
+            .expect("state root")
+            .join("deepseek.json")
+    };
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("settings dir");
+    std::fs::write(&settings, &original_settings).expect("settings");
+    let credential = extension_secret_dir_of(&state, allowed.extension.as_str())
+        .expect("secret root")
+        .join(format!("providers/{identity}/api-key.json"));
+    std::fs::create_dir_all(credential.parent().expect("credential parent"))
+        .expect("credential dir");
+    let original_credential = br#"{"version":0,"kind":"api_key","value":"snapshot-key"}"#;
+    std::fs::write(&credential, original_credential).expect("credential");
+    let access = provider_access_from_dirs_and_settings(
+        Some(config),
+        Some(state),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: vec![allowed],
+        }),
+    );
+
+    access.copy_allowed_profiles().expect("copy registration");
+
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("real settings"),
+        original_settings
+    );
+    assert_eq!(
+        std::fs::read(&credential).expect("real credential"),
+        original_credential
+    );
+    let scratch_settings = std::fs::read(scratch.join("providers/provider-builtin/deepseek.json"))
+        .expect("scratch settings");
+    let scratch_value: serde_json::Value =
+        serde_json::from_slice(&scratch_settings).expect("scratch JSON");
+    assert_eq!(scratch_value["kind"], "chat_completions");
+    assert_eq!(scratch_value["base_url"], "https://example.invalid");
+    assert_eq!(scratch_value["credential"]["kind"], "api_key");
+    assert_eq!(scratch_value["credential"]["identity"], identity);
+    assert!(scratch_value["credential"].get("source").is_none());
+    let scratch_object = scratch_value.as_object().expect("scratch object");
+    let ProviderCredential::Stored(reference) =
+        parse_provider_credential(&tau_proto::ProviderName::new("deepseek"), scratch_object)
+            .expect("scratch credential")
+    else {
+        panic!("scratch credential must remain stored");
+    };
+    assert_eq!(reference.identity().as_str(), identity);
+    assert_eq!(reference.named_source(), None);
+    assert_eq!(
+        std::fs::read(scratch.join(format!(
+            "secrets/ext/provider-builtin/providers/{identity}/api-key.json"
+        )))
+        .expect("scratch credential"),
+        original_credential
+    );
+}
+
+/// Proves direct-entry and keyless profiles retain byte-identical settings
+/// while named-source detachment remains narrowly scoped.
+#[test]
+fn provider_allowlist_preserves_direct_entry_and_keyless_profiles() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = temp.path().join("state");
+    let scratch = temp.path().join("scratch");
+    let identity = "0123456789abcdef0123456789abcdef";
+    let direct = target("provider-builtin", "deepseek");
+    let keyless = target("provider-builtin", "local");
+    let settings_dir =
+        extension_provider_settings_dir_of(&state, direct.extension.as_str()).expect("settings");
+    std::fs::create_dir_all(&settings_dir).expect("settings dir");
+    let direct_settings = format!(
+        r#"{{ "kind": "chat_completions", "credential": {{ "kind": "api_key", "identity": "{identity}" }} }}"#
+    );
+    let keyless_settings = r#"{ "kind": "local", "credential": { "kind": "none" } }"#.to_owned();
+    std::fs::write(settings_dir.join("deepseek.json"), &direct_settings).expect("direct settings");
+    std::fs::write(settings_dir.join("local.json"), &keyless_settings).expect("keyless settings");
+    let credential = extension_secret_dir_of(&state, direct.extension.as_str())
+        .expect("secret root")
+        .join(format!("providers/{identity}/api-key.json"));
+    std::fs::create_dir_all(credential.parent().expect("credential parent"))
+        .expect("credential dir");
+    let original_credential = br#"{"version":0,"kind":"api_key","value":"direct-key"}"#;
+    std::fs::write(&credential, original_credential).expect("credential");
+    let access = provider_access_from_settings(
+        Some(state),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: vec![direct, keyless],
+        }),
+    );
+
+    access.copy_allowed_profiles().expect("copy profiles");
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("providers/provider-builtin/deepseek.json"))
+            .expect("direct scratch settings"),
+        direct_settings
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("providers/provider-builtin/local.json"))
+            .expect("keyless scratch settings"),
+        keyless_settings
+    );
+    assert_eq!(
+        std::fs::read(scratch.join(format!(
+            "secrets/ext/provider-builtin/providers/{identity}/api-key.json"
+        )))
+        .expect("direct scratch credential"),
+        original_credential
+    );
+}
+
 /// Proves tmux rejects an oversized external config profile before copying it
 /// into scratch state.
 #[cfg(unix)]

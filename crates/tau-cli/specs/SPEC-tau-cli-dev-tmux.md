@@ -29,6 +29,13 @@ The scratch Tau enables every extension instance named by the allowlist. The
 canonical `provider-builtin` instance inherits its built-in component identity;
 renamed instances receive exact scratch-only built-in component suffix and
 provider-role configuration.
+For a materialized API-key profile with a named-secret binding, the helper
+removes only that binding from the scratch copy after copying its typed
+credential. The scratch profile is a direct-entry snapshot: it preserves the
+credential identity, slot, and other settings across scratch startup and
+restart, but does not import source declarations or follow later source
+changes. The real profile and credential remain unchanged. Direct-entry,
+OAuth, and keyless profiles retain their existing copy behavior.
 
 The trusted-local process and scratch-cleanup boundaries are described by
 [`ARCH-tau-cli`](ARCH-tau-cli.md).
