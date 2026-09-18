@@ -17,6 +17,19 @@ const STALE_TTL: Duration = Duration::from_secs(30);
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 type Discovery = Arc<dyn Fn() -> io::Result<RunningSessionSnapshot> + Send + Sync>;
 
+#[cfg(test)]
+type WorkerTestHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+/// Deterministic synchronization hooks for focused worker lifecycle tests.
+#[derive(Clone, Default)]
+struct WorkerTestHooks {
+    /// Pauses or observes the worker after its post-discovery shutdown check.
+    after_shutdown_check: Option<WorkerTestHook>,
+    /// Observes shutdown after it has attempted to wake the worker.
+    after_shutdown_action: Option<WorkerTestHook>,
+}
+
 /// Owns one lazy, single-flight discovery worker for an interactive attachment.
 pub(super) struct SessionCompletion {
     /// Shared worker control retained until attachment cleanup.
@@ -55,6 +68,44 @@ impl SessionCompletion {
         clock: Clock,
         discovery: Discovery,
     ) -> Self {
+        #[cfg(test)]
+        {
+            Self::new_with_test_hooks(
+                current_session,
+                term,
+                clock,
+                discovery,
+                WorkerTestHooks::default(),
+            )
+        }
+        #[cfg(not(test))]
+        {
+            Self {
+                control: Arc::new(WorkerControl {
+                    current_session,
+                    term,
+                    clock,
+                    discovery,
+                    cache: Arc::new(Mutex::new(Cache::default())),
+                    worker: Mutex::new(None),
+                    latest_generation: Arc::new(AtomicU64::new(0)),
+                    lifecycle: Arc::new(WorkerLifecycle {
+                        shutdown: AtomicBool::new(false),
+                    }),
+                }),
+            }
+        }
+    }
+
+    /// Creates test completion with deterministic worker lifecycle hooks.
+    #[cfg(test)]
+    fn new_with_test_hooks(
+        current_session: SessionId,
+        term: TermHandle,
+        clock: Clock,
+        discovery: Discovery,
+        test_hooks: WorkerTestHooks,
+    ) -> Self {
         Self {
             control: Arc::new(WorkerControl {
                 current_session,
@@ -64,7 +115,10 @@ impl SessionCompletion {
                 cache: Arc::new(Mutex::new(Cache::default())),
                 worker: Mutex::new(None),
                 latest_generation: Arc::new(AtomicU64::new(0)),
-                shutdown: Arc::new(AtomicBool::new(false)),
+                lifecycle: Arc::new(WorkerLifecycle {
+                    shutdown: AtomicBool::new(false),
+                    test_hooks,
+                }),
             }),
         }
     }
@@ -92,8 +146,17 @@ struct WorkerControl {
     worker: Mutex<Option<Worker>>,
     /// Most recent completion interaction interested in an in-flight scan.
     latest_generation: Arc<AtomicU64>,
+    /// Shared shutdown state and test-only lifecycle seams.
+    lifecycle: Arc<WorkerLifecycle>,
+}
+
+/// Shutdown state shared with the completion worker.
+struct WorkerLifecycle {
     /// Stops late wakeups and asks the worker to exit.
-    shutdown: Arc<AtomicBool>,
+    shutdown: AtomicBool,
+    /// Deterministic worker lifecycle seams used only by focused tests.
+    #[cfg(test)]
+    test_hooks: WorkerTestHooks,
 }
 
 impl WorkerControl {
@@ -135,7 +198,7 @@ impl WorkerControl {
                 Arc::clone(&self.discovery),
                 Arc::clone(&self.cache),
                 Arc::clone(&self.latest_generation),
-                Arc::clone(&self.shutdown),
+                Arc::clone(&self.lifecycle),
             ));
         }
         if let Some(worker) = worker.as_ref() {
@@ -146,15 +209,21 @@ impl WorkerControl {
     /// Stops and joins the worker after its bounded current discovery
     /// completes.
     fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.lifecycle.shutdown.store(true, Ordering::Release);
         let worker = self
             .worker
             .lock()
             .expect("session completion worker")
             .take();
         if let Some(worker) = worker {
-            let _ = worker.demand.try_send(());
-            let _ = worker.join.join();
+            let Worker { demand, join } = worker;
+            let _ = demand.try_send(());
+            #[cfg(test)]
+            if let Some(hook) = &self.lifecycle.test_hooks.after_shutdown_action {
+                hook();
+            }
+            drop(demand);
+            let _ = join.join();
         }
     }
 }
@@ -176,12 +245,12 @@ impl Worker {
         discovery: Discovery,
         cache: Arc<Mutex<Cache>>,
         latest_generation: Arc<AtomicU64>,
-        shutdown: Arc<AtomicBool>,
+        lifecycle: Arc<WorkerLifecycle>,
     ) -> Self {
         let (demand, demand_rx) = mpsc::sync_channel(1);
         let join = std::thread::spawn(move || {
             while demand_rx.recv().is_ok() {
-                if shutdown.load(Ordering::Acquire) {
+                if lifecycle.shutdown.load(Ordering::Acquire) {
                     break;
                 }
                 let result = discovery();
@@ -210,8 +279,12 @@ impl Worker {
                         }
                     }
                 }
-                if shutdown.load(Ordering::Acquire) {
+                if lifecycle.shutdown.load(Ordering::Acquire) {
                     break;
+                }
+                #[cfg(test)]
+                if let Some(hook) = &lifecycle.test_hooks.after_shutdown_check {
+                    hook();
                 }
                 while demand_rx.try_recv().is_ok() {}
                 let generation = latest_generation.load(Ordering::Acquire);

@@ -161,3 +161,60 @@ fn shutdown_during_discovery_exits_worker_after_result() {
         .recv_timeout(Duration::from_secs(1))
         .expect("worker joined after discovery");
 }
+
+/// Shutdown must disconnect the sole demand sender before joining when its
+/// wakeup is consumed by the worker's post-discovery coalescing drain.
+#[test]
+fn shutdown_disconnects_demand_before_join_after_wakeup_is_drained() {
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(Vec::<u8>::new()), CursorShape::Bar);
+    let (checked_tx, checked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let (released_tx, released_rx) = mpsc::channel();
+    let (shutdown_action_tx, shutdown_action_rx) = mpsc::channel();
+    let completion = SessionCompletion::new_with_test_hooks(
+        session_id("current"),
+        handle,
+        Arc::new(Instant::now),
+        Arc::new(|| {
+            Ok(RunningSessionSnapshot {
+                sessions: Vec::new(),
+                incomplete_claims: 0,
+            })
+        }),
+        WorkerTestHooks {
+            after_shutdown_check: Some(Arc::new(move || {
+                checked_tx.send(()).expect("report shutdown check");
+                release_rx
+                    .lock()
+                    .expect("release receiver")
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("release worker drain");
+                released_tx.send(()).expect("report worker released");
+            })),
+            after_shutdown_action: Some(Arc::new(move || {
+                shutdown_action_tx.send(()).expect("report shutdown action");
+            })),
+        },
+    );
+    assert!(completion.completer()(&[""]).is_empty());
+    checked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker reached post-check drain boundary");
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let drop_thread = std::thread::spawn(move || {
+        drop(completion);
+        dropped_tx.send(()).expect("report dropped");
+    });
+
+    shutdown_action_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("shutdown wake attempted");
+    release_tx.send(()).expect("release worker drain");
+    let released = released_rx.recv_timeout(Duration::from_secs(1));
+    let dropped = dropped_rx.recv_timeout(Duration::from_secs(1));
+    released.expect("worker accepted drain release");
+    dropped.expect("worker joined after draining shutdown wake");
+    drop_thread.join().expect("join completion drop thread");
+}
