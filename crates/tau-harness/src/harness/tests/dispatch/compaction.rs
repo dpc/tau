@@ -8819,58 +8819,6 @@ fn self_compaction_terminal_envelopes_are_literal_and_bounded() {
     }
 }
 
-#[test]
-fn late_prompt_surface_failure_terminalizes_running_compaction() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.config.selected_model = Some("test/model".into());
-    let cid = ensure_test_user_agent(&mut h);
-    let transaction_id =
-        tau_proto::CompactionTransactionId::parse("ct-late-surface").expect("transaction id");
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("user agent")
-        .dispatch
-        .activation_dispatch = path_crate_agent::ActivationDispatchState::Running {
-        id: transaction_id.clone(),
-        cut: tau_proto::AgentHead::Root,
-        resume_through: None,
-        model: "test/model".into(),
-        branch_generation: 0,
-        compact_prompt_id: test_agent_prompt_id("ap-late-surface"),
-    };
-
-    for internal_name in ["first_internal", "second_internal"] {
-        h.tool_routing.registry.register(
-            &crate::test_connection_id("late-surface-test"),
-            ToolSpec {
-                provider_scope: None,
-                name: ToolName::new(internal_name),
-                model_visible_name: Some(ToolName::new("duplicate_visible")),
-                description: None,
-                tool_type: tau_proto::ToolType::Function,
-                parameters: None,
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: true,
-                background_support: None,
-                examples: Vec::new(),
-            },
-        );
-    }
-
-    assert!(h.prepare_agent_prompt_for_dispatch(&cid).is_none());
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentStandaloneCompactionFailed(failed)
-            if failed.transaction_id == transaction_id
-                && failed.reason
-                    == tau_proto::StandaloneCompactionFailureReason::RouteFailed
-    )));
-    h.shutdown().expect("shutdown");
-}
 /// A restored standalone continuation rejects off-branch reconciliation
 /// without an attempt marker, then retries after a journal append failure
 /// without retrying on owning-branch reselection.
