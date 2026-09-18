@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -118,6 +119,145 @@ impl Drop for BlockingTeardownRelease {
             let _ = exited.recv_timeout(Duration::from_secs(1));
         }
     }
+}
+
+/// Deterministic multi-read stderr source that records every byte consumed and
+/// whether the logger continued through EOF.
+struct TrackingChunks {
+    /// Chunks returned by successive reads.
+    chunks: std::collections::VecDeque<Vec<u8>>,
+    /// Concatenation of all bytes returned to the logger.
+    consumed: Arc<Mutex<Vec<u8>>>,
+    /// Whether the logger performed the final EOF read.
+    reached_eof: Arc<AtomicBool>,
+}
+
+impl io::Read for TrackingChunks {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(chunk) = self.chunks.pop_front() else {
+            self.reached_eof.store(true, Ordering::Release);
+            return Ok(0);
+        };
+        buf[..chunk.len()].copy_from_slice(&chunk);
+        self.consumed
+            .lock()
+            .expect("consumed bytes")
+            .extend_from_slice(&chunk);
+        Ok(chunk.len())
+    }
+}
+
+/// Captures mirror records and announces each completed worker flush.
+#[derive(Clone)]
+struct NotifyingMirrorOutput {
+    /// Complete bytes written by the mirror worker.
+    output: Arc<Mutex<Vec<u8>>>,
+    /// Notification sent after each successful flush.
+    flushed: mpsc::Sender<()>,
+}
+
+impl io::Write for NotifyingMirrorOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.output
+            .lock()
+            .expect("mirror output")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let _ = self.flushed.send(());
+        Ok(())
+    }
+}
+
+/// Runs one raw-log setup failure and proves it drains arbitrary stderr through
+/// EOF without mirroring it or disabling another logger's shared mirror.
+fn assert_raw_log_setup_failure_keeps_draining(log_path: &Path) {
+    let chunks = [
+        b"first\0chunk\n".to_vec(),
+        vec![0xff, 0xfe, b'\n'],
+        b"unterminated tail".to_vec(),
+    ];
+    let expected = chunks.concat();
+    let consumed = Arc::new(Mutex::new(Vec::new()));
+    let reached_eof = Arc::new(AtomicBool::new(false));
+    let reader = TrackingChunks {
+        chunks: chunks.into(),
+        consumed: consumed.clone(),
+        reached_eof: reached_eof.clone(),
+    };
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let (flushed_tx, flushed_rx) = mpsc::channel();
+    let mirror = ExtensionStderrMirror::with_writer_and_capacity(
+        NotifyingMirrorOutput {
+            output: output.clone(),
+            flushed: flushed_tx,
+        },
+        8,
+    );
+    let failed_logger = mirror.logger(ExtensionStderrIdentity::new(
+        crate::test_extension_name("setup-failure"),
+        0,
+        31,
+    ));
+
+    run_extension_stderr_logger("setup-failure", reader, log_path, Some(failed_logger));
+
+    assert_eq!(*consumed.lock().expect("consumed bytes"), expected);
+    assert!(
+        reached_eof.load(Ordering::Acquire),
+        "setup failure must keep reading through EOF"
+    );
+    assert!(
+        output.lock().expect("mirror output").is_empty(),
+        "failed logger must mirror neither child bytes nor its EOF suffix"
+    );
+
+    let mut healthy_reader = io::Cursor::new(b"healthy logger\n");
+    let mut healthy_raw = Vec::new();
+    drain_extension_stderr(
+        &mut healthy_reader,
+        &mut healthy_raw,
+        Some(mirror.logger(ExtensionStderrIdentity::new(
+            crate::test_extension_name("setup-healthy"),
+            0,
+            32,
+        ))),
+    );
+    flushed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("shared mirror remained enabled for healthy logger");
+    let mirrored = String::from_utf8(output.lock().expect("mirror output").clone())
+        .expect("escaped mirror record");
+    assert_eq!(healthy_raw, b"healthy logger\n");
+    assert!(mirrored.contains("extension=setup-healthy"));
+    assert!(
+        !mirrored.contains("extension=setup-failure"),
+        "failed logger must mirror neither child bytes nor its EOF suffix"
+    );
+}
+
+/// A parent that is a regular file must not close the child stderr reader when
+/// raw-log directory creation fails.
+#[test]
+fn raw_log_directory_creation_failure_keeps_draining_without_mirroring() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent = temp.path().join("regular-file");
+    std::fs::write(&parent, b"not a directory").expect("create regular-file parent");
+
+    assert_raw_log_setup_failure_keeps_draining(&parent.join("extension.log"));
+}
+
+/// A log path that is already a directory must not close the child stderr
+/// reader when append-open fails.
+#[test]
+fn raw_log_open_failure_keeps_draining_without_mirroring() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log_path = temp.path().join("extension.log");
+    std::fs::create_dir(&log_path).expect("create directory at log path");
+
+    assert_raw_log_setup_failure_keeps_draining(&log_path);
 }
 
 /// A private-file failure permanently suppresses only that child's mirror while

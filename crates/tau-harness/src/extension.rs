@@ -616,51 +616,67 @@ fn spawn_extension_stderr_logger(
     log_path: PathBuf,
     mirror: Option<ExtensionStderrLogger>,
 ) {
-    use std::io::{BufReader, Write};
     thread::spawn(move || {
-        if let Some(parent) = log_path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
+        run_extension_stderr_logger(&name, stderr, &log_path, mirror);
+    });
+}
+
+/// Drains one extension stderr reader while writing its authoritative raw log
+/// when setup succeeds.
+fn run_extension_stderr_logger(
+    name: &str,
+    stderr: impl path_std_io::Read,
+    log_path: &Path,
+    mirror: Option<ExtensionStderrLogger>,
+) {
+    use std::io::{BufReader, Write};
+
+    let mut reader = BufReader::new(stderr);
+    if let Some(parent) = log_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "tau: failed to create extension log dir {}: {e}",
+            parent.display()
+        );
+        let mut discard = std::io::sink();
+        drain_extension_stderr(&mut reader, &mut discard, None);
+        return;
+    }
+    let mut file = match path_std_fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
             eprintln!(
-                "tau: failed to create extension log dir {}: {e}",
-                parent.display()
+                "tau: failed to open extension log {}: {e}",
+                log_path.display()
             );
+            let mut discard = std::io::sink();
+            drain_extension_stderr(&mut reader, &mut discard, None);
             return;
         }
-        let mut file = match path_std_fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!(
-                    "tau: failed to open extension log {}: {e}",
-                    log_path.display()
-                );
-                return;
-            }
-        };
+    };
 
-        let _ = writeln!(
-            file,
-            "--- {} (pid={}) attached at {} ---",
-            name,
-            std::process::id(),
-            chrono_free_date()
-        );
-        let _ = file.flush();
+    let _ = writeln!(
+        file,
+        "--- {} (pid={}) attached at {} ---",
+        name,
+        std::process::id(),
+        chrono_free_date()
+    );
+    let _ = file.flush();
 
-        let mut reader = BufReader::new(stderr);
-        drain_extension_stderr(&mut reader, &mut file, mirror);
-        let _ = writeln!(
-            file,
-            "--- {} stderr closed at {} ---",
-            name,
-            chrono_free_date()
-        );
-        let _ = file.flush();
-    });
+    drain_extension_stderr(&mut reader, &mut file, mirror);
+    let _ = writeln!(
+        file,
+        "--- {} stderr closed at {} ---",
+        name,
+        chrono_free_date()
+    );
+    let _ = file.flush();
 }
 
 /// Drains arbitrary child stderr to the authoritative raw sink before
