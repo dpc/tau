@@ -6,6 +6,13 @@ use std::{
 use super::sampling::ResponsesResponseSampler;
 use super::*;
 
+/// Maximum header bytes accepted by the local HTTP fixture.
+const LOOPBACK_REQUEST_HEADER_LIMIT: usize = 64 * 1024;
+/// Maximum body bytes accepted by the local HTTP fixture.
+const LOOPBACK_REQUEST_BODY_LIMIT: usize = 1024 * 1024;
+/// Maximum time the local HTTP fixture permits for one socket operation.
+const LOOPBACK_SOCKET_TIMEOUT: path_std_time::Duration = path_std_time::Duration::from_secs(5);
+
 /// Minimal borrowed projection used to exercise the production sampler seam.
 struct FakeSamplingProgress<'a> {
     /// Cumulative byte count.
@@ -249,15 +256,20 @@ fn run_loopback_attempt(
     model: &ResponsesModel,
     response: &str,
 ) -> PromptAttemptOutcome {
-    use path_std_io::{Read as _, Write as _};
+    use path_std_io::Write as _;
 
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let address = listener.local_addr().expect("loopback address");
     let response = response.to_owned();
     let server = path_std_thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept request");
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request).expect("read request");
+        stream
+            .set_read_timeout(Some(LOOPBACK_SOCKET_TIMEOUT))
+            .expect("bound loopback request read");
+        stream
+            .set_write_timeout(Some(LOOPBACK_SOCKET_TIMEOUT))
+            .expect("bound loopback response write");
+        consume_loopback_request(&mut stream).expect("consume complete loopback request");
         stream
             .write_all(response.as_bytes())
             .expect("write response");
@@ -282,6 +294,221 @@ fn run_loopback_attempt(
     );
     server.join().expect("loopback server");
     outcome
+}
+
+/// Consume the finite Content-Length request shape emitted by the loopback
+/// adapter without treating an individual read as an HTTP message boundary.
+fn consume_loopback_request(reader: &mut impl path_std_io::Read) -> path_std_io::Result<()> {
+    let mut received = Vec::new();
+    let header_end = loop {
+        let mut chunk = [0_u8; 8192];
+        let count = reader.read(&mut chunk)?;
+        if count == 0 {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::UnexpectedEof,
+                "loopback request ended before complete headers",
+            ));
+        }
+        received.extend_from_slice(&chunk[..count]);
+        if let Some(offset) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+            break offset + 4;
+        }
+        if received.len() > LOOPBACK_REQUEST_HEADER_LIMIT {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidData,
+                "loopback request headers exceed fixture limit",
+            ));
+        }
+    };
+    if LOOPBACK_REQUEST_HEADER_LIMIT < header_end {
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            "loopback request headers exceed fixture limit",
+        ));
+    }
+
+    let headers = std::str::from_utf8(&received[..header_end]).map_err(|error| {
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            format!("loopback request headers are not UTF-8: {error}"),
+        )
+    })?;
+    let mut content_length = None;
+    for line in headers.split("\r\n").skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line.split_once(':').ok_or_else(|| {
+            path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidData,
+                "loopback request contains a malformed header",
+            )
+        })?;
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidData,
+                "loopback request fixture does not support Transfer-Encoding",
+            ));
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::InvalidData,
+                    "loopback request contains duplicate Content-Length",
+                ));
+            }
+            content_length = Some(value.trim().parse::<usize>().map_err(|error| {
+                path_std_io::Error::new(
+                    path_std_io::ErrorKind::InvalidData,
+                    format!("loopback request has invalid Content-Length: {error}"),
+                )
+            })?);
+        }
+    }
+    let content_length = content_length.ok_or_else(|| {
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            "loopback request is missing Content-Length",
+        )
+    })?;
+    if LOOPBACK_REQUEST_BODY_LIMIT < content_length {
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            "loopback request body exceeds fixture limit",
+        ));
+    }
+
+    let buffered_body = received.len() - header_end;
+    if content_length < buffered_body {
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            "loopback request contains bytes after its declared body",
+        ));
+    }
+    let mut remaining = content_length - buffered_body;
+    while remaining != 0 {
+        let mut chunk = [0_u8; 8192];
+        let read_limit = remaining.min(chunk.len());
+        let count = reader.read(&mut chunk[..read_limit])?;
+        if count == 0 {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::UnexpectedEof,
+                "loopback request ended before its declared body",
+            ));
+        }
+        remaining -= count;
+    }
+    Ok(())
+}
+
+/// Scripted reads make request fragmentation deterministic rather than relying
+/// on the kernel to preserve separate socket writes.
+struct ScriptedRead {
+    /// Chunks returned by successive reads.
+    chunks: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl path_std_io::Read for ScriptedRead {
+    fn read(&mut self, buffer: &mut [u8]) -> path_std_io::Result<usize> {
+        let Some(mut chunk) = self.chunks.pop_front() else {
+            return Ok(0);
+        };
+        let count = chunk.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&chunk[..count]);
+        if count != chunk.len() {
+            chunk.drain(..count);
+            self.chunks.push_front(chunk);
+        }
+        Ok(count)
+    }
+}
+
+/// The fixture reader must preserve body bytes buffered with fragmented headers
+/// and continue until the declared body is complete.
+#[test]
+fn loopback_request_reader_handles_fragmented_headers_and_buffered_body() {
+    let mut reader = ScriptedRead {
+        chunks: [
+            b"POST /v1/responses HTTP/1.1\r\ncontent-len".to_vec(),
+            b"gth: 11\r\nx-test: value\r\n\r".to_vec(),
+            b"\nhello ".to_vec(),
+            b"world".to_vec(),
+        ]
+        .into(),
+    };
+
+    consume_loopback_request(&mut reader).expect("consume fragmented request");
+    assert!(reader.chunks.is_empty());
+}
+
+/// A request body larger than the former single-read buffer must be consumed
+/// completely before the fixture writes its response.
+#[test]
+fn loopback_request_reader_consumes_large_body_exactly() {
+    let body = vec![b'x'; 16 * 1024];
+    let mut request = format!(
+        "POST /v1/responses HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&body);
+    let request_len = request.len();
+    request.extend_from_slice(b"sentinel");
+    let mut reader = path_std_io::Cursor::new(request);
+
+    consume_loopback_request(&mut reader).expect("consume large request");
+    assert_eq!(reader.position(), request_len as u64);
+}
+
+/// Premature body EOF must fail clearly rather than allowing the fixture to
+/// reply to a partially delivered request.
+#[test]
+fn loopback_request_reader_rejects_premature_body_eof() {
+    let mut reader =
+        path_std_io::Cursor::new(b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nabc".as_slice());
+
+    let error = consume_loopback_request(&mut reader).expect_err("reject truncated request");
+    assert_eq!(error.kind(), path_std_io::ErrorKind::UnexpectedEof);
+    assert!(error.to_string().contains("declared body"));
+}
+
+/// Unsupported transfer framing must fail explicitly instead of being treated
+/// as an empty or complete request.
+#[test]
+fn loopback_request_reader_rejects_transfer_encoding() {
+    let mut reader = path_std_io::Cursor::new(
+        b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".as_slice(),
+    );
+
+    let error = consume_loopback_request(&mut reader).expect_err("reject chunked request");
+    assert_eq!(error.kind(), path_std_io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("Transfer-Encoding"));
+}
+
+/// Oversized declarations must fail before the fixture waits for or allocates
+/// the declared request body.
+#[test]
+fn loopback_request_reader_rejects_body_over_fixture_limit() {
+    let request = format!(
+        "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+        LOOPBACK_REQUEST_BODY_LIMIT + 1
+    );
+    let mut reader = path_std_io::Cursor::new(request);
+
+    let error = consume_loopback_request(&mut reader).expect_err("reject oversized body");
+    assert_eq!(error.kind(), path_std_io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("body exceeds fixture limit"));
+}
+
+/// Headers that never terminate within the fixture cap must fail rather than
+/// allowing an indefinitely growing request buffer.
+#[test]
+fn loopback_request_reader_rejects_headers_over_fixture_limit() {
+    let mut reader = path_std_io::Cursor::new(vec![b'x'; LOOPBACK_REQUEST_HEADER_LIMIT + 8192]);
+
+    let error = consume_loopback_request(&mut reader).expect_err("reject oversized headers");
+    assert_eq!(error.kind(), path_std_io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("headers exceed fixture limit"));
 }
 
 /// A successful retried public Responses attempt retains the scheduler's
