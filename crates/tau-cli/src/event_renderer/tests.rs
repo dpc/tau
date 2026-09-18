@@ -119,6 +119,14 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
     )
 }
 
+/// Counts visible output blocks without changing the renderer's owned snapshot.
+fn visible_block_count(renderer: &mut super::EventRenderer) -> usize {
+    let snapshot = renderer.resources.handle.take_output_snapshot();
+    let count = snapshot.block_count();
+    renderer.resources.handle.replace_output_snapshot(snapshot);
+    count
+}
+
 /// Unhandled durable observations and metadata mutations must remain harmless
 /// even if delivered during cold attach or later-agent replay. The UI does not
 /// need a harness-side event filter to protect its current pending state.
@@ -182,10 +190,10 @@ fn irrelevant_replay_facts_preserve_current_ui_state() {
     }
 }
 
-/// Cancellation drops ordinary queued projections but must retain their hidden
-/// internal ordering slot for a surviving output-length continuation.
+/// User cancellation arrives before termination and must retain its hidden
+/// output-length continuation while removing visible queued prompts.
 #[test]
-fn cancel_reconciliation_preserves_internal_queued_continuation() {
+fn user_cancel_reconciliation_preserves_internal_queued_continuation() {
     let mut renderer = renderer_for_agent_id_tests();
     let agent = agent_id("main");
     let active_prompt_id = tau_proto::AgentPromptId::parse("active").expect("valid prompt id");
@@ -229,39 +237,25 @@ fn cancel_reconciliation_preserves_internal_queued_continuation() {
         tau_proto::PromptMessageClass::Internal
     );
     assert!(queued.id.is_none());
+}
 
-    let ordinary_preempted_prompt_id =
-        tau_proto::AgentPromptId::parse("ordinary-preempted").expect("valid prompt id");
+/// Marked side-agent preemption finishes its provider before termination and
+/// must retain every queued projection because the harness retains that queue.
+#[test]
+fn marked_preemption_reconciliation_preserves_the_whole_queue() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let agent = agent_id("main");
+    renderer.selection.current_agent_id = Some(agent.clone());
+    renderer.selection.displayed_agent_id = Some(agent.clone());
     renderer.handle_agent_prompt_queued(&tau_proto::AgentPromptQueued {
         agent_id: agent.clone(),
-        text: "discarded by ordinary preemption".to_owned(),
-        message_class: tau_proto::PromptMessageClass::User,
+        text: tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
     });
-    renderer.handle(&tau_proto::Event::AgentPromptTerminated(
-        tau_proto::AgentPromptTerminated {
-            agent_id: agent.clone(),
-            agent_prompt_id: ordinary_preempted_prompt_id.clone(),
-            reason: tau_proto::AgentPromptTerminationReason::Canceled,
-            originator: tau_proto::PromptOriginator::Extension {
-                name: tau_proto::ExtensionName::parse("side-agent").expect("valid extension name"),
-                query_id: "ordinary-preemption".to_owned(),
-            },
-            automatic_compaction_decision: None,
-        },
-    ));
-    renderer.handle(&tau_proto::Event::UiCancelPrompt(
-        tau_proto::UiCancelPrompt {
-            session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
-            target_agent_id: Some(agent.clone()),
-            agent_prompt_id: Some(ordinary_preempted_prompt_id),
-        },
-    ));
-    assert_eq!(renderer.transcript.runtime.queued_user_blocks.len(), 1);
-
     let preempted_prompt_id =
         tau_proto::AgentPromptId::parse("preempted").expect("valid prompt id");
     renderer.handle_agent_prompt_queued(&tau_proto::AgentPromptQueued {
-        agent_id: agent_id("main"),
+        agent_id: agent.clone(),
         text: "retained after preemption".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
     });
@@ -271,7 +265,7 @@ fn cancel_reconciliation_preserves_internal_queued_continuation() {
         .insert(preempted_prompt_id.clone());
     renderer.handle(&tau_proto::Event::AgentPromptTerminated(
         tau_proto::AgentPromptTerminated {
-            agent_id: agent_id("main"),
+            agent_id: agent.clone(),
             agent_prompt_id: preempted_prompt_id.clone(),
             reason: tau_proto::AgentPromptTerminationReason::Canceled,
             originator: tau_proto::PromptOriginator::Extension {
@@ -284,7 +278,7 @@ fn cancel_reconciliation_preserves_internal_queued_continuation() {
     renderer.handle(&tau_proto::Event::UiCancelPrompt(
         tau_proto::UiCancelPrompt {
             session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
-            target_agent_id: Some(agent_id("main")),
+            target_agent_id: Some(agent),
             agent_prompt_id: Some(preempted_prompt_id),
         },
     ));
@@ -292,6 +286,159 @@ fn cancel_reconciliation_preserves_internal_queued_continuation() {
     assert_eq!(
         renderer.transcript.runtime.queued_user_blocks[1].text,
         "retained after preemption"
+    );
+}
+
+/// Ordinary side-agent preemption terminates before its targeted cancellation
+/// and must remove visible and hidden queue slots without touching another
+/// agent. A later user submission must promote exactly once without stale
+/// internal slots consuming its submission or start.
+#[test]
+fn ordinary_preemption_reconciliation_clears_all_target_queue_slots() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let target = agent_id("main");
+    let other = agent_id("other");
+    renderer.selection.current_agent_id = Some(target.clone());
+    renderer.selection.displayed_agent_id = Some(target.clone());
+
+    for (text, message_class) in [
+        (
+            "first stale internal",
+            tau_proto::PromptMessageClass::Internal,
+        ),
+        ("discarded visible", tau_proto::PromptMessageClass::User),
+        (
+            "second stale internal",
+            tau_proto::PromptMessageClass::Internal,
+        ),
+    ] {
+        renderer.handle(&tau_proto::Event::AgentPromptQueued(
+            tau_proto::AgentPromptQueued {
+                agent_id: target.clone(),
+                text: text.to_owned(),
+                message_class,
+            },
+        ));
+    }
+    renderer.handle(&tau_proto::Event::AgentPromptQueued(
+        tau_proto::AgentPromptQueued {
+            agent_id: other.clone(),
+            text: "other agent remains queued".to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+        },
+    ));
+    let blocks_before_cancellation = visible_block_count(&mut renderer);
+
+    let preempted = tau_proto::AgentPromptId::parse("ordinary-preempted").expect("valid prompt id");
+    renderer.handle(&tau_proto::Event::AgentPromptTerminated(
+        tau_proto::AgentPromptTerminated {
+            agent_id: target.clone(),
+            agent_prompt_id: preempted.clone(),
+            reason: tau_proto::AgentPromptTerminationReason::Canceled,
+            originator: tau_proto::PromptOriginator::Extension {
+                name: tau_proto::ExtensionName::parse("side-agent").expect("valid extension name"),
+                query_id: "ordinary-preemption".to_owned(),
+            },
+            automatic_compaction_decision: None,
+        },
+    ));
+    renderer.handle(&tau_proto::Event::UiCancelPrompt(
+        tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+            target_agent_id: Some(target.clone()),
+            agent_prompt_id: Some(preempted),
+        },
+    ));
+
+    assert!(renderer.transcript.runtime.queued_user_blocks.is_empty());
+    assert_eq!(
+        visible_block_count(&mut renderer),
+        blocks_before_cancellation - 1,
+        "ordinary preemption removes its discarded visible queue block"
+    );
+    let other_state = renderer
+        .selection
+        .agents_ui_state
+        .get(&other)
+        .expect("other agent snapshot");
+    assert_eq!(other_state.transcript.runtime.queued_user_blocks.len(), 1);
+    assert_eq!(
+        other_state.transcript.runtime.queued_user_blocks[0].text,
+        "other agent remains queued"
+    );
+
+    let blocks_before_submission = visible_block_count(&mut renderer);
+    let fresh_text = "fresh after preemption";
+    renderer.handle(&tau_proto::Event::AgentPromptQueued(
+        tau_proto::AgentPromptQueued {
+            agent_id: target.clone(),
+            text: fresh_text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+        },
+    ));
+    renderer.handle(&tau_proto::Event::AgentPromptSubmitted(
+        tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: target.clone(),
+            text: fresh_text.to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        },
+    ));
+    renderer.handle(&tau_proto::Event::AgentPromptStarted(
+        tau_proto::AgentPromptStarted {
+            agent_prompt_id: tau_proto::AgentPromptId::parse("fresh-prompt")
+                .expect("valid prompt id"),
+            agent_id: target,
+            session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+            model: "test/model".parse().expect("valid model id"),
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+            operation: tau_proto::PromptOperation::Inference,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    ));
+
+    assert!(renderer.transcript.runtime.queued_user_blocks.is_empty());
+    assert_eq!(
+        visible_block_count(&mut renderer),
+        blocks_before_submission + 1,
+        "fresh submission produces one block and its start consumes no phantom slot"
+    );
+}
+
+/// Untargeted cancellation has no prompt ownership evidence and must not alter
+/// either visible or hidden queued projections.
+#[test]
+fn untargeted_cancel_reconciliation_is_a_noop() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let agent = agent_id("main");
+    renderer.selection.current_agent_id = Some(agent.clone());
+    renderer.selection.displayed_agent_id = Some(agent.clone());
+    renderer.handle_agent_prompt_queued(&tau_proto::AgentPromptQueued {
+        agent_id: agent,
+        text: "still queued".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+    });
+
+    renderer.handle(&tau_proto::Event::UiCancelPrompt(
+        tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::parse("s1").expect("valid session id"),
+            target_agent_id: None,
+            agent_prompt_id: None,
+        },
+    ));
+
+    assert_eq!(renderer.transcript.runtime.queued_user_blocks.len(), 1);
+    assert_eq!(
+        renderer.transcript.runtime.queued_user_blocks[0].text,
+        "still queued"
     );
 }
 

@@ -636,6 +636,91 @@ fn extension_internal_prompt_submit_request_routes_as_internal_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ordinary extension-side preemption must clear a configured extension's
+/// queued internal prompt and publish the exact terminal before its targeted
+/// cancellation so renderer reconciliation can distinguish it from user cancel.
+#[test]
+fn ordinary_side_preemption_clears_internal_queue_before_targeted_cancel() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "utils-ext",
+        "utils-ext",
+        tau_proto::ClientKind::Tool,
+    );
+    h.config.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    append_user_message_via_event(&mut h, "s1", "side work");
+    let prompt_id = h.send_prompt_to_agent("s1");
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("side agent")
+        .identity
+        .originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name("side-owner"),
+        query_id: "ordinary-preemption".to_owned(),
+    };
+    let event_offset = event_log_events(&h).len();
+
+    h.handle_extension_event(
+        "utils-ext",
+        TestProtocolItem::Event(Event::ExtInternalPromptSubmitRequest(
+            tau_proto::ExtInternalPromptSubmitRequest {
+                agent_id: agent_id.clone(),
+                text: "queued internal wake".to_owned(),
+                ctx_id: Some("internal-before-preemption".to_owned()),
+                activation_kind: None,
+            },
+        )),
+    )
+    .expect("queue configured extension internal prompt");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .len(),
+        1
+    );
+
+    h.preempt_blocking_ext_side_agents(&test_session_id("s1"));
+
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .is_empty()
+    );
+    let relevant: Vec<_> = event_log_events(&h)[event_offset..]
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptQueued(queued)
+                if queued.agent_id == agent_id
+                    && queued.message_class == tau_proto::PromptMessageClass::Internal =>
+            {
+                Some("queued")
+            }
+            Event::AgentPromptTerminated(terminated) if terminated.agent_prompt_id == prompt_id => {
+                Some("terminated")
+            }
+            Event::UiCancelPrompt(cancel)
+                if cancel.agent_prompt_id.as_ref() == Some(&prompt_id)
+                    && cancel.target_agent_id.as_ref() == Some(&agent_id) =>
+            {
+                Some("cancel")
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(relevant, ["queued", "terminated", "cancel"]);
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Bad extension prompt targets must be rejected with user-visible harness
 /// notice and must not create durable prompt facts for arbitrary agent ids.
 #[test]

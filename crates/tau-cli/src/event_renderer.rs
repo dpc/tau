@@ -6961,9 +6961,11 @@ impl EventRenderer {
             });
     }
 
-    /// Removes ordinary queued-prompt projections discarded by cancellation
-    /// while retaining hidden internal continuations that remain queued in
-    /// the harness.
+    /// Reconciles queued-prompt projections after targeted cancellation.
+    ///
+    /// User cancellation retains hidden internal continuations. Ordinary
+    /// side-agent preemption clears every queued class, while marked side-agent
+    /// preemption retains the queue and is identified by lifecycle ordering.
     fn handle_ui_cancel_prompt(&mut self, cancel: &tau_proto::UiCancelPrompt) {
         queued_prompt_cancellation::reconcile(
             cancel,

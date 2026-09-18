@@ -19,8 +19,14 @@ pub(super) fn user_front_matches(
     })
 }
 
-/// Removes ordinary queued projections only when the cancellation path cleared
-/// the matching harness queue.
+/// Reconciles queued projections with the cancellation path for the exact
+/// prompt.
+///
+/// Cancellation before termination is user cancellation and retains hidden
+/// internal continuations. Termination before cancellation is side-agent
+/// preemption: an unmarked owner loses its whole harness queue, while the
+/// completion-before-termination marker identifies the queue-retaining marked
+/// owner path.
 pub(super) fn reconcile(
     cancel: &tau_proto::UiCancelPrompt,
     watches: &WatchActivityState,
@@ -35,7 +41,8 @@ pub(super) fn reconcile(
     // User cancellation publishes cancel before termination even during the
     // post-provider tool phase; ordinary side-agent preemption has no marked
     // provider completion and clears its queue before the wakeup.
-    if watches.terminated_agent_prompts.contains(prompt_id)
+    let terminated = watches.terminated_agent_prompts.contains(prompt_id);
+    if terminated
         && watches
             .provider_finished_before_termination
             .contains(prompt_id)
@@ -44,7 +51,7 @@ pub(super) fn reconcile(
     }
     let mut removed_block_ids = Vec::new();
     queued_user_blocks.retain(|queued| {
-        if queued.message_class.is_internal() {
+        if queued.message_class.is_internal() && !terminated {
             return true;
         }
         removed_block_ids.extend(queued.id);
