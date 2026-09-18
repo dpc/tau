@@ -271,6 +271,17 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
             "message scenario requires one closed main call/result lane and one matching inbound lane",
         ));
     }
+    if !provider_context_placement_shape
+        && scenario.lanes.iter().any(|lane| {
+            lane.actions
+                .iter()
+                .any(|action| matches!(action, ScenarioActionV2::BarrierParallelDummyTools { .. }))
+        })
+    {
+        return Err(ClientError::handler(
+            "parallel dummy-tool barriers require the closed provider-context placement scenario",
+        ));
+    }
     let typed_image_lanes = scenario
         .lanes
         .iter()

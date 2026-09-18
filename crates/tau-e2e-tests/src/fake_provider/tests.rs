@@ -2751,6 +2751,56 @@ fn v2_validation_requires_complete_consistent_barriers() {
     );
 }
 
+/// Rejects standalone parallel dummy-tool barriers even when their IDs are
+/// duplicate or otherwise valid, preserving the closed provider-context shape.
+#[test]
+fn v2_validation_rejects_parallel_barriers_outside_provider_context_placement() {
+    let mut standalone_parallel = ScenarioV2::new(
+        "standalone-parallel-barrier",
+        vec![
+            crate::ScenarioLaneV2 {
+                ctx_id: "a".to_owned(),
+                actions: vec![ScenarioActionV2::BarrierParallelDummyTools {
+                    user_text: "a".to_owned(),
+                    barrier: "shared".to_owned(),
+                    participants: 2,
+                    tool_call_ids: vec!["duplicate".into(), "duplicate".into()],
+                }],
+            },
+            crate::ScenarioLaneV2 {
+                ctx_id: "b".to_owned(),
+                actions: vec![ScenarioActionV2::BarrierText {
+                    user_text: "b".to_owned(),
+                    barrier: "shared".to_owned(),
+                    participants: 2,
+                    response: "b".to_owned(),
+                }],
+            },
+        ],
+    );
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(standalone_parallel.clone())
+        }
+        .validate()
+        .is_err()
+    );
+
+    let ScenarioActionV2::BarrierParallelDummyTools { tool_call_ids, .. } =
+        &mut standalone_parallel.lanes[0].actions[0]
+    else {
+        unreachable!("known parallel barrier")
+    };
+    *tool_call_ids = vec!["tool-a".into(), "tool-b".into()];
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(standalone_parallel)
+        }
+        .validate()
+        .is_err()
+    );
+}
+
 /// The placement grammar accepts only the two fully cross-bound non-tool and
 /// parallel-tool shapes and rejects swapped or mismatched fields.
 #[test]
