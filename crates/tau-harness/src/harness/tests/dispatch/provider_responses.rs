@@ -1721,6 +1721,266 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
     restored.shutdown().expect("shutdown restored harness");
 }
 
+/// External messages queued behind an ordinary uncertain inference must make a
+/// second cold restore close that owner even when completed background results
+/// are also restored, so later HumanUI input cannot leave the agent wedged.
+#[test]
+fn replayed_external_messages_supersede_uncertain_owner_after_completed_background_work() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_background_placeholder(&state, "completed-before-replay", "slow_bg");
+    seed_background_result(
+        &state,
+        "completed-before-replay",
+        "slow_bg",
+        "durable background output",
+    );
+
+    let (durable_agent_id, old_prompt_id, crash_cut) = {
+        let mut first =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume completed background state");
+        let cid = ensure_test_user_agent(&mut first);
+        let durable_agent_id = durable_agent_id_for_conversation(&first, &cid);
+        first
+            .dispatch_prompt_for_agent(&cid, PendingPrompt::user("old uncertain owner".to_owned()))
+            .expect("dispatch old owner");
+        let old_prompt_id = read_nth_prompt_created(&first, 0).agent_prompt_id;
+        let crash_cut = first
+            .session_runtime
+            .agent_store
+            .agent_events(durable_agent_id.as_str())
+            .expect("pre-crash records")
+            .to_vec();
+        first.shutdown().expect("release seed session");
+        (durable_agent_id, old_prompt_id, crash_cut)
+    };
+    wait_for_session_unlock(&state, "s1");
+
+    let journal_path = state
+        .join("agents")
+        .join(durable_agent_id.as_str())
+        .join("events.cbor");
+    let mut journal = File::create(&journal_path).expect("rewrite uncertain crash cut");
+    for record in &crash_cut {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(record, &mut encoded).expect("encode crash-cut record");
+        journal
+            .write_all(&(encoded.len() as u64).to_le_bytes())
+            .expect("write record length");
+        journal.write_all(&encoded).expect("write record");
+    }
+    journal.sync_all().expect("sync uncertain crash cut");
+
+    {
+        let mut first_restore =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("first cold restore");
+        let cid = first_restore
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .get(durable_agent_id.as_str())
+            .cloned()
+            .expect("restored route");
+        first_restore
+            .config
+            .accepted_harness_settings
+            .notification_delivery = HarnessSettings::built_in().notification_delivery;
+        for index in 1..=2 {
+            first_restore.publish_event(
+                Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+                Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                    tau_proto::MessagePublisherId::parse("replay-bridge").expect("publisher"),
+                    tau_proto::MessageAgentTarget::new(durable_agent_id.as_str()),
+                    tau_proto::MessageFactId::new(format!("replay-message-{index}")),
+                    tau_proto::MessageParty {
+                        stable_id: "external".to_owned(),
+                        display_name: None,
+                        sender_auth: None,
+                        sender_trust: None,
+                    },
+                    None,
+                    format!("external activation {index}"),
+                )),
+            );
+        }
+        assert_eq!(
+            first_restore.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .pending_message_wakes
+                .len(),
+            2,
+            "both external messages remain deferred behind the uncertain owner"
+        );
+        assert_eq!(
+            first_restore
+                .session_runtime
+                .agent_store
+                .agent_events(durable_agent_id.as_str())
+                .expect("first-restore records")
+                .iter()
+                .filter(|record| matches!(&record.event, Event::MessageDelivered(_)))
+                .count(),
+            2,
+            "both external message facts remain durable"
+        );
+        assert!(
+            first_restore
+                .session_runtime
+                .agent_store
+                .agent_events(durable_agent_id.as_str())
+                .expect("first-restore records")
+                .iter()
+                .all(|record| !matches!(
+                    &record.event,
+                    Event::AgentPromptTerminated(terminated)
+                        if terminated.agent_prompt_id == old_prompt_id
+                )),
+            "the first restore preserves uncertainty until replay can close it"
+        );
+        first_restore.shutdown().expect("shutdown first restore");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut second_restore =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("second cold restore");
+    assert!(
+        second_restore
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .contains_key(durable_agent_id.as_str()),
+        "the second restore must retain the durable agent route"
+    );
+    let background_call = ToolCallId::from("completed-before-replay");
+    assert!(
+        !second_restore
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key(&background_call),
+        "completed background work must not regain active ownership"
+    );
+    let records = second_restore
+        .session_runtime
+        .agent_store
+        .agent_events(durable_agent_id.as_str())
+        .expect("post-replay records");
+    let stale_count = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+            )
+        })
+        .count();
+    let successor_count = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.agent_prompt_id != old_prompt_id
+            )
+        })
+        .count();
+    assert_eq!(
+        stale_count, 1,
+        "the second restore must close the uncertain owner before HumanUI input"
+    );
+    assert_eq!(
+        successor_count, 1,
+        "replayed messages must mint one successor before HumanUI input"
+    );
+    assert!(
+        second_restore
+            .prompt_coordination
+            .prompt_runtime
+            .pending_replay_uncertain_stale
+            .is_empty()
+    );
+    assert!(
+        second_restore
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        second_restore
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+
+    submit_authenticated_ui_prompt(
+        &mut second_restore,
+        durable_agent_id.clone(),
+        "visible HumanUI follow-up",
+        tau_proto::PromptMessageClass::User,
+    )
+    .expect("submit HumanUI follow-up");
+
+    let records = second_restore
+        .session_runtime
+        .agent_store
+        .agent_events(durable_agent_id.as_str())
+        .expect("post-replay records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+            ))
+            .count(),
+        stale_count,
+        "HumanUI follow-up must not duplicate the replay Stale"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.agent_prompt_id != old_prompt_id
+            ))
+            .count(),
+        successor_count,
+        "HumanUI follow-up must not duplicate the replay successor"
+    );
+    assert!(
+        second_restore
+            .prompt_coordination
+            .prompt_runtime
+            .pending_replay_uncertain_stale
+            .is_empty()
+    );
+    assert!(
+        second_restore
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        second_restore
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    second_restore.shutdown().expect("shutdown second restore");
+}
+
 /// A retained manual-compaction start installed after HumanUI Stale
 /// interception gains priority before semantic admission.
 #[test]
