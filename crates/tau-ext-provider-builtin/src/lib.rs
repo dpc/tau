@@ -11,6 +11,7 @@ use std::io as path_std_io;
 
 mod backend_observation;
 mod cache_contract;
+mod cache_refresh;
 mod chat_completions;
 mod chatgpt_profile;
 pub use chatgpt_profile::ChatGptProfile;
@@ -2926,6 +2927,9 @@ where
                 match runtime.try_recv() {
                     Ok(ManualRuntimePoll::Message(frame)) => {
                         handled_input = true;
+                        runtime
+                            .state_mut()
+                            .expire_pending_cache_refreshes(Instant::now(), &handle)?;
                         if OBSERVE_RECEIPT
                             && matches!(
                                 &frame,
@@ -2961,6 +2965,9 @@ where
                                 return Ok(());
                             }
                             DispatchOutcome::StopRequested => {
+                                runtime
+                                    .state_mut()
+                                    .cancel_pending_cache_refreshes(&handle)?;
                                 runtime.state_mut().begin_input_shutdown();
                                 runtime.finish()?;
                                 return Ok(());
@@ -2976,6 +2983,9 @@ where
                     }
                     Ok(ManualRuntimePoll::InputClosed) => {
                         handled_input = true;
+                        runtime
+                            .state_mut()
+                            .cancel_pending_cache_refreshes(&handle)?;
                         runtime.state_mut().begin_input_shutdown();
                         break;
                     }
@@ -2983,6 +2993,9 @@ where
                     Err(error) => {
                         handled_input = true;
                         tracing::warn!(target: LOG_TARGET, "provider input reader failed: {error}");
+                        runtime
+                            .state_mut()
+                            .cancel_pending_cache_refreshes(&handle)?;
                         runtime.state_mut().begin_input_shutdown();
                         break;
                     }
@@ -3000,13 +3013,14 @@ where
     }
 }
 
-/// Main-loop-owned state for asynchronous prompt credential admission.
+/// Main-loop-owned credentials shared by ordered prompts and independent
+/// refreshes.
 #[derive(Default)]
 struct PromptCredentialAdmissionState {
     /// Single bounded timer actor shared by every prompt credential RPC.
     deadlines: Option<PromptCredentialDeadlineScheduler>,
-    /// Prompt admissions retained in source order until credential work
-    /// completes.
+    /// Credential consumers retained in receipt order. Only real prompts share
+    /// FIFO eligibility; maintenance must never become their blocking head.
     admissions: VecDeque<PendingPromptAdmission>,
     /// Exact Secret generations currently undergoing prompt-owned OAuth
     /// refresh.
@@ -3586,6 +3600,7 @@ where
                 self.cache_refresh_backend(refresh, handle)?
             }
             Event::AgentCacheRefreshCancelRequested(cancel) => {
+                self.cancel_pending_cache_refresh(&cancel.refresh_id, handle)?;
                 self.prewarm_supervisor.cancel_refresh(&cancel.refresh_id);
             }
             Event::AgentPromptCreated(prompt) => self.handle_prompt_created(prompt, handle)?,
@@ -3693,114 +3708,6 @@ where
         });
         Ok(())
     }
-    fn cache_refresh_backend(
-        &mut self,
-        refresh: tau_proto::AgentCacheRefreshRequested,
-        handle: &ClientHandle,
-    ) -> ClientResult<()> {
-        let refresh_id = refresh.refresh_id.clone();
-        let requested_provider = refresh
-            .prompt
-            .model
-            .as_ref()
-            .map(|model| model.provider.clone());
-        let mut profiles = match requested_provider.as_ref() {
-            Some(provider) => self.load_selected_profile(provider, handle)?,
-            None => BuiltinProviderProfiles::default(),
-        };
-        let observes_oauth_refresh = requested_provider
-            .as_ref()
-            .is_some_and(|provider| profiles.chatgpt_credential_reference(provider).is_some());
-        let resolved = resolve_prewarm_backend(
-            &refresh.prompt,
-            &mut profiles,
-            &mut self.oauth_refresh_rejections,
-            self.codex_runtime.network(),
-            self.extension_data_client.as_ref(),
-        );
-        if let Some(provider) = requested_provider.as_ref() {
-            self.observe_selected_oauth_resolution(provider, observes_oauth_refresh, handle)?;
-        }
-        let Some((model, config)) = resolved else {
-            return send_cache_refresh_terminal(
-                handle,
-                refresh_id,
-                tau_proto::ProviderCacheRefreshStatus::Unsupported,
-            );
-        };
-        let identity = backend_profile_identity(&PromptBackend::Responses(config.clone()));
-        self.reconcile_provider_profile(&model.provider, identity);
-        if matches!(
-            self.shared_cooldowns.get(&model.provider),
-            Some(cooldown) if cooldown.not_before > self.retry_clock.now()
-        ) {
-            return send_cache_refresh_terminal(
-                handle,
-                refresh_id,
-                tau_proto::ProviderCacheRefreshStatus::Failed,
-            );
-        }
-        self.reconcile_prewarm_profile(&model.provider, &config);
-        let key = PrewarmKey {
-            provider: model.provider,
-            agent_id: refresh.prompt.agent_id.clone(),
-            refresh_id: Some(refresh_id.clone()),
-        };
-        let Some((generation, abort)) = self.prewarm_supervisor.begin(key.clone()) else {
-            return send_cache_refresh_terminal(
-                handle,
-                refresh_id,
-                tau_proto::ProviderCacheRefreshStatus::Failed,
-            );
-        };
-        let deadline =
-            Instant::now() + Duration::from_millis(u64::from(refresh.stop_after_millis.get()));
-        let deadline_abort = abort.clone();
-        thread::spawn(move || {
-            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-                thread::sleep(remaining);
-            }
-            deadline_abort.cancel();
-        });
-        let debug_provider_requests = debug_provider_requests_for(
-            &refresh.prompt.session_id,
-            &self.diagnostics.session_debug_allowed,
-        );
-        let executor = self.prewarm_executor.clone();
-        let runtime = self.codex_runtime.clone();
-        let tx = self.worker_tx.clone();
-        let waker = self
-            .worker_waker
-            .as_ref()
-            .expect("provider runtime worker waker is installed before dispatch")
-            .clone();
-        thread::spawn(move || {
-            let status = executor(PrewarmExecution {
-                runtime,
-                config,
-                request: refresh.prompt,
-                refresh_id: Some(refresh_id.clone()),
-                debug_provider_requests,
-                abort,
-            });
-            let status = if deadline <= Instant::now() {
-                tau_proto::ProviderCacheRefreshStatus::DeadlineExceeded
-            } else {
-                status
-            };
-            let _ = send_worker_message(
-                &tx,
-                &waker,
-                WorkerMessage::PrewarmDone {
-                    key,
-                    generation,
-                    terminal: Some((refresh_id, status)),
-                },
-            );
-        });
-        Ok(())
-    }
-
     fn reconcile_provider_profile(
         &mut self,
         provider: &ProviderName,
@@ -3944,6 +3851,19 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         match &admission.kind {
+            PendingPromptAdmissionKind::CacheRefresh {
+                refresh, deadline, ..
+            } => {
+                send_cache_refresh_terminal(
+                    handle,
+                    refresh.refresh_id.clone(),
+                    if *deadline <= Instant::now() {
+                        tau_proto::ProviderCacheRefreshStatus::DeadlineExceeded
+                    } else {
+                        tau_proto::ProviderCacheRefreshStatus::Cancelled
+                    },
+                )?;
+            }
             PendingPromptAdmissionKind::Initial {
                 agent_prompt_id,
                 prompt,
@@ -4126,7 +4046,7 @@ where
         &mut self,
         mut kind: PendingPromptAdmissionKind,
     ) -> ClientResult<Option<PendingPromptAdmissionKind>> {
-        let provider = kind.prompt().model.provider.clone();
+        let provider = kind.model().provider.clone();
         let profiles = load_fresh_retry_profiles(
             &mut self.load_prompt_profiles,
             &self.configuration.startup_responses_modes,
@@ -4303,9 +4223,7 @@ where
                     .iter()
                     .enumerate()
                     .filter(|(_, admission)| admission.oauth_refresh.as_ref() == Some(&key))
-                    .map(|(index, admission)| {
-                        (index, admission.kind.prompt().model.provider.clone())
-                    })
+                    .map(|(index, admission)| (index, admission.kind.model().provider.clone()))
                     .collect::<Vec<_>>();
                 let (authoritative, observation) = match result {
                     tau_proto::ExtensionDataResultPayload::Ok {
@@ -4352,8 +4270,8 @@ where
         let (provider, model) = {
             let admission = &self.credential_admission.admissions[index];
             (
-                admission.kind.prompt().model.provider.clone(),
-                admission.kind.prompt().model.clone(),
+                admission.kind.model().provider.clone(),
+                admission.kind.model().clone(),
             )
         };
         let Some(reference) = self.credential_admission.admissions[index]
@@ -4599,7 +4517,7 @@ where
             if admission.oauth_refresh.as_ref() != Some(key) {
                 continue;
             }
-            let provider = admission.kind.prompt().model.provider.clone();
+            let provider = admission.kind.model().provider.clone();
             if let Some(BuiltinProviderProfile::Chatgpt(profile)) =
                 admission.profiles.providers.get_mut(&provider)
             {
@@ -4639,7 +4557,7 @@ where
             if admission.oauth_refresh.as_ref() != Some(key) {
                 continue;
             }
-            let provider = admission.kind.prompt().model.provider.clone();
+            let provider = admission.kind.model().provider.clone();
             let mut authoritative_valid = false;
             if let Some(BuiltinProviderProfile::Chatgpt(profile)) =
                 admission.profiles.providers.get_mut(&provider)
@@ -4742,23 +4660,38 @@ where
     /// eligibility and `ProviderPromptSubmitted` stay FIFO even when the
     /// harness replies out of order.
     fn drain_prompt_admissions(&mut self, handle: &ClientHandle) -> ClientResult<()> {
-        while self
-            .credential_admission
-            .admissions
-            .front()
-            .is_some_and(|admission| {
-                admission.observations.is_some() && admission.oauth_refresh.is_none()
-            })
-        {
+        self.expire_pending_cache_refreshes(Instant::now(), handle)?;
+        loop {
+            // Maintenance never owns the prompt FIFO head. Only the first real
+            // prompt can become eligible; ready maintenance is independent.
+            let mut saw_prompt = false;
+            let index = self
+                .credential_admission
+                .admissions
+                .iter()
+                .position(|admission| {
+                    let maintenance = matches!(
+                        admission.kind,
+                        PendingPromptAdmissionKind::CacheRefresh { .. }
+                    );
+                    let eligible = maintenance || !saw_prompt;
+                    saw_prompt |= !maintenance;
+                    eligible
+                        && admission.observations.is_some()
+                        && admission.oauth_refresh.is_none()
+                });
+            let Some(index) = index else { break };
             let mut admission = self
                 .credential_admission
                 .admissions
-                .pop_front()
+                .remove(index)
                 .expect("ready admission is queued");
+            self.cancel_admission_deadlines(&admission);
             if self.input_closed
-                || self
-                    .cancellation
-                    .take_canceled(admission.kind.agent_prompt_id())
+                || admission
+                    .kind
+                    .agent_prompt_id()
+                    .is_some_and(|id| self.cancellation.take_canceled(id))
             {
                 if let Some(observation) = admission.receipt_observation.take() {
                     observation.finished_before_worker(ReceiptOutcome::Canceled);
@@ -4778,7 +4711,7 @@ where
         mut admission: PendingPromptAdmission,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let provider = admission.kind.prompt().model.provider.clone();
+        let provider = admission.kind.model().provider.clone();
         self.publish_selected_models_if_changed(
             &provider,
             &admission.profiles,
@@ -4786,6 +4719,17 @@ where
             handle,
         )?;
         match admission.kind {
+            PendingPromptAdmissionKind::CacheRefresh {
+                refresh,
+                model,
+                deadline,
+            } => self.start_admitted_cache_refresh(
+                refresh,
+                model,
+                deadline,
+                &mut admission.profiles,
+                handle,
+            ),
             PendingPromptAdmissionKind::Initial {
                 agent_prompt_id,
                 prompt,
@@ -4913,7 +4857,7 @@ where
             .credential_admission
             .admissions
             .iter()
-            .position(|admission| admission.kind.agent_prompt_id() == &apid)
+            .position(|admission| admission.kind.agent_prompt_id() == Some(&apid))
             && let Some(mut admission) = self.credential_admission.admissions.remove(index)
         {
             let oauth_refresh = admission.oauth_refresh.clone();
@@ -4967,6 +4911,7 @@ where
     fn drain_worker_messages(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         let mut drain_observation = WorkerDrainObservation::enabled();
         loop {
+            self.expire_pending_cache_refreshes(Instant::now(), handle)?;
             let received = self.worker_rx.try_recv();
             if let (Ok(message), Some(observation)) = (&received, &mut drain_observation) {
                 observation.message(matches!(message, WorkerMessage::Output { .. }));
@@ -5862,6 +5807,32 @@ struct PrewarmExecution {
     abort: PrewarmAbort,
 }
 
+impl PrewarmExecution {
+    /// Checks the original receipt budget at actual worker entry and
+    /// completion. A delayed thread start never receives another
+    /// execution-relative window.
+    fn execute_refresh(
+        mut self,
+        executor: &PrewarmExecutor,
+        deadline: Instant,
+        now: impl Fn() -> Instant,
+    ) -> tau_proto::ProviderCacheRefreshStatus {
+        if deadline <= now() {
+            return tau_proto::ProviderCacheRefreshStatus::DeadlineExceeded;
+        }
+        let status = if tau_provider_codex::TurnAbort::is_aborted(&mut self.abort) {
+            tau_proto::ProviderCacheRefreshStatus::Cancelled
+        } else {
+            executor(self)
+        };
+        if deadline <= now() {
+            tau_proto::ProviderCacheRefreshStatus::DeadlineExceeded
+        } else {
+            status
+        }
+    }
+}
+
 /// Injected finite prewarm attempt used by production and runtime tests.
 type PrewarmExecutor =
     Arc<dyn Fn(PrewarmExecution) -> tau_proto::ProviderCacheRefreshStatus + Send + Sync + 'static>;
@@ -5915,6 +5886,15 @@ struct PendingPromptAdmission {
 
 /// Prompt ownership returned after an asynchronous credential read.
 enum PendingPromptAdmissionKind {
+    /// Optional maintenance shares credential mechanics, never prompt FIFO.
+    CacheRefresh {
+        /// Original content and terminal correlation.
+        refresh: tau_proto::AgentCacheRefreshRequested,
+        /// Selected route, validated before starting credential work.
+        model: ModelId,
+        /// Receipt-relative lifetime, unchanged by credential completion.
+        deadline: Instant,
+    },
     /// Initial prompt admission has not emitted its submitted marker.
     Initial {
         /// Prompt identity used by cancellation and Secret-result correlation.
@@ -5937,26 +5917,28 @@ impl PendingPromptAdmissionKind {
     /// Moves the enabled-only receipt observation into admission ownership.
     fn take_receipt_observation(&mut self) -> Option<ReceiptObservation> {
         match self {
-            Self::Initial { .. } => None,
+            Self::Initial { .. } | Self::CacheRefresh { .. } => None,
             Self::RetryDue(job) | Self::Manual { job, .. } => job.receipt_observation.take(),
         }
     }
 
     /// Returns the prompt identity protected by this admission.
-    fn agent_prompt_id(&self) -> &tau_proto::AgentPromptId {
+    fn agent_prompt_id(&self) -> Option<&tau_proto::AgentPromptId> {
         match self {
+            Self::CacheRefresh { .. } => None,
             Self::Initial {
                 agent_prompt_id, ..
-            } => agent_prompt_id,
-            Self::RetryDue(job) | Self::Manual { job, .. } => &job.agent_prompt_id,
+            } => Some(agent_prompt_id),
+            Self::RetryDue(job) | Self::Manual { job, .. } => Some(&job.agent_prompt_id),
         }
     }
 
-    /// Returns the prompt retained by this admission.
-    fn prompt(&self) -> &tau_proto::AgentPromptCreated {
+    /// Returns the selected route without manufacturing prompt authority.
+    fn model(&self) -> &ModelId {
         match self {
-            Self::Initial { prompt, .. } => prompt,
-            Self::RetryDue(job) | Self::Manual { job, .. } => &job.prompt,
+            Self::CacheRefresh { model, .. } => model,
+            Self::Initial { prompt, .. } => &prompt.model,
+            Self::RetryDue(job) | Self::Manual { job, .. } => &job.prompt.model,
         }
     }
 }

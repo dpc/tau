@@ -17,6 +17,8 @@ use tau_proto::{
 use super::*;
 use crate::tests::SharedTraceWriter;
 
+mod cache_refresh_admission_tests;
+
 /// Shared byte sink used by tests that run tau-client's writer thread.
 #[derive(Clone, Default)]
 struct SharedWriter {
