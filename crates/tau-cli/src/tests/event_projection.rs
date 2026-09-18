@@ -1354,12 +1354,46 @@ fn set_show_thinking_round_trip_restores_history() {
     assert!(thinking_row < response_row);
 }
 
+/// Prevents hidden streamed reasoning from becoming terminal history when
+/// `show-thinking` is enabled after the response finishes.
+///
+/// Reasoning still accumulates transiently while hidden. In verbose mode,
+/// terminal finalization must discard that fallback history; the enabled
+/// control below verifies the same fixture remains renderable after final
+/// synchronization when it is not hidden.
 #[test]
 fn thinking_created_while_off_stays_invisible_after_toggle_on() {
-    // Blocks that arrive while `show_thinking == false` are
-    // never rendered and never tracked, so toggling back on
-    // doesn't suddenly resurrect them. Only blocks that were
-    // visible at some point round-trip through `set_block`.
+    let deliver_response = |renderer: &mut EventRenderer| {
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "hi".into(),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }));
+        renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+            model_params: tau_proto::ModelParams {
+                thinking_summary: tau_proto::ThinkingSummary::Auto,
+                ..Default::default()
+            },
+            ..agent_prompt_created("sp-0", "s1")
+        }));
+        renderer.handle(&Event::ProviderResponseUpdated(
+            provider_response_delta_update(
+                test_agent_prompt_id("sp-0"),
+                "answer",
+                Some("hidden reasoning".into()),
+                tau_proto::PromptOriginator::User,
+            ),
+        ));
+        renderer.handle(&Event::ProviderResponseFinished(finished_response(
+            "sp-0",
+            vec![assistant_message_item("answer")],
+        )));
+    };
+
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1367,27 +1401,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         cli_test_theme(),
     );
     renderer.apply_setting("show-thinking", "false");
-
-    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "hi".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    }));
-    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
-        model_params: tau_proto::ModelParams {
-            thinking_summary: tau_proto::ThinkingSummary::Auto,
-            ..Default::default()
-        },
-        ..agent_prompt_created("sp-0", "s1")
-    }));
-    renderer.handle(&Event::ProviderResponseFinished(finished_response(
-        "sp-0",
-        vec![assistant_message_item("answer")],
-    )));
+    deliver_response(&mut renderer);
     sync(&handle);
     assert!(vt.screen_contains(80, "answer"));
     assert!(!vt.screen_contains(80, "hidden reasoning"));
@@ -1398,6 +1412,18 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         !vt.screen_contains(80, "hidden reasoning"),
         "blocks created while off should not appear after toggle on"
     );
+
+    let (_term, visible_handle, visible_vt) = setup(80, 24);
+    let mut visible_renderer = EventRenderer::new(
+        visible_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    visible_renderer.apply_setting("show-thinking", "true");
+    deliver_response(&mut visible_renderer);
+    sync(&visible_handle);
+    assert!(visible_vt.screen_contains(80, "hidden reasoning"));
+    assert!(visible_vt.screen_contains(80, "answer"));
 }
 
 /// Contradictory request correlation must preserve the independent lifecycle
