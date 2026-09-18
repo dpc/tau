@@ -1033,7 +1033,7 @@ fn validate_json_schema_with_work(
     if let Some(enum_values) = schema.get("enum").and_then(serde_json::Value::as_array)
         && !enum_values
             .iter()
-            .any(|allowed| tau_proto::json_to_cbor(allowed) == *value)
+            .any(|allowed| json_enum_value_matches(allowed, value))
     {
         return Err(enum_error(path, enum_values, value));
     }
@@ -1045,6 +1045,88 @@ fn validate_json_schema_with_work(
         CborValue::Integer(_) | CborValue::Float(_) => validate_number_schema(schema, value, path),
         _ => Ok(()),
     }
+}
+
+/// Compares one JSON enum member with a CBOR argument using JSON value
+/// equality, including exact mixed integer/float comparison.
+fn json_enum_value_matches(allowed: &serde_json::Value, value: &CborValue) -> bool {
+    match (allowed, value) {
+        (serde_json::Value::Null, CborValue::Null) => true,
+        (serde_json::Value::Bool(allowed), CborValue::Bool(value)) => allowed == value,
+        (serde_json::Value::String(allowed), CborValue::Text(value)) => allowed == value,
+        (serde_json::Value::Number(allowed), value) => json_number_matches(allowed, value),
+        (serde_json::Value::Array(allowed), CborValue::Array(values)) => {
+            allowed.len() == values.len()
+                && allowed
+                    .iter()
+                    .zip(values)
+                    .all(|(allowed, value)| json_enum_value_matches(allowed, value))
+        }
+        (serde_json::Value::Object(allowed), CborValue::Map(entries)) => {
+            json_enum_object_matches(allowed, entries)
+        }
+        _ => false,
+    }
+}
+
+/// Compares a JSON number with a CBOR number without reinterpreting a JSON
+/// integer through `f64`.
+fn json_number_matches(allowed: &serde_json::Number, value: &CborValue) -> bool {
+    if let Some(allowed) = allowed.as_i64() {
+        return match value {
+            CborValue::Integer(value) => i128::from(*value) == i128::from(allowed),
+            CborValue::Float(value) => float_matches_integer(*value, i128::from(allowed)),
+            _ => false,
+        };
+    }
+    if let Some(allowed) = allowed.as_u64() {
+        return match value {
+            CborValue::Integer(value) => i128::from(*value) == i128::from(allowed),
+            CborValue::Float(value) => float_matches_integer(*value, i128::from(allowed)),
+            _ => false,
+        };
+    }
+    let Some(allowed) = allowed.as_f64() else {
+        return false;
+    };
+    match value {
+        CborValue::Integer(value) => float_matches_integer(allowed, i128::from(*value)),
+        CborValue::Float(value) => allowed.is_finite() && value.is_finite() && allowed == *value,
+        _ => false,
+    }
+}
+
+/// Compares a finite float with a CBOR integer without rounding the integer.
+fn float_matches_integer(float: f64, integer: i128) -> bool {
+    const CBOR_INTEGER_LIMIT: f64 = 18_446_744_073_709_551_616.0;
+
+    float.is_finite()
+        && float.fract() == 0.0
+        && (float == -CBOR_INTEGER_LIMIT
+            || (-CBOR_INTEGER_LIMIT..CBOR_INTEGER_LIMIT).contains(&float))
+        && float as i128 == integer
+}
+
+/// Matches a JSON object against a CBOR map without admitting duplicate or
+/// non-string keys.
+fn json_enum_object_matches(
+    allowed: &serde_json::Map<String, serde_json::Value>,
+    entries: &[(CborValue, CborValue)],
+) -> bool {
+    if allowed.len() != entries.len() {
+        return false;
+    }
+
+    let mut seen = path_std_collections::HashSet::with_capacity(entries.len());
+    entries.iter().all(|(key, value)| {
+        let CborValue::Text(key) = key else {
+            return false;
+        };
+        seen.insert(key.as_str())
+            && allowed
+                .get(key)
+                .is_some_and(|allowed| json_enum_value_matches(allowed, value))
+    })
 }
 
 fn schema_type_matches(type_schema: &serde_json::Value, value: &CborValue) -> bool {

@@ -104,7 +104,7 @@ fn legacy_validate_json_schema(
     if let Some(enum_values) = schema.get("enum").and_then(serde_json::Value::as_array)
         && !enum_values
             .iter()
-            .any(|allowed| tau_proto::json_to_cbor(allowed) == *value)
+            .any(|allowed| json_enum_value_matches(allowed, value))
     {
         return Err(enum_error(path, enum_values, value));
     }
@@ -294,6 +294,193 @@ fn validation_error_rejects_non_finite_and_imprecise_numbers() {
         large_integer_error.to_string(),
         "$.count: must be at most 9007199254740992"
     );
+}
+
+/// Ensures enum membership compares integer and float representations by exact
+/// numeric value in both directions, including negative values and signed zero.
+#[test]
+fn enum_numeric_equality_is_exact_across_representations() {
+    for (allowed, value) in [
+        (serde_json::json!(1), CborValue::Float(1.0)),
+        (serde_json::json!(1.0), CborValue::Integer(1.into())),
+        (serde_json::json!(-7), CborValue::Float(-7.0)),
+        (serde_json::json!(-7.0), CborValue::Integer((-7).into())),
+        (serde_json::json!(0), CborValue::Float(-0.0)),
+        (
+            serde_json::json!(u64::MAX),
+            CborValue::Integer(u64::MAX.into()),
+        ),
+        (serde_json::json!(1.5), CborValue::Float(1.5)),
+    ] {
+        assert!(
+            json_enum_value_matches(&allowed, &value),
+            "{allowed} must equal {value:?}"
+        );
+    }
+
+    for (allowed, value) in [
+        (serde_json::json!(1), CborValue::Float(1.5)),
+        (
+            serde_json::json!(9_007_199_254_740_993_u64),
+            CborValue::Float(9_007_199_254_740_992.0),
+        ),
+        (
+            serde_json::json!(9_223_372_036_854_775_809_u64),
+            CborValue::Float(9_223_372_036_854_775_808.0),
+        ),
+        (
+            serde_json::json!(u64::MAX),
+            CborValue::Float(18_446_744_073_709_551_616.0),
+        ),
+    ] {
+        assert!(
+            !json_enum_value_matches(&allowed, &value),
+            "{allowed} must not equal {value:?}"
+        );
+    }
+
+    assert!(json_enum_value_matches(
+        &serde_json::json!(9_007_199_254_740_992_u64),
+        &CborValue::Float(9_007_199_254_740_992.0),
+    ));
+    assert!(json_enum_value_matches(
+        &serde_json::json!(9_223_372_036_854_775_808_u64),
+        &CborValue::Float(9_223_372_036_854_775_808.0),
+    ));
+    assert!(json_enum_value_matches(
+        &serde_json::json!(9_223_372_036_854_775_808.0),
+        &CborValue::Integer(9_223_372_036_854_775_808_u64.into()),
+    ));
+    assert!(!json_enum_value_matches(
+        &serde_json::json!(18_446_744_073_709_551_616.0),
+        &CborValue::Integer(u64::MAX.into()),
+    ));
+}
+
+/// Ensures recursive enum equality ignores object member order while
+/// preserving array order and rejecting malformed CBOR maps.
+#[test]
+fn enum_composite_equality_matches_unique_string_keyed_json_objects() {
+    let allowed = serde_json::json!({
+        "name": "sample",
+        "values": [1, true, null]
+    });
+    let reordered = CborValue::Map(vec![
+        (
+            CborValue::Text("values".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Float(1.0),
+                CborValue::Bool(true),
+                CborValue::Null,
+            ]),
+        ),
+        (
+            CborValue::Text("name".to_owned()),
+            CborValue::Text("sample".to_owned()),
+        ),
+    ]);
+    assert!(json_enum_value_matches(&allowed, &reordered));
+
+    for unequal in [
+        CborValue::Map(vec![
+            (
+                CborValue::Text("name".to_owned()),
+                CborValue::Text("sample".to_owned()),
+            ),
+            (
+                CborValue::Text("values".to_owned()),
+                CborValue::Array(vec![
+                    CborValue::Bool(true),
+                    CborValue::Float(1.0),
+                    CborValue::Null,
+                ]),
+            ),
+        ]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("name".to_owned()),
+                CborValue::Text("sample".to_owned()),
+            ),
+            (
+                CborValue::Text("values".to_owned()),
+                CborValue::Array(vec![CborValue::Float(1.0), CborValue::Bool(true)]),
+            ),
+        ]),
+        CborValue::Map(vec![(
+            CborValue::Text("name".to_owned()),
+            CborValue::Text("sample".to_owned()),
+        )]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("name".to_owned()),
+                CborValue::Text("different".to_owned()),
+            ),
+            (
+                CborValue::Text("values".to_owned()),
+                CborValue::Array(vec![
+                    CborValue::Float(1.0),
+                    CborValue::Bool(true),
+                    CborValue::Null,
+                ]),
+            ),
+        ]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("name".to_owned()),
+                CborValue::Text("sample".to_owned()),
+            ),
+            (
+                CborValue::Text("name".to_owned()),
+                CborValue::Text("sample".to_owned()),
+            ),
+        ]),
+        CborValue::Map(vec![
+            (
+                CborValue::Integer(1.into()),
+                CborValue::Text("sample".to_owned()),
+            ),
+            (
+                CborValue::Text("values".to_owned()),
+                CborValue::Array(vec![
+                    CborValue::Float(1.0),
+                    CborValue::Bool(true),
+                    CborValue::Null,
+                ]),
+            ),
+        ]),
+    ] {
+        assert!(!json_enum_value_matches(&allowed, &unequal));
+    }
+}
+
+/// Ensures enum equality does not conflate JSON scalar types or admit
+/// non-finite and non-JSON CBOR values.
+#[test]
+fn enum_equality_keeps_json_scalar_and_cbor_domain_distinctions() {
+    assert!(!json_enum_value_matches(
+        &serde_json::json!(1),
+        &CborValue::Bool(true)
+    ));
+    assert!(!json_enum_value_matches(
+        &serde_json::json!(1),
+        &CborValue::Text("1".to_owned())
+    ));
+    assert!(!json_enum_value_matches(
+        &serde_json::Value::Null,
+        &CborValue::Text("null".to_owned())
+    ));
+    assert!(!json_enum_value_matches(
+        &serde_json::json!(1.0),
+        &CborValue::Float(f64::NAN)
+    ));
+    assert!(!json_enum_value_matches(
+        &serde_json::json!("bytes"),
+        &CborValue::Bytes(b"bytes".to_vec())
+    ));
+    assert!(!json_enum_value_matches(
+        &serde_json::json!(1),
+        &CborValue::Tag(1, Box::new(CborValue::Integer(1.into())))
+    ));
 }
 
 /// Ensures unsigned integer bounds above `i64::MAX` are compared exactly
@@ -951,6 +1138,60 @@ fn invalid_tool_example_rejects_registration() {
             .to_string()
             .contains("$.path: expected string")
     );
+}
+
+/// Ensures example registration uses ordinary exact enum validation, accepts
+/// equal mixed numeric representations without rewriting them, and still
+/// rejects unequal values.
+#[test]
+fn numeric_enum_examples_register_without_argument_repair() {
+    let mut valid = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "value": { "type": "number", "enum": [1] }
+        },
+        "required": ["value"],
+        "additionalProperties": false
+    }));
+    let arguments = CborValue::Map(vec![(
+        CborValue::Text("value".to_owned()),
+        CborValue::Float(1.0),
+    )]);
+    valid.examples.push(ToolExample {
+        id: "mixed-number".to_owned(),
+        title: None,
+        arguments: arguments.clone(),
+        note: None,
+        subcommand: None,
+    });
+
+    let original_arguments = arguments.clone();
+    validate_tool_arguments(&valid, &arguments).expect("mixed representation is valid");
+    assert_eq!(arguments, original_arguments);
+
+    let mut registry = ToolRegistry::new();
+    let report = registry.register(&test_connection_id("valid"), valid);
+    assert!(report.errors.is_empty());
+    let registered = registry
+        .resolve_provider("strict")
+        .expect("valid example registers");
+    assert_eq!(registered.tool.examples[0].arguments, arguments);
+
+    let mut invalid = strict_tool(serde_json::json!({
+        "type": "number",
+        "enum": [1]
+    }));
+    invalid.examples.push(ToolExample {
+        id: "unequal-number".to_owned(),
+        title: None,
+        arguments: CborValue::Float(1.5),
+        note: None,
+        subcommand: None,
+    });
+    let mut invalid_registry = ToolRegistry::new();
+    let report = invalid_registry.register(&test_connection_id("invalid"), invalid);
+    assert_eq!(report.errors.len(), 1);
+    assert!(invalid_registry.providers_for("strict").is_empty());
 }
 
 #[test]
