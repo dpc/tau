@@ -1,7 +1,9 @@
 use std::io::{BufReader, Read, Write};
 use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::Command as path_std_process_Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, fs, io as path_std_io, thread};
@@ -432,26 +434,113 @@ fn listener_forwarder_drop_wakes_while_accept_ready() {
     let socket_path = td.path().join("daemon.sock");
     let listener = bind_listener(&socket_path).expect("bind listener");
     let (forwarder, rx) = spawn_waiting_test_forwarder(&listener);
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let connector_path = socket_path.clone();
-    let connector = thread::spawn(move || {
-        while stop_rx.try_recv().is_err() {
-            let _ = UnixStream::connect(&connector_path);
-        }
-    });
-    rx.recv_timeout(Duration::from_secs(1))
-        .expect("forwarder should accept at least one traffic client");
+    let (stop_tx, connector, _) = spawn_connection_producer(socket_path);
+    let initial_traffic = rx.recv_timeout(Duration::from_secs(1));
 
-    let (done_tx, done_rx) = mpsc::channel();
     let drop_join = thread::spawn(move || {
         drop(forwarder);
-        let _ = done_tx.send(());
     });
-    let drop_result = done_rx.recv_timeout(Duration::from_secs(1));
+    let drop_result = join_thread_with_timeout(drop_join, Duration::from_secs(1));
     let _ = stop_tx.send(());
-    connector.join().expect("connector should not panic");
+    drop(listener);
+    let connector_result = join_thread_with_timeout(connector, Duration::from_secs(1));
+
+    initial_traffic.expect("forwarder should accept at least one traffic client");
     drop_result.expect("forwarder drop should not wait for accept traffic to quiesce");
-    drop_join.join().expect("drop thread should not panic");
+    connector_result.expect("connection producer should stop without waiting for accepts");
+}
+
+/// Ensures the bounded traffic producer stops while an open listener leaves
+/// repeated connection attempts unaccepted and its backlog under pressure.
+#[test]
+fn connection_producer_stops_with_live_unserviced_listener() {
+    let td = TempDir::new().expect("tempdir");
+    let socket_path = td.path().join("daemon.sock");
+    let _listener = bind_listener(&socket_path).expect("bind listener");
+    let (stop_tx, connector, attempts) = spawn_connection_producer(socket_path);
+
+    wait_for_connection_attempts(&attempts, 192, Duration::from_secs(1));
+    stop_tx.send(()).expect("stop connection producer");
+    join_thread_with_timeout(connector, Duration::from_secs(1))
+        .expect("connection producer should stop with the listener still open");
+}
+
+/// Ensures loss of the producer's stop sender requests shutdown rather than
+/// leaving the worker to retry connections forever.
+#[test]
+fn connection_producer_stops_when_stop_sender_disconnects() {
+    let td = TempDir::new().expect("tempdir");
+    let socket_path = td.path().join("daemon.sock");
+    let _listener = bind_listener(&socket_path).expect("bind listener");
+    let (stop_tx, connector, _) = spawn_connection_producer(socket_path);
+
+    drop(stop_tx);
+    join_thread_with_timeout(connector, Duration::from_secs(1))
+        .expect("disconnected stop channel should stop connection producer");
+}
+
+/// Ensures timeout cleanup detaches an unfinished worker instead of hiding the
+/// recorded failure behind an unbounded join.
+#[test]
+fn thread_join_timeout_does_not_wait_for_blocked_worker() {
+    let (release_tx, release_rx) = mpsc::channel();
+    let blocked = thread::spawn(move || {
+        let _ = release_rx.recv();
+    });
+
+    let started = Instant::now();
+    let result = join_thread_with_timeout(blocked, Duration::from_millis(10));
+    assert_eq!(result, Err("thread did not finish before timeout"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let _ = release_tx.send(());
+}
+
+fn spawn_connection_producer(
+    socket_path: PathBuf,
+) -> (mpsc::Sender<()>, thread::JoinHandle<()>, Arc<AtomicUsize>) {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let worker_attempts = Arc::clone(&attempts);
+    let connector = thread::spawn(move || {
+        loop {
+            match stop_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let _ = tau_socket::SocketPeer::connect_with_timeouts(
+                &socket_path,
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+            );
+            worker_attempts.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    (stop_tx, connector, attempts)
+}
+
+fn wait_for_connection_attempts(attempts: &AtomicUsize, minimum: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while attempts.load(Ordering::Relaxed) < minimum {
+        assert!(
+            Instant::now() < deadline,
+            "connection producer did not make {minimum} attempts before timeout"
+        );
+        thread::yield_now();
+    }
+}
+
+fn join_thread_with_timeout(
+    join: thread::JoinHandle<()>,
+    timeout: Duration,
+) -> Result<(), &'static str> {
+    let deadline = Instant::now() + timeout;
+    while !join.is_finished() {
+        if Instant::now() >= deadline {
+            return Err("thread did not finish before timeout");
+        }
+        thread::yield_now();
+    }
+    join.join().map_err(|_| "thread panicked")
 }
 
 fn spawn_waiting_test_forwarder(
