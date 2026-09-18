@@ -1880,22 +1880,14 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
         .expect("race read");
     writer.flush().expect("flush race read");
     let race_close = next_artifact_request(&mut reader);
-    writer
-        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
-            tau_proto::ArtifactResult {
-                request_id: race_close.request_id,
-                result: Ok(tau_proto::ArtifactValue::Done),
-            },
-        )))
-        .expect("race close");
     send_read_image_cancel(&mut writer, "cancel-race", 61);
     writer
         .flush()
-        .expect("flush race completion and cancellation");
+        .expect("flush cancellation with Close outstanding");
     loop {
         let frame = reader
             .read_message()
-            .expect("race terminal")
+            .expect("race cancellation terminal")
             .expect("frame");
         let HarnessInputMessage::Emit(emit) = frame else {
             continue;
@@ -1907,11 +1899,23 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
                 break;
             }
             Event::ToolResultReported(result) if result.call_id.as_str() == "cancel-race" => {
-                panic!("queued cancellation lost to unreported decoder completion");
+                panic!("cancellation with Close outstanding reported success");
+            }
+            Event::ToolErrorReported(error) if error.call_id.as_str() == "cancel-race" => {
+                panic!("cancellation with Close outstanding reported error");
             }
             _ => {}
         }
     }
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: race_close.request_id,
+                result: Ok(tau_proto::ArtifactValue::Done),
+            },
+        )))
+        .expect("stale race close");
+    writer.flush().expect("flush stale race close");
 
     send_read_image_start(&mut writer, &key, "shutdown-open", 70);
     writer.flush().expect("flush shutdown start");

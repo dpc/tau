@@ -14,10 +14,11 @@ schema and foreground-only image declaration.
 
 Lifecycle tests cover max-eight read admission, stale response rejection,
 descriptor rejection above the separate 8 MiB image limit before any Read,
-cancellation immediately behind a completed download, cancellation and shutdown
-Close, and complete-terminal budgeting that converts an oversized typed image
-into a byte-free error. The runtime additionally bounds ready-input batches and
-tracks queued and running decoder cancellation separately. Cross-crate provider
+cancellation with Close outstanding, deferred cancellation before a ready
+decoder completion, cancellation and shutdown Close, and complete-terminal
+budgeting that converts an oversized typed image into a byte-free error. The
+runtime additionally bounds ready-input batches and tracks queued and running
+decoder cancellation separately. Cross-crate provider
 tests own Responses wire shape, Lite detail omission, fail-closed route gating,
 request-wide raw and data-URL budgets, and digest-preserving data-URL redaction.
 
