@@ -210,10 +210,39 @@ fn session_keyed_paths_are_deterministic_and_short() {
             .map(str::len),
         Some(64)
     );
+    let expected_digest = blake3::hash(id.as_str().as_bytes()).to_hex().to_string();
+    assert_eq!(
+        first,
+        root.path()
+            .join("tau")
+            .join("harnesses")
+            .join("sockets")
+            .join(expected_digest)
+    );
+}
+
+/// A runtime parent containing the current PID must not make deterministic
+/// session-keyed socket paths appear process-derived.
+#[test]
+fn session_keyed_paths_accept_pid_containing_runtime_parent() {
+    let root = bounded_runtime_root();
+    let pid = std::process::id().to_string();
+    let runtime_parent = root.path().join(&pid);
+    let _override = override_runtime_dir(&runtime_parent);
+    let id = session("session-with-pid-parent");
+    let first = harness_path_for_session(&id);
     assert!(
-        !first
-            .to_string_lossy()
-            .contains(&std::process::id().to_string())
+        first.to_string_lossy().contains(&pid),
+        "regression fixture must contain the current PID"
+    );
+    let expected_digest = blake3::hash(id.as_str().as_bytes()).to_hex().to_string();
+    assert_eq!(
+        first,
+        runtime_parent
+            .join("tau")
+            .join("harnesses")
+            .join("sockets")
+            .join(expected_digest)
     );
 }
 
