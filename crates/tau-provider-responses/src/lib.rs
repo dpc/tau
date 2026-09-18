@@ -2060,6 +2060,7 @@ impl State {
                 }
                 let usage = parse_usage(response.get("usage"));
                 let mut replacement = None;
+                let mut terminal_qualifies = false;
                 if let Some(output) = response.get("output") {
                     let output = output.as_array().ok_or(Error::UnsupportedOutput)?;
                     if !(output.len() <= MAX_OUTPUT_ITEMS as usize) {
@@ -2076,7 +2077,7 @@ impl State {
                         } else {
                             OutputItemPhase::TerminalFallback
                         };
-                        slot.apply_item(
+                        terminal_qualifies |= slot.apply_item(
                             item,
                             phase,
                             raw_output
@@ -2118,7 +2119,7 @@ impl State {
                 self.response_id = response_id;
                 self.usage = usage;
                 self.terminalize(terminal)?;
-                false
+                terminal_qualifies && self.semantic_progress_revision == 0
             }
             "response.failed" | "response.incomplete" | "error" => {
                 return Err(Error::StreamFailure);

@@ -794,9 +794,12 @@ fn terminal_replacement_renews_borrowed_display_generation() {
             }],
         },
     });
-    state
-        .apply_event(&terminal.to_string())
-        .expect("authoritative replacement");
+    assert!(
+        !state
+            .apply_event(&terminal.to_string())
+            .expect("authoritative replacement")
+    );
+    assert_eq!(state.semantic_progress_revision, 1);
     let mut display = None;
     state.progress_view().visit_display_output(|output| {
         display = Some((output.generation, output.text.to_owned()));
@@ -873,11 +876,16 @@ fn display_disappearance_invalidates_later_reappearance() {
 #[test]
 fn terminal_output_fallback_materializes_plain_reasoning_and_text() {
     let mut state = State::default();
-    state.apply_event(r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"fallback thought"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback answer"}]}]}}"#,
-    )
-    .expect("terminal output");
+    assert!(
+        state.apply_event(r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"fallback thought"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback answer"}]}]}}"#,
+        )
+        .expect("terminal output")
+    );
 
     assert_eq!(state.terminal, Some(TerminalKind::Completed));
+    assert_eq!(state.semantic_progress_revision, 1);
+    assert!(state.progress_view().has_timed_semantic_output());
+    assert!(state.progress().has_timed_semantic_output);
     assert!(!state.has_incomplete_reasoning());
     let output = state.output_items();
     assert_eq!(output.len(), 3);
@@ -895,6 +903,79 @@ fn terminal_output_fallback_materializes_plain_reasoning_and_text() {
                 text: "fallback answer".to_owned(),
             }]
     ));
+}
+
+/// Successful terminal fallbacks establish the first semantic observation for
+/// every supported qualifying item and successful terminal spelling.
+#[test]
+fn terminal_output_fallback_qualifies_supported_semantics_once() {
+    for event in [
+        r#"{"type":"response.done","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}"#,
+        r#"{"type":"response.completed","response":{"output":[{"type":"reasoning","id":"rs_opaque","summary":[{"type":"summary_text","text":"hidden"}],"content":[],"encrypted_content":"ciphertext"}]}}"#,
+        r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"run","arguments":"{\"path\""}]}}"#,
+    ] {
+        let mut state = State::default();
+        assert!(
+            state
+                .apply_event(event)
+                .expect("qualifying terminal fallback")
+        );
+        assert_eq!(state.semantic_progress_revision, 1);
+        assert!(state.progress_view().has_timed_semantic_output());
+        assert!(state.progress().has_timed_semantic_output);
+
+        assert!(
+            !state
+                .apply_event(event)
+                .expect("duplicate qualifying terminal fallback")
+        );
+        assert_eq!(state.semantic_progress_revision, 1);
+    }
+}
+
+/// Rejected terminal candidates must not publish staged semantic qualification
+/// or change failure evidence when no earlier progress was accepted.
+#[test]
+fn rejected_terminal_fallback_does_not_establish_semantic_progress() {
+    let cases = [
+        (
+            r#"{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"candidate"}]},{"type":"unsupported"}]}}"#.to_owned(),
+            false,
+        ),
+        (
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "x".repeat(1_024),
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+            true,
+        ),
+    ];
+
+    for (event, repetition) in cases {
+        let mut state = State::default();
+        let error = state
+            .apply_event(&event)
+            .expect_err("terminal candidate must be rejected");
+        if repetition {
+            assert!(matches!(error, Error::RepetitionDetected(_)));
+        } else {
+            assert!(matches!(error, Error::UnsupportedOutput));
+        }
+        assert_eq!(state.semantic_progress_revision, 0);
+        assert!(!state.progress_view().has_timed_semantic_output());
+        assert!(!state.progress().has_timed_semantic_output);
+        assert_eq!(state.terminal, None);
+    }
 }
 
 /// The shared attempt guard treats assistant text, reasoning text, and function
@@ -2418,6 +2499,70 @@ fn sse_suppressed_progress_samples_do_not_materialize_display_slots() {
         1,
         "only the separate durable terminal may materialize"
     );
+}
+
+/// Both production transports must synchronously expose terminal-only semantic
+/// qualification to the update callback and preserve it in final success.
+#[test]
+fn terminal_only_success_reports_semantic_timing_before_transport_return() {
+    for transport in [Transport::Sse, Transport::Websocket] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind terminal-only server");
+        let address = listener.local_addr().expect("terminal-only server address");
+        let server = std::thread::spawn(move || match transport {
+            Transport::Sse => {
+                let (mut socket, _) = listener.accept().expect("accept SSE request");
+                let _ = read_http_request(&mut socket);
+                let event = r#"{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"terminal only"}]}]}}"#;
+                let body = format!("data: {event}\n\n");
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("write terminal-only SSE response");
+            }
+            Transport::Websocket => {
+                let socket = accept_websocket_peer(&listener);
+                let mut socket = tungstenite::accept(socket).expect("upgrade WebSocket");
+                let _ = socket.read().expect("read response.create");
+                socket
+                    .send(Message::Text(
+                        r#"{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"terminal only"}]}]}}"#
+                            .into(),
+                    ))
+                    .expect("send terminal-only WebSocket response");
+            }
+        });
+        let mut progress_observations = Vec::new();
+        let outcome = run_attempt_with_debug(
+            &minimal_prompt(),
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: String::new(),
+                max_output_tokens: 0,
+                transport,
+                prompt_cache: None,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            false,
+            &mut |update| {
+                if let AttemptUpdate::Progress(progress) = update {
+                    progress_observations.push(progress.has_timed_semantic_output());
+                }
+            },
+            &mut || false,
+            &test_network(),
+        );
+        join_websocket_peer(server);
+
+        let AttemptOutcome::Completed(success) = outcome else {
+            panic!("{transport:?} terminal-only output must complete");
+        };
+        assert_eq!(progress_observations, [true]);
+        assert!(success.has_timed_semantic_output());
+    }
 }
 
 /// Terminal materialization must move message and reasoning display buffers
