@@ -1786,6 +1786,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             message: String::new(),
         })
     };
+    let is_engineer_row = |row: &str| row.split_whitespace().nth(1) == Some("@engineer_1");
 
     sync(&handle);
     assert!(
@@ -1837,6 +1838,11 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
     ));
     sync(&handle);
     assert!(vt.screen_contains(100, "❓💤 @engineer_1"));
+    let rows = vt.screen_text(100);
+    assert!(
+        rows.iter().any(|row| is_engineer_row(row)),
+        "unknown status must retain the watched-agent activity row: {rows:?}"
+    );
 
     renderer.handle(&watch_status(
         "status-done",
@@ -1844,11 +1850,10 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         Some("finished"),
     ));
     sync(&handle);
+    let rows = vt.screen_text(100);
     assert!(
-        vt.screen_text(100)
-            .iter()
-            .all(|row| !row.trim_start().starts_with("@engineer_1 ")),
-        "done must remove the watched-agent activity row"
+        !rows.iter().any(|row| is_engineer_row(row)),
+        "done must remove the watched-agent activity row: {rows:?}"
     );
 }
 
