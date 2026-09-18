@@ -22,10 +22,16 @@ runtime log retains their observation order, but replay never reruns report sema
 Pre-Ready staging remains source-bound and preserves the complete encoded envelope and
 global activation ordering. On release, the publication captures the stable configured
 publisher, source connection, Provider kind, and logical instance before interception.
-Downstream processing requires that exact generation to remain current. A report parked
-across disconnect or replacement may commit but cannot mutate current state or derive a
-successor. A same-name interceptor replacement reruns every correlation check; dropping
-a report has no semantic effect.
+Downstream processing ordinarily requires that exact generation to remain current. For an
+ordinary inference only, an exact finished report whose prompt owner was captured while
+current retains process-local terminal authority when provider disconnect later leaves that
+same prompt dispatch-uncertain. Its session binding and exact prompt ownership must still
+match, and the authority does not survive a crash. This terminal resolves before HumanUI
+Stale under [SPEC-tau-harness-prompt-dispatch](../crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md)
+and [SPEC-provider-prompt-materialization-authority](SPEC-provider-prompt-materialization-authority.md).
+Every other report parked across disconnect or replacement may commit but cannot mutate
+current state or derive a successor. A same-name interceptor replacement reruns every
+correlation check; dropping a report has no semantic effect.
 
 ## Canonical facts and correlation
 
@@ -55,7 +61,8 @@ disconnect, and final shutdown cleanup does. There is no canonical
 
 ## Terminal response behavior
 
-A current-owner finished report enters the existing response terminal pipeline. The
+A finished report with current prompt ownership, or the exact admitted ordinary-inference
+terminal authority above, enters the existing response terminal pipeline. The
 harness discards provider claims to recovery disposition and context-limit telemetry,
 estimated cost rates, and estimated cost increments, then derives agent identity,
 usage, telemetry, recovery, normalization, transcript, watch, tool,
@@ -92,7 +99,8 @@ assertion with absence and emits one bounded structured warning for the
 accepted terminal report. The ceiling is informational: token counters,
 session and model totals, estimated cost, and latency never consume it.
 
-Canceled, stale, unknown, and duplicate reports produce no canonical response.
+Canceled, unknown, duplicate, and generation-stale reports without that exact admitted
+ordinary-inference terminal authority produce no canonical response.
 Standalone-compaction success derives `agent.compacted`; invalid standalone compaction
 derives its failure without folding provider output into transcript history. Before
 either outcome, the harness normalizes cached usage to no more than sent usage for
