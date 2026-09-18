@@ -1981,6 +1981,189 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
     second_restore.shutdown().expect("shutdown second restore");
 }
 
+/// Terminal blocked-compaction history must not mask a later ordinary uncertain
+/// inference whose durable external activations need replay supersession.
+#[test]
+fn blocked_compaction_history_does_not_mask_uncertain_inference_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_background_placeholder(&state, "completed-before-blocked-replay", "slow_bg");
+    seed_background_result(
+        &state,
+        "completed-before-blocked-replay",
+        "slow_bg",
+        "durable background output",
+    );
+
+    let (durable_agent_id, old_prompt_id, crash_cut) = {
+        let mut first =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume completed background state");
+        let cid = ensure_test_user_agent(&mut first);
+        let durable_agent_id = durable_agent_id_for_conversation(&first, &cid);
+        let compact_cut = first.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let transaction_id =
+            tau_proto::CompactionTransactionId::parse("ct-blocked-before-uncertain")
+                .expect("transaction id");
+        first.publish_for_agent(
+            &cid,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                compact_prompt_id: test_agent_prompt_id("ap-blocked-before-uncertain"),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                agent_id: durable_agent_id.clone(),
+                transaction_id: transaction_id.clone(),
+                cut: compact_cut,
+                resume_through: Some(compact_cut),
+                model: "test/model".into(),
+                originator: tau_proto::PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+            }),
+        );
+        first.publish_for_agent(
+            &cid,
+            Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+                agent_id: durable_agent_id.clone(),
+                transaction_id,
+                cut: compact_cut,
+                reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+                resume_through: Some(compact_cut),
+                context_retreat: None,
+                output_length_continuation: None,
+                incomplete_response: None,
+            }),
+        );
+        assert!(matches!(
+            first
+                .session_runtime
+                .agent_store
+                .agent(durable_agent_id.as_str())
+                .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+            Some(tau_core::StandaloneCompactionRecovery::Blocked { .. })
+        ));
+
+        first
+            .dispatch_prompt_for_agent(&cid, PendingPrompt::user("old uncertain owner".to_owned()))
+            .expect("dispatch old owner");
+        let old_prompt_id = match first
+            .session_runtime
+            .agent_store
+            .agent(durable_agent_id.as_str())
+            .and_then(tau_core::AgentTree::inference_dispatch_recovery)
+        {
+            Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) => {
+                checkpoint.agent_prompt_id
+            }
+            other => panic!("expected ordinary uncertain owner, got {other:?}"),
+        };
+        first.config.accepted_harness_settings.notification_delivery =
+            HarnessSettings::built_in().notification_delivery;
+        for index in 1..=2 {
+            first.publish_event(
+                Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+                Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                    tau_proto::MessagePublisherId::parse("blocked-replay-bridge")
+                        .expect("publisher"),
+                    tau_proto::MessageAgentTarget::new(durable_agent_id.as_str()),
+                    tau_proto::MessageFactId::new(format!("blocked-replay-message-{index}")),
+                    tau_proto::MessageParty {
+                        stable_id: "external".to_owned(),
+                        display_name: None,
+                        sender_auth: None,
+                        sender_trust: None,
+                    },
+                    None,
+                    format!("external activation {index}"),
+                )),
+            );
+        }
+        assert_eq!(
+            first.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .pending_message_wakes
+                .len(),
+            2,
+            "both external activations remain deferred behind the uncertain owner"
+        );
+        let crash_cut = first
+            .session_runtime
+            .agent_store
+            .agent_events(durable_agent_id.as_str())
+            .expect("pre-crash records")
+            .to_vec();
+        first.shutdown().expect("release seed session");
+        (durable_agent_id, old_prompt_id, crash_cut)
+    };
+    wait_for_session_unlock(&state, "s1");
+
+    let journal_path = state
+        .join("agents")
+        .join(durable_agent_id.as_str())
+        .join("events.cbor");
+    let mut journal = File::create(&journal_path).expect("rewrite uncertain crash cut");
+    for record in &crash_cut {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(record, &mut encoded).expect("encode crash-cut record");
+        journal
+            .write_all(&(encoded.len() as u64).to_le_bytes())
+            .expect("write record length");
+        journal.write_all(&encoded).expect("write record");
+    }
+    journal.sync_all().expect("sync uncertain crash cut");
+
+    let mut restored =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("cold restore");
+    let records = restored
+        .session_runtime
+        .agent_store
+        .agent_events(durable_agent_id.as_str())
+        .expect("restored records");
+    let replay_records = &records[crash_cut.len()..];
+    assert_eq!(
+        replay_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptTerminated(terminated)
+                    if terminated.agent_prompt_id == old_prompt_id
+                        && terminated.reason
+                            == tau_proto::AgentPromptTerminationReason::Stale
+            ))
+            .count(),
+        1,
+        "blocked compaction history must not suppress the uncertain owner's Stale terminal"
+    );
+    assert_eq!(
+        replay_records
+            .iter()
+            .filter(|record| matches!(&record.event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        1,
+        "deferred activations must dispatch exactly one successor"
+    );
+    assert!(matches!(
+        restored
+            .session_runtime
+            .agent_store
+            .agent(durable_agent_id.as_str())
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::Blocked { .. })
+    ));
+    assert!(
+        !restored
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key(&ToolCallId::from("completed-before-blocked-replay")),
+        "completed background work must not regain active ownership"
+    );
+    restored.shutdown().expect("shutdown restored harness");
+}
+
 /// A retained manual-compaction start installed after HumanUI Stale
 /// interception gains priority before semantic admission.
 #[test]

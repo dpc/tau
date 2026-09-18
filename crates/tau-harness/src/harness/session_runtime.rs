@@ -2760,7 +2760,14 @@ impl Harness {
                 Some(tau_core::StandaloneCompactionRecovery::Interrupted(_)) | None => {}
                 Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. }) => {}
             }
-            if restored_compaction.is_none()
+            let compaction_blocks_ordinary_inference =
+                restored_compaction.as_ref().is_some_and(|recovery| {
+                    !matches!(
+                        recovery,
+                        tau_core::StandaloneCompactionRecovery::Blocked { .. }
+                    )
+                });
+            if !compaction_blocks_ordinary_inference
                 && let Some(tau_core::InferenceDispatchRecovery::ContextRecoveryRequired(
                     checkpoint,
                 )) = restored_inference.clone()
@@ -2798,7 +2805,7 @@ impl Harness {
                         checkpoint,
                     };
             }
-            if restored_compaction.is_none()
+            if !compaction_blocks_ordinary_inference
                 && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
                     restored_inference.clone()
             {
@@ -2863,7 +2870,7 @@ impl Harness {
                         )
                     })
             });
-            let uncertain_with_deferred_activation = restored_compaction.is_none()
+            let uncertain_with_deferred_activation = !compaction_blocks_ordinary_inference
                 && matches!(
                     restored_inference,
                     Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(_))
