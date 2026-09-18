@@ -202,6 +202,73 @@ fn folds_adjacent_pure_updates_in_exact_order() {
     assert_eq!(memory.active_len_for_test(), 0);
 }
 
+/// Real scheduler dequeue, including retained disconnect lookahead, must win
+/// over delayed producer-side FIFO attribution for measured receipts.
+#[test]
+fn late_fifo_attribution_does_not_override_dequeued_remote_ownership() {
+    let memory = Arc::new(DeliveryMemoryTracker::new());
+    memory.force_enable_for_test();
+    let encoded = tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte");
+    let ordinary_id = RendererDeliveryId::new(1);
+    let disconnect_id = RendererDeliveryId::new(2);
+    memory.observe_decode(
+        ordinary_id,
+        &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
+        encoded,
+    );
+    memory.observe_decode(
+        disconnect_id,
+        &tau_proto::HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        }),
+        encoded,
+    );
+
+    let (admitted, remote_tx, _local_tx, mut receiver) =
+        scheduler_with_memory(Some(Arc::clone(&memory)));
+    admitted.store(2, Ordering::Release);
+    remote_tx
+        .send(update(1, "prompt-1", "a", None))
+        .expect("ordinary remote command");
+    remote_tx
+        .send(RendererCmd::RemoteDisconnect {
+            reason: Some("done".to_owned()),
+            delivery_id: disconnect_id,
+            queue_bytes: 2,
+            enqueued_at: Instant::now(),
+        })
+        .expect("disconnect command");
+
+    assert!(matches!(
+        receiver.recv_timeout(Duration::ZERO),
+        Ok(RendererCmd::Remote { .. })
+    ));
+    assert_eq!(
+        memory.cut_for_test(ordinary_id),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
+    assert_eq!(
+        memory.cut_for_test(disconnect_id),
+        Some(DeliveryMemoryCut::Scheduler),
+        "folding lookahead must retain scheduler ownership"
+    );
+
+    memory.transition(ordinary_id, DeliveryMemoryCut::RendererFifo);
+    memory.transition(disconnect_id, DeliveryMemoryCut::RendererFifo);
+    assert_eq!(
+        memory.cut_for_test(ordinary_id),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
+    assert_eq!(
+        memory.cut_for_test(disconnect_id),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
+    assert!(matches!(
+        receiver.recv_timeout(Duration::ZERO),
+        Ok(RendererCmd::RemoteDisconnect { .. })
+    ));
+}
+
 /// A captured local watermark is a hard barrier: a later admitted update cannot
 /// be sampled before the local command even when both are already queued.
 #[test]

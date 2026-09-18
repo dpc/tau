@@ -139,6 +139,16 @@ impl DeliveryMemoryTracker {
         let Some(estimate) = state.active.get_mut(&delivery_id) else {
             return;
         };
+        // Producer FIFO acknowledgement follows publication, so the consumer
+        // can advance ownership before this post-send transition arrives.
+        if cut == DeliveryMemoryCut::RendererFifo
+            && matches!(
+                estimate.cut,
+                DeliveryMemoryCut::Scheduler | DeliveryMemoryCut::Handler
+            )
+        {
+            return;
+        }
         estimate.cut = cut;
         state.emit_snapshot();
     }

@@ -58,6 +58,77 @@ fn guarded_owner_moves_release_without_changing_disabled_path() {
     );
 }
 
+/// A producer's post-send FIFO acknowledgement must not move ownership
+/// backward after the scheduler or handler has already taken the receipt.
+#[test]
+fn late_renderer_fifo_does_not_override_consumer_ownership() {
+    let tracker = DeliveryMemoryTracker::new();
+    tracker.force_enable_for_test();
+    let encoded = tau_proto::ProtocolMessageBytes::new(7).expect("nonzero encoded size");
+
+    let scheduler_id = RendererDeliveryId::new(1);
+    tracker.observe_decode(scheduler_id, &vec!["scheduler"], encoded);
+    tracker.transition(scheduler_id, DeliveryMemoryCut::Scheduler);
+    tracker.transition(scheduler_id, DeliveryMemoryCut::RendererFifo);
+    assert_eq!(
+        tracker.cut_for_test(scheduler_id),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
+
+    let handler_id = RendererDeliveryId::new(2);
+    tracker.observe_decode(handler_id, &vec!["handler"], encoded);
+    tracker.transition(handler_id, DeliveryMemoryCut::ColdStaging);
+    tracker.transition(handler_id, DeliveryMemoryCut::Handler);
+    tracker.transition(handler_id, DeliveryMemoryCut::RendererFifo);
+    assert_eq!(
+        tracker.cut_for_test(handler_id),
+        Some(DeliveryMemoryCut::Handler)
+    );
+
+    let released_id = RendererDeliveryId::new(3);
+    tracker.observe_decode(released_id, &vec!["released"], encoded);
+    tracker.release(released_id);
+    tracker.transition(released_id, DeliveryMemoryCut::RendererFifo);
+    assert_eq!(tracker.cut_for_test(released_id), None);
+
+    let state = tracker.state.lock().expect("tracker");
+    assert_eq!(
+        state.as_ref().expect("enabled state").high_water_items
+            [DeliveryMemoryCut::RendererFifo.index()],
+        0,
+        "stale transitions must not create false FIFO high-water ownership"
+    );
+}
+
+/// Both decode/current and cold-staging receipts must retain their normal
+/// forward path through FIFO, scheduler, handler, and release.
+#[test]
+fn normal_renderer_fifo_transitions_remain_valid() {
+    let tracker = DeliveryMemoryTracker::new();
+    tracker.force_enable_for_test();
+    let encoded = tau_proto::ProtocolMessageBytes::new(7).expect("nonzero encoded size");
+
+    for (raw_id, origin) in [
+        (1, DeliveryMemoryCut::DecodeCurrent),
+        (2, DeliveryMemoryCut::ColdStaging),
+    ] {
+        let delivery_id = RendererDeliveryId::new(raw_id);
+        tracker.observe_decode(delivery_id, &vec!["normal"], encoded);
+        if origin == DeliveryMemoryCut::ColdStaging {
+            tracker.transition(delivery_id, origin);
+        }
+        tracker.transition(delivery_id, DeliveryMemoryCut::RendererFifo);
+        assert_eq!(
+            tracker.cut_for_test(delivery_id),
+            Some(DeliveryMemoryCut::RendererFifo)
+        );
+        tracker.transition(delivery_id, DeliveryMemoryCut::Scheduler);
+        tracker.transition(delivery_id, DeliveryMemoryCut::Handler);
+        tracker.release(delivery_id);
+        assert_eq!(tracker.cut_for_test(delivery_id), None);
+    }
+}
+
 /// The runtime diagnostic schema must remain a fixed content-free allowlist;
 /// adding identities or payload fields requires this privacy oracle to change.
 #[test]
