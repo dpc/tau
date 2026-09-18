@@ -115,6 +115,48 @@ fn output_adapter_budgets_exact_frame_after_wire_name_scope() {
     assert_eq!(result.provider_content.len(), 1);
 }
 
+/// Ensures an unreportable non-diff terminal records the preparation failure,
+/// submits no frame, and leaves the mandatory-failure marker sticky after the
+/// manual loop consumes the original error.
+#[test]
+fn oversized_non_diff_terminal_is_retained_as_mandatory_failure() {
+    let oversized = "x".repeat(
+        usize::try_from(tau_client::MAX_OUTBOUND_FRAME_BYTES).expect("frame limit fits usize"),
+    );
+    let event = Event::ToolError(ToolError {
+        presentation: Default::default(),
+        call_id: ToolCallId::new("call"),
+        tool_name: ToolName::new("read"),
+        tool_type: ToolType::Function,
+        message: oversized.clone(),
+        details: None,
+        display: Some(ToolUseState {
+            status: ToolUseStatus::Error,
+            status_text: oversized,
+            ..Default::default()
+        }),
+        originator: Default::default(),
+    });
+    let (tx, rx) = mpsc::channel();
+    let output = Output::channel(tx);
+
+    let error = output
+        .report_tool_terminal(event)
+        .expect_err("oversized terminal must fail preparation");
+
+    assert!(matches!(error, tau_client::ClientError::Overloaded));
+    assert!(
+        rx.try_recv().is_err(),
+        "failed preparation must submit no frame"
+    );
+    assert!(output.mandatory_output_failed());
+    let retained = output
+        .take_mandatory_failure()
+        .expect_err("manual loop must observe preparation failure");
+    assert_eq!(retained.to_string(), error.to_string());
+    assert!(output.mandatory_output_failed());
+}
+
 /// Ensures an image that makes its complete envelope oversized becomes a clean
 /// typed tool error and never falls back to base64 or generic text content.
 #[test]

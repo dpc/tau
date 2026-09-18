@@ -1597,6 +1597,76 @@ fn mandatory_model_tool_terminal_failure_exits_production_manual_loop() {
     assert_mandatory_frame_failure_exits(event, b"tool.result_reported", "model tool terminal");
 }
 
+/// A worker-side terminal budget failure must wake and exit the production
+/// manual loop while harness input remains open, without reaching the writer.
+#[test]
+fn mandatory_terminal_preparation_failure_exits_production_manual_loop() {
+    let path = "\u{1}".repeat(950_000);
+    let patch = format!("*** Begin Patch\n*** Delete File: {path}\n*** End Patch");
+    let event = tool_started(
+        "call-terminal-preparation-failure",
+        APPLY_PATCH_TOOL_NAME,
+        CborValue::Text(patch),
+        "main",
+    );
+    let (runtime_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    let runtime_reader = runtime_stream.try_clone().expect("runtime reader");
+    let (done_tx, done_rx) = path_std_sync::mpsc::channel();
+    thread::spawn(move || {
+        let result = run_impl(
+            runtime_reader,
+            runtime_stream,
+            DiscoverySourcePolicy::EmptyFixture,
+            RuntimeCwdSource::Fixture(PathBuf::from("/tmp")),
+        )
+        .map_err(|error| error.to_string());
+        let _ = done_tx.send(result);
+    });
+    let mut input = EventWriter::new(
+        harness_stream
+            .try_clone()
+            .expect("harness input writer clone"),
+    );
+    input
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            purpose: tau_proto::ConfigurePurpose::Runtime,
+            tool_prefix: None,
+            instance_name: test_extension_name("test-extension"),
+            config: cbor_map(vec![(
+                "dir_lock",
+                cbor_map(vec![("enable", CborValue::Bool(false))]),
+            )]),
+            state_dir: None,
+            secrets: Default::default(),
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input.flush().expect("flush configure");
+    let mut output = HarnessInputReader::new(
+        harness_stream
+            .try_clone()
+            .expect("harness output reader clone"),
+    );
+    while !matches!(
+        output.read_message().expect("startup output"),
+        Some(HarnessInputMessage::Ready(_))
+    ) {}
+
+    input
+        .write_event(&event)
+        .expect("oversized terminal producer");
+    input.flush().expect("flush input");
+
+    let error = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("terminal preparation failure must wake the manual loop")
+        .expect_err("terminal preparation failure must exit with an error");
+    assert!(
+        error.contains("frame byte limit"),
+        "unexpected preparation failure: {error}"
+    );
+}
+
 /// Ensures configured command enforcement replaces the startup fragment with
 /// the effective selector pairs that the harness projects into agent prompts.
 #[test]

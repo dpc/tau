@@ -215,21 +215,24 @@ impl Output {
 
     /// Submit one terminal tool outcome through the typed client report helper.
     fn report_tool_terminal(&self, event: Event) -> tau_client::ClientResult<()> {
-        let mut outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|event| {
-            tau_client::ClientError::handler(format!(
-                "terminal report helper received {}",
-                event.name()
-            ))
-        })?;
-        self.scope_tool_name(outcome.tool_name_mut());
-        let message = terminal_frame::budget_terminal_report(outcome.into_reported_event())?;
-        let result = match &self.inner {
-            OutputInner::Client(handle) => handle.send(message),
-            #[cfg(test)]
-            OutputInner::Channel(tx) => tx
-                .send(message)
-                .map_err(|_| tau_client::ClientError::WriterClosed),
-        };
+        let result = (|| {
+            let mut outcome =
+                tau_client::ToolTerminalOutcome::try_from(event).map_err(|event| {
+                    tau_client::ClientError::handler(format!(
+                        "terminal report helper received {}",
+                        event.name()
+                    ))
+                })?;
+            self.scope_tool_name(outcome.tool_name_mut());
+            let message = terminal_frame::budget_terminal_report(outcome.into_reported_event())?;
+            match &self.inner {
+                OutputInner::Client(handle) => handle.send(message),
+                #[cfg(test)]
+                OutputInner::Channel(tx) => tx
+                    .send(message)
+                    .map_err(|_| tau_client::ClientError::WriterClosed),
+            }
+        })();
         self.retain_mandatory_failure(result)
     }
 

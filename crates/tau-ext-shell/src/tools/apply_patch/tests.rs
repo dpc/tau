@@ -62,6 +62,30 @@ fn parse_delete_hunk() {
     );
 }
 
+/// Ensures an admitted freeform delete can produce the bounded escaped-path
+/// failure that exercises terminal frame rejection without oversized metadata.
+#[test]
+fn escaped_overlong_delete_path_produces_unreportable_terminal() {
+    let path = "\u{1}".repeat(950_000);
+    let patch = format!("*** Begin Patch\n*** Delete File: {path}\n*** End Patch");
+    let arguments = CborValue::Text(patch);
+    let mut world = ShellWorld::real();
+
+    let failure = apply_patch(&arguments, &mut world)
+        .expect_err("overlong filesystem path must fail before mutation");
+
+    assert!(failure.message.starts_with("Failed to delete file "));
+    assert!(failure.message.contains("\\u{1}"));
+    let display = &failure.display;
+    assert_eq!(display.status_text, failure.message);
+    assert!(
+        failure.message.len() + display.status_text.len()
+            > usize::try_from(tau_client::MAX_OUTBOUND_FRAME_BYTES)
+                .expect("frame limit fits usize"),
+        "duplicated escaped failure text must exceed the complete frame budget"
+    );
+}
+
 /// Ensures context-guided replacement still selects the intended original
 /// range after mismatch diagnostics become structured.
 #[test]
