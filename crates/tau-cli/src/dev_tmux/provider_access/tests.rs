@@ -497,7 +497,7 @@ fn source_secret_symlink_fails_closed() {
 }
 
 /// Proves copying rejects a symlinked source ancestor rather than relying only
-/// on `O_NOFOLLOW` at the final credential file.
+/// on `O_NOFOLLOW` at the final profile file.
 #[cfg(unix)]
 #[test]
 fn source_settings_ancestor_symlink_fails_closed() {
@@ -510,7 +510,7 @@ fn source_settings_ancestor_symlink_fails_closed() {
     std::fs::create_dir_all(outside.join("provider-builtin")).expect("outside");
     std::fs::write(
         outside.join("provider-builtin/chatgpt.json"),
-        "outside-settings",
+        r#"{"credential":{"kind":"none"}}"#,
     )
     .expect("outside settings");
     std::fs::create_dir_all(&source).expect("source");
@@ -523,9 +523,18 @@ fn source_settings_ancestor_symlink_fails_closed() {
         }),
     );
 
-    access
+    let error = access
         .copy_allowed_profiles()
         .expect_err("ancestor symlink must fail");
+    match error {
+        CliError::Io(error) => {
+            assert_eq!(
+                error.to_string(),
+                "provider path crosses a symlink component"
+            );
+        }
+        other => panic!("expected source ancestor symlink error, got {other:?}"),
+    }
 
     assert!(!scratch.join(PROVIDER_SETTINGS_DIR).exists());
     assert!(!scratch.join(EXTENSION_SECRETS_DIR).exists());
