@@ -4075,29 +4075,47 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
     resumed.shutdown().expect("shutdown");
 }
 
+/// Canonical reasoning survives persistence and same-provider replay as typed
+/// output without being converted into ordinary assistant narrative.
 #[test]
-fn thinking_is_persisted_but_excluded_from_prompt_replay() {
-    // Linear-prefix and prompt-cache hygiene depends on
-    // `assemble_conversation` ignoring the persisted thinking
-    // field. Otherwise the model would see its own reasoning
-    // summary echoed back as plain assistant text.
+fn reasoning_is_persisted_and_replayed_as_typed_items_not_assistant_text() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.config.selected_model = Some("test/model".into());
+    let agents_dir = h.session_runtime.agent_store.agents_dir().to_owned();
 
     append_user_message_via_event(&mut h, "s1", "first");
 
     let spid1 = h.send_prompt_to_agent("s1");
+    let prompt1 = read_prompt_created(&h, &spid1);
+    let agent_id = prompt1.agent_id;
+    let summary_text = "summary-reasoning-sentinel";
+    let full_text = "full-reasoning-sentinel";
+    let answer_text = "assistant-answer-sentinel";
+    let expected_output = vec![
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: summary_text.to_owned(),
+        }),
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: full_text.to_owned(),
+        }),
+        assistant_output(answer_text)
+            .into_iter()
+            .next()
+            .expect("assistant output"),
+    ];
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: spid1,
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: assistant_output("answer"),
+        agent_prompt_id: spid1.clone(),
+        agent_id: agent_id.clone(),
+        output_items: expected_output.clone(),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
@@ -4117,13 +4135,80 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     append_user_message_via_event(&mut h, "s1", "second");
     let spid2 = h.send_prompt_to_agent("s1");
     let prompt2 = read_prompt_created(&h, &spid2);
-    let serialized = serde_json::to_string(&prompt2.context.flatten()).expect("json");
+    let matching_responses = prompt2
+        .context
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            tau_proto::ContextBlock::AssistantResponse(response)
+                if response.output_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        ContextItem::Message(tau_proto::MessageItem { content, .. })
+                            if content.iter().any(|part| matches!(
+                                part,
+                                tau_proto::ContentPart::Text { text } if text == answer_text
+                            ))
+                    )
+                }) =>
+            {
+                Some(response)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_responses.len(),
+        1,
+        "the sentinel response must identify exactly one assistant block"
+    );
+    assert_eq!(matching_responses[0].output_items, expected_output);
+    assert!(matches!(
+        &matching_responses[0].output_items[2],
+        ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content,
+            ..
+        }) if matches!(
+            content.as_slice(),
+            [tau_proto::ContentPart::Text { text }] if text == answer_text
+        )
+    ));
     assert!(
-        !serialized.contains("The user is asking"),
-        "prompt replay must not echo reasoning summary back to the model",
+        prompt2.context.flatten_iter().all(|item| {
+            !matches!(
+                item,
+                ContextItem::Message(tau_proto::MessageItem {
+                    role: tau_proto::ContextRole::Assistant,
+                    content,
+                    ..
+                }) if content.iter().any(|part| matches!(
+                    part,
+                    tau_proto::ContentPart::Text { text }
+                        if text.contains(summary_text) || text.contains(full_text)
+                ))
+            )
+        }),
+        "typed reasoning must not be copied into ordinary assistant text",
     );
 
     h.shutdown().expect("shutdown");
+    drop(h);
+    wait_for_session_unlock(&sp, "s1");
+
+    let store = tau_core::AgentStore::open_lazy(agents_dir).expect("open persisted agent store");
+    let persisted = store
+        .agent_events(agent_id.as_str())
+        .expect("read persisted agent events")
+        .into_iter()
+        .find_map(|record| match record.event {
+            Event::ProviderResponseFinished(response) if response.agent_prompt_id == spid1 => {
+                Some(response)
+            }
+            _ => None,
+        })
+        .expect("persisted canonical provider terminal");
+    assert_eq!(persisted.output_items, expected_output);
 }
 
 /// Metadata selection returns both the folded snapshot and durable mutations;
