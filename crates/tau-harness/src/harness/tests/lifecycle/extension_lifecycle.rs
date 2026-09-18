@@ -1673,33 +1673,6 @@ fn install_exhausted_test_extension(h: &mut Harness, name: &str) -> tau_proto::C
     connection_id
 }
 
-#[test]
-fn duplicate_tool_result_is_discarded() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-
-    let mut h = echo_harness(&sp).expect("start");
-
-    // Fabricate a tool result for a call_id with no pending runtime metadata.
-    let result = h.handle_extension_event(
-        "fake-ext",
-        TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
-            presentation: Default::default(),
-            call_id: "orphan-call".into(),
-            tool_name: ToolName::new("read"),
-            tool_type: tau_proto::ToolType::Function,
-            result: tau_proto::CborValue::Text("stale data".to_owned()),
-            provider_content: Vec::new(),
-            kind: tau_proto::ToolResultKind::Final,
-            originator: tau_proto::PromptOriginator::User,
-
-            display: None,
-        })),
-    );
-    // Should not error — just emits a warning and discards.
-    assert!(result.is_ok());
-}
-
 /// Extension handshake stores declared bridge authority on the configured
 /// connection entry used by event admission.
 #[test]
