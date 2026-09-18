@@ -38,11 +38,12 @@ fn classify_send_line(
     }
 
     if canonical_line.is_some() {
+        let text = crate::chat::redacted_command_echo_line(text);
         return Ok(SendLineDisposition::Message(Box::new(
             HarnessInputMessage::emit(Event::UiCreateAgent(create_user_agent_prompt(
                 session_id,
                 DEFAULT_AGENT_ROLE,
-                text,
+                text.as_ref(),
                 CreateUserAgentPromptOptions {
                     command_handling: PromptCommandHandling::LiteralEscape,
                     ..CreateUserAgentPromptOptions::default()

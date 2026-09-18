@@ -362,6 +362,33 @@ fn literal_colon_escape_submits_canonical_prompt_text() {
     assert!(request.literal);
 }
 
+/// Ensures headless literal Gmail OAuth finish prompts redact callback secrets
+/// after canonicalization without broadening the exact shared matcher.
+#[test]
+fn literal_gmail_oauth_finish_prompt_is_redacted() {
+    let Event::UiCreateAgent(request) = event(
+        "  ::email auth google finish work \
+         http://127.0.0.1:54321/?code=PLACEHOLDER_CODE&state=PLACEHOLDER_STATE",
+    )
+    .expect("literal prompt event") else {
+        panic!("expected create-agent prompt");
+    };
+    let prompt = request.initial_prompt.as_deref().expect("initial prompt");
+    assert_eq!(prompt, ":email auth google finish <redacted>");
+    assert!(request.literal);
+    assert!(!prompt.contains("PLACEHOLDER_CODE"));
+    assert!(!prompt.contains("PLACEHOLDER_STATE"));
+
+    assert_eq!(
+        prompt_text(
+            "::email auth google start work \
+             http://127.0.0.1:54321/?code=PLACEHOLDER_CODE&state=PLACEHOLDER_STATE"
+        ),
+        ":email auth google start work \
+         http://127.0.0.1:54321/?code=PLACEHOLDER_CODE&state=PLACEHOLDER_STATE"
+    );
+}
+
 /// Ensures unknown colon commands do not silently become model prompts in the
 /// headless parser.
 #[test]
