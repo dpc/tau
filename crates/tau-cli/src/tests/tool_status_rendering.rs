@@ -4123,6 +4123,8 @@ fn compaction_success_status_formats_exact_and_partial_measurements() {
     );
 }
 
+/// Ensures a provider-declared call remains invisible until it starts, and a
+/// provider-only error cannot directly project its terminal tool row.
 #[test]
 fn provider_tool_error_before_tool_started_is_ignored() {
     let (_term, handle, vt) = setup(80, 24);
@@ -4150,25 +4152,54 @@ fn provider_tool_error_before_tool_started_is_ignored() {
         tau_proto::UnixMicros::new(1_000_000),
     );
     sync(&handle);
-    assert!(!vt.screen_contains(80, "delegate 0s …"));
+    let screen = vt.screen_text(80);
+    assert!(
+        !screen.iter().any(|row| row.contains("agent_start")),
+        "provider tool call created a visible row before start: {screen:?}"
+    );
 
+    let provider_error = ToolError {
+        presentation: Default::default(),
+        call_id: "bad-args".into(),
+        tool_name: tau_proto::ToolName::new("agent_start"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "invalid arguments for tool `agent_start`".to_owned(),
+        details: None,
+        originator: tau_proto::PromptOriginator::User,
+
+        display: None,
+    };
     renderer.handle_recorded_at(
-        &Event::ProviderToolError(ToolError {
-            presentation: Default::default(),
-            call_id: "bad-args".into(),
-            tool_name: tau_proto::ToolName::new("agent_start"),
-            tool_type: tau_proto::ToolType::Function,
-            message: "invalid arguments for tool `agent_start`".to_owned(),
-            details: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            display: None,
-        }),
+        &Event::ProviderToolError(provider_error.clone()),
         tau_proto::UnixMicros::new(2_000_000),
     );
     sync(&handle);
-    assert!(!vt.screen_contains(80, "delegate err: invalid"));
-    assert!(!vt.screen_contains(80, "delegate 0s …"));
+    let screen = vt.screen_text(80);
+    assert!(
+        !screen.iter().any(|row| row.contains("agent_start")),
+        "provider-only error created a visible tool row: {screen:?}"
+    );
+    assert!(
+        !screen
+            .iter()
+            .any(|row| row.contains("invalid arguments for tool `agent_start`")),
+        "provider-only error projected its diagnostic: {screen:?}"
+    );
+
+    renderer.handle_recorded_at(
+        &Event::ToolError(provider_error),
+        tau_proto::UnixMicros::new(3_000_000),
+    );
+    sync(&handle);
+    let screen = vt.screen_text(80);
+    assert!(
+        screen.iter().any(|row| {
+            row.contains("agent_start")
+                && row.contains("err:")
+                && row.contains("invalid arguments for tool `agent_start`")
+        }),
+        "logical tool error did not render the expected terminal row: {screen:?}"
+    );
 }
 /// Provider-facing errors must not finish live UI tool blocks. The harness is
 /// responsible for publishing a logical `ToolError` for user-visible failures.
