@@ -3572,12 +3572,14 @@ impl Harness {
     ) -> NormalizedFinishedToolCall {
         let mut call = call.clone();
         normalization.normalize_call_id(index, &mut call);
-        let background_support = self.resolve_tool_background_support(call.name.as_str());
-        let turn_categories = self
-            .resolve_enabled_tool_spec_for_prompt(&call.name, &response.agent_prompt_id)
-            .map_or_else(ToolTurnCategories::default, |spec| {
-                ToolTurnCategories::from_tags(&spec.tags)
-            });
+        let selected_spec =
+            self.resolve_enabled_tool_spec_for_prompt(&call.name, &response.agent_prompt_id);
+        let background_support = selected_spec
+            .and_then(|spec| spec.background_support)
+            .unwrap_or_else(BackgroundSupport::default_effective);
+        let turn_categories = selected_spec.map_or_else(ToolTurnCategories::default, |spec| {
+            ToolTurnCategories::from_tags(&spec.tags)
+        });
         NormalizedFinishedToolCall {
             call,
             background_support,

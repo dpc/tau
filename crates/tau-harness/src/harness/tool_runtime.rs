@@ -201,17 +201,6 @@ impl ToolRuntimeState {
 }
 
 impl Harness {
-    /// Returns the effective foreground/background support for a tool name.
-    /// Missing registration metadata uses the protocol default of
-    /// `MinForegroundSeconds(2)`.
-    pub(super) fn resolve_tool_background_support(&self, name: &str) -> BackgroundSupport {
-        self.tool_routing
-            .registry
-            .resolve_provider(name)
-            .and_then(|provider| provider.tool.background_support)
-            .unwrap_or_else(BackgroundSupport::default_effective)
-    }
-
     /// Drain scheduler-selected tool invocations into harness side effects.
     pub(super) fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
         loop {

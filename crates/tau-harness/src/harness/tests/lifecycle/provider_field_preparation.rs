@@ -6,6 +6,51 @@ use super::*;
 use crate::harness::AgentToolCall;
 use crate::harness::terminal_response_projection::TerminalResponseProjection;
 
+fn background_policy_tool(
+    internal_name: &str,
+    visible_name: &str,
+    background_support: Option<tau_proto::BackgroundSupport>,
+) -> ToolSpec {
+    ToolSpec {
+        provider_scope: None,
+        name: ToolName::new(internal_name),
+        model_visible_name: Some(ToolName::new(visible_name)),
+        description: None,
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+        tags: Vec::new(),
+        enabled_by_default: true,
+        background_support,
+        examples: Vec::new(),
+    }
+}
+
+fn response_with_one_tool_call(
+    source: &tau_proto::AgentPromptCreated,
+    call_id: &str,
+    name: &str,
+) -> (ProviderResponseFinished, Vec<AgentToolCall>) {
+    let call = AgentToolCall {
+        call_ref: None,
+        id: call_id.into(),
+        name: ToolName::new(name),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    let mut response = reasoning_only_length_response(source, 7);
+    response.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+    response.output_items = vec![ContextItem::ToolCall(ToolCallItem {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        tool_type: call.tool_type,
+        arguments: call.arguments.clone(),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    (response, vec![call])
+}
+
 /// The complete prepared ordinary payload must equal the eventual canonical
 /// fact, without charging usage, consuming snapshots, or reserving a
 /// continuation while its envelope is still being considered for admission.
@@ -575,5 +620,210 @@ fn tool_field_preparation_is_read_only_and_matches_attachment() {
             .tool_call_prompt(&"reserved".into()),
         Some(&prior)
     );
+    h.shutdown().expect("shutdown");
+}
+
+/// Background scheduling must use the aliased tool metadata frozen into the
+/// originating prompt, not an unrelated internal-name collision or a later
+/// replacement in the live registry.
+#[test]
+fn tool_background_policy_uses_prompt_owned_aliased_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    let tool_connection = crate::test_connection_id("tools");
+    let tool_sink =
+        connect_ready_configured_extension(&mut h, "tools", "tools", tau_proto::ClientKind::Tool);
+    let selected = background_policy_tool(
+        "generic_asset",
+        "render_asset",
+        Some(tau_proto::BackgroundSupport::Never),
+    );
+    h.tool_routing
+        .registry
+        .register(&tool_connection, selected.clone());
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("collision"),
+        background_policy_tool(
+            "render_asset",
+            "other_asset",
+            Some(tau_proto::BackgroundSupport::Instant),
+        ),
+    );
+    h.submit_user_prompt(test_session_id("s1"), "render".to_owned())
+        .expect("submit");
+    let source = read_nth_prompt_created(&h, 0);
+    let frozen = h
+        .resolve_enabled_tool_spec_for_prompt(
+            &ToolName::new("render_asset"),
+            &source.agent_prompt_id,
+        )
+        .expect("aliased tool is present in the prompt snapshot");
+    assert_eq!(frozen.name.as_str(), "generic_asset");
+    assert_eq!(
+        frozen.background_support,
+        Some(tau_proto::BackgroundSupport::Never)
+    );
+
+    h.tool_routing.registry.register(
+        &tool_connection,
+        background_policy_tool(
+            "generic_asset",
+            "render_asset",
+            Some(tau_proto::BackgroundSupport::Instant),
+        ),
+    );
+    let (mut response, mut calls) =
+        response_with_one_tool_call(&source, "frozen-policy", "render_asset");
+    let prepared = h.normalize_finished_response_tool_calls(
+        &mut response,
+        &mut calls,
+        false,
+        false,
+        tau_proto::ObservationId::random(),
+    );
+    assert_eq!(prepared.calls.len(), 1);
+    assert_eq!(
+        prepared.calls[0].background_support,
+        tau_proto::BackgroundSupport::Never
+    );
+    let cid = h
+        .agent_id_for_prompt(&source.agent_prompt_id)
+        .expect("prompt owner");
+    h.dispatch_finished_response_tool_calls(&cid, prepared, None)
+        .expect("dispatch aliased call");
+    assert!(sink_has_tool_invoke(&tool_sink, "frozen-policy"));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ToolStarted(started)
+            if started.call_id.as_str() == "frozen-policy"
+                && started.tool_name.as_str() == "generic_asset"
+    )));
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .tool_turn
+            .next_background_deadline()
+            .is_none()
+    );
+    h.process_background_deadlines_at(Instant::now() + Duration::from_secs(3));
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "frozen-policy"
+                && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+    )));
+    h.handle_extension_event_inner(
+        &tool_connection,
+        test_tool_result("frozen-policy", "generic_asset"),
+    )
+    .expect("settle real aliased tool result");
+    assert!(h.tool_routing.tool_runtime.tool_turn.is_empty());
+    assert!(
+        !h.tool_routing
+            .tool_runtime
+            .pending_tool_providers
+            .contains_key("frozen-policy")
+    );
+    assert!(
+        !h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key("frozen-policy")
+    );
+
+    let model = h.config.selected_model.as_ref().expect("selected model");
+    let fresh_surface =
+        h.gather_effective_tool_specs_for_role_model(h.config.selected_role.as_str(), Some(model));
+    let fresh = fresh_surface
+        .iter()
+        .find(|spec| spec.name.as_str() == "generic_asset")
+        .expect("replacement appears on a newly materialized surface");
+    assert_eq!(
+        fresh.background_support,
+        Some(tau_proto::BackgroundSupport::Instant)
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Prompt-selected metadata must preserve every policy variant exactly, while
+/// an omitted policy or missing selected spec retains the two-second
+/// non-authorizing scheduler default.
+#[test]
+fn tool_background_policy_preserves_exact_values_and_default() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    h.submit_user_prompt(test_session_id("s1"), "render".to_owned())
+        .expect("submit");
+    let source = read_nth_prompt_created(&h, 0);
+    let cases = [
+        (
+            Some(tau_proto::BackgroundSupport::Instant),
+            tau_proto::BackgroundSupport::Instant,
+        ),
+        (
+            Some(tau_proto::BackgroundSupport::MinForegroundSeconds(7)),
+            tau_proto::BackgroundSupport::MinForegroundSeconds(7),
+        ),
+        (None, tau_proto::BackgroundSupport::MinForegroundSeconds(2)),
+    ];
+    for (index, (declared, expected)) in cases.into_iter().enumerate() {
+        h.prompt_coordination.prompt_runtime.tool_specs.insert(
+            source.agent_prompt_id.clone(),
+            vec![background_policy_tool("internal", "visible", declared)],
+        );
+        let (mut response, mut calls) =
+            response_with_one_tool_call(&source, &format!("policy-{index}"), "visible");
+        let prepared = h.prepare_finished_response_tool_calls(
+            &mut response,
+            &mut calls,
+            false,
+            false,
+            tau_proto::ObservationId::random(),
+        );
+        assert_eq!(prepared.calls[0].background_support, expected);
+    }
+
+    h.prompt_coordination
+        .prompt_runtime
+        .tool_specs
+        .insert(source.agent_prompt_id.clone(), Vec::new());
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("unauthorized"),
+        background_policy_tool(
+            "registered_only",
+            "registered_only",
+            Some(tau_proto::BackgroundSupport::Instant),
+        ),
+    );
+    let (mut response, mut calls) =
+        response_with_one_tool_call(&source, "missing-spec", "registered_only");
+    let prepared = h.normalize_finished_response_tool_calls(
+        &mut response,
+        &mut calls,
+        false,
+        false,
+        tau_proto::ObservationId::random(),
+    );
+    assert_eq!(
+        prepared.calls[0].background_support,
+        tau_proto::BackgroundSupport::MinForegroundSeconds(2)
+    );
+    assert!(
+        h.resolve_enabled_tool_spec_for_prompt(
+            &ToolName::new("registered_only"),
+            &source.agent_prompt_id,
+        )
+        .is_none()
+    );
+    let cid = h
+        .agent_id_for_prompt(&source.agent_prompt_id)
+        .expect("prompt owner");
+    h.dispatch_finished_response_tool_calls(&cid, prepared, None)
+        .expect("existing unavailable-tool rejection path");
+    assert!(h.tool_routing.tool_runtime.tool_turn.is_empty());
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ProviderToolError(error) if error.call_id.as_str() == "missing-spec"
+    )));
     h.shutdown().expect("shutdown");
 }
