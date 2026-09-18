@@ -159,10 +159,17 @@ impl ThemedText {
     }
 
     /// Appends a tree at the root level.
+    ///
+    /// When the current root is a text leaf, wraps the original leaf and the
+    /// appended tree in a default-style root span, preserving their order.
     pub fn push_tree(&mut self, span: SpanTree<StyleIdx>) {
         match &mut self.spans {
             SpanTree::Span { text, .. } => text.push(span),
-            SpanTree::Text(_) => unreachable!("ThemedText root is always a span"),
+            root @ SpanTree::Text(_) => {
+                let original =
+                    std::mem::replace(&mut *root, SpanTree::span(StyleIdx::DEFAULT, Vec::new()));
+                *root = SpanTree::span(StyleIdx::DEFAULT, vec![original, span]);
+            }
         }
     }
 
