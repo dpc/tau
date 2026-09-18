@@ -157,6 +157,7 @@ pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloa
     ordered_attributes: &[
         "event",
         "publisher",
+        "message_ref_publisher",
         "message_ref",
         "sender_ref",
         "sender_display",

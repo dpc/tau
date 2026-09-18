@@ -283,7 +283,11 @@ The harness is an ordinary post-commit consumer:
   or wake but remains visible to the UI and every matching subscriber.
 
 No reference must resolve before projection. Operation facts show their opaque
-target reference; consumers do not edit or delete prior transcript items.
+target reference as an always-present `message_ref_publisher` followed by
+`message_ref`; the former is the validated target publisher claim, while the
+separate `publisher` remains the authenticated reporting extension. Consumers
+do not edit or delete prior transcript items. These descriptive attributes add
+no routing, ownership, authentication, or permission authority.
 
 When an agent tree has its sole open foreground tool round, committed facts still
 broadcast immediately. A derived transcript item enters the per-agent

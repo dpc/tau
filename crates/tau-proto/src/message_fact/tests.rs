@@ -315,13 +315,87 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         rendered,
         vec![
             "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\"><hello></message>",
-            "<message event=\"edited\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
-            "<message event=\"deleted\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\"/>",
-            "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
-            "<message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<message event=\"edited\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
+            "<message event=\"deleted\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\"/>",
+            "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
             "<message event=\"sent\" publisher=\"bridge-main\" message_ref=\"m2\" recipient_ref=\"recipient-1\" recipient_display=\"Recipient\">sent</message>",
         ]
     );
+}
+
+/// Every operation projection preserves the referenced publisher namespace so
+/// equal opaque message IDs from different publishers remain distinguishable.
+#[test]
+fn operation_message_projections_include_the_target_publisher() {
+    let publisher = crate::MessagePublisherId::parse("reporting-bridge")
+        .expect("canonical publisher id must satisfy the identifier grammar");
+    let agent = MessageAgentTarget::new("agent-1");
+    let reference = |publisher_extension_id| MessageFactRef {
+        publisher_extension_id: RawMessagePublisherId::new(publisher_extension_id),
+        message_id: MessageFactId::new("shared-id"),
+    };
+    let operations = |target_publisher| {
+        [
+            Event::MessageEdited(MessageEdited::new(
+                publisher.clone(),
+                agent.clone(),
+                reference(target_publisher),
+                None,
+                None,
+                "edited",
+            )),
+            Event::MessageDeleted(MessageDeleted::new(
+                publisher.clone(),
+                agent.clone(),
+                reference(target_publisher),
+                None,
+                None,
+            )),
+            Event::MessageReactionAdded(MessageReactionAdded::new(
+                publisher.clone(),
+                agent.clone(),
+                reference(target_publisher),
+                None,
+                None,
+                "👍",
+            )),
+            Event::MessageReactionRemoved(MessageReactionRemoved::new(
+                publisher.clone(),
+                agent.clone(),
+                reference(target_publisher),
+                None,
+                None,
+                "👍",
+            )),
+        ]
+    };
+
+    let projections = |target_publisher| {
+        operations(target_publisher).map(|event| {
+            let projection = project_message_fact(&event)
+                .expect("message fact")
+                .expect("valid projection");
+            let ContentPart::Text { text } = &projection.item.content[0] else {
+                panic!("message projection must contain ordinary text")
+            };
+            text.clone()
+        })
+    };
+    let first = projections("target-a");
+    let second = projections("target-b");
+
+    for (first, second) in first.iter().zip(&second) {
+        assert!(first.contains(
+            "publisher=\"reporting-bridge\" message_ref_publisher=\"target-a\" \
+             message_ref=\"shared-id\""
+        ));
+        assert!(second.contains(
+            "publisher=\"reporting-bridge\" message_ref_publisher=\"target-b\" \
+             message_ref=\"shared-id\""
+        ));
+        assert_ne!(first, second);
+    }
 }
 
 /// Message bodies replace every exact own close while preserving attributes,

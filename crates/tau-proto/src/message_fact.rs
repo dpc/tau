@@ -826,6 +826,11 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
         push_attribute(&mut output, "message_ref", message_id.as_str());
     }
     if let Some(reference) = view.reference() {
+        push_attribute(
+            &mut output,
+            "message_ref_publisher",
+            reference.publisher_extension_id.as_str(),
+        );
         push_attribute(&mut output, "message_ref", reference.message_id.as_str());
     }
     if let Some(party) = view.party() {

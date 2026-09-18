@@ -53,6 +53,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
             ordered_attributes: &[
                 "event",
                 "publisher",
+                "message_ref_publisher",
                 "message_ref",
                 "sender_ref",
                 "sender_display",
