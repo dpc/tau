@@ -1046,6 +1046,16 @@ impl ManualInput {
         request_id: String,
         timeout: Option<Duration>,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        if let Some(
+            ReaderMessage::Message(tau_proto::HarnessOutputMessage::Disconnect(disconnect))
+            | ReaderMessage::ObservedMessage {
+                message: tau_proto::HarnessOutputMessage::Disconnect(disconnect),
+                ..
+            },
+        ) = self.pending.front()
+        {
+            return Err(ExtensionDataRpcError::Disconnect(disconnect.clone()));
+        }
         let mut deferred = std::mem::take(&mut self.pending);
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let result = loop {

@@ -1,4 +1,5 @@
 use std::io::{self, Cursor, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::rc::Rc;
@@ -1003,6 +1004,15 @@ fn encode_output_messages(input: &[HarnessOutputMessage]) -> Vec<u8> {
     }
     input_writer.flush().expect("flush input");
     input_bytes
+}
+
+/// Returns the encoded byte length of one harness-output frame.
+fn encoded_output_message_len(message: &HarnessOutputMessage) -> usize {
+    let mut bytes = Vec::new();
+    HarnessOutputWriter::new(&mut bytes)
+        .write_message(message)
+        .expect("encode harness output message");
+    bytes.len()
 }
 
 /// Runs one callback cleanup scenario and returns its retained handle, writer
@@ -3090,6 +3100,223 @@ fn manual_loop_extension_data_request_preserves_disconnect() {
         ManualRuntimeInput::Message(HarnessOutputMessage::Disconnect(_))
     ));
     let _ = runtime.finish_detached();
+}
+
+/// Ensures a successive untimed request returns an already-retained Disconnect
+/// without consuming it or disturbing earlier deferred frames.
+#[test]
+fn manual_loop_successive_extension_data_request_reuses_retained_disconnect() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+    let mut input_writer =
+        HarnessOutputWriter::new(writer_stream.try_clone().expect("clone input stream"));
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(35),
+            notice("before-retained-disconnect"),
+        ))
+        .expect("write unrelated delivery");
+    input_writer
+        .write_message(&disconnect("retained shutdown"))
+        .expect("write disconnect");
+    input_writer.flush().expect("flush input");
+
+    let client = runtime.extension_data_client();
+    let first_error = client
+        .request(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::ListFiles {
+                path: tau_proto::ExtensionDataPath::new(""),
+            },
+        )
+        .expect_err("first request should retain disconnect");
+    assert!(matches!(
+        first_error,
+        ExtensionDataRpcError::Disconnect(tau_proto::Disconnect {
+            reason: Some(ref reason),
+        }) if reason == "retained shutdown"
+    ));
+
+    let watchdog_stream = writer_stream
+        .try_clone()
+        .expect("clone input stream for watchdog");
+    let (watchdog_done, watchdog_wait) = mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if watchdog_wait.recv_timeout(Duration::from_secs(2)).is_err() {
+            watchdog_stream
+                .shutdown(Shutdown::Write)
+                .expect("bound stuck successive request");
+        }
+    });
+    let second_error = client
+        .request(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::ListFiles {
+                path: tau_proto::ExtensionDataPath::new(""),
+            },
+        )
+        .expect_err("successive request should reuse retained disconnect");
+    watchdog_done.send(()).expect("stop watchdog");
+    watchdog.join().expect("watchdog thread");
+    assert!(matches!(
+        second_error,
+        ExtensionDataRpcError::Disconnect(tau_proto::Disconnect {
+            reason: Some(ref reason),
+        }) if reason == "retained shutdown"
+    ));
+    assert_eq!(
+        frames_from_writer(&written)
+            .into_iter()
+            .filter(|message| matches!(message, HarnessInputMessage::ExtensionDataRequest(_)))
+            .count(),
+        2,
+        "the retained disconnect must not suppress the successive outbound request"
+    );
+
+    assert!(matches!(
+        runtime
+            .recv_timeout(Duration::from_millis(100))
+            .expect("preserved disconnect"),
+        ManualRuntimeInput::Message(HarnessOutputMessage::Disconnect(
+            tau_proto::Disconnect {
+                reason: Some(reason),
+            }
+        )) if reason == "retained shutdown"
+    ));
+    match runtime
+        .recv_timeout(Duration::from_millis(100))
+        .expect("preserved earlier delivery")
+    {
+        ManualRuntimeInput::Message(HarnessOutputMessage::Deliver(delivery)) => {
+            assert!(matches!(
+                delivery.event.as_ref(),
+                Event::HarnessNotice(notice)
+                    if notice.message == "before-retained-disconnect"
+            ));
+        }
+        other => panic!("expected preserved delivery, got {other:?}"),
+    }
+    let _ = runtime.finish_detached();
+}
+
+/// Ensures a successive timed request returns an observed retained Disconnect
+/// before its deadline while preserving the frame's observation metadata.
+#[test]
+fn manual_loop_successive_timed_request_preserves_observed_disconnect() {
+    let delivery = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(36),
+        notice("before-observed-disconnect"),
+    );
+    let disconnect = disconnect("observed retained shutdown");
+    let encoded_delivery_len = encoded_output_message_len(&delivery);
+    let encoded_disconnect_len = encoded_output_message_len(&disconnect);
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("provider-builtin.receipt=trace")
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::io::sink)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+        write_initial_configure(&writer_stream);
+        let writer = SharedWriter::default();
+        let mut runtime = TauExtensionRunner::new(ReplayExtension)
+            .start_manual_loop(reader, writer, Counts::default())
+            .expect("start manual loop");
+        let (observations_enabled, selected_runtime) = runtime.select_local_input_observation_path(
+            |runtime| (true, runtime),
+            |runtime| (false, runtime),
+        );
+        assert!(observations_enabled);
+        runtime = selected_runtime;
+        let mut input_writer = HarnessOutputWriter::new(writer_stream);
+        input_writer
+            .write_message(&delivery)
+            .expect("write unrelated delivery");
+        input_writer
+            .write_message(&disconnect)
+            .expect("write observed disconnect");
+        input_writer.flush().expect("flush input");
+
+        let client = runtime.extension_data_client();
+        let first_error = client
+            .request(
+                tau_proto::ExtensionDataScope::User,
+                tau_proto::ExtensionDataRequestOp::ListFiles {
+                    path: tau_proto::ExtensionDataPath::new(""),
+                },
+            )
+            .expect_err("first request should retain observed disconnect");
+        assert!(matches!(
+            first_error,
+            ExtensionDataRpcError::Disconnect(tau_proto::Disconnect {
+                reason: Some(ref reason),
+            }) if reason == "observed retained shutdown"
+        ));
+
+        let second_error = client
+            .request_timeout(
+                tau_proto::ExtensionDataScope::User,
+                tau_proto::ExtensionDataRequestOp::ListFiles {
+                    path: tau_proto::ExtensionDataPath::new(""),
+                },
+                Duration::from_millis(100),
+            )
+            .expect_err("timed request should reuse retained disconnect");
+        assert!(matches!(
+            second_error,
+            ExtensionDataRpcError::Disconnect(tau_proto::Disconnect {
+                reason: Some(ref reason),
+            }) if reason == "observed retained shutdown"
+        ));
+
+        assert!(matches!(
+            runtime
+                .recv_timeout(Duration::from_millis(100))
+                .expect("preserved observed disconnect"),
+            ManualRuntimeInput::Message(HarnessOutputMessage::Disconnect(
+                tau_proto::Disconnect {
+                    reason: Some(reason),
+                }
+            )) if reason == "observed retained shutdown"
+        ));
+        assert_eq!(
+            runtime
+                .take_local_input_observation()
+                .expect("disconnect observation")
+                .frame_bytes
+                .get(),
+            u64::try_from(encoded_disconnect_len).expect("fixture size fits u64")
+        );
+        match runtime
+            .recv_timeout(Duration::from_millis(100))
+            .expect("preserved observed delivery")
+        {
+            ManualRuntimeInput::Message(HarnessOutputMessage::Deliver(delivery)) => {
+                assert!(matches!(
+                    delivery.event.as_ref(),
+                    Event::HarnessNotice(notice)
+                        if notice.message == "before-observed-disconnect"
+                ));
+            }
+            other => panic!("expected preserved delivery, got {other:?}"),
+        }
+        assert_eq!(
+            runtime
+                .take_local_input_observation()
+                .expect("delivery observation")
+                .frame_bytes
+                .get(),
+            u64::try_from(encoded_delivery_len).expect("fixture size fits u64")
+        );
+        let _ = runtime.finish_detached();
+    });
 }
 
 /// Ensures clean input EOF before a matching extension-data response is
