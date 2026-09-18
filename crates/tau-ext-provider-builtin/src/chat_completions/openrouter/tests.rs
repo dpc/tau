@@ -328,10 +328,6 @@ fn cache_policy_preserves_last_good_data_across_failure_classes() {
     for body in [
         r#"{"data":[]}"#.to_owned(),
         r#"{"data":[{"id":""}]}"#.to_owned(),
-        format!(
-            r#"{{"data":[{{"id":"{}"}}]}}"#,
-            "x".repeat(MAX_OPENROUTER_MODELS_BODY_BYTES + 1)
-        ),
     ] {
         let invalid = ScriptedHttpServer::spawn(200, body);
         fetch_openrouter_models_from("", &network(), &invalid.url(), Some(&cache))
@@ -339,6 +335,22 @@ fn cache_policy_preserves_last_good_data_across_failure_classes() {
         invalid.finish();
         assert_eq!(fs::read(&cache).expect("preserved cache"), original);
     }
+
+    let oversized = ScriptedHttpServer::spawn(
+        200,
+        format!(
+            r#"{{"data":[{{"id":"vendor/model","name":"{}","context_length":1234}}]}}"#,
+            "x".repeat(MAX_OPENROUTER_MODELS_BODY_BYTES + 1)
+        ),
+    );
+    let error = fetch_openrouter_models_from("", &network(), &oversized.url(), Some(&cache))
+        .expect_err("oversized successful response must fail closed");
+    assert!(matches!(
+        error.downcast_ref::<OpenRouterDiscoveryError>(),
+        Some(OpenRouterDiscoveryError::BodyTooLarge)
+    ));
+    oversized.finish();
+    assert_eq!(fs::read(&cache).expect("preserved cache"), original);
 
     let invalid_network = tau_provider::OutboundNetworkPolicy::from_environment(
         path_std_collections::BTreeMap::from([(
