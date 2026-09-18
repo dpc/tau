@@ -100,6 +100,10 @@ fn creator_edges_are_immutable_and_acyclic() {
         RecordCreatorOutcome::RejectedCycle
     );
     assert_eq!(
+        topology.inclusive_creator_chain(&agent_id("parent")),
+        vec![agent_id("parent")]
+    );
+    assert_eq!(
         topology.inclusive_creator_chain(&agent_id("child")),
         vec![agent_id("child"), agent_id("parent")]
     );
