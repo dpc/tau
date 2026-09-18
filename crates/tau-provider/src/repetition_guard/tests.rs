@@ -1,5 +1,33 @@
 use super::*;
 
+const GENEROUS_MAX_TAIL_CAPACITY: usize = DEFAULT_TAIL_CHARS * 4 * 2;
+
+fn non_repeating_ascii(min_bytes: usize) -> String {
+    let mut text = String::with_capacity(min_bytes);
+    let mut index = 0;
+    while text.len() < min_bytes {
+        text.push_str(&format!("item-{index:08x};"));
+        index += 1;
+    }
+    text
+}
+
+fn scalar_suffix(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
+fn detector<'a>(
+    guard: &'a StreamRepetitionGuard,
+    key: &StreamRepetitionKey,
+) -> &'a ExactTailDetector {
+    guard
+        .detectors
+        .get(key)
+        .expect("the test component should be admitted")
+}
+
 /// Ensures single-character loops are caught only after a long exact
 /// suffix.
 #[test]
@@ -245,4 +273,93 @@ fn bounds_tracked_stream_components() {
         StreamRepetitionKey::AssistantText { output_index: 0 }
     );
     assert_eq!(hit.mode, RepetitionMode::Fragment);
+}
+
+/// Ensures large deltas and replacement snapshots copy only the bounded suffix
+/// and never retain input-sized allocation afterward.
+#[test]
+fn bounds_tail_allocation_for_large_deltas_and_replacements() {
+    let mut guard = StreamRepetitionGuard::new();
+    let key = StreamRepetitionKey::AssistantText { output_index: 0 };
+    let large_delta = non_repeating_ascii(512 * 1024);
+
+    assert!(guard.push_delta(key.clone(), &large_delta).is_none());
+    assert_eq!(
+        detector(&guard, &key).tail,
+        scalar_suffix(&large_delta, DEFAULT_TAIL_CHARS)
+    );
+    assert!(
+        detector(&guard, &key).tail.capacity() <= GENEROUS_MAX_TAIL_CAPACITY,
+        "tail capacity should follow the UTF-8 tail bound, not the input size"
+    );
+
+    let larger_replacement = non_repeating_ascii(2 * 1024 * 1024);
+    assert!(
+        guard
+            .replace_tail(key.clone(), &larger_replacement)
+            .is_none()
+    );
+    assert_eq!(
+        detector(&guard, &key).tail,
+        scalar_suffix(&larger_replacement, DEFAULT_TAIL_CHARS)
+    );
+    assert!(
+        detector(&guard, &key).tail.capacity() <= GENEROUS_MAX_TAIL_CAPACITY,
+        "a larger replacement should not increase retained capacity"
+    );
+
+    assert!(guard.push_delta(key.clone(), "later-small-delta").is_none());
+    let combined = format!(
+        "{}later-small-delta",
+        scalar_suffix(&larger_replacement, DEFAULT_TAIL_CHARS)
+    );
+    assert_eq!(
+        detector(&guard, &key).tail,
+        scalar_suffix(&combined, DEFAULT_TAIL_CHARS)
+    );
+
+    assert!(
+        guard
+            .replace_tail(key.clone(), "smaller non-prefix replacement")
+            .is_none()
+    );
+    assert_eq!(
+        detector(&guard, &key).tail,
+        "smaller non-prefix replacement"
+    );
+    assert!(
+        detector(&guard, &key).tail.capacity() <= GENEROUS_MAX_TAIL_CAPACITY,
+        "later small replacements should preserve the bounded allocation"
+    );
+
+    assert!(guard.replace_tail(key.clone(), "").is_none());
+    assert!(detector(&guard, &key).tail.is_empty());
+    assert!(
+        detector(&guard, &key).tail.capacity() <= GENEROUS_MAX_TAIL_CAPACITY,
+        "empty replacement should not leave input-sized capacity"
+    );
+}
+
+/// Ensures suffix truncation follows Unicode scalar boundaries for mixed-width
+/// text, including boundaries that retain only part of the old tail.
+#[test]
+fn retains_exact_mixed_width_scalar_suffix() {
+    let scalars = ['a', 'é', '中', '🦀'];
+    let text = scalars.into_iter().cycle().take(40).collect::<String>();
+
+    for max_chars in [0, 1, 3, 4, 5, 39, 40, 41] {
+        let mut detector = ExactTailDetector {
+            tail: String::new(),
+        };
+        detector.push(&text, max_chars);
+        assert_eq!(detector.tail, scalar_suffix(&text, max_chars));
+    }
+
+    let mut detector = ExactTailDetector {
+        tail: "old-aé中🦀".to_owned(),
+    };
+    let delta = "new-é中🦀";
+    let combined = format!("{}{}", detector.tail, delta);
+    detector.push(delta, 9);
+    assert_eq!(detector.tail, scalar_suffix(&combined, 9));
 }

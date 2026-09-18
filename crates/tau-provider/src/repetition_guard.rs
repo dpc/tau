@@ -167,10 +167,27 @@ impl StreamRepetitionGuard {
 
 impl ExactTailDetector {
     fn push(&mut self, delta: &str, max_tail_chars: usize) {
-        self.tail.push_str(delta);
-        let chars = self.tail.chars().count();
-        if max_tail_chars < chars {
-            let drop = chars - max_tail_chars;
+        if max_tail_chars == 0 {
+            self.tail.clear();
+            return;
+        }
+
+        let delta_chars = delta.chars().take(max_tail_chars.saturating_add(1)).count();
+        if max_tail_chars < delta_chars {
+            let byte = delta
+                .char_indices()
+                .rev()
+                .nth(max_tail_chars - 1)
+                .map_or(delta.len(), |(index, _)| index);
+            self.tail.clear();
+            self.tail.push_str(&delta[byte..]);
+            return;
+        }
+
+        let keep_old_chars = max_tail_chars - delta_chars;
+        let old_chars = self.tail.chars().count();
+        if keep_old_chars < old_chars {
+            let drop = old_chars - keep_old_chars;
             let byte = self
                 .tail
                 .char_indices()
@@ -179,6 +196,7 @@ impl ExactTailDetector {
                 .unwrap_or(self.tail.len());
             self.tail.drain(..byte);
         }
+        self.tail.push_str(delta);
     }
 
     fn detect(&self, key: &StreamRepetitionKey) -> Option<(RepetitionMode, String)> {
