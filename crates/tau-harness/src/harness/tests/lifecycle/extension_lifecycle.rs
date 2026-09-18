@@ -10,6 +10,31 @@ use crate::harness::extension_activation::{
     tool_started_subscription_work,
 };
 
+/// A test sink that releases a waiting Ready sender only after the expired
+/// extension's startup notice proves the waiter classified an empty FIFO.
+struct StartupTimeoutNoticeSink {
+    /// Routed frames retained for the final notice assertion.
+    events: Arc<Mutex<Vec<RoutedFrame>>>,
+    /// One-shot rendezvous released by the expired extension's notice.
+    observed: Option<mpsc::SyncSender<()>>,
+    /// Extension name whose timeout notice marks branch completion.
+    expired_name: &'static str,
+}
+
+impl ConnectionSink for StartupTimeoutNoticeSink {
+    fn send(&mut self, event: RoutedFrame) -> Result<(), ConnectionSendError> {
+        let observed = matches!(
+            peel_inner_event(&event.frame),
+            Some(Event::HarnessNotice(notice)) if notice.message.contains(self.expired_name)
+        );
+        self.events.lock().expect("sink mutex").push(event);
+        if observed && let Some(tx) = self.observed.take() {
+            tx.send(()).expect("Ready sender awaits timeout notice");
+        }
+        Ok(())
+    }
+}
+
 /// Supervised providers preserve fatal/non-respawn policy even though their
 /// writer cleanup uses the same retained ownership path.
 #[test]
@@ -4256,6 +4281,132 @@ fn required_extension_startup_deadlines_are_independent() {
             require: true,
         })
     );
+}
+
+/// Ensures the already-due empty-FIFO waiter expires only the elapsed optional
+/// peer, then accepts a required peer's Ready at its unchanged later deadline.
+#[test]
+fn empty_startup_fifo_preserves_later_required_extension_deadline() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.extensions.initial_tool_preflight_complete = false;
+    let expired = crate::test_connection_id("expired-optional-empty-fifo");
+    let later = crate::test_connection_id("later-required-empty-fifo");
+    let _expired_sink = connect_handshaking_tool(&mut h, expired.as_str());
+    let _later_sink = connect_handshaking_tool(&mut h, later.as_str());
+    h.extensions
+        .entries
+        .get_mut(&expired)
+        .expect("expired extension")
+        .require = false;
+    let now = Instant::now();
+    let expired_deadline = now - Duration::from_secs(1);
+    let later_deadline = now + Duration::from_secs(10);
+    h.extensions.startup_deadlines.insert(
+        expired.clone(),
+        StartupDeadline {
+            deadline: expired_deadline,
+            name: crate::test_extension_name("expired-optional-empty-fifo"),
+            require: false,
+        },
+    );
+    h.extensions.startup_deadlines.insert(
+        later.clone(),
+        StartupDeadline {
+            deadline: later_deadline,
+            name: crate::test_extension_name("later-required-empty-fifo"),
+            require: true,
+        },
+    );
+    assert_eq!(h.extensions.pending_connects, 0);
+    assert!(!h.extensions_all_ready());
+    assert!(!h.extensions.initial_tool_preflight_complete);
+    assert!(
+        h.runtime_io
+            .component_ingress
+            .startup_frame_observations()
+            .is_empty()
+    );
+    assert!(matches!(
+        h.runtime_io.rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+
+    let notice_events = Arc::new(Mutex::new(Vec::new()));
+    let (observed_tx, observed_rx) = mpsc::sync_channel(0);
+    let ui_connection = crate::test_connection_id("startup-timeout-observer");
+    h.runtime_io.bus.connect(Connection::new(
+        PendingConnectionMetadata {
+            id: Some(ui_connection.clone()),
+            name: crate::test_extension_name("startup-timeout-observer"),
+            kind: tau_proto::ClientKind::Ui,
+            origin: ConnectionOrigin::InMemory,
+        },
+        Box::new(StartupTimeoutNoticeSink {
+            events: Arc::clone(&notice_events),
+            observed: Some(observed_tx),
+            expired_name: "expired-optional-empty-fifo",
+        }),
+    ));
+    h.handle_client_event(
+        &ui_connection,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe timeout observer");
+
+    let ready_tx = h.runtime_io.tx.clone();
+    let ready_connection = later.clone();
+    let ready = thread::spawn(move || {
+        observed_rx
+            .recv()
+            .expect("waiter emits expired extension notice");
+        ready_tx
+            .send(HarnessEvent::from_connection_observed_at_for_test(
+                ready_connection,
+                HarnessInputMessage::Ready(Default::default()),
+                later_deadline,
+            ))
+            .expect("deliver later Ready after empty-FIFO classification");
+    });
+
+    h.wait_for_extensions_ready_at(now - STARTUP_TIMEOUT)
+        .expect("later required extension retains its independent deadline");
+    ready.join().expect("Ready sender joins");
+
+    assert_eq!(
+        h.extensions.entries[&expired].state,
+        ExtensionState::Disconnected
+    );
+    assert_eq!(h.extensions.entries[&later].state, ExtensionState::Ready);
+    assert!(!h.extensions.startup_deadlines.contains_key(&expired));
+    assert!(!h.extensions.startup_deadlines.contains_key(&later));
+    assert!(h.extensions.initial_tool_preflight_complete);
+    let notices = notice_events.lock().expect("notice sink");
+    assert!(notices.iter().any(|frame| matches!(
+        peel_inner_event(&frame.frame),
+        Some(Event::HarnessNotice(notice))
+            if notice.message.contains("expired-optional-empty-fifo")
+                && !notice.message.contains("later-required-empty-fifo")
+    )));
+}
+
+/// Ensures an already-due general deadline with only pending connects retains
+/// the terminal fallback instead of repeatedly continuing an empty FIFO.
+#[test]
+fn empty_startup_fifo_with_pending_connect_uses_terminal_fallback() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.extensions.pending_connects = 1;
+
+    let error = h
+        .wait_for_extensions_ready_at(Instant::now() - STARTUP_TIMEOUT)
+        .expect_err("pending-only startup cannot make progress from an empty FIFO");
+
+    assert!(matches!(error, HarnessError::StartupTimeout));
+    assert_eq!(h.extensions.pending_connects, 1);
 }
 
 /// Ensures an externally managed queued peer retains its one startup-wait

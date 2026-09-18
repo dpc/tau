@@ -182,6 +182,10 @@ impl Harness {
                             .map_err(|_| HarnessError::StartupTimeout)?;
                         self.expand_component_ingress_wake(event)
                     }
+                    Err(mpsc::TryRecvError::Empty) if self.extensions.pending_connects == 0 => {
+                        self.handle_expired_extension_startup_deadlines(Instant::now())?;
+                        continue;
+                    }
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
                         return self.handle_extensions_startup_timeout();
                     }
