@@ -153,3 +153,132 @@ fn read_rejects_multi_range_render_expansion_over_cap() {
         err.message
     );
 }
+
+fn result_field<'a>(result: &'a CborValue, name: &str) -> Option<&'a CborValue> {
+    let CborValue::Map(entries) = result else {
+        panic!("expected map");
+    };
+    entries
+        .iter()
+        .find_map(|(key, value)| (key == &CborValue::Text(name.to_owned())).then_some(value))
+}
+
+/// Default and both explicit single-range forms still accept dense sources.
+/// Verify the saved at-cap prefix incrementally, without a giant full oracle.
+#[test]
+fn read_dense_single_ranges_preserve_output_and_saved_prefix() {
+    use crate::shell_output_spool::MAX_SAVED_OUTPUT_BYTES;
+    use crate::truncate::MAX_OUTPUT_BYTES;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("dense");
+    std::fs::write(&path, vec![b'\n'; MAX_READ_FILE_BYTES]).expect("write at-cap dense input");
+    for extra in [
+        vec![],
+        vec![("start_line", CborValue::Integer(1.into()))],
+        vec![(
+            "end_line",
+            CborValue::Integer((MAX_READ_FILE_BYTES as i64 + 1).into()),
+        )],
+        vec![(
+            "ranges",
+            CborValue::Array(vec![map(vec![
+                ("start_line", CborValue::Integer(1.into())),
+                (
+                    "end_line",
+                    CborValue::Integer((MAX_READ_FILE_BYTES as i64 + 1).into()),
+                ),
+            ])]),
+        )],
+    ] {
+        let mut args = vec![("path", CborValue::Text(path.display().to_string()))];
+        args.extend(extra);
+        let output =
+            read_file(&map(args), &mut ShellWorld::real()).expect("read accepted single range");
+        let result = &output.result;
+        assert_eq!(
+            result_field(result, "truncated"),
+            Some(&CborValue::Bool(true))
+        );
+        for field in ["total_lines", "total_bytes"] {
+            assert_eq!(
+                result_field(result, field),
+                Some(&CborValue::Integer((MAX_READ_FILE_BYTES as i64).into()))
+            );
+        }
+        assert!(result_field(result, "valid_utf8").is_none());
+        assert!(result_field(result, "full_output_path").is_none());
+        assert_eq!(
+            result_field(result, "saved_output_truncated"),
+            Some(&CborValue::Bool(true))
+        );
+        assert_eq!(
+            result_field(result, "saved_output_bytes"),
+            Some(&CborValue::Integer((MAX_SAVED_OUTPUT_BYTES as i64).into()))
+        );
+        let Some(CborValue::Text(content)) = result_field(result, "line-numbered content") else {
+            panic!("missing visible content");
+        };
+        assert!(content.len() <= MAX_OUTPUT_BYTES);
+        assert!(content.starts_with("1 \n2 \n"));
+        assert!(content.contains("\n...\n"));
+        assert!(content.ends_with(&format!("{MAX_READ_FILE_BYTES} ")));
+        let Some(CborValue::Text(saved_path)) = result_field(result, "saved_output_path") else {
+            panic!("missing saved prefix");
+        };
+        let saved = std::fs::read(saved_path).expect("read saved prefix");
+        assert_eq!(saved.len(), MAX_SAVED_OUTPUT_BYTES);
+        let mut offset = 0;
+        for number in 1..=MAX_READ_FILE_BYTES {
+            let record = if number == 1 {
+                "1 ".to_owned()
+            } else {
+                format!("\n{number} ")
+            };
+            let take = record.len().min(saved.len() - offset);
+            assert_eq!(&saved[offset..offset + take], &record.as_bytes()[..take]);
+            offset += take;
+            if offset == saved.len() {
+                break;
+            }
+        }
+        assert_eq!(offset, saved.len());
+    }
+}
+
+/// Whole-source UTF-8 validity and total-field presence are independent of the
+/// selected range, and a past-EOF request remains an error rather than output.
+#[test]
+fn read_single_range_preserves_validation_and_metadata_presence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("source");
+    std::fs::write(&path, b"\xff\nok\n").expect("write invalid unselected line");
+    let args = |start| {
+        map(vec![
+            ("path", CborValue::Text(path.display().to_string())),
+            ("start_line", CborValue::Integer(start)),
+        ])
+    };
+    let output =
+        read_file(&args(2.into()), &mut ShellWorld::real()).expect("read valid selected line");
+    assert_eq!(
+        result_field(&output.result, "valid_utf8"),
+        Some(&CborValue::Bool(false))
+    );
+    assert_eq!(
+        result_field(&output.result, "line-numbered content"),
+        Some(&CborValue::Text("2 ok".to_owned()))
+    );
+    for field in [
+        "total_lines",
+        "total_bytes",
+        "truncated",
+        "full_output_path",
+        "saved_output_path",
+        "truncation_warning",
+    ] {
+        assert!(result_field(&output.result, field).is_none(), "{field}");
+    }
+    let error = read_file(&args(3.into()), &mut ShellWorld::real()).expect_err("reject past EOF");
+    assert!(error.message.contains("past end of file (total_lines: 2)"));
+}

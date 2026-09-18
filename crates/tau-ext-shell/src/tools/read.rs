@@ -3,6 +3,7 @@
 use std::io as path_std_io;
 use std::num::NonZeroUsize;
 
+mod single_range;
 #[cfg(test)]
 mod tests;
 use std::path::{Path, PathBuf};
@@ -42,16 +43,37 @@ pub(crate) fn read_file(
         })?;
     let file_bytes = bytes.len();
     validate_range_render_budget(&bytes, &request.ranges, &display_args)?;
-    let sliced = slice_line_ranges(&bytes, &request.ranges);
-    validate_ranges_with_total(&request.ranges, sliced.total_lines, &display_args)?;
-    let total_lines = sliced.total_lines;
-    let truncated = truncate_line_oriented(&sliced.content);
+    let (total_lines, valid_utf8, truncated, saved_prefix, incomplete) =
+        if let [range] = request.ranges.as_slice() {
+            let prepared = single_range::Prepared::new(&bytes, range);
+            validate_ranges_with_total(&request.ranges, prepared.total_lines, &display_args)?;
+            let truncated = prepared.truncate();
+            let incomplete = prepared.prefix.len() < prepared.rendered_bytes;
+            (
+                prepared.total_lines,
+                prepared.valid_utf8,
+                truncated,
+                prepared.prefix,
+                incomplete,
+            )
+        } else {
+            let sliced = slice_line_ranges(&bytes, &request.ranges);
+            validate_ranges_with_total(&request.ranges, sliced.total_lines, &display_args)?;
+            let truncated = truncate_line_oriented(&sliced.content);
+            (
+                sliced.total_lines,
+                sliced.valid_utf8,
+                truncated,
+                sliced.content,
+                false,
+            )
+        };
     let content_value = CborValue::Text(truncated.content.clone());
     let mut entries = vec![(
         CborValue::Text("line-numbered content".to_owned()),
         content_value,
     )];
-    if !sliced.valid_utf8 {
+    if !valid_utf8 {
         entries.push((
             CborValue::Text("valid_utf8".to_owned()),
             CborValue::Bool(false),
@@ -74,7 +96,7 @@ pub(crate) fn read_file(
         ));
     }
     if truncated.was_truncated {
-        crate::shell_output_spool::append_metadata(&mut entries, &sliced.content);
+        crate::shell_output_spool::append_prefix_metadata(&mut entries, &saved_prefix, incomplete);
     }
     let mut display = ok_display(display_args);
     display.stats = text_stats(&truncated.content);
@@ -376,23 +398,47 @@ impl SliceState {
 }
 
 fn render_read_line(line: &ReadLine) -> String {
-    let mut markers = Vec::new();
-    if line.invalid_utf8 {
-        markers.push("invalid-utf8");
-    }
-    match line.ending {
-        Some(LineEndingKind::Lf) => {}
-        Some(LineEndingKind::Crlf) => markers.push("crlf"),
-        Some(LineEndingKind::Cr) => markers.push("cr"),
-        None => markers.push("no_nl"),
-    }
+    let mut output = String::new();
+    render_line_into(
+        &mut output,
+        line.number,
+        &line.content,
+        line.invalid_utf8,
+        line.ending,
+    );
+    output
+}
 
-    let marker = if markers.is_empty() {
-        String::new()
-    } else {
-        format!("({})", markers.join(","))
+/// Render one source line into reusable scratch, preserving marker order.
+fn render_line_into(
+    output: &mut String,
+    number: usize,
+    content: &str,
+    invalid_utf8: bool,
+    ending: Option<LineEndingKind>,
+) {
+    use std::fmt::Write as _;
+    output.clear();
+    write!(output, "{number}").expect("writing to String");
+    let ending_marker = match ending {
+        Some(LineEndingKind::Lf) => "",
+        Some(LineEndingKind::Crlf) => "crlf",
+        Some(LineEndingKind::Cr) => "cr",
+        None => "no_nl",
     };
-    format!("{}{marker} {}", line.number, line.content)
+    if invalid_utf8 || !ending_marker.is_empty() {
+        output.push('(');
+        if invalid_utf8 {
+            output.push_str("invalid-utf8");
+            if !ending_marker.is_empty() {
+                output.push(',');
+            }
+        }
+        output.push_str(ending_marker);
+        output.push(')');
+    }
+    output.push(' ');
+    output.push_str(content);
 }
 
 fn parse_read_request(arguments: &CborValue) -> Result<ReadRequest, ToolFailure> {

@@ -62,6 +62,20 @@ pub(crate) fn append_metadata(
     entries: &mut Vec<(tau_proto::CborValue, tau_proto::CborValue)>,
     rendered: &str,
 ) {
+    let mut end = rendered.len().min(MAX_SAVED_OUTPUT_BYTES);
+    while !rendered.is_char_boundary(end) {
+        end -= 1;
+    }
+    append_prefix_metadata(entries, &rendered[..end], end < rendered.len());
+}
+
+/// Append the same metadata for an already bounded native-rendering prefix.
+/// `incomplete` describes the original rendering, not just the supplied prefix.
+pub(crate) fn append_prefix_metadata(
+    entries: &mut Vec<(tau_proto::CborValue, tau_proto::CborValue)>,
+    prefix: &str,
+    incomplete: bool,
+) {
     use tau_proto::CborValue;
     entries.push((
         CborValue::Text("truncation_warning".to_owned()),
@@ -70,12 +84,7 @@ pub(crate) fn append_metadata(
                 .to_owned(),
         ),
     ));
-    let mut end = rendered.len().min(MAX_SAVED_OUTPUT_BYTES);
-    while !rendered.is_char_boundary(end) {
-        end -= 1;
-    }
-    let incomplete = end < rendered.len();
-    match save(&rendered[..end], incomplete) {
+    match save(prefix, incomplete) {
         Ok(saved) => {
             entries.push((
                 CborValue::Text(
