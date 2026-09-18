@@ -6,7 +6,8 @@ use fs2::FileExt as _;
 use tempfile::TempDir;
 
 use super::{
-    cleanup_diagnostics_with, cleanup_diagnostics_with_lock, spawn_diagnostic_cleanup_for_test,
+    DiagnosticCleanupSummary, cleanup_diagnostics_with, cleanup_diagnostics_with_lock,
+    cleanup_provider_capture_directory_entries, spawn_diagnostic_cleanup_for_test,
     try_acquire_diagnostic_cleanup_lock,
 };
 
@@ -144,6 +145,142 @@ fn cleanup_removes_expired_nested_provider_instance_captures() {
 
     assert!(!capture.exists());
     assert!(unrelated.exists());
+}
+
+/// Ensures a substantive nested-directory open failure is counted without
+/// preventing cleanup of an independent provider capture sink.
+#[test]
+fn cleanup_counts_nested_provider_capture_open_errors_and_continues() {
+    let temp = TempDir::new().expect("temp state");
+    let failed = temp.path().join("failed");
+    let independent = temp.path().join("independent");
+    std::fs::create_dir_all(&independent).expect("independent capture dir");
+    let capture = independent.join("1-prompt-http-sse-request.json.zst");
+    std::fs::write(&capture, b"capture").expect("provider capture");
+    let now = SystemTime::now() + Duration::from_secs(1);
+    let mut summary = DiagnosticCleanupSummary::default();
+    let mut remove_file = |path: &Path| std::fs::remove_file(path);
+
+    cleanup_provider_capture_directory_entries(
+        &failed,
+        Err::<Vec<path_std_io::Result<std::path::PathBuf>>, _>(path_std_io::Error::new(
+            path_std_io::ErrorKind::PermissionDenied,
+            "denied",
+        )),
+        Duration::ZERO,
+        now,
+        &mut remove_file,
+        &mut summary,
+    );
+    cleanup_provider_capture_directory_entries(
+        &independent,
+        Ok(vec![Ok(capture.clone())]),
+        Duration::ZERO,
+        now,
+        &mut remove_file,
+        &mut summary,
+    );
+
+    assert_eq!(
+        summary,
+        DiagnosticCleanupSummary {
+            scanned: 1,
+            removed: 1,
+            failures: 1,
+        }
+    );
+    assert!(!capture.exists());
+}
+
+/// Ensures one substantive nested iterator error is counted while successful
+/// entries before and after it remain eligible for cleanup.
+#[test]
+fn cleanup_counts_nested_provider_capture_entry_errors_and_continues() {
+    let temp = TempDir::new().expect("temp state");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&captures).expect("capture dir");
+    let first = captures.join("1-prompt-http-sse-request.json.zst");
+    let second = captures.join("2-prompt-http-sse-response.json.zst");
+    std::fs::write(&first, b"first").expect("first capture");
+    std::fs::write(&second, b"second").expect("second capture");
+    let mut summary = DiagnosticCleanupSummary::default();
+
+    cleanup_provider_capture_directory_entries(
+        &captures,
+        Ok(vec![
+            Ok(first.clone()),
+            Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::PermissionDenied,
+                "denied",
+            )),
+            Ok(second.clone()),
+        ]),
+        Duration::ZERO,
+        SystemTime::now() + Duration::from_secs(1),
+        &mut |path| std::fs::remove_file(path),
+        &mut summary,
+    );
+
+    assert_eq!(
+        summary,
+        DiagnosticCleanupSummary {
+            scanned: 2,
+            removed: 2,
+            failures: 1,
+        }
+    );
+    assert!(!first.exists());
+    assert!(!second.exists());
+}
+
+/// Ensures nested enumeration disappearance remains benign at both open and
+/// entry boundaries and does not suppress independent successful cleanup.
+#[test]
+fn cleanup_ignores_nested_provider_capture_not_found_errors() {
+    let temp = TempDir::new().expect("temp state");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&captures).expect("capture dir");
+    let capture = captures.join("1-prompt-http-sse-request.json.zst");
+    std::fs::write(&capture, b"capture").expect("provider capture");
+    let now = SystemTime::now() + Duration::from_secs(1);
+    let mut summary = DiagnosticCleanupSummary::default();
+    let mut remove_file = |path: &Path| std::fs::remove_file(path);
+
+    cleanup_provider_capture_directory_entries(
+        temp.path(),
+        Err::<Vec<path_std_io::Result<std::path::PathBuf>>, _>(path_std_io::Error::new(
+            path_std_io::ErrorKind::NotFound,
+            "gone",
+        )),
+        Duration::ZERO,
+        now,
+        &mut remove_file,
+        &mut summary,
+    );
+    cleanup_provider_capture_directory_entries(
+        &captures,
+        Ok(vec![
+            Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::NotFound,
+                "gone",
+            )),
+            Ok(capture.clone()),
+        ]),
+        Duration::ZERO,
+        now,
+        &mut remove_file,
+        &mut summary,
+    );
+
+    assert_eq!(
+        summary,
+        DiagnosticCleanupSummary {
+            scanned: 1,
+            removed: 1,
+            failures: 0,
+        }
+    );
+    assert!(!capture.exists());
 }
 
 /// Ensures a diagnostic newer than the configured window remains available.

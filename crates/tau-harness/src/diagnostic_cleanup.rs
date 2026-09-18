@@ -6,9 +6,7 @@ use tau_config::provider_debug_capture as path_tau_config_provider_debug_capture
 mod tests;
 
 use std::ffi::OsStr;
-use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -256,11 +254,56 @@ fn cleanup_provider_capture_directory(
     remove_file: &mut impl FnMut(&Path) -> io::Result<()>,
     summary: &mut DiagnosticCleanupSummary,
 ) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
+    cleanup_provider_capture_directory_entries(
+        directory,
+        fs::read_dir(directory).map(|entries| entries.map(|entry| entry.map(|entry| entry.path()))),
+        retention,
+        now,
+        remove_file,
+        summary,
+    );
+}
+
+/// Remove recognized captures from explicitly supplied nested enumeration
+/// results, allowing deterministic inspection-failure tests.
+fn cleanup_provider_capture_directory_entries(
+    directory: &Path,
+    entries: io::Result<impl IntoIterator<Item = io::Result<PathBuf>>>,
+    retention: Duration,
+    now: SystemTime,
+    remove_file: &mut impl FnMut(&Path) -> io::Result<()>,
+    summary: &mut DiagnosticCleanupSummary,
+) {
+    let entries = match entries {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            summary.failures += 1;
+            tracing::warn!(
+                target: "tau_harness::diagnostic_cleanup",
+                path = %directory.display(),
+                %error,
+                "failed to list nested provider debug captures for cleanup"
+            );
+            return;
+        }
     };
-    for entry in entries.flatten() {
-        cleanup_provider_capture_candidate(&entry.path(), retention, now, remove_file, summary);
+    for entry in entries {
+        let path = match entry {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                summary.failures += 1;
+                tracing::warn!(
+                    target: "tau_harness::diagnostic_cleanup",
+                    path = %directory.display(),
+                    %error,
+                    "failed to inspect one nested provider debug capture"
+                );
+                continue;
+            }
+        };
+        cleanup_provider_capture_candidate(&path, retention, now, remove_file, summary);
     }
 }
 
