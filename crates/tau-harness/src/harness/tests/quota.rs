@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use super::*;
 use crate::event_log as path_crate_event_log;
 
@@ -194,16 +192,12 @@ fn self_info_quota_snapshot_is_provider_and_model_scoped() {
         &crate::test_connection_id("quota-provider"),
         vec![quota_model()],
     );
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("current unix time")
-        .as_millis() as u64;
     let mut window = quota_window(1_234);
-    window.usage_observed_at_unix_ms = tau_proto::UnixMillis::new(now.saturating_sub(2_000));
-    window.timing_anchor_observed_at_unix_ms =
-        Some(tau_proto::UnixMillis::new(now.saturating_sub(2_000)));
+    window.usage_observed_at_unix_ms = tau_proto::UnixMillis::new(123_000);
+    window.remaining_seconds_at_timing_anchor = None;
+    window.timing_anchor_observed_at_unix_ms = None;
     let mut binding = quota_binding();
-    binding.observed_at_unix_ms = tau_proto::UnixMillis::new(now.saturating_sub(3_000));
+    binding.observed_at_unix_ms = tau_proto::UnixMillis::new(122_000);
     harness
         .handle_extension_event_inner_with_persist(
             &crate::test_connection_id("quota-provider"),
@@ -223,11 +217,9 @@ fn self_info_quota_snapshot_is_provider_and_model_scoped() {
     let snapshot = harness
         .self_provider_quota_info(&"chatgpt/gpt-5.6-sol".into())
         .expect("current provider quota");
-    assert!(
-        snapshot
-            .model_binding_age_seconds
-            .is_some_and(|age| age <= 4)
-    );
+    let binding_age = snapshot
+        .model_binding_age_seconds
+        .expect("binding observation age");
     assert_eq!(
         snapshot.model_limit_ids,
         vec![tau_proto::ProviderQuotaLimitId::parse("codex").expect("pool")]
@@ -235,12 +227,11 @@ fn self_info_quota_snapshot_is_provider_and_model_scoped() {
     assert_eq!(snapshot.windows.len(), 1);
     assert_eq!(snapshot.windows[0].used_basis_points, 1_234);
     assert!(snapshot.windows[0].applies_to_model);
-    assert!(
-        snapshot.windows[0]
-            .observed_age_seconds
-            .is_some_and(|age| age <= 3)
-    );
-    assert!(snapshot.windows[0].remaining_seconds.is_some());
+    let usage_age = snapshot.windows[0]
+        .observed_age_seconds
+        .expect("usage observation age");
+    assert_eq!(binding_age, usage_age + 1);
+    assert_eq!(snapshot.windows[0].remaining_seconds, None);
     assert!(
         harness
             .self_provider_quota_info(&"other/model".into())

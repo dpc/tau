@@ -1,5 +1,17 @@
 use super::*;
 
+/// Elapsed quota ages floor nonfuture millisecond differences to whole seconds
+/// and remain unavailable without a projection-time observation.
+#[test]
+fn elapsed_quota_age_floors_milliseconds() {
+    assert_eq!(elapsed_seconds(1_000, Some(1_000)), Some(0));
+    assert_eq!(elapsed_seconds(1_000, Some(1_999)), Some(0));
+    assert_eq!(elapsed_seconds(1_000, Some(2_000)), Some(1));
+    assert_eq!(elapsed_seconds(1_000, Some(3_999)), Some(2));
+    assert_eq!(elapsed_seconds(1_000, Some(4_000)), Some(3));
+    assert_eq!(elapsed_seconds(1_000, None), None);
+}
+
 /// Relative remaining time advances through the inclusive fresh boundary but
 /// becomes unavailable once the existing 15-minute trust window is exceeded.
 #[test]
