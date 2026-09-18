@@ -7,9 +7,10 @@ use super::*;
 /// The active composer must use the configured hollow prompt-state marker.
 #[test]
 fn active_prompt_uses_composing_marker() {
-    let theme = select_theme(
+    let theme = select_theme_with_env_override(
         &path_tau_config_settings::TauDirs::default(),
         CliTheme::default(),
+        None,
     )
     .expect("default theme loads");
     let settings = path_tau_config_settings::CliSettings::built_in();
@@ -44,7 +45,7 @@ fn selected_named_builtin_theme() {
         state_dir: None,
     };
 
-    let theme = select_theme(&dirs, CliTheme::Named("tau-dpc".to_owned()))
+    let theme = select_theme_with_env_override(&dirs, CliTheme::Named("tau-dpc".to_owned()), None)
         .expect("built-in theme loads without config dir");
     let prompt = right_prompt_context(&theme, Path::new("/tmp/project"), None, "session-1");
 
@@ -119,7 +120,8 @@ fn selected_external_theme_from_config_themes_dir() {
         state_dir: None,
     };
 
-    let theme = select_theme(&dirs, CliTheme::Named("custom".to_owned())).expect("theme loads");
+    let theme = select_theme_with_env_override(&dirs, CliTheme::Named("custom".to_owned()), None)
+        .expect("theme loads");
     let prompt = right_prompt_context(&theme, Path::new("/tmp/project"), None, "session-1");
 
     assert_eq!(prompt.spans()[0].style.fg, Some(tau_cli_term::Color::Red));
@@ -297,7 +299,8 @@ fn selected_external_theme_rejects_path_components() {
         state_dir: None,
     };
 
-    let err = select_theme(&dirs, CliTheme::Named("../bad".to_owned())).expect_err("rejects name");
+    let err = select_theme_with_env_override(&dirs, CliTheme::Named("../bad".to_owned()), None)
+        .expect_err("rejects name");
 
     assert!(err.to_string().contains("invalid theme name"));
 }
