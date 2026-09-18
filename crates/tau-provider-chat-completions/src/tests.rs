@@ -2541,69 +2541,115 @@ fn standalone_compaction_requires_enabled_local_summary_config() {
     );
 }
 
-/// Standalone lowering must require one exact final harness trigger rather than
-/// silently ignoring missing, non-final, duplicated, or mixed markers.
+/// With local summary enabled, standalone lowering must reject each malformed
+/// trigger shape and lower the one exact final trigger into its shared request.
 #[test]
 fn standalone_compaction_requires_exact_trailing_trigger() {
     let invalid_contexts = [
-        Vec::new(),
-        vec![
-            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-                items: vec![ContextItem::CompactionTrigger],
-            }),
-            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-                items: vec![assistant_text_item("later")],
-            }),
-        ],
-        vec![
-            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-                items: vec![ContextItem::CompactionTrigger],
-            }),
-            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-                items: vec![ContextItem::CompactionTrigger],
-            }),
-        ],
-        vec![tau_proto::ContextBlock::UserInput(
-            tau_proto::UserInputBlock {
-                items: vec![assistant_text_item("mixed"), ContextItem::CompactionTrigger],
-            },
-        )],
-        vec![
-            tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
-                provider_response_id: None,
-                backend: None,
-                output_items: vec![ContextItem::CompactionTrigger],
-                usage: None,
-            }),
-            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-                items: vec![ContextItem::CompactionTrigger],
-            }),
-        ],
-        vec![tau_proto::ContextBlock::AssistantResponse(
-            tau_proto::AssistantResponseBlock {
-                provider_response_id: None,
-                backend: None,
-                output_items: vec![ContextItem::CompactionTrigger],
-                usage: None,
-            },
-        )],
+        (
+            "empty context",
+            Vec::new(),
+            "local compaction prompt must contain exactly one harness trigger",
+        ),
+        (
+            "trigger followed by later user input",
+            vec![
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::CompactionTrigger],
+                }),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![assistant_text_item("later")],
+                }),
+            ],
+            "local compaction prompt has a malformed harness trigger",
+        ),
+        (
+            "two trigger user-input blocks",
+            vec![
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::CompactionTrigger],
+                }),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::CompactionTrigger],
+                }),
+            ],
+            "local compaction prompt must contain exactly one harness trigger",
+        ),
+        (
+            "trigger mixed with a message",
+            vec![tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![assistant_text_item("mixed"), ContextItem::CompactionTrigger],
+                },
+            )],
+            "local compaction prompt has a malformed harness trigger",
+        ),
+        (
+            "assistant trigger plus trailing user trigger",
+            vec![
+                tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                    provider_response_id: None,
+                    backend: None,
+                    output_items: vec![ContextItem::CompactionTrigger],
+                    usage: None,
+                }),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::CompactionTrigger],
+                }),
+            ],
+            "local compaction prompt must contain exactly one harness trigger",
+        ),
+        (
+            "sole assistant trigger",
+            vec![tau_proto::ContextBlock::AssistantResponse(
+                tau_proto::AssistantResponseBlock {
+                    provider_response_id: None,
+                    backend: None,
+                    output_items: vec![ContextItem::CompactionTrigger],
+                    usage: None,
+                },
+            )],
+            "local compaction prompt lacks its trailing harness trigger",
+        ),
     ];
-    for blocks in invalid_contexts {
+    let mut config = resolved_provider(&provider());
+    config.local_summary_compaction =
+        Some(LocalSummaryCompactionConfig::default_for(8_192).expect("positive context window"));
+    let model = provider().models[0].clone();
+    for (case, blocks, expected) in invalid_contexts {
         let mut created = prompt();
         created.operation = tau_proto::PromptOperation::StandaloneCompaction;
         created.context.blocks = blocks;
-        assert!(
-            matches!(
-                try_build_request(
-                    &resolved_provider(&provider()),
-                    &provider().models[0],
-                    &created
-                ),
-                Err(LlmError::InvalidCompaction(_))
-            ),
-            "invalid trigger shape must reject before lowering"
+        let error = match try_build_request(&config, &model, &created) {
+            Err(LlmError::InvalidCompaction(error)) => error,
+            Ok(_) => panic!("{case} must reject before lowering"),
+            Err(error) => panic!("{case} must reject as invalid compaction, got {error:?}"),
+        };
+        assert_eq!(
+            error, expected,
+            "{case} must report its exact trigger diagnostic"
         );
     }
+
+    let mut valid = prompt();
+    valid.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    valid
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
+    let request =
+        try_build_request(&config, &model, &valid).expect("exact trailing trigger must lower");
+    assert_eq!(
+        request.messages.last(),
+        Some(&serde_json::json!({
+            "role": "user",
+            "content": tau_provider::local_summary_compaction::REQUEST,
+        }))
+    );
 }
 
 /// The compact-only event validator accepts one bounded narrative with optional
