@@ -696,6 +696,7 @@ impl Harness {
         cid: &AgentId,
         call_id: &ToolCallId,
         completion_prompt_mode: BackgroundCompletionPromptMode,
+        made_progress: bool,
     ) {
         if !matches!(
             completion_prompt_mode,
@@ -712,11 +713,12 @@ impl Harness {
             .tool_runtime
             .background_completion_targets
             .insert(call_id.clone(), cid.clone());
-        if !self
-            .tool_routing
-            .tool_runtime
-            .self_compaction_results_without_progress
-            .contains(call_id)
+        if made_progress
+            && !self
+                .tool_routing
+                .tool_runtime
+                .self_compaction_results_without_progress
+                .contains(call_id)
         {
             self.reset_loop_guard_for_progress(cid);
         }

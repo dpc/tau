@@ -1169,6 +1169,8 @@ fn loop_guard_folding_user_prompt_drops_stale_pivot_from_batch() {
         Event::AgentPromptSteered(steered) if steered.text == "queued user input"
     )));
 }
+/// A committed successful background result must clear prior failures while
+/// retaining the normal completion notification.
 #[test]
 fn loop_guard_resets_on_successful_background_tool_result() {
     let td = TempDir::new().expect("tempdir");
@@ -1222,5 +1224,159 @@ fn loop_guard_resets_on_successful_background_tool_result() {
             .iter()
             .any(PendingPrompt::is_activating_background_completion),
         "committed background result should queue its completion prompt"
+    );
+}
+
+/// A committed background error must preserve failure history and a queued
+/// breaker because the failed call made no progress.
+#[test]
+fn loop_guard_preserves_failure_history_and_pending_breaker_after_background_error() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    publish_test_tool_declaration(&mut h, &cid, "bg-error");
+    h.record_tool_failure_loop_signature(
+        &cid,
+        &loop_guard_tool_error("failed-call", "read", "missing file"),
+    );
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+    for _ in 0..3 {
+        h.record_assistant_loop_signature(&cid, Some(text));
+    }
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert("bg-error".into(), cid.clone());
+    h.tool_routing.tool_runtime.pending_tools.insert(
+        "bg-error".into(),
+        PendingTool {
+            name: ToolName::new("read"),
+            internal_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+
+    h.reset_loop_guard_progress_reset_count_for_test();
+    h.handle_background_tool_error(
+        Some(&crate::test_connection_id("conn-bg")),
+        tau_proto::ToolError {
+            presentation: Default::default(),
+            call_id: "bg-error".into(),
+            tool_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "still failed".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+    );
+
+    let conv = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("agent");
+    assert_eq!(h.loop_guard_progress_reset_count_for_test(), 0);
+    assert_eq!(conv.execution.loop_guard.consecutive_tool_failures(), 1);
+    assert!(
+        conv.dispatch
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_loop_guard),
+        "background error must preserve the queued loop-guard pivot"
+    );
+    assert!(
+        conv.dispatch
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_activating_background_completion),
+        "background error must retain its completion notification"
+    );
+}
+
+/// A committed background cancellation must retain a blocked breaker and its
+/// cancellation-shaped completion notification.
+#[test]
+fn loop_guard_preserves_blocked_breaker_after_background_cancellation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    publish_test_tool_declaration(&mut h, &cid, "bg-cancel");
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert("bg-cancel".into(), cid.clone());
+    h.tool_routing.tool_runtime.pending_tools.insert(
+        "bg-cancel".into(),
+        PendingTool {
+            name: ToolName::new("read"),
+            internal_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    h.tool_routing
+        .tool_runtime
+        .pending_cancellation_observations
+        .insert(
+            "bg-cancel".into(),
+            tau_proto::ObservationId::from_bytes([42; 16]),
+        );
+    {
+        let guard = &mut h
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .execution
+            .loop_guard;
+        guard.remember_cycle_pending("blocked-cycle".to_owned(), 8);
+        guard.mark_pending_breakers_dispatched();
+        guard.mark_cycle_blocked("blocked-cycle");
+    }
+
+    h.reset_loop_guard_progress_reset_count_for_test();
+    h.handle_background_tool_cancelled(
+        &crate::test_connection_id("conn-bg"),
+        tau_proto::ToolCancelled {
+            presentation: Default::default(),
+            call_id: "bg-cancel".into(),
+            tool_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            display: None,
+        },
+    );
+
+    let conv = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("agent");
+    assert_eq!(h.loop_guard_progress_reset_count_for_test(), 0);
+    assert_eq!(
+        conv.execution.loop_guard.cycle_state("blocked-cycle"),
+        Some(LoopCycleState::Blocked)
+    );
+    assert!(conv.execution.loop_guard.stop_automatic_continuation());
+    let mut pending = conv
+        .dispatch
+        .pending_prompts
+        .iter()
+        .filter(|prompt| prompt.is_activating_background_completion())
+        .cloned()
+        .collect::<Vec<_>>();
+    h.materialize_background_completion_preview_group(&mut pending);
+    assert!(
+        pending
+            .iter()
+            .any(|prompt| prompt.text.contains("tool_outcome=\"cancelled\"")),
+        "cancellation must retain its existing wait/notification outcome"
     );
 }

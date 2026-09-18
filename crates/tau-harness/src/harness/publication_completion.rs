@@ -2504,7 +2504,7 @@ impl Harness {
                 .tool_runtime
                 .self_compaction_results_without_progress
                 .contains(call_id);
-            self.finish_committed_background_completion(&cid, call_id, pending.mode);
+            self.finish_committed_background_completion(&cid, call_id, pending.mode, true);
             if self_compaction_without_progress {
                 self.tool_routing
                     .tool_runtime
@@ -2547,7 +2547,7 @@ impl Harness {
                     PendingBackgroundTerminalKind::Result => return,
                 },
             );
-            self.finish_committed_background_completion(&cid, call_id, pending.mode);
+            self.finish_committed_background_completion(&cid, call_id, pending.mode, false);
             return;
         }
         self.tool_routing
