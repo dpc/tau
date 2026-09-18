@@ -1,8 +1,12 @@
 //! Shell-facing artifact transfer state and off-loop filesystem preparation.
 
 use std::collections::{HashMap, VecDeque};
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -578,7 +582,7 @@ fn prepare_export(
         return Err((invoke, lifecycle, "path must be a string".to_owned()));
     };
     let path = absolute_path(workdir, &path);
-    let mut file = File::open(&path).map_err(|error| {
+    let mut file = open_export_file(&path).map_err(|error| {
         (
             invoke.clone(),
             lifecycle.clone(),
@@ -634,6 +638,21 @@ fn prepare_export(
         upload,
         filename,
     })
+}
+
+/// Opens an export source without waiting for a FIFO writer on Unix.
+#[cfg(unix)]
+fn open_export_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens an export source with the platform's ordinary read-only behavior.
+#[cfg(not(unix))]
+fn open_export_file(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 #[expect(
