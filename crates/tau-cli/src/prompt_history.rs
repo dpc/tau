@@ -369,7 +369,8 @@ fn load_prompt_history_locked(path: &Path) -> io::Result<(Vec<String>, Option<Va
         }
         Err(error) => return Err(error),
     };
-    if MAX_HISTORY_FILE_BYTES < file.metadata()?.len() {
+    let file_len = file.metadata()?.len();
+    if MAX_HISTORY_FILE_BYTES < file_len {
         tracing::warn!(
             target: "tau_cli::prompt_history",
             path = %path.display(),
@@ -381,6 +382,9 @@ fn load_prompt_history_locked(path: &Path) -> io::Result<(Vec<String>, Option<Va
     let mut entries = VecDeque::new();
     let mut valid_len = 0_u64;
     loop {
+        if valid_len == file_len {
+            break;
+        }
         let mut length_bytes = [0_u8; 8];
         match file.read_exact(&mut length_bytes) {
             Ok(()) => {}

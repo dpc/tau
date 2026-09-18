@@ -1,5 +1,45 @@
 use super::*;
 
+/// Shared byte sink for inspecting formatted prompt-history warnings.
+struct TraceWriter {
+    /// Captured formatted bytes.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for TraceWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes
+            .lock()
+            .expect("trace bytes")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Prompt-history loader result captured by warning-oracle tests.
+type LoadResult = io::Result<(Vec<String>, Option<ValidatedTail>)>;
+
+fn load_with_warning_output(path: &Path) -> (LoadResult, String) {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let writer_bytes = Arc::clone(&bytes);
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || TraceWriter {
+            bytes: Arc::clone(&writer_bytes),
+        })
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, || load_prompt_history(path));
+    let output = String::from_utf8(bytes.lock().expect("trace bytes").clone())
+        .expect("trace output is UTF-8");
+    (result, output)
+}
+
 /// UI startup retains persisted order and multiline text but still starts with
 /// empty history when the backing path cannot be read as a history file.
 #[test]
@@ -368,6 +408,122 @@ fn load_ignores_history_files_over_size_limit() {
         .expect("grow over cap");
 
     assert_eq!(store.load().expect("load"), Vec::<String>::new());
+}
+
+/// Existing empty and complete history files end at valid frame boundaries, so
+/// loading must preserve their witnesses without reporting truncated headers.
+#[test]
+fn clean_history_eof_does_not_warn_about_a_truncated_header() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let empty_path = tmp.path().join("empty-history");
+    File::create(&empty_path).expect("create empty history");
+    let empty_before = fs::read(&empty_path).expect("read empty history");
+
+    let (empty_result, empty_output) = load_with_warning_output(&empty_path);
+    let (empty_entries, empty_tail) = empty_result.expect("load empty history");
+    assert!(empty_entries.is_empty());
+    assert_eq!(
+        empty_tail
+            .expect("existing history has a witness")
+            .end_offset,
+        0
+    );
+    assert!(
+        empty_output.is_empty(),
+        "unexpected warning: {empty_output}"
+    );
+    assert_eq!(
+        fs::read(&empty_path).expect("reread empty history"),
+        empty_before
+    );
+
+    let complete_path = tmp.path().join("complete-history");
+    for (recorded_at_micros, text) in [(1, "first"), (2, "second")] {
+        append_raw_record(
+            &complete_path,
+            &PromptHistoryRecord {
+                version: PROMPT_HISTORY_VERSION,
+                recorded_at_micros,
+                text: text.to_owned(),
+            },
+        );
+    }
+    let complete_before = fs::read(&complete_path).expect("read complete history");
+
+    let (complete_result, complete_output) = load_with_warning_output(&complete_path);
+    let (complete_entries, complete_tail) = complete_result.expect("load complete history");
+    assert_eq!(complete_entries, vec!["first", "second"]);
+    assert_eq!(
+        complete_tail
+            .expect("existing history has a witness")
+            .end_offset,
+        complete_before.len() as u64
+    );
+    assert!(
+        complete_output.is_empty(),
+        "unexpected warning: {complete_output}"
+    );
+    assert_eq!(
+        fs::read(&complete_path).expect("reread complete history"),
+        complete_before
+    );
+}
+
+/// Every non-empty prefix of a length header remains a torn header: loading
+/// must retain the complete prefix and emit exactly one enabled warning.
+#[test]
+fn partial_length_headers_emit_exactly_one_warning() {
+    const TRUNCATED_HEADER_WARNING: &str = "ignoring truncated prompt-history length header";
+
+    for partial_len in 1..8 {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(HISTORY_FILE);
+        append_raw_record(
+            &path,
+            &PromptHistoryRecord {
+                version: PROMPT_HISTORY_VERSION,
+                recorded_at_micros: 1,
+                text: "kept".to_owned(),
+            },
+        );
+        let prefix_len = fs::metadata(&path).expect("history metadata").len();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open history");
+        file.write_all(&42_u64.to_le_bytes()[..partial_len])
+            .expect("write partial length");
+        drop(file);
+        let before = fs::read(&path).expect("read history");
+
+        let (result, output) = load_with_warning_output(&path);
+        let (entries, tail) = result.expect("load history");
+        assert_eq!(entries, vec!["kept"], "partial length {partial_len}");
+        assert_eq!(
+            tail.expect("existing history has a witness").end_offset,
+            prefix_len,
+            "partial length {partial_len}"
+        );
+        assert_eq!(
+            output.lines().count(),
+            1,
+            "partial length {partial_len}: {output}"
+        );
+        assert_eq!(
+            output.matches(TRUNCATED_HEADER_WARNING).count(),
+            1,
+            "partial length {partial_len}: {output}"
+        );
+        assert!(
+            output.contains("tau_cli::prompt_history"),
+            "partial length {partial_len}: {output}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("reread history"),
+            before,
+            "partial length {partial_len}"
+        );
+    }
 }
 
 /// Loading should ignore a crash-torn final record while preserving complete
