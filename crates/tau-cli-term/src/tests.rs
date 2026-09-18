@@ -32,6 +32,102 @@ fn ownership_failure_does_not_resume_external_terminal() {
     assert_eq!(resume_calls.get(), 0);
 }
 
+/// An in-process interactive callback runs only while terminal ownership is
+/// released, and ordinary callback completion restores ownership exactly once.
+#[test]
+fn external_terminal_callback_is_bracketed_by_pause_and_resume() {
+    let events = path_std_rc::Rc::new(path_std_cell::RefCell::new(Vec::new()));
+    let pause_events = events.clone();
+    let callback_events = events.clone();
+    let resume_events = events.clone();
+
+    let result = run_with_external_terminal_hooks(
+        move || {
+            callback_events.borrow_mut().push("callback");
+            "result"
+        },
+        move || {
+            pause_events.borrow_mut().push("pause");
+            Ok(())
+        },
+        move || {
+            resume_events.borrow_mut().push("resume");
+            Ok(())
+        },
+    )
+    .expect("terminal handoff succeeds");
+
+    assert_eq!(result, "result");
+    assert_eq!(&*events.borrow(), &["pause", "callback", "resume"]);
+}
+
+/// A terminal release failure must not invoke the interactive callback or try
+/// a second resume beyond the raw terminal's own release rollback.
+#[test]
+fn external_terminal_release_failure_skips_callback() {
+    let callback_calls = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let callback_state = callback_calls.clone();
+    let resume_calls = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let resume_state = resume_calls.clone();
+
+    let error = run_with_external_terminal_hooks(
+        move || callback_state.set(callback_state.get() + 1),
+        || Err(io::Error::other("injected release failure")),
+        move || {
+            resume_state.set(resume_state.get() + 1);
+            Ok(())
+        },
+    )
+    .expect_err("release failure is reported");
+
+    assert_eq!(error.to_string(), "injected release failure");
+    assert_eq!(callback_calls.get(), 0);
+    assert_eq!(resume_calls.get(), 0);
+}
+
+/// A terminal resume failure remains visible after the callback and cannot
+/// leave the guard armed for a duplicate resume attempt.
+#[test]
+fn external_terminal_resume_failure_is_reported_once() {
+    let resume_calls = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let resume_state = resume_calls.clone();
+
+    let error = run_with_external_terminal_hooks(
+        || (),
+        || Ok(()),
+        move || {
+            resume_state.set(resume_state.get() + 1);
+            Err(io::Error::other("injected resume failure"))
+        },
+    )
+    .expect_err("resume failure is reported");
+
+    assert_eq!(error.to_string(), "injected resume failure");
+    assert_eq!(resume_calls.get(), 1);
+}
+
+/// Panic unwinding through an interactive callback still restores terminal
+/// ownership exactly once through the armed resume guard.
+#[test]
+fn external_terminal_callback_panic_resumes_once() {
+    let resume_calls = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let resume_state = resume_calls.clone();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = run_with_external_terminal_hooks(
+            || panic!("injected callback panic"),
+            || Ok(()),
+            move || {
+                resume_state.set(resume_state.get() + 1);
+                Ok(())
+            },
+        );
+    }));
+
+    assert!(panic.is_err());
+    assert_eq!(resume_calls.get(), 1);
+}
+
 /// Picker setup failure after foreground transfer still checks restoration and
 /// disarms the picker's distinct explicit-resume path on persistent failure.
 #[cfg(unix)]

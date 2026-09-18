@@ -3830,13 +3830,31 @@ impl<'a> TerminalInputSession<'a> {
             let provider = provider.trim();
             if !provider.is_empty() {
                 let output = &self.output;
-                run_provider_auth(provider, &|message| output.command_feedback(message));
+                run_provider_auth(
+                    provider,
+                    &|message| output.command_feedback(message),
+                    |args| {
+                        self.term
+                            .run_with_external_terminal(|| {
+                                tau_ext_provider_builtin::run_provider_cli(args)
+                                    .map_err(|error| error.to_string())
+                            })
+                            .map_err(|error| format!("terminal handoff failed: {error}"))?
+                    },
+                );
             }
             return true;
         }
         if text == ":provider-auth" {
             let output = &self.output;
-            run_provider_auth("", &|message| output.command_feedback(message));
+            run_provider_auth("", &|message| output.command_feedback(message), |args| {
+                self.term
+                    .run_with_external_terminal(|| {
+                        tau_ext_provider_builtin::run_provider_cli(args)
+                            .map_err(|error| error.to_string())
+                    })
+                    .map_err(|error| format!("terminal handoff failed: {error}"))?
+            });
             return true;
         }
         false
@@ -5474,7 +5492,11 @@ fn handle_set_command(text: &str, renderer_tx: &LocalRendererSender, print_local
     });
 }
 
-fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
+fn run_provider_auth(
+    provider: &str,
+    print_local: &impl Fn(&str),
+    register: impl FnOnce(&[String]) -> Result<(), String>,
+) {
     print_local("starting provider registration; follow prompts in the terminal");
     if !provider.is_empty() {
         print_local(
@@ -5482,7 +5504,7 @@ fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
         );
     }
     let args = vec!["add".to_owned()];
-    match tau_ext_provider_builtin::run_provider_cli(&args) {
+    match register(&args) {
         Ok(()) => print_local("provider profile saved; new prompts will use updated credentials"),
         Err(error) => print_local(&format!("provider registration failed: {error}")),
     }
@@ -5501,6 +5523,8 @@ fn send_shell_command(
     )
 }
 
+#[cfg(test)]
+mod provider_auth_tests;
 #[cfg(test)]
 mod role_cycle_tests;
 const UI_SESSION_ADMISSION_TIMEOUT: Duration = crate::ui_client::UI_SESSION_ADMISSION_TIMEOUT;

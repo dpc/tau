@@ -324,6 +324,21 @@ pub struct HighTerm {
 }
 
 impl HighTerm {
+    /// Runs an in-process interactive callback while it exclusively owns the
+    /// terminal.
+    ///
+    /// Tau pauses redraws and releases raw terminal features before invoking
+    /// `callback`, then restores terminal state and requests a fresh repaint.
+    /// A release failure prevents the callback from running. The resume guard
+    /// also restores terminal state if the callback unwinds.
+    pub fn run_with_external_terminal<T>(&self, callback: impl FnOnce() -> T) -> io::Result<T> {
+        run_with_external_terminal_hooks(
+            callback,
+            || self.term.pause_for_external(),
+            || self.term.resume_after_external(),
+        )
+    }
+
     /// Creates a new terminal with the given prompt and commands.
     ///
     /// Returns the terminal, a thread-safe handle for rendering, and a
@@ -1144,6 +1159,19 @@ impl HighTerm {
         );
         self.handle.print_output("prompt-action-error", block);
     }
+}
+
+/// Runs one callback between injectable terminal release and resume operations.
+fn run_with_external_terminal_hooks<T>(
+    callback: impl FnOnce() -> T,
+    pause: impl FnOnce() -> io::Result<()>,
+    resume: impl FnMut() -> io::Result<()>,
+) -> io::Result<T> {
+    pause()?;
+    let guard = ExternalResumeGuard::new(resume);
+    let result = callback();
+    guard.finish()?;
+    Ok(result)
 }
 
 /// Bounds startup-seeded history with production limits before an attachment
