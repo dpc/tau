@@ -3155,40 +3155,43 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
 fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path()).expect("start");
+    let tool_connection_id = crate::test_connection_id("length-tool-terminal-race");
     let tool_frames = connect_test_tool(&mut h, "length-tool-terminal-race");
-    h.handle_extension_event_inner_with_persist(
-        &crate::test_connection_id("length-tool-terminal-race"),
-        Event::ToolRegister(tau_proto::ToolRegister {
-            publisher_extension_id: crate::test_extension_name("length-tool-terminal-race"),
-            publisher_instance_id: 42.into(),
-            tool: tau_proto::ToolSpec {
-                provider_scope: None,
-                name: ToolName::new("cancel_test_tool"),
-                model_visible_name: None,
-                description: Some("must remain undispatched".to_owned()),
-                tool_type: tau_proto::ToolType::Function,
-                parameters: Some(serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": false
-                })),
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: true,
-                background_support: Some(tau_proto::BackgroundSupport::Never),
-                examples: Vec::new(),
-            },
-            tool_group: None,
-            prompt_fragment: None,
-        }),
-        Some(false),
-    )
-    .expect("register dispatchable tool");
+    h.tool_routing.registry.register(
+        &tool_connection_id,
+        tau_proto::ToolSpec {
+            provider_scope: None,
+            name: ToolName::new("cancel_test_tool"),
+            model_visible_name: None,
+            description: Some("must remain undispatched".to_owned()),
+            tool_type: tau_proto::ToolType::Function,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "additionalProperties": false
+            })),
+            format: None,
+            tags: Vec::new(),
+            enabled_by_default: true,
+            background_support: Some(tau_proto::BackgroundSupport::Never),
+            examples: Vec::new(),
+        },
+    );
+    assert_eq!(
+        h.tool_routing
+            .registry
+            .resolve_provider("cancel_test_tool")
+            .expect("dispatchable tool provider")
+            .connection_id,
+        tool_connection_id
+    );
     h.submit_user_prompt(test_session_id("s1"), "cancel tool terminal".to_owned())
         .expect("submit");
     let source = read_nth_prompt_created(&h, 0);
+    assert!(prompt_has_tool(&source, "cancel_test_tool"));
     h.handle_provider_response_finished(reasoning_only_length_response(&source, 3))
         .expect("source response");
     let successor = read_nth_prompt_created(&h, 1);
+    assert!(prompt_has_tool(&successor, "cancel_test_tool"));
     h.handle_extension_event(
         "length-tool-terminal-race",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
@@ -3243,12 +3246,10 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
         event,
         Event::ProviderToolError(error) if error.call_id == "cancelled-successor-call"
     )));
-    assert!(tool_frames.lock().expect("tool frames").iter().all(|frame| {
-        !matches!(
-            peel_inner_event(&frame.frame),
-            Some(Event::ToolRequest(request)) if request.call_id == "cancelled-successor-call"
-        )
-    }));
+    assert!(!sink_has_tool_invoke(
+        &tool_frames,
+        "cancelled-successor-call"
+    ));
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
         &tau_proto::UiCancelPrompt {
@@ -3278,12 +3279,10 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
         event,
         Event::ProviderToolError(error) if error.call_id == "cancelled-successor-call"
     )));
-    assert!(tool_frames.lock().expect("tool frames").iter().all(|frame| {
-        !matches!(
-            peel_inner_event(&frame.frame),
-            Some(Event::ToolRequest(request)) if request.call_id == "cancelled-successor-call"
-        )
-    }));
+    assert!(!sink_has_tool_invoke(
+        &tool_frames,
+        "cancelled-successor-call"
+    ));
     assert!(!default_agent_tree(&h).nodes().iter().any(|node| matches!(
         &node.entry,
         AgentEntry::ToolResults { items }
