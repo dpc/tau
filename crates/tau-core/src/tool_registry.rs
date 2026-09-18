@@ -601,6 +601,8 @@ fn cbor_to_json_value(value: &CborValue) -> serde_json::Value {
             let value: i128 = (*value).into();
             if let Ok(value) = i64::try_from(value) {
                 serde_json::Value::Number(value.into())
+            } else if let Ok(value) = u64::try_from(value) {
+                serde_json::Value::Number(value.into())
             } else {
                 serde_json::Value::String(value.to_string())
             }

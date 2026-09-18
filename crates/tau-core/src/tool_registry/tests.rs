@@ -16,6 +16,47 @@ fn strict_tool(parameters: serde_json::Value) -> ToolSpec {
     }
 }
 
+/// Builds a strict tool whose generic example exercises nested unsigned
+/// integers.
+fn unsigned_example_tool(value: u64) -> ToolSpec {
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": { "type": "integer" },
+            "nested": {
+                "type": "object",
+                "properties": {
+                    "values": { "type": "array", "items": { "type": "integer" } }
+                },
+                "required": ["values"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["count", "nested"],
+        "additionalProperties": false
+    }));
+    tool.examples.push(ToolExample {
+        id: "unsigned".to_owned(),
+        title: None,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("count".to_owned()),
+                CborValue::Integer(value.into()),
+            ),
+            (
+                CborValue::Text("nested".to_owned()),
+                CborValue::Map(vec![(
+                    CborValue::Text("values".to_owned()),
+                    CborValue::Array(vec![CborValue::Integer(value.into())]),
+                )]),
+            ),
+        ]),
+        note: None,
+        subcommand: None,
+    });
+    tool
+}
+
 /// Runs the production validator while retaining its exact semantic object
 /// indexing and lookup work for complexity assertions.
 fn validate_with_object_work(
@@ -938,6 +979,83 @@ fn oversized_tool_example_rejects_registration() {
             .to_string()
             .contains("arguments are too large for a compact example")
     );
+}
+
+/// Ensures registered examples render unsigned integers above `i64::MAX` as
+/// exact JSON numbers, so copied nested arguments remain valid.
+#[test]
+fn tool_example_hint_preserves_exact_unsigned_integer_json_numbers() {
+    for value in [i64::MAX as u64 + 1, u64::MAX] {
+        let mut registry = ToolRegistry::new();
+        let report = registry.register(
+            &test_connection_id("extension"),
+            unsigned_example_tool(value),
+        );
+        assert!(
+            report.errors.is_empty(),
+            "unsigned example {value} registers"
+        );
+
+        let registered = registry
+            .resolve_provider("strict")
+            .expect("registered provider retains tool");
+        assert_eq!(registered.tool.examples.len(), 1);
+        let hint = tool_example_hint(&registered.tool, &CborValue::Map(Vec::new())).expect("hint");
+        let json = hint
+            .strip_prefix("\n\nExample valid call:\n")
+            .expect("generic hint framing");
+        assert!(!json.contains(&format!("\"count\":\"{value}\"")));
+
+        let rendered: serde_json::Value = serde_json::from_str(json).expect("hint JSON");
+        assert_eq!(rendered["count"].as_u64(), Some(value));
+        assert_eq!(rendered["nested"]["values"][0].as_u64(), Some(value));
+
+        let copied_arguments = tau_proto::json_to_cbor(&rendered);
+        validate_tool_arguments(&registered.tool, &copied_arguments)
+            .expect("copied unsigned example remains valid");
+    }
+}
+
+/// Ensures signed integer boundaries remain JSON numbers and CBOR integers
+/// below `i64::MIN` retain their string fallback while unsigned support
+/// expands.
+#[test]
+fn cbor_json_rendering_preserves_signed_integer_boundaries_and_fallback() {
+    for value in [i64::MIN, -1, 0, i64::MAX] {
+        let rendered = cbor_to_json_value(&CborValue::Integer(value.into()));
+        assert_eq!(rendered.as_i64(), Some(value));
+    }
+
+    let below_i64_min = i128::from(i64::MIN) - 1;
+    let rendered = cbor_to_json_value(&CborValue::Integer(
+        below_i64_min
+            .try_into()
+            .expect("CBOR integer accepts the major-type-1 negative range"),
+    ));
+    assert_eq!(
+        rendered,
+        serde_json::Value::String(below_i64_min.to_string())
+    );
+}
+
+/// Ensures quoted integers above `i64::MAX` remain invalid and are not widened
+/// by the deliberately narrow integer-string repair.
+#[test]
+fn repair_leaves_quoted_unsigned_integer_overflow_unrepaired() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": { "count": { "type": "integer" } },
+        "required": ["count"],
+        "additionalProperties": false
+    }));
+    let arguments = CborValue::Map(vec![(
+        CborValue::Text("count".to_owned()),
+        CborValue::Text(u64::MAX.to_string()),
+    )]);
+
+    validate_tool_arguments(&tool, &arguments)
+        .expect_err("quoted overflow must fail integer schema");
+    assert_eq!(repair_tool_arguments(&tool, &arguments), None);
 }
 
 /// Ensures harness-owned tools retain distinct policy groups rather than
