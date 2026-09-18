@@ -712,6 +712,25 @@ fn read_pty(
     #[cfg(test)] hook: Option<&ReaderHook>,
 ) {
     let mut buffer = [0_u8; 8 * 1024];
+    read_pty_with_buffer(
+        &mut master,
+        capture,
+        stop,
+        artifacts,
+        #[cfg(test)]
+        hook,
+        &mut buffer,
+    );
+}
+
+fn read_pty_with_buffer(
+    master: &mut File,
+    capture: &Arc<(Mutex<Capture>, Condvar)>,
+    stop: &AtomicBool,
+    artifacts: Option<&(PathBuf, PathBuf)>,
+    #[cfg(test)] hook: Option<&ReaderHook>,
+    buffer: &mut [u8],
+) {
     loop {
         if stop.load(Ordering::Acquire) {
             break;
@@ -727,10 +746,13 @@ fn read_pty(
                 Err(_) => break,
             }
         };
-        if ready.intersects(PollFlags::POLLHUP | PollFlags::POLLERR) {
-            break;
+        if !ready.contains(PollFlags::POLLIN) {
+            if ready.intersects(PollFlags::POLLHUP | PollFlags::POLLERR) {
+                break;
+            }
+            continue;
         }
-        match master.read(&mut buffer) {
+        match master.read(&mut *buffer) {
             Ok(0) | Err(_) => break,
             Ok(read) => {
                 let (lock, wake) = &**capture;
@@ -787,6 +809,34 @@ fn read_pty(
         capture.closed = true;
         wake.notify_all();
     }
+}
+
+#[cfg(test)]
+fn test_capture() -> Arc<(Mutex<Capture>, Condvar)> {
+    Arc::new((
+        Mutex::new(Capture {
+            raw: Vec::new(),
+            frames: VecDeque::new(),
+            parser: vt100::Parser::new(ROWS, COLS, 10),
+            closed: false,
+            tool_violation: None,
+            tool_latch_armed: false,
+            generation: PtyReadGeneration(0),
+        }),
+        Condvar::new(),
+    ))
+}
+
+#[cfg(test)]
+fn assert_reader_capture(
+    capture: &Arc<(Mutex<Capture>, Condvar)>,
+    expected_raw: &[u8],
+    minimum_generation: u64,
+) {
+    let capture = capture.0.lock().expect("capture");
+    assert_eq!(capture.raw, expected_raw);
+    assert!(capture.generation.0 >= minimum_generation);
+    assert!(capture.closed);
 }
 
 fn process_capture_bytes(
@@ -1110,6 +1160,250 @@ fn armed_capture_stops_mid_chunk_without_losing_prior_violation() {
     assert!(capture.tool_violation.is_some());
     assert_eq!(capture.raw.len(), MAX_RAW_BYTES);
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+/// Ensures final printable bytes queued before slave closure are consumed
+/// before the reader honors the simultaneous Linux PTY hangup.
+#[test]
+fn reader_drains_final_bytes_from_preclosed_slave() {
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: ROWS,
+            ws_col: COLS,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .expect("open pty");
+    let master = File::from(pty.master);
+    let mut slave = File::from(pty.slave);
+    let payload = b"final-preclosed-payload";
+    slave.write_all(payload).expect("queue final payload");
+    slave.flush().expect("flush final payload");
+    drop(slave);
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut descriptors = [PollFd::new(
+            master.as_fd(),
+            PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+        )];
+        assert_eq!(
+            poll(&mut descriptors, 100_u16).expect("poll preclosed pty"),
+            1
+        );
+        let ready = descriptors[0].revents().expect("preclosed readiness");
+        assert!(ready.contains(PollFlags::POLLIN));
+        assert!(ready.contains(PollFlags::POLLHUP));
+    }
+
+    let capture = test_capture();
+    let reader_capture = Arc::clone(&capture);
+    let stop = AtomicBool::new(false);
+    let (done_tx, done_rx) = mpsc::channel();
+    let completed = thread::scope(|scope| {
+        scope.spawn(|| {
+            read_pty(master, &reader_capture, &stop, None, None);
+            done_tx.send(()).expect("report reader completion");
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(1));
+        if completed.is_err() {
+            stop.store(true, Ordering::Release);
+        }
+        completed
+    });
+    completed.expect("reader completion");
+
+    assert_reader_capture(&capture, payload, 1);
+    assert_eq!(
+        normalized_screen(&capture.0.lock().expect("capture").parser),
+        "final-preclosed-payload"
+    );
+}
+
+/// Ensures a reader already observing hangup returns to poll after every small
+/// read until all queued bytes have crossed the ordinary capture path.
+#[test]
+fn reader_drains_multiple_buffers_after_preclosed_hangup() {
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: ROWS,
+            ws_col: COLS,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .expect("open pty");
+    let mut master = File::from(pty.master);
+    let mut slave = File::from(pty.slave);
+    let payload = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-";
+    assert_eq!(payload.len(), 64);
+    slave.write_all(payload).expect("queue multiread payload");
+    slave.flush().expect("flush multiread payload");
+    drop(slave);
+
+    let capture = test_capture();
+    let reader_capture = Arc::clone(&capture);
+    let stop = AtomicBool::new(false);
+    let (done_tx, done_rx) = mpsc::channel();
+    let mut buffer = [0_u8; 16];
+    let completed = thread::scope(|scope| {
+        scope.spawn(|| {
+            read_pty_with_buffer(&mut master, &reader_capture, &stop, None, None, &mut buffer);
+            done_tx.send(()).expect("report reader completion");
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(1));
+        if completed.is_err() {
+            stop.store(true, Ordering::Release);
+        }
+        completed
+    });
+    completed.expect("reader completion");
+
+    assert_reader_capture(&capture, payload, 4);
+    assert_eq!(
+        normalized_screen(&capture.0.lock().expect("capture").parser),
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-"
+    );
+}
+
+/// Ensures an empty preclosed slave terminates the reader promptly without a
+/// readable event or a stop request.
+#[test]
+fn reader_finishes_empty_preclosed_slave() {
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: ROWS,
+            ws_col: COLS,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .expect("open pty");
+    let master = File::from(pty.master);
+    drop(File::from(pty.slave));
+
+    let capture = test_capture();
+    let reader_capture = Arc::clone(&capture);
+    let stop = AtomicBool::new(false);
+    let (done_tx, done_rx) = mpsc::channel();
+    let completed = thread::scope(|scope| {
+        scope.spawn(|| {
+            read_pty(master, &reader_capture, &stop, None, None);
+            done_tx.send(()).expect("report reader completion");
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(1));
+        if completed.is_err() {
+            stop.store(true, Ordering::Release);
+        }
+        completed
+    });
+    completed.expect("reader completion");
+
+    assert_reader_capture(&capture, b"", 0);
+    assert_eq!(
+        normalized_screen(&capture.0.lock().expect("capture").parser),
+        ""
+    );
+}
+
+/// Ensures the production 8 KiB reader preserves a larger concurrent transfer,
+/// including its final marker, through slave closure.
+#[test]
+fn reader_drains_production_sized_concurrent_transfer() {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: ROWS,
+            ws_col: COLS,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .expect("open pty");
+    let master = File::from(pty.master);
+    let mut slave = File::from(pty.slave);
+    let flags =
+        OFlag::from_bits_truncate(fcntl(slave.as_raw_fd(), FcntlArg::F_GETFL).expect("flags"));
+    fcntl(
+        slave.as_raw_fd(),
+        FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK),
+    )
+    .expect("make slave nonblocking");
+    let mut payload = vec![b'x'; 24 * 1024];
+    let marker = b"FINAL-MARKER";
+    payload.extend_from_slice(marker);
+
+    let capture = test_capture();
+    let reader_capture = Arc::clone(&capture);
+    let stop = AtomicBool::new(false);
+    let cancel = AtomicBool::new(false);
+    let (reader_done_tx, reader_done_rx) = mpsc::channel();
+    let (writer_done_tx, writer_done_rx) = mpsc::channel();
+    let (writer_result, reader_result) = thread::scope(|scope| {
+        let reader_stop = &stop;
+        scope.spawn(move || {
+            read_pty(master, &reader_capture, reader_stop, None, None);
+            reader_done_tx.send(()).expect("report reader completion");
+        });
+        let writer_payload = &payload;
+        let producer_cancel = &cancel;
+        scope.spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut written = 0;
+            let result = (|| -> Result<(), String> {
+                while written < writer_payload.len() {
+                    if producer_cancel.load(Ordering::Acquire) {
+                        return Err("producer canceled".to_owned());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "producer deadline after {written}/{} bytes",
+                            writer_payload.len()
+                        ));
+                    }
+                    match slave.write(&writer_payload[written..]) {
+                        Ok(0) => return Err("producer made no progress".to_owned()),
+                        Ok(count) => written += count,
+                        Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => {
+                            let mut descriptors = [PollFd::new(slave.as_fd(), PollFlags::POLLOUT)];
+                            poll(&mut descriptors, 10_u16)
+                                .map_err(|error| format!("producer poll failed: {error}"))?;
+                        }
+                        Err(error) => return Err(format!("producer write failed: {error}")),
+                    }
+                }
+                Ok(())
+            })();
+            writer_done_tx.send(result).expect("report producer result");
+        });
+
+        let writer_result = writer_done_rx.recv_timeout(Duration::from_secs(3));
+        if !matches!(&writer_result, Ok(Ok(()))) {
+            cancel.store(true, Ordering::Release);
+            stop.store(true, Ordering::Release);
+        }
+        let reader_result = reader_done_rx.recv_timeout(Duration::from_secs(3));
+        if reader_result.is_err() {
+            cancel.store(true, Ordering::Release);
+            stop.store(true, Ordering::Release);
+        }
+        (writer_result, reader_result)
+    });
+    writer_result
+        .expect("bounded producer completion")
+        .expect("complete producer transfer");
+    reader_result.expect("reader completion after producer closure");
+
+    assert_reader_capture(&capture, &payload, 2);
+    assert!(
+        normalized_screen(&capture.0.lock().expect("capture").parser).ends_with("FINAL-MARKER")
+    );
 }
 
 /// Ensures the real reader thread acknowledges stop within bounds without
