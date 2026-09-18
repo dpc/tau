@@ -21,6 +21,7 @@ mod openai_auth;
 mod openai_prompt_cache;
 mod output_cost_observation;
 mod prewarm;
+mod prompt_oauth;
 mod provider_settings_validation;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
@@ -74,6 +75,9 @@ use output_cost_observation::{
     SamplerObservation, WorkerDrainObservation, WorkerOutputObservation, WorkerQueueState,
 };
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
+use prompt_oauth::{
+    PromptOAuthRefresh, PromptOAuthRefreshKey, PromptOAuthRefreshOwner, PromptOAuthRpc,
+};
 use provider_settings_validation::{
     ProviderSettingsValidationError, ProviderSettingsValidationReason,
     reject_obsolete_local_summary_fields,
@@ -2941,9 +2945,7 @@ where
                         }
                         if let tau_proto::HarnessOutputMessage::ExtensionDataResult(result) = frame
                         {
-                            runtime
-                                .state_mut()
-                                .handle_extension_data_result(*result, &handle)?;
+                            runtime.state_mut().handle_extension_data_result(*result)?;
                             runtime
                                 .state_mut()
                                 .drain_workers_and_start_prompts(&handle)?;
@@ -3009,6 +3011,8 @@ struct PromptCredentialAdmissionState {
     /// Exact Secret generations currently undergoing prompt-owned OAuth
     /// refresh.
     oauth_refreshes: HashMap<PromptOAuthRefreshKey, PromptOAuthRefresh>,
+    /// Next process-local identity assigned to a newly installed OAuth flight.
+    next_oauth_refresh_owner: u64,
     /// Correlated Secret CAS/reload continuations for prompt-owned refreshes.
     oauth_rpcs: HashMap<String, PromptOAuthRpc>,
     /// Credential-hydrated startup snapshot retained for initial quota work.
@@ -4194,7 +4198,6 @@ where
     fn handle_extension_data_result(
         &mut self,
         result: tau_proto::ExtensionDataResult,
-        handle: &ClientHandle,
     ) -> ClientResult<()> {
         if let Some(deadlines) = &self.credential_admission.deadlines {
             deadlines.cancel(result.request_id.clone());
@@ -4204,7 +4207,7 @@ where
             .oauth_rpcs
             .remove(&result.request_id)
         {
-            return self.handle_prompt_oauth_rpc_result(continuation, result.result, handle);
+            return self.handle_prompt_oauth_rpc_result(continuation, result.result);
         }
         let Some(admission) = self
             .credential_admission
@@ -4251,11 +4254,14 @@ where
         &mut self,
         continuation: PromptOAuthRpc,
         result: tau_proto::ExtensionDataResultPayload,
-        _handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let continuation_key = match &continuation {
-            PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+        let (continuation_key, continuation_owner) = match &continuation {
+            PromptOAuthRpc::CompareAndSwap { key, owner }
+            | PromptOAuthRpc::Reload { key, owner } => (key, *owner),
         };
+        if !self.prompt_oauth_owner_matches(continuation_key, continuation_owner) {
+            return Ok(());
+        }
         let response_bytes = match &result {
             tau_proto::ExtensionDataResultPayload::Ok {
                 value: tau_proto::ExtensionDataValue::ReadFile { contents },
@@ -4277,20 +4283,20 @@ where
             refresh.secret_in_flight = false;
         }
         match continuation {
-            PromptOAuthRpc::CompareAndSwap { key } => {
+            PromptOAuthRpc::CompareAndSwap { key, owner } => {
                 if prompt_oauth_cas_requires_reload(&result) {
                     self.start_prompt_oauth_rpc(
                         tau_proto::ExtensionDataRequestOp::ReadFile {
                             path: key.path.clone(),
                         },
-                        PromptOAuthRpc::Reload { key },
+                        PromptOAuthRpc::Reload { key, owner },
                     )
                 } else {
-                    self.fail_prompt_oauth_refresh(&key, None);
+                    self.fail_prompt_oauth_refresh(&key, owner, None);
                     Ok(())
                 }
             }
-            PromptOAuthRpc::Reload { key } => {
+            PromptOAuthRpc::Reload { key, owner } => {
                 let matching = self
                     .credential_admission
                     .admissions
@@ -4316,9 +4322,9 @@ where
                     | tau_proto::ExtensionDataResultPayload::Error { .. } => (None, None),
                 };
                 if let Some(authoritative) = authoritative {
-                    self.complete_prompt_oauth_refresh(&key, authoritative);
+                    self.complete_prompt_oauth_refresh(&key, owner, authoritative);
                 } else {
-                    self.fail_prompt_oauth_refresh(&key, None);
+                    self.fail_prompt_oauth_refresh(&key, owner, None);
                 }
                 for (index, provider) in matching {
                     if let Some(observation) = observation.clone()
@@ -4474,9 +4480,16 @@ where
             observation.oauth_started();
         }
         let refresh_token = current.refresh_token.clone();
+        let owner = PromptOAuthRefreshOwner(self.credential_admission.next_oauth_refresh_owner);
+        self.credential_admission.next_oauth_refresh_owner = self
+            .credential_admission
+            .next_oauth_refresh_owner
+            .checked_add(1)
+            .expect("process-local OAuth flight identity exhausted");
         self.credential_admission.oauth_refreshes.insert(
             key.clone(),
             PromptOAuthRefresh {
+                owner,
                 current,
                 forced,
                 transport_finished: false,
@@ -4500,17 +4513,85 @@ where
             let _ = send_worker_message(
                 &tx,
                 &waker,
-                WorkerMessage::PromptOAuthRefreshFinished { key, result },
+                WorkerMessage::PromptOAuthRefreshFinished { key, owner, result },
             );
         });
+    }
+
+    /// Reports whether an asynchronous transition still owns the keyed flight.
+    fn prompt_oauth_owner_matches(
+        &self,
+        key: &PromptOAuthRefreshKey,
+        owner: PromptOAuthRefreshOwner,
+    ) -> bool {
+        self.credential_admission
+            .oauth_refreshes
+            .get(key)
+            .is_some_and(|refresh| refresh.owner == owner)
+    }
+
+    /// Advances one owner-checked OAuth network completion.
+    fn handle_prompt_oauth_refresh_finished(
+        &mut self,
+        key: PromptOAuthRefreshKey,
+        owner: PromptOAuthRefreshOwner,
+        result: Result<
+            tau_provider_codex::oauth::OAuthTokenRefresh,
+            tau_provider_codex::oauth::OAuthError,
+        >,
+    ) -> ClientResult<()> {
+        if !self.prompt_oauth_owner_matches(&key, owner) {
+            return Ok(());
+        }
+        let Some(refresh) = self.credential_admission.oauth_refreshes.get_mut(&key) else {
+            return Ok(());
+        };
+        refresh.transport_finished = true;
+        let current = refresh.current.clone();
+        for admission in &mut self.credential_admission.admissions {
+            if admission.oauth_refresh.as_ref() == Some(&key)
+                && let Some(observation) = admission.receipt_observation.as_mut()
+            {
+                observation.oauth_transport_finished();
+            }
+        }
+        match result {
+            Ok(tokens) => match merge_chatgpt_refresh(&current, tokens) {
+                Ok(refreshed) => {
+                    let contents = serde_json::to_vec(
+                        &credential_record::ChatGptOAuthCredential::from(refreshed.clone()),
+                    )
+                    .map_err(|_| {
+                        ClientError::handler("could not encode refreshed OAuth credential")
+                    })?;
+                    self.start_prompt_oauth_rpc(
+                        tau_proto::ExtensionDataRequestOp::CompareAndSwapFile {
+                            path: key.path.clone(),
+                            expected_generation: key.generation.clone(),
+                            contents,
+                        },
+                        PromptOAuthRpc::CompareAndSwap { key, owner },
+                    )?;
+                }
+                Err(_) => self.fail_prompt_oauth_refresh(&key, owner, None),
+            },
+            Err(error) => {
+                self.fail_prompt_oauth_refresh(&key, owner, Some(&error));
+            }
+        }
+        Ok(())
     }
 
     /// Applies one failed refresh to every exact-generation waiter.
     fn fail_prompt_oauth_refresh(
         &mut self,
         key: &PromptOAuthRefreshKey,
+        owner: PromptOAuthRefreshOwner,
         oauth_error: Option<&tau_provider_codex::oauth::OAuthError>,
     ) {
+        if !self.prompt_oauth_owner_matches(key, owner) {
+            return;
+        }
         let Some(refresh) = self.credential_admission.oauth_refreshes.remove(key) else {
             return;
         };
@@ -4547,8 +4628,12 @@ where
     fn complete_prompt_oauth_refresh(
         &mut self,
         key: &PromptOAuthRefreshKey,
+        owner: PromptOAuthRefreshOwner,
         authoritative: OpenAiAuth,
     ) {
+        if !self.prompt_oauth_owner_matches(key, owner) {
+            return;
+        }
         self.credential_admission.oauth_refreshes.remove(key);
         for admission in &mut self.credential_admission.admissions {
             if admission.oauth_refresh.as_ref() != Some(key) {
@@ -4591,9 +4676,13 @@ where
         op: tau_proto::ExtensionDataRequestOp,
         continuation: PromptOAuthRpc,
     ) -> ClientResult<()> {
-        let continuation_key = match &continuation {
-            PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+        let (continuation_key, continuation_owner) = match &continuation {
+            PromptOAuthRpc::CompareAndSwap { key, owner }
+            | PromptOAuthRpc::Reload { key, owner } => (key, *owner),
         };
+        if !self.prompt_oauth_owner_matches(continuation_key, continuation_owner) {
+            return Ok(());
+        }
         for admission in &mut self.credential_admission.admissions {
             if admission.oauth_refresh.as_ref() == Some(continuation_key)
                 && let Some(observation) = admission.receipt_observation.as_mut()
@@ -4632,7 +4721,8 @@ where
             .oauth_rpcs
             .retain(|request_id, continuation| {
                 let continuation_key = match continuation {
-                    PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+                    PromptOAuthRpc::CompareAndSwap { key, .. }
+                    | PromptOAuthRpc::Reload { key, .. } => key,
                 };
                 let retain = continuation_key != key;
                 if !retain {
@@ -4888,56 +4978,16 @@ where
                 Ok(WorkerMessage::ImageTimedOut { call_id }) => {
                     self.images.timeout(&call_id, handle)?;
                 }
-                Ok(WorkerMessage::PromptOAuthRefreshFinished { key, result }) => {
-                    let Some(refresh) = self.credential_admission.oauth_refreshes.get_mut(&key)
-                    else {
-                        continue;
-                    };
-                    refresh.transport_finished = true;
-                    let current = refresh.current.clone();
-                    for admission in &mut self.credential_admission.admissions {
-                        if admission.oauth_refresh.as_ref() == Some(&key)
-                            && let Some(observation) = admission.receipt_observation.as_mut()
-                        {
-                            observation.oauth_transport_finished();
-                        }
-                    }
-                    match result {
-                        Ok(tokens) => match merge_chatgpt_refresh(&current, tokens) {
-                            Ok(refreshed) => {
-                                let contents = serde_json::to_vec(
-                                    &credential_record::ChatGptOAuthCredential::from(
-                                        refreshed.clone(),
-                                    ),
-                                )
-                                .map_err(|_| {
-                                    ClientError::handler(
-                                        "could not encode refreshed OAuth credential",
-                                    )
-                                })?;
-                                self.start_prompt_oauth_rpc(
-                                    tau_proto::ExtensionDataRequestOp::CompareAndSwapFile {
-                                        path: key.path.clone(),
-                                        expected_generation: key.generation.clone(),
-                                        contents,
-                                    },
-                                    PromptOAuthRpc::CompareAndSwap { key },
-                                )?;
-                            }
-                            Err(_) => self.fail_prompt_oauth_refresh(&key, None),
-                        },
-                        Err(error) => {
-                            self.fail_prompt_oauth_refresh(&key, Some(&error));
-                        }
-                    }
+                Ok(WorkerMessage::PromptOAuthRefreshFinished { key, owner, result }) => {
+                    self.handle_prompt_oauth_refresh_finished(key, owner, result)?;
                 }
                 Ok(WorkerMessage::PromptCredentialRpcTimedOut { request_id }) => {
-                    if let Some(key) = apply_prompt_credential_timeout(
+                    if let Some((key, owner)) = apply_prompt_credential_timeout(
                         &request_id,
                         &mut self.credential_admission.oauth_rpcs,
                         &mut self.credential_admission.admissions,
                     ) {
-                        self.fail_prompt_oauth_refresh(&key, None);
+                        self.fail_prompt_oauth_refresh(&key, owner, None);
                     }
                 }
                 Ok(WorkerMessage::Output {
@@ -5522,10 +5572,11 @@ fn apply_prompt_credential_timeout(
     request_id: &str,
     oauth_rpcs: &mut HashMap<String, PromptOAuthRpc>,
     admissions: &mut VecDeque<PendingPromptAdmission>,
-) -> Option<PromptOAuthRefreshKey> {
+) -> Option<(PromptOAuthRefreshKey, PromptOAuthRefreshOwner)> {
     if let Some(continuation) = oauth_rpcs.remove(request_id) {
         return Some(match continuation {
-            PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+            PromptOAuthRpc::CompareAndSwap { key, owner }
+            | PromptOAuthRpc::Reload { key, owner } => (key, owner),
         });
     }
     if let Some(admission) = admissions.iter_mut().find(|admission| {
@@ -5860,48 +5911,6 @@ struct PendingPromptAdmission {
     oauth_forced: bool,
     /// Enabled-only content-free receipt observation.
     receipt_observation: Option<ReceiptObservation>,
-}
-
-/// Provider, startup mode, and exact Secret generation used to coalesce OAuth
-/// refresh.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct PromptOAuthRefreshKey {
-    /// Provider namespace whose rejection and identity state owns this refresh.
-    provider: ProviderName,
-    /// Opaque Secret-scope path; never rendered.
-    path: tau_proto::ExtensionDataPath,
-    /// BLAKE3 generation expected by Secret compare-and-swap.
-    generation: String,
-    /// Startup-selected Responses Lite mode, retained without making
-    /// `CodexMode` part of the hash key.
-    lite_compatibility: bool,
-}
-
-/// One shared network refresh and its main-loop-owned Secret publication state.
-struct PromptOAuthRefresh {
-    /// Credential generation supplied to the OAuth endpoint.
-    current: OpenAiAuth,
-    /// Whether this flight consumed forced recovery authority for the
-    /// generation.
-    forced: bool,
-    /// Whether network OAuth ended and Secret publication has begun.
-    transport_finished: bool,
-    /// Whether a shared Secret CAS or authoritative reload is in flight.
-    secret_in_flight: bool,
-}
-
-/// Main-loop continuation for one prompt-owned Secret operation.
-enum PromptOAuthRpc {
-    /// Publish the refreshed credential, then verify the authoritative record.
-    CompareAndSwap {
-        /// Exact refresh operation.
-        key: PromptOAuthRefreshKey,
-    },
-    /// Adopt the authoritative record after CAS success or a losing CAS.
-    Reload {
-        /// Exact refresh operation.
-        key: PromptOAuthRefreshKey,
-    },
 }
 
 /// Prompt ownership returned after an asynchronous credential read.
@@ -7263,6 +7272,8 @@ enum WorkerMessage {
     PromptOAuthRefreshFinished {
         /// Refresh generation shared by its current waiters.
         key: PromptOAuthRefreshKey,
+        /// Process-local owner of the keyed flight.
+        owner: PromptOAuthRefreshOwner,
         /// Provider-typed OAuth result, kept inside the provider process.
         result: Result<
             tau_provider_codex::oauth::OAuthTokenRefresh,

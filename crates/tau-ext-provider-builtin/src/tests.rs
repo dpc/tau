@@ -4096,6 +4096,48 @@ fn prompt_async_test_auth() -> OpenAiAuth {
     }
 }
 
+/// Installs one refresh-due prompt admission through the production staging
+/// path and returns its credential key and process-local flight owner.
+fn stage_prompt_oauth_test_flight(
+    runtime: &mut ProviderRuntime<fn(Option<&ProviderName>) -> BuiltinProviderProfiles>,
+    request_id: &str,
+    agent_prompt_id: &str,
+    profiles: BuiltinProviderProfiles,
+    generation: blake3::Hash,
+) -> (PromptOAuthRefreshKey, PromptOAuthRefreshOwner) {
+    let provider = ProviderName::new(CHATGPT_PROVIDER_NAME);
+    let mut prompt = minimal_prompt();
+    prompt.agent_prompt_id = agent_prompt_id.parse().expect("valid prompt id");
+    prompt.model = ModelId::new(provider.clone(), ModelName::new("gpt-5.3-codex"));
+    runtime
+        .credential_admission
+        .admissions
+        .push_back(PendingPromptAdmission {
+            kind: PendingPromptAdmissionKind::Initial {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                prompt,
+            },
+            profiles,
+            request_id: Some(request_id.to_owned()),
+            observations: Some(BTreeMap::from([(
+                provider,
+                CredentialObservation::Contents(generation),
+            )])),
+            oauth_refresh: None,
+            oauth_forced: false,
+            receipt_observation: None,
+        });
+    runtime.stage_prompt_oauth_refresh(request_id);
+    let key = runtime
+        .credential_admission
+        .admissions
+        .back()
+        .and_then(|admission| admission.oauth_refresh.clone())
+        .expect("refresh-due admission installed an OAuth flight");
+    let owner = runtime.credential_admission.oauth_refreshes[&key].owner;
+    (key, owner)
+}
+
 /// Builds an inert runtime owner for focused credential-admission transitions.
 pub(super) fn observation_test_runtime()
 -> ProviderRuntime<fn(Option<&ProviderName>) -> BuiltinProviderProfiles> {
@@ -4211,6 +4253,7 @@ fn prompt_oauth_refresh_key_coalesces_exactly_and_not_across_generations() {
     let mut refreshes = HashMap::from([(
         key.clone(),
         PromptOAuthRefresh {
+            owner: PromptOAuthRefreshOwner(1),
             current: prompt_async_test_auth(),
             forced: false,
             transport_finished: false,
@@ -4241,6 +4284,7 @@ fn prompt_oauth_refresh_key_coalesces_exactly_and_not_across_generations() {
         refreshes.insert(
             distinct,
             PromptOAuthRefresh {
+                owner: PromptOAuthRefreshOwner(1),
                 current: prompt_async_test_auth(),
                 forced: false,
                 transport_finished: false,
@@ -4249,6 +4293,165 @@ fn prompt_oauth_refresh_key_coalesces_exactly_and_not_across_generations() {
         );
     }
     assert_eq!(refreshes.len(), 5);
+}
+
+/// A detached completion from a canceled flight must not acquire a same-key
+/// replacement's authority, whether the old network operation failed or
+/// returned valid refresh data.
+#[test]
+fn prompt_oauth_replacement_rejects_stale_error_and_success_owners() {
+    let mut runtime = observation_test_runtime();
+    runtime.diagnostics.receipt.suppress_oauth_worker = true;
+    let auth = OpenAiAuth {
+        expires_at_ms: now_ms().saturating_add(60_000),
+        refresh_token: "refresh-aba-canary".to_owned(),
+        ..prompt_async_test_auth()
+    };
+    let profiles = profiles_with_chatgpt_auth(auth);
+    let generation = blake3::hash(b"oauth-aba-generation");
+    let (key, old_owner) = stage_prompt_oauth_test_flight(
+        &mut runtime,
+        "old-read",
+        "old-prompt",
+        profiles.clone(),
+        generation,
+    );
+    runtime.credential_admission.admissions.pop_front();
+    runtime.prune_unreferenced_prompt_oauth(&key);
+
+    let (replacement_key, replacement_owner) = stage_prompt_oauth_test_flight(
+        &mut runtime,
+        "replacement-read",
+        "replacement-prompt",
+        profiles,
+        generation,
+    );
+    assert_eq!(replacement_key, key);
+    assert_ne!(replacement_owner, old_owner);
+
+    runtime
+        .handle_prompt_oauth_refresh_finished(
+            key.clone(),
+            old_owner,
+            Err(path_tau_provider_codex_oauth::OAuthError::from_http_response(502, "{}")),
+        )
+        .expect("stale error is ignored");
+    let replacement = &runtime.credential_admission.oauth_refreshes[&key];
+    assert_eq!(replacement.owner, replacement_owner);
+    assert!(!replacement.transport_finished);
+    assert!(!replacement.secret_in_flight);
+    assert_eq!(
+        runtime.credential_admission.admissions[0].oauth_refresh,
+        Some(key.clone())
+    );
+
+    runtime
+        .handle_prompt_oauth_refresh_finished(
+            key.clone(),
+            old_owner,
+            Ok(path_tau_provider_codex_oauth::OAuthTokenRefresh {
+                access_token: None,
+                refresh_token: None,
+                expires_at_ms: None,
+                account_id: None,
+            }),
+        )
+        .expect("stale success is ignored before Secret dispatch");
+    let replacement = &runtime.credential_admission.oauth_refreshes[&key];
+    assert_eq!(replacement.owner, replacement_owner);
+    assert!(!replacement.transport_finished);
+    assert!(!replacement.secret_in_flight);
+    assert!(runtime.credential_admission.oauth_rpcs.is_empty());
+
+    runtime
+        .handle_prompt_oauth_refresh_finished(
+            key.clone(),
+            replacement_owner,
+            Err(path_tau_provider_codex_oauth::OAuthError::from_http_response(502, "{}")),
+        )
+        .expect("replacement owner advances normally");
+    assert!(
+        !runtime
+            .credential_admission
+            .oauth_refreshes
+            .contains_key(&key)
+    );
+    assert_eq!(
+        runtime.credential_admission.admissions[0].oauth_refresh,
+        None
+    );
+}
+
+/// A Secret continuation and timeout from a canceled flight remain inert after
+/// the same credential key is installed under a new process-local owner.
+#[test]
+fn prompt_oauth_replacement_rejects_stale_secret_continuations() {
+    let mut runtime = observation_test_runtime();
+    runtime.diagnostics.receipt.suppress_oauth_worker = true;
+    let auth = OpenAiAuth {
+        expires_at_ms: now_ms().saturating_add(60_000),
+        refresh_token: "refresh-continuation-canary".to_owned(),
+        ..prompt_async_test_auth()
+    };
+    let profiles = profiles_with_chatgpt_auth(auth);
+    let generation = blake3::hash(b"oauth-continuation-generation");
+    let (key, old_owner) = stage_prompt_oauth_test_flight(
+        &mut runtime,
+        "old-continuation-read",
+        "old-continuation-prompt",
+        profiles.clone(),
+        generation,
+    );
+    runtime.credential_admission.admissions.pop_front();
+    runtime.prune_unreferenced_prompt_oauth(&key);
+    let (_, replacement_owner) = stage_prompt_oauth_test_flight(
+        &mut runtime,
+        "replacement-continuation-read",
+        "replacement-continuation-prompt",
+        profiles,
+        generation,
+    );
+
+    runtime
+        .handle_prompt_oauth_rpc_result(
+            PromptOAuthRpc::CompareAndSwap {
+                key: key.clone(),
+                owner: old_owner,
+            },
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::CompareAndSwapFile,
+            },
+        )
+        .expect("stale CAS continuation is ignored");
+    assert_eq!(
+        runtime.credential_admission.oauth_refreshes[&key].owner,
+        replacement_owner
+    );
+    assert!(!runtime.credential_admission.oauth_refreshes[&key].secret_in_flight);
+    assert!(runtime.credential_admission.oauth_rpcs.is_empty());
+
+    runtime.credential_admission.oauth_rpcs.insert(
+        "stale-timeout".to_owned(),
+        PromptOAuthRpc::Reload {
+            key: key.clone(),
+            owner: old_owner,
+        },
+    );
+    let (timed_out_key, timed_out_owner) = apply_prompt_credential_timeout(
+        "stale-timeout",
+        &mut runtime.credential_admission.oauth_rpcs,
+        &mut runtime.credential_admission.admissions,
+    )
+    .expect("stale continuation correlation is consumed");
+    runtime.fail_prompt_oauth_refresh(&timed_out_key, timed_out_owner, None);
+    assert_eq!(
+        runtime.credential_admission.oauth_refreshes[&key].owner,
+        replacement_owner
+    );
+    assert_eq!(
+        runtime.credential_admission.admissions[0].oauth_refresh,
+        Some(key)
+    );
 }
 
 /// The production OAuth failure owner must close a non-default timed class
@@ -4307,8 +4510,9 @@ fn production_prompt_oauth_failure_closes_private_observation() {
             .front()
             .and_then(|admission| admission.oauth_refresh.clone())
             .expect("real OAuth start installed a flight");
+        let owner = runtime.credential_admission.oauth_refreshes[&key].owner;
         std::thread::sleep(Duration::from_millis(1));
-        runtime.fail_prompt_oauth_refresh(&key, None);
+        runtime.fail_prompt_oauth_refresh(&key, owner, None);
         let observation = runtime
             .credential_admission
             .admissions
@@ -4357,6 +4561,7 @@ fn production_prompt_oauth_failure_closes_private_observation() {
             .front()
             .and_then(|admission| admission.oauth_refresh.clone())
             .expect("second real OAuth start installed a flight");
+        let owner = runtime.credential_admission.oauth_refreshes[&key].owner;
         {
             let refresh = runtime
                 .credential_admission
@@ -4414,7 +4619,7 @@ fn production_prompt_oauth_failure_closes_private_observation() {
             .take()
             .expect("late receipt observation");
         late_observation.finished_before_worker(ReceiptOutcome::Canceled);
-        runtime.complete_prompt_oauth_refresh(&key, auth.clone());
+        runtime.complete_prompt_oauth_refresh(&key, owner, auth.clone());
         let observation = runtime
             .credential_admission
             .admissions
@@ -4475,6 +4680,7 @@ fn prompt_oauth_exhausted_waiter_joins_matching_forced_flight() {
     assert!(rejections.unauthorized_exhausted(&provider, identity));
 
     let flight = PromptOAuthRefresh {
+        owner: PromptOAuthRefreshOwner(1),
         current: prompt_async_test_auth(),
         forced: true,
         transport_finished: false,
@@ -4514,34 +4720,67 @@ fn prompt_oauth_cas_loser_and_winner_both_require_authoritative_reload() {
 /// its sibling; only removal of the final exact-key waiter invalidates it.
 #[test]
 fn prompt_oauth_shared_refresh_survives_one_waiter_cancellation() {
-    let key = PromptOAuthRefreshKey {
-        provider: ProviderName::new("chatgpt"),
-        path: tau_proto::ExtensionDataPath::new("providers/identity/oauth.json"),
-        generation: "generation".to_owned(),
-        lite_compatibility: false,
+    let mut runtime = observation_test_runtime();
+    runtime.diagnostics.receipt.suppress_oauth_worker = true;
+    let auth = OpenAiAuth {
+        expires_at_ms: now_ms().saturating_add(60_000),
+        refresh_token: "refresh-shared-canary".to_owned(),
+        ..prompt_async_test_auth()
     };
-    let admission = |agent_prompt_id: &str| {
-        let mut prompt = minimal_prompt();
-        prompt.agent_prompt_id = agent_prompt_id.parse().expect("valid prompt id");
-        PendingPromptAdmission {
-            kind: PendingPromptAdmissionKind::Initial {
-                agent_prompt_id: prompt.agent_prompt_id.clone(),
-                prompt,
-            },
-            profiles: BuiltinProviderProfiles::default(),
-            request_id: None,
-            observations: Some(BTreeMap::new()),
-            oauth_refresh: Some(key.clone()),
-            oauth_forced: false,
-            receipt_observation: None,
-        }
-    };
-    let mut admissions = VecDeque::from([admission("waiter-a"), admission("waiter-b")]);
+    let profiles = profiles_with_chatgpt_auth(auth.clone());
+    let generation = blake3::hash(b"oauth-shared-generation");
+    let (key, owner) = stage_prompt_oauth_test_flight(
+        &mut runtime,
+        "shared-read-a",
+        "shared-waiter-a",
+        profiles.clone(),
+        generation,
+    );
+    let (joined_key, joined_owner) = stage_prompt_oauth_test_flight(
+        &mut runtime,
+        "shared-read-b",
+        "shared-waiter-b",
+        profiles,
+        generation,
+    );
+    assert_eq!(joined_key, key);
+    assert_eq!(joined_owner, owner);
 
-    admissions.pop_front();
-    assert!(prompt_oauth_has_waiter(&admissions, &key));
-    admissions.pop_front();
-    assert!(!prompt_oauth_has_waiter(&admissions, &key));
+    runtime.credential_admission.admissions.pop_front();
+    runtime.prune_unreferenced_prompt_oauth(&key);
+    assert!(
+        runtime
+            .credential_admission
+            .oauth_refreshes
+            .contains_key(&key)
+    );
+    assert!(prompt_oauth_has_waiter(
+        &runtime.credential_admission.admissions,
+        &key
+    ));
+
+    let authoritative = OpenAiAuth {
+        refresh_token: "refresh-shared-rotated-canary".to_owned(),
+        ..auth
+    };
+    runtime.complete_prompt_oauth_refresh(&key, owner, authoritative.clone());
+    assert!(
+        !runtime
+            .credential_admission
+            .oauth_refreshes
+            .contains_key(&key)
+    );
+    assert_eq!(
+        runtime.credential_admission.admissions[0].oauth_refresh,
+        None
+    );
+    let BuiltinProviderProfile::Chatgpt(profile) = &runtime.credential_admission.admissions[0]
+        .profiles
+        .providers[&ProviderName::new(CHATGPT_PROVIDER_NAME)]
+    else {
+        panic!("surviving waiter retains ChatGPT profile");
+    };
+    assert_eq!(profile.auth, authoritative);
 }
 
 /// Read and CAS deadlines invalidate their exact correlations once. A late
@@ -4584,11 +4823,14 @@ fn prompt_credential_read_and_cas_timeouts_ignore_late_reentry() {
     };
     oauth_rpcs.insert(
         "cas-rpc".to_owned(),
-        PromptOAuthRpc::CompareAndSwap { key: key.clone() },
+        PromptOAuthRpc::CompareAndSwap {
+            key: key.clone(),
+            owner: PromptOAuthRefreshOwner(7),
+        },
     );
     assert_eq!(
         apply_prompt_credential_timeout("cas-rpc", &mut oauth_rpcs, &mut admissions),
-        Some(key)
+        Some((key, PromptOAuthRefreshOwner(7)))
     );
     assert_eq!(
         apply_prompt_credential_timeout("cas-rpc", &mut oauth_rpcs, &mut admissions),
