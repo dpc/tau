@@ -1,5 +1,7 @@
 //! Spawned shell process and standard-stream endpoint ownership.
 
+#[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos")))]
+use std::process as path_std_process;
 use std::process::Command;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
