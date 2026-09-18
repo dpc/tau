@@ -172,7 +172,7 @@ impl CompactFailureCaptureContext {
         };
         let redacted_prefix_len = floor_char_boundary_if_utf8(&redacted, evidence_limit);
         let redacted_prefix = &redacted[..redacted_prefix_len];
-        let parsed = ParsedProviderError::from_body(&redacted, body.complete);
+        let parsed = ParsedProviderError::from_body(&redacted, body.complete, &self.credentials);
         let record = CompactHttpFailureRecord {
             schema_version: 0,
             capture_kind: "compact_http_failure",
@@ -340,14 +340,17 @@ impl BoundedBytes {
         }
     }
 
-    fn text(value: &str, max_bytes: usize, max_scalars: usize) -> Self {
-        let byte_limit = floor_char_boundary_if_utf8(value.as_bytes(), max_bytes);
-        let scalar_limit = value
+    fn text(value: &str, max_bytes: usize, max_scalars: usize, credentials: &[Vec<u8>]) -> Self {
+        let redacted = redact_credentials(value.as_bytes(), credentials);
+        let redacted = std::str::from_utf8(&redacted)
+            .expect("replacing UTF-8 credentials with UTF-8 text preserves UTF-8");
+        let byte_limit = floor_char_boundary_if_utf8(redacted.as_bytes(), max_bytes);
+        let scalar_limit = redacted
             .char_indices()
             .nth(max_scalars)
-            .map_or(value.len(), |(index, _)| index);
+            .map_or(redacted.len(), |(index, _)| index);
         let retained_len = byte_limit.min(scalar_limit);
-        let retained = &value[..retained_len];
+        let retained = &redacted[..retained_len];
         Self {
             original_bytes: u64::try_from(value.len()).unwrap_or(u64::MAX),
             retained_bytes: u64::try_from(retained.len()).unwrap_or(u64::MAX),
@@ -357,7 +360,7 @@ impl BoundedBytes {
             retained_unicode_scalars: Some(
                 u64::try_from(retained.chars().count()).unwrap_or(u64::MAX),
             ),
-            truncated: retained.len() < value.len(),
+            truncated: retained.len() < redacted.len(),
             base64: BASE64_STANDARD.encode(retained),
             utf8: Some(retained.to_owned()),
         }
@@ -406,7 +409,7 @@ struct ParsedProviderError {
 }
 
 impl ParsedProviderError {
-    fn from_body(body: &[u8], complete: bool) -> Option<Self> {
+    fn from_body(body: &[u8], complete: bool, credentials: &[Vec<u8>]) -> Option<Self> {
         if !complete {
             return None;
         }
@@ -417,21 +420,25 @@ impl ParsedProviderError {
                 error.get("code"),
                 MAX_PARSED_IDENTIFIER_BYTES,
                 MAX_PARSED_IDENTIFIER_SCALARS,
+                credentials,
             ),
             ty: bounded_json_field(
                 error.get("type"),
                 MAX_PARSED_IDENTIFIER_BYTES,
                 MAX_PARSED_IDENTIFIER_SCALARS,
+                credentials,
             ),
             param: bounded_json_field(
                 error.get("param"),
                 MAX_PARSED_IDENTIFIER_BYTES,
                 MAX_PARSED_IDENTIFIER_SCALARS,
+                credentials,
             ),
             message: bounded_json_field(
                 error.get("message"),
                 MAX_PARSED_MESSAGE_BYTES,
                 MAX_PARSED_MESSAGE_SCALARS,
+                credentials,
             ),
         };
         (parsed.code.is_some()
@@ -446,8 +453,14 @@ fn bounded_json_field(
     value: Option<&serde_json::Value>,
     max_bytes: usize,
     max_scalars: usize,
+    credentials: &[Vec<u8>],
 ) -> Option<BoundedBytes> {
-    Some(BoundedBytes::text(value?.as_str()?, max_bytes, max_scalars))
+    Some(BoundedBytes::text(
+        value?.as_str()?,
+        max_bytes,
+        max_scalars,
+        credentials,
+    ))
 }
 
 fn bounded_header(

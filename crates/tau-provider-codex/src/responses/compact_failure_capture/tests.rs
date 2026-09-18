@@ -100,6 +100,89 @@ fn complete_failure_capture_preserves_forensic_evidence() {
     );
 }
 
+/// JSON-decoded parsed fields must redact escaped configured credentials before
+/// bounding both exported representations while preserving honest size
+/// metadata.
+#[test]
+fn parsed_fields_redact_decoded_credentials_before_bounding() {
+    let api_key = b"key-secret";
+    let account_id = b"acct-secret";
+    let code_prefix = "x".repeat(MAX_PARSED_IDENTIFIER_SCALARS - api_key.len() - 1);
+    let message_prefix = "m".repeat(MAX_PARSED_MESSAGE_SCALARS - account_id.len() - 1);
+    let wire_body = format!(
+        r#"{{"error":{{"code":"{code_prefix}\u006bey-secret","type":"\u0061cct-secret type","param":"param \u006bey-secret","message":"{message_prefix}\u0061cct-secret"}}}}"#
+    );
+    let capture_context = CompactFailureCaptureContext {
+        session_id: tau_proto::SessionId::parse("session-test").expect("session"),
+        agent_prompt_id: Some(tau_proto::AgentPromptId::parse("prompt-test").expect("prompt")),
+        enabled: true,
+        credentials: vec![api_key.to_vec(), account_id.to_vec()],
+        sink: None,
+        body_chunk_observer: None,
+    };
+    let mut accumulator = capture_context.body_capture();
+    accumulator.push(wire_body.as_bytes());
+
+    let record = captured_record(
+        &capture_context,
+        400,
+        &HeaderMap::new(),
+        accumulator.finish(true),
+    );
+    let parsed = &record["body"]["parsed_error"];
+    let original_code = format!("{code_prefix}key-secret");
+    let original_message = format!("{message_prefix}acct-secret");
+    let redacted_code = format!("{code_prefix}<redacted-credential>");
+    let redacted_message = format!("{message_prefix}<redacted-credential>");
+    let expected_fields = [
+        (
+            "code",
+            original_code.as_str(),
+            redacted_code.as_str(),
+            MAX_PARSED_IDENTIFIER_SCALARS,
+        ),
+        (
+            "type",
+            "acct-secret type",
+            "<redacted-credential> type",
+            MAX_PARSED_IDENTIFIER_SCALARS,
+        ),
+        (
+            "param",
+            "param key-secret",
+            "param <redacted-credential>",
+            MAX_PARSED_IDENTIFIER_SCALARS,
+        ),
+        (
+            "message",
+            original_message.as_str(),
+            redacted_message.as_str(),
+            MAX_PARSED_MESSAGE_SCALARS,
+        ),
+    ];
+
+    for (name, original, redacted, max_scalars) in expected_fields {
+        let field = &parsed[name];
+        let retained = redacted.chars().take(max_scalars).collect::<String>();
+        assert_eq!(field["utf8"], retained);
+        let decoded = BASE64_STANDARD
+            .decode(field["base64"].as_str().expect("base64"))
+            .expect("decode parsed field");
+        assert_eq!(decoded, retained.as_bytes());
+        assert!(!retained.contains(std::str::from_utf8(api_key).expect("UTF-8 API key")));
+        assert!(!retained.contains(std::str::from_utf8(account_id).expect("UTF-8 account ID")));
+        assert_eq!(field["original_bytes"], original.len());
+        assert_eq!(field["original_unicode_scalars"], original.chars().count());
+        assert_eq!(field["retained_bytes"], retained.len());
+        assert_eq!(field["retained_unicode_scalars"], retained.chars().count());
+        assert_eq!(field["truncated"], retained.len() < redacted.len());
+    }
+    assert_eq!(parsed["code"]["truncated"], true);
+    assert_eq!(parsed["type"]["truncated"], false);
+    assert_eq!(parsed["param"]["truncated"], false);
+    assert_eq!(parsed["message"]["truncated"], true);
+}
+
 /// Crossing the 64-KiB prefix cap must stop retention, hash every byte in the
 /// delivered crossing chunk, and state that EOF/full-body coverage is unknown.
 #[test]
