@@ -2,6 +2,7 @@
 
 use super::super::lifecycle::{assert_no_message, connect_socket_ui, read_notice};
 use super::*;
+use crate::agent::DeliveryDeadlineKind;
 use crate::harness::prompt_materialization_timing::{diagnostic_work, reset_diagnostic_work};
 
 #[derive(Clone)]
@@ -2364,6 +2365,15 @@ fn human_ui_prompt_interrupts_exact_wait_at_five_second_deadline() {
         .user_prompt = HarnessSettings::built_in()
         .notification_delivery
         .user_prompt;
+    assert_eq!(
+        h.config
+            .accepted_harness_settings
+            .notification_delivery
+            .user_prompt
+            .wait_tool(),
+        Duration::from_secs(5),
+        "HumanUI prompts retain the five-second exact-wait policy"
+    );
     let _tool_events = connect_test_tool(&mut h, "human-ui-deadline-tool");
     h.tool_routing.registry.register(
         &crate::test_connection_id("human-ui-deadline-tool"),
@@ -2392,16 +2402,25 @@ fn human_ui_prompt_interrupts_exact_wait_at_five_second_deadline() {
         .expect("install exact wait");
     seed_tools_running(&mut h, &cid, vec![wait_call.id.clone()]);
 
-    let before_admission = Instant::now();
     h.submit_prompt_to_agent(
         h.session_runtime.current_session_id.clone(),
         durable_id.as_str(),
         PendingPrompt::human_ui("urgent visible input".to_owned()),
     )
     .expect("queue HumanUI prompt");
-    h.process_notification_delivery_deadlines_at(before_admission + Duration::from_millis(4_999));
+    let deadline = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .pending_prompts
+        .back()
+        .expect("queued HumanUI prompt")
+        .delivery_schedule
+        .as_ref()
+        .expect("install notification delivery schedule")
+        .deadline(DeliveryDeadlineKind::WaitTool)
+        .expect("exact-wait deadline");
+    h.process_notification_delivery_deadlines_at(deadline - Duration::from_millis(1));
     assert_eq!(tool_result_count(&h, wait_call.id.as_str()), 0);
-    h.process_notification_delivery_deadlines_at(before_admission + Duration::from_millis(5_001));
+    h.process_notification_delivery_deadlines_at(deadline);
     assert_eq!(tool_result_count(&h, wait_call.id.as_str()), 1);
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
