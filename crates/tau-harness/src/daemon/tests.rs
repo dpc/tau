@@ -1,15 +1,18 @@
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Command as path_std_process_Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, fs, io as path_std_io, thread};
 
 use tau_config::settings::TauDirs;
-use tau_proto::{HarnessOutputMessage, PeerInputReader};
+use tau_proto::{
+    ClientKind, Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
+    PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter, Subscribe,
+};
 use tempfile::TempDir;
 
 use super::*;
@@ -657,6 +660,137 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
         reader.read_message().expect("read terminal EOF").is_none(),
         "a complete queued Disconnect remains readable before socket EOF"
     );
+}
+
+/// The real daemon startup must publish its runtime claim before greeting the
+/// authenticated initial UI, and a failure at that boundary must deliver the
+/// exact terminal error without leaking an introduction.
+#[test]
+fn claim_publication_failure_precedes_initial_ui_introduction() {
+    const INJECTED_ERROR: &str = "injected session claim publication failure";
+
+    let temp = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in("/tmp")
+        .expect("bounded tempdir");
+    let runtime = temp.path().to_path_buf();
+    let state = temp.path().join("state");
+    let config = temp.path().join("config");
+    fs::create_dir_all(&state).expect("state dir");
+    fs::create_dir_all(&config).expect("config dir");
+    let dirs = TauDirs {
+        config_dir: Some(config),
+        state_dir: Some(state),
+    };
+    let (server_end, ui_end) = UnixStream::pair().expect("initial UI pair");
+    let startup_error_end = server_end.try_clone().expect("clone startup error stream");
+    let publication_reached = Arc::new(AtomicBool::new(false));
+    let hook_reached = Arc::clone(&publication_reached);
+    let project_root = temp.path().to_path_buf();
+    let runtime_for_daemon = runtime.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let daemon = thread::spawn(move || {
+        let result = runtime_dir::with_runtime_dir(Some(&runtime_for_daemon), || {
+            run_harness_daemon_with_internal_tools_and_initial_client(
+                &project_root,
+                &Config::default(),
+                "claim-publication-failure",
+                ServeOptions {
+                    exit_on_disconnect: true,
+                    dirs: Some(dirs),
+                    storage_mode: HarnessStorageMode::MemoryOnly,
+                    ..Default::default()
+                },
+                HarnessSessionLaunchMode::New,
+                Vec::new(),
+                RuntimeHarnessLaunch {
+                    initial_client: Some(InitialClient::Stream(server_end)),
+                    initial_client_error_stream: Some(InitialClientStartupErrorOutput::Stream(
+                        startup_error_end,
+                    )),
+                    introduction_notice_eligible: true,
+                    termination_signals: None,
+                    bootstrap: None,
+                    extension_stderr_mirror: None,
+                    publish_session_claim: Some(Box::new(move |_, _| {
+                        hook_reached.store(true, Ordering::SeqCst);
+                        Err(path_std_io::Error::other(INJECTED_ERROR))
+                    })),
+                },
+            )
+        });
+        let _ = result_tx.send(result);
+    });
+
+    let mut writer = PeerOutputWriter::new(BufWriter::new(
+        ui_end.try_clone().expect("clone initial UI stream"),
+    ));
+    writer
+        .write_message(&HarnessInputMessage::Hello(Hello {
+            declaration_inspection: false,
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "claim-publication-test"
+                .parse()
+                .expect("valid initial UI name"),
+            client_kind: ClientKind::Ui,
+            expected_session_id: None,
+            capabilities: Vec::new(),
+        }))
+        .expect("write initial UI hello");
+    writer
+        .write_message(&HarnessInputMessage::Subscribe(Subscribe {
+            historical_selectors: vec![EventSelector::Exact(EventName::SESSION_REPLAY_COMPLETE)],
+            live_selectors: Vec::new(),
+        }))
+        .expect("write initial UI subscribe");
+    writer.flush().expect("flush initial UI handshake");
+
+    ui_end
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("bound initial UI read");
+    let mut reader = PeerInputReader::new(BufReader::new(ui_end));
+    let mut introductions = 0;
+    let disconnect = loop {
+        let message = reader
+            .read_message()
+            .expect("read terminal startup result")
+            .expect("startup must deliver a terminal Disconnect");
+        match message {
+            HarnessOutputMessage::Deliver(delivery) => {
+                if matches!(
+                    delivery.event(),
+                    Event::HarnessNotice(notice)
+                        if notice.kind == tau_proto::notice_kind::HARNESS_INTRODUCTION
+                ) {
+                    introductions += 1;
+                }
+            }
+            HarnessOutputMessage::Disconnect(disconnect) => break disconnect,
+            _ => {}
+        }
+    };
+
+    assert_eq!(
+        introductions, 0,
+        "the initial UI must not be greeted before claim publication succeeds"
+    );
+    assert_eq!(
+        disconnect.reason.as_deref(),
+        Some("harness startup failed: injected session claim publication failure")
+    );
+    assert!(
+        publication_reached.load(Ordering::SeqCst),
+        "the injected failure must run at the claim-publication boundary"
+    );
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("daemon startup must terminate after publication failure");
+    assert!(
+        matches!(result, Err(HarnessError::Io(ref error)) if error.to_string() == INJECTED_ERROR),
+        "daemon must preserve the injected publication error: {result:?}"
+    );
+    join_thread_with_timeout(daemon, Duration::from_secs(2))
+        .expect("publication-failure daemon thread must finish");
 }
 
 /// Ensures a fatal startup response cannot retain a writer, reader, cursor, and

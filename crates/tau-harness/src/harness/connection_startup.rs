@@ -24,6 +24,8 @@ impl Harness {
         };
         let client_id = match initial_client {
             InitialClient::Stdio => self.accept_stdio_client()?,
+            #[cfg(test)]
+            InitialClient::Stream(stream) => self.accept_client(stream)?,
         };
         *initial_client_error_stream = None;
         if let Err(error) = self.wait_for_initial_ui_subscribe() {

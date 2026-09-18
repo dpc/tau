@@ -1728,6 +1728,9 @@ enum ClientWriterFailure {
 /// Initial UI transport owned by the harness process during startup.
 pub(crate) enum InitialClient {
     Stdio,
+    /// Test-only full-duplex transport for daemon startup orchestration.
+    #[cfg(test)]
+    Stream(UnixStream),
 }
 
 /// Process-local inputs captured before configured harness startup.

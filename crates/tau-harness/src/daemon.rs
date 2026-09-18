@@ -1666,7 +1666,15 @@ struct RuntimeHarnessLaunch<'a> {
     bootstrap: Option<BootstrapPromptOptions<'a>>,
     /// Optional process-local extension stderr mirror.
     extension_stderr_mirror: Option<crate::extension_stderr_mirror::ExtensionStderrMirror>,
+    /// Test-only replacement for the exact runtime-claim publication operation.
+    #[cfg(test)]
+    publish_session_claim: Option<SessionClaimPublishHook<'a>>,
 }
+
+#[cfg(test)]
+/// Test callback replacing the exact runtime-claim publication operation.
+type SessionClaimPublishHook<'a> =
+    Box<dyn FnOnce(&mut runtime_dir::SessionClaim, bool) -> io::Result<()> + 'a>;
 
 fn run_harness_daemon_with_internal_tools_and_initial_client(
     project_root: &Path,
@@ -1684,6 +1692,8 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         termination_signals,
         bootstrap,
         extension_stderr_mirror,
+        #[cfg(test)]
+        publish_session_claim,
     } = launch;
     let project_root = canonical_project_root(project_root)?;
     validate_pre_resolved_serve_options(&options, config)?;
@@ -1730,8 +1740,15 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
 
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "writing daemon ready markers");
+    #[cfg(test)]
+    let publication = match publish_session_claim {
+        Some(publish) => publish(&mut session_claim, harness.has_peer_entrypoint()),
+        None => session_claim.publish(harness.has_peer_entrypoint()),
+    };
+    #[cfg(not(test))]
+    let publication = session_claim.publish(harness.has_peer_entrypoint());
     notify_startup_error_after_accept(
-        session_claim.publish(harness.has_peer_entrypoint()),
+        publication,
         &mut initial_client_error_stream,
         &mut harness,
         initial_client_id.as_ref(),
@@ -1990,6 +2007,8 @@ fn run_fixed_session_component_with_internal_tools(
             extension_stderr_mirror: mirror_extension_stderr
                 .then(ExtensionStderrMirror::stderr)
                 .flatten(),
+            #[cfg(test)]
+            publish_session_claim: None,
         },
     )
     .map_err(Into::into)
@@ -2036,9 +2055,13 @@ fn run_component_with_internal_tools_and_initial_client(
     let initial_client = launch
         .uses_spawned_transport()
         .then_some(InitialClient::Stdio);
-    let mut initial_client_error_output = initial_client
-        .as_ref()
-        .map(|InitialClient::Stdio| InitialClientStartupErrorOutput::Stdout);
+    let mut initial_client_error_output = initial_client.as_ref().map(|client| match client {
+        InitialClient::Stdio => InitialClientStartupErrorOutput::Stdout,
+        #[cfg(test)]
+        InitialClient::Stream(_) => {
+            unreachable!("component launch never constructs the test-only stream transport")
+        }
+    });
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let startup_started_at = Instant::now();
         let current_exe = std::env::current_exe()
@@ -2101,6 +2124,8 @@ fn run_component_with_internal_tools_and_initial_client(
                 termination_signals: None,
                 bootstrap: None,
                 extension_stderr_mirror: None,
+                #[cfg(test)]
+                publish_session_claim: None,
             },
         )
         .map_err(Into::into)
