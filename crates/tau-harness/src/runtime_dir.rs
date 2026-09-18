@@ -1628,8 +1628,10 @@ fn probe_peer_entrypoint(
     {
         return PeerProbeOutcome::Incomplete;
     }
-    if !peer_discovery_target_still_current(target, deadline, cancelled) {
-        return PeerProbeOutcome::Unavailable;
+    match peer_discovery_target_still_current(target, deadline, cancelled) {
+        Ok(true) => {}
+        Ok(false) => return PeerProbeOutcome::Unavailable,
+        Err(_) => return PeerProbeOutcome::Incomplete,
     }
     let request_id = format!("peer-probe-{}", std::process::id());
     let Some(write_timeout) = probe_remaining(deadline, cancelled) else {
@@ -1668,7 +1670,7 @@ fn peer_discovery_target_still_current(
     target: &PeerDiscoveryTarget,
     deadline: Instant,
     cancelled: &AtomicBool,
-) -> bool {
+) -> Result<bool, FindHarnessForSessionError> {
     stable_claim_and_socket(
         &target.claim_path,
         &target.record.session_id,
@@ -1676,7 +1678,7 @@ fn peer_discovery_target_still_current(
         deadline,
         cancelled,
     )
-    .is_ok_and(|current| {
+    .map(|current| {
         current.is_some_and(|(record, socket_identity)| {
             record == target.record && socket_identity == target.socket_identity
         })

@@ -36,6 +36,18 @@ fn wait_for_target_capture_jobs_to_drain(timeout: Duration) {
     }
 }
 
+/// Resets the target-capture delay hook and drains detached capture work even
+/// when a delay regression unwinds before its explicit cleanup.
+struct TargetCaptureDelayCleanup;
+
+impl Drop for TargetCaptureDelayCleanup {
+    fn drop(&mut self) {
+        TEST_TARGET_CAPTURE_DELAY_MS.store(0, Ordering::Release);
+        wait_for_target_capture_jobs_to_drain(Duration::from_secs(3));
+        TEST_TARGET_CAPTURE_DELAY_STARTED.store(0, Ordering::Release);
+    }
+}
+
 fn spawn_peer_daemon(
     root: &TempDir,
     session_id: &str,
@@ -1436,6 +1448,192 @@ fn peer_discovery_rechecks_live_project_root_after_restart() {
     assert!(snapshot.sessions.is_empty());
     assert!(!snapshot.scan_truncated);
     server.join().expect("restarted peer server");
+    drop(claim);
+}
+
+/// Ensures losing the socket pathname during post-admission revalidation marks
+/// discovery incomplete and closes the admitted connection before probing.
+#[test]
+fn peer_discovery_marks_missing_revalidation_socket_incomplete() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("peer-revalidation-missing-socket");
+    let mut claim = claim_session(root.path(), &id).expect("claim peer");
+    claim.reclaim_stale_socket().expect("reclaim peer socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind peer socket");
+    let socket_path = claim.socket_path().to_path_buf();
+    claim.publish(true).expect("publish peer claim");
+    let server_id = id.clone();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept peer probe");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set peer read timeout");
+        let reader_stream = stream.try_clone().expect("clone peer stream");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(reader_stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
+        assert!(matches!(
+            reader.read_message().expect("read peer hello"),
+            Some(tau_proto::HarnessInputMessage::Hello(_))
+        ));
+        std::fs::remove_file(socket_path).expect("remove peer socket pathname");
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: server_id,
+                    harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
+                },
+            ))
+            .expect("write peer acceptance");
+        writer.flush().expect("flush peer acceptance");
+        assert!(
+            reader
+                .read_message()
+                .expect("read post-acceptance connection state")
+                .is_none(),
+            "failed revalidation must close before peer probing"
+        );
+    });
+
+    let snapshot = discover_peer_sessions(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+    );
+
+    assert!(snapshot.sessions.is_empty());
+    assert!(!snapshot.truncated);
+    assert!(snapshot.scan_truncated);
+    server.join().expect("peer server");
+    drop(claim);
+}
+
+/// Ensures an absent claim observed during post-admission revalidation remains
+/// a confirmed unavailable target rather than an incomplete discovery scan.
+#[test]
+fn peer_discovery_treats_absent_revalidation_claim_as_unavailable() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    let id = session("peer-revalidation-absent-claim");
+    let mut claim = claim_session(root.path(), &id).expect("claim peer");
+    claim.reclaim_stale_socket().expect("reclaim peer socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind peer socket");
+    let claim_path = claim.claim_path.clone();
+    claim.publish(true).expect("publish peer claim");
+    let server_id = id.clone();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept peer probe");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set peer read timeout");
+        let reader_stream = stream.try_clone().expect("clone peer stream");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(reader_stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
+        assert!(matches!(
+            reader.read_message().expect("read peer hello"),
+            Some(tau_proto::HarnessInputMessage::Hello(_))
+        ));
+        std::fs::remove_file(claim_path).expect("remove peer claim pathname");
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: server_id,
+                    harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
+                },
+            ))
+            .expect("write peer acceptance");
+        writer.flush().expect("flush peer acceptance");
+        assert!(
+            reader
+                .read_message()
+                .expect("read post-acceptance connection state")
+                .is_none(),
+            "absent claim must close before peer probing"
+        );
+    });
+
+    let snapshot = discover_peer_sessions(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+    );
+
+    assert!(snapshot.sessions.is_empty());
+    assert!(!snapshot.truncated);
+    assert!(!snapshot.scan_truncated);
+    server.join().expect("peer server");
+    drop(claim);
+}
+
+/// Ensures a delay introduced only after exact admission makes the second
+/// target capture incomplete within its candidate deadline, not the whole scan.
+#[test]
+fn peer_discovery_bounds_delayed_revalidation_capture() {
+    let _serial = TEST_DISCOVERY_SERIAL.lock().expect("discovery serial lock");
+    let root = bounded_runtime_root();
+    let _override = override_runtime_dir(root.path());
+    assert_eq!(ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire), 0);
+    TEST_TARGET_CAPTURE_DELAY_STARTED.store(0, Ordering::Release);
+    let _delay_cleanup = TargetCaptureDelayCleanup;
+    let id = session("peer-delayed-revalidation");
+    let mut claim = claim_session(root.path(), &id).expect("claim peer");
+    claim.reclaim_stale_socket().expect("reclaim peer socket");
+    let listener = UnixListener::bind(claim.socket_path()).expect("bind peer socket");
+    claim.publish(true).expect("publish peer claim");
+    let server_id = id.clone();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept peer probe");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set peer read timeout");
+        let reader_stream = stream.try_clone().expect("clone peer stream");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(reader_stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
+        assert!(matches!(
+            reader.read_message().expect("read peer hello"),
+            Some(tau_proto::HarnessInputMessage::Hello(_))
+        ));
+        TEST_TARGET_CAPTURE_DELAY_MS.store(500, Ordering::Release);
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::SessionAccepted(
+                tau_proto::SessionAccepted {
+                    session_id: server_id,
+                    harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
+                },
+            ))
+            .expect("write peer acceptance");
+        writer.flush().expect("flush peer acceptance");
+        assert!(
+            reader
+                .read_message()
+                .expect("read post-acceptance connection state")
+                .is_none(),
+            "timed-out revalidation must close before peer probing"
+        );
+    });
+    let started = Instant::now();
+
+    let snapshot = discover_peer_sessions(
+        None,
+        SESSION_DISCOVERY_MAX_RESULTS,
+        "",
+        DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+    );
+    let returned_after = started.elapsed();
+
+    assert_eq!(TEST_TARGET_CAPTURE_DELAY_STARTED.load(Ordering::Acquire), 1);
+    assert!(returned_after < Duration::from_secs(1));
+    assert!(snapshot.sessions.is_empty());
+    assert!(!snapshot.truncated);
+    assert!(snapshot.scan_truncated);
+    TEST_TARGET_CAPTURE_DELAY_MS.store(0, Ordering::Release);
+    wait_for_target_capture_jobs_to_drain(Duration::from_secs(2));
+    assert_eq!(ACTIVE_TARGET_CAPTURE_JOBS.load(Ordering::Acquire), 0);
+    server.join().expect("peer server");
     drop(claim);
 }
 
