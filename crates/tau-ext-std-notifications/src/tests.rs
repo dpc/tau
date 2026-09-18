@@ -1750,7 +1750,17 @@ fn unique_waiting_agent_does_not_own_unattributed_placeholder() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_frame(&default_notifications_config_frame())
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_START },
+                }],
+                "agent_end": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END },
+                }],
+                "agent_idle": [],
+            }),
+        )))
         .expect("write config");
     writer
         .write_event(&user_prompt_submitted(
@@ -1769,12 +1779,8 @@ fn unique_waiting_agent_does_not_own_unattributed_placeholder() {
             assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
         ))
         .expect("write final");
-    writer
-        .write_event(&Event::ToolBackgroundResult(tool_background_result(
-            "call-unowned",
-            tau_proto::PromptOriginator::User,
-        )))
-        .expect("write unowned terminal");
+    // Leave the unowned tool unresolved so inferred ownership would suppress
+    // END.
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
