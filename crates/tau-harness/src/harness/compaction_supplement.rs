@@ -137,6 +137,9 @@ fn canonical_attributes(mut attributes: &str) -> bool {
         let Some(rest) = attributes.strip_prefix(' ') else {
             return false;
         };
+        if rest.is_empty() {
+            return false;
+        }
         attributes = rest;
     }
     0 < count
