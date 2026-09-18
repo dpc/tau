@@ -604,57 +604,9 @@ async fn send_bounded(
 }
 
 fn provider_terminal_error(event: &Value) -> Option<Error> {
-    let ty = event.get("type").and_then(Value::as_str)?;
-    if !matches!(ty, "error" | "response.failed" | "response.incomplete") {
-        return None;
-    }
-    if ty == "response.incomplete" && super::incomplete_reason(event) == Some("max_output_tokens") {
-        return None;
-    }
-    let status = event
-        .get("status")
-        .or_else(|| event.pointer("/error/status"))
-        .or_else(|| event.pointer("/response/status"))
-        .or_else(|| event.pointer("/response/error/status"))
-        .and_then(Value::as_u64)
-        .and_then(|status| u16::try_from(status).ok());
-    let code = selected_provider_detail(event).map(|code| code.chars().take(128).collect());
+    let (status, code) = super::provider_terminal_detail(event)?;
+    let code = code.map(|code| code.chars().take(128).collect());
     Some(Error::Provider { status, code })
-}
-
-/// Select the canonical WebSocket provider detail that owns error
-/// classification.
-///
-/// Context exhaustion wins across the complete canonical envelope, followed by
-/// the first detail with a known shared retry class and then the first opaque
-/// detail. Classification observes each borrowed full string before the caller
-/// bounds the selected diagnostic for retention.
-fn selected_provider_detail(event: &Value) -> Option<&str> {
-    let mut first_detail = None;
-    let mut first_known = None;
-    for path in [
-        "/code",
-        "/error/code",
-        "/error/type",
-        "/response/error/code",
-        "/response/error/type",
-        "/response/incomplete_details/reason",
-    ] {
-        let Some(detail) = event.pointer(path).and_then(Value::as_str) else {
-            continue;
-        };
-        if detail == "context_length_exceeded" {
-            return Some(detail);
-        }
-        if first_detail.is_none() {
-            first_detail = Some(detail);
-        }
-        if first_known.is_none() && super::classify_error_code(detail) != super::RetryClass::Unknown
-        {
-            first_known = Some(detail);
-        }
-    }
-    first_known.or(first_detail)
 }
 
 fn websocket_url(base_url: &str) -> Result<String, Error> {

@@ -477,6 +477,14 @@ enum Error {
         /// Bounded provider error code, type, or incomplete reason.
         code: Option<String>,
     },
+    SseProvider {
+        /// Optional status carried by an in-stream provider event.
+        status: Option<u16>,
+        /// Closed failure kind selected from reviewed structured identifiers.
+        failure_kind: Option<tau_proto::ProviderFailureKind>,
+        /// Shared retry class selected from reviewed structured identifiers.
+        retry_class: RetryClass,
+    },
     Json,
     InvalidRequest,
     UnsupportedTool,
@@ -538,6 +546,22 @@ impl Error {
                     Some(RetryDecision::new(class))
                 }
             }
+            Self::SseProvider {
+                status,
+                failure_kind,
+                retry_class,
+            } => {
+                if failure_kind.is_some() {
+                    return None;
+                }
+                if status.is_some_and(
+                    |status| matches!(status, 400 | 402 | 404..=407 | 409..=424 | 426..=428 | 430..=499),
+                ) {
+                    None
+                } else {
+                    Some(RetryDecision::new(*retry_class))
+                }
+            }
             Self::Outbound(error) => Some(RetryDecision::new(match error.kind() {
                 tau_provider::OutboundErrorKind::InvalidConfiguration
                 | tau_provider::OutboundErrorKind::ProxyAuthentication => RetryClass::Auth,
@@ -565,6 +589,20 @@ impl Error {
                     None
                 }
             }
+            Self::SseProvider {
+                status,
+                failure_kind,
+                ..
+            } => failure_kind.or_else(|| {
+                status
+                    .is_some_and(|status| {
+                        matches!(
+                            status,
+                            400 | 402 | 404..=407 | 409..=424 | 426..=499
+                        )
+                    })
+                    .then_some(tau_proto::ProviderFailureKind::RequestRejected)
+            }),
             Self::InvalidRequest | Self::UnsupportedTool | Self::UnsupportedOutput => {
                 Some(tau_proto::ProviderFailureKind::RequestRejected)
             }
@@ -581,6 +619,79 @@ fn provider_code_failure_kind(code: &str) -> Option<tau_proto::ProviderFailureKi
         }
         _ => None,
     }
+}
+
+/// Classify one structured provider terminal without retaining SSE detail.
+fn sse_provider_terminal_error(event: &Value) -> Option<Error> {
+    provider_terminal_detail(event).map(|(status, code)| {
+        let failure_kind = code.and_then(provider_code_failure_kind);
+        let retry_class = code
+            .map(classify_error_code)
+            .filter(|class| *class != RetryClass::Unknown)
+            .unwrap_or(match status {
+                Some(408 | 425) => RetryClass::Transport,
+                Some(429) => RetryClass::Throttle,
+                Some(500..=599) => RetryClass::Overload,
+                Some(401 | 403) => RetryClass::Auth,
+                _ => RetryClass::Unknown,
+            });
+        Error::SseProvider {
+            status,
+            failure_kind,
+            retry_class,
+        }
+    })
+}
+
+/// Select the structured fields that own provider-terminal classification.
+fn provider_terminal_detail(event: &Value) -> Option<(Option<u16>, Option<&str>)> {
+    let ty = event.get("type").and_then(Value::as_str)?;
+    if !matches!(ty, "error" | "response.failed" | "response.incomplete") {
+        return None;
+    }
+    if ty == "response.incomplete" && incomplete_reason(event) == Some("max_output_tokens") {
+        return None;
+    }
+    let status = event
+        .get("status")
+        .or_else(|| event.pointer("/error/status"))
+        .or_else(|| event.pointer("/response/status"))
+        .or_else(|| event.pointer("/response/error/status"))
+        .and_then(Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok());
+    Some((status, selected_provider_detail(event)))
+}
+
+/// Select the canonical structured provider detail that owns classification.
+///
+/// Context exhaustion wins across the complete canonical envelope, followed by
+/// the first detail with a known shared retry class and then the first opaque
+/// detail.
+fn selected_provider_detail(event: &Value) -> Option<&str> {
+    let mut first_detail = None;
+    let mut first_known = None;
+    for path in [
+        "/code",
+        "/error/code",
+        "/error/type",
+        "/response/error/code",
+        "/response/error/type",
+        "/response/incomplete_details/reason",
+    ] {
+        let Some(detail) = event.pointer(path).and_then(Value::as_str) else {
+            continue;
+        };
+        if detail == "context_length_exceeded" {
+            return Some(detail);
+        }
+        if first_detail.is_none() {
+            first_detail = Some(detail);
+        }
+        if first_known.is_none() && classify_error_code(detail) != RetryClass::Unknown {
+            first_known = Some(detail);
+        }
+    }
+    first_known.or(first_detail)
 }
 
 fn failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailureKind> {
@@ -955,6 +1066,7 @@ fn finish_attempt_timing(
 }
 
 fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
+    let failure_kind = error.failure_kind();
     AttemptOutcome::Terminal(AttemptFailure {
         message: match &error {
             Error::Canceled => "request canceled".to_owned(),
@@ -978,11 +1090,14 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
                     (None, None) => "provider returned a WebSocket error".to_owned(),
                 }
             }
+            Error::SseProvider { .. } => "provider returned a Responses stream error".to_owned(),
             _ => "Responses request failed".to_owned(),
         },
-        failure_kind: error.failure_kind(),
+        failure_kind,
         stop_reason: if matches!(error, Error::RepetitionDetected(_)) {
             ProviderStopReason::RepetitionDetected
+        } else if failure_kind == Some(tau_proto::ProviderFailureKind::ContextWindowExceeded) {
+            ProviderStopReason::Error
         } else {
             ProviderStopReason::EndTurn
         },
@@ -1822,6 +1937,9 @@ impl State {
 
     fn apply_event(&mut self, data: &str) -> Result<bool, Error> {
         let decoded = decoded_event::DecodedEvent::decode(data).map_err(|_| Error::Json)?;
+        if let Some(error) = sse_provider_terminal_error(decoded.value()) {
+            return Err(error);
+        }
         self.apply_decoded_event(&decoded, data)
     }
 

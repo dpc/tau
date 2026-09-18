@@ -249,6 +249,42 @@ fn production_attempt_backend_metadata_tracks_actual_egress() {
     ));
 }
 
+/// Public Responses context rejection must cross the extension boundary as the
+/// exact typed no-output Error terminal consumed by guarded harness recovery.
+#[test]
+fn production_context_rejection_exposes_guarded_recovery_facts() {
+    let prompt = crate::openai_tests::prompt();
+    let model: ResponsesModel =
+        serde_json::from_value(serde_json::json!({"id": "test-model"})).expect("model");
+    let sse_body = "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\"}}}\n\n";
+    let http_body = "{\"error\":{\"code\":\"context_length_exceeded\"}}";
+    let responses = [
+        format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{http_body}",
+            http_body.len()
+        ),
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse_body}",
+            sse_body.len()
+        ),
+    ];
+
+    for response in responses {
+        let outcome = run_loopback_attempt(&prompt, &model, &response);
+        let PromptAttemptOutcome::Terminal { finished, progress } = outcome else {
+            panic!("context rejection must cross as a terminal response");
+        };
+        assert_eq!(
+            finished.failure_kind,
+            Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+        );
+        assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
+        assert!(finished.output_items.is_empty());
+        assert!(progress.output_items.is_empty());
+        assert!(!progress.has_timed_semantic_output);
+    }
+}
+
 /// Run the production public Responses adapter against one finite loopback
 /// response.
 fn run_loopback_attempt(

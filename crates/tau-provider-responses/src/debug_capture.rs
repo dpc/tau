@@ -575,6 +575,7 @@ fn error_metadata(error: &Error) -> Value {
         Error::Provider { status, code } => serde_json::json!({
             "kind": "provider", "http_status": status, "code": code,
         }),
+        Error::SseProvider { .. } => serde_json::json!({"kind": "provider"}),
         Error::Outbound(error) => serde_json::json!({
             "kind": "outbound",
             "route": format!("{:?}", error.route()),

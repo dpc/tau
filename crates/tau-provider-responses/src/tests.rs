@@ -436,6 +436,53 @@ fn sse_request_rejection_identifier_overrides_auth_status() {
         failure.failure_kind,
         Some(tau_proto::ProviderFailureKind::RequestRejected)
     );
+    assert_eq!(failure.stop_reason, ProviderStopReason::EndTurn);
+}
+
+/// HTTP context rejection must expose the canonical error stop reason required
+/// by the harness's existing guarded recovery classifier.
+#[test]
+fn http_context_rejection_exposes_recovery_terminal_facts() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind context rejection server");
+    let address = listener
+        .local_addr()
+        .expect("context rejection server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept context rejection");
+        let _ = read_http_request(&mut socket);
+        let body = r#"{"error":{"code":"context_length_exceeded"}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write context rejection");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join context rejection server");
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("context rejection must terminalize");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+    assert_eq!(failure.stop_reason, ProviderStopReason::Error);
 }
 
 /// Public Responses usage preserves OpenAI cache reads and writes as separate
@@ -2002,7 +2049,11 @@ fn unknown_incomplete_reason_remains_a_failure() {
         state.apply_event(
             r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"},"metadata":{"reason":"max_output_tokens"}}}"#
         ),
-        Err(Error::StreamFailure)
+        Err(Error::SseProvider {
+            failure_kind: None,
+            retry_class: RetryClass::Unknown,
+            ..
+        })
     ));
     assert_eq!(state.terminal, None);
 
@@ -2011,7 +2062,11 @@ fn unknown_incomplete_reason_remains_a_failure() {
         top_level_only.apply_event(
             r#"{"type":"response.incomplete","incomplete_details":{"reason":"max_output_tokens"},"response":{"incomplete_details":{"reason":"content_filter"}}}"#
         ),
-        Err(Error::StreamFailure)
+        Err(Error::SseProvider {
+            failure_kind: None,
+            retry_class: RetryClass::Unknown,
+            ..
+        })
     ));
 }
 
@@ -3280,6 +3335,7 @@ fn websocket_rejects_invalid_and_oversized_frames() {
         failure.failure_kind,
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
+    assert_eq!(failure.stop_reason, ProviderStopReason::Error);
 }
 
 /// The production WebSocket path must apply canonical detail precedence before
@@ -3313,6 +3369,104 @@ fn websocket_provider_detail_precedence_reaches_retry_and_failure_outcomes() {
         failure.failure_kind,
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
+    assert_eq!(failure.stop_reason, ProviderStopReason::Error);
+}
+
+/// Successful-HTTP SSE terminals must use the shared structured classifier,
+/// preserve unknown retries, and never expose provider detail in diagnostics.
+#[test]
+fn sse_provider_terminals_classify_without_exposing_detail() {
+    let context = run_sse_terminal_event(
+        r#"{"type":"response.failed","message":"secret context prose","response":{"error":{"code":"context_length_exceeded"}}}"#,
+    );
+    let AttemptOutcome::Terminal(context) = context else {
+        panic!("context rejection must terminalize");
+    };
+    assert_eq!(
+        context.failure_kind,
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+    assert_eq!(context.stop_reason, ProviderStopReason::Error);
+    assert_eq!(
+        context.message,
+        "provider returned a Responses stream error"
+    );
+    assert!(!context.message.contains("secret context prose"));
+    assert!(!context.message.contains("context_length_exceeded"));
+
+    let rejected =
+        run_sse_terminal_event(r#"{"type":"error","error":{"type":"invalid_request_error"}}"#);
+    let AttemptOutcome::Terminal(rejected) = rejected else {
+        panic!("deterministic request rejection must terminalize");
+    };
+    assert_eq!(
+        rejected.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert_eq!(rejected.stop_reason, ProviderStopReason::EndTurn);
+
+    let auth = run_sse_terminal_event(r#"{"type":"error","error":{"code":"invalid_api_key"}}"#);
+    let AttemptOutcome::Retryable { decision, .. } = auth else {
+        panic!("known authentication failure must remain retryable");
+    };
+    assert_eq!(decision.class, RetryClass::Auth);
+
+    for event in [
+        r#"{"type":"error","status":429}"#,
+        r#"{"type":"error","status":429,"code":"opaque"}"#,
+        r#"{"type":"error","status":429,"code":"rate_limit_exceeded"}"#,
+    ] {
+        let AttemptOutcome::Retryable { decision, .. } = run_sse_terminal_event(event) else {
+            panic!("numeric throttle status must remain retryable: {event}");
+        };
+        assert_eq!(decision.class, RetryClass::Throttle);
+    }
+
+    for event in [
+        r#"{"type":"error","error":{"code":"opaque"}}"#,
+        r#"{"type":"error","message":"context_length_exceeded"}"#,
+        r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}"#,
+    ] {
+        let AttemptOutcome::Retryable { decision, .. } = run_sse_terminal_event(event) else {
+            panic!("unknown structured failure must remain retryable: {event}");
+        };
+        assert_eq!(decision.class, RetryClass::Unknown);
+    }
+}
+
+/// Run one production SSE attempt containing a single provider terminal event.
+fn run_sse_terminal_event(event: &str) -> AttemptOutcome {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE terminal server");
+    let address = listener.local_addr().expect("SSE terminal server address");
+    let body = format!("data: {event}\n\n");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept SSE terminal request");
+        let _ = read_http_request(&mut socket);
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write SSE terminal response");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join SSE terminal server");
+    outcome
 }
 
 /// A WebSocket max-output terminal must complete once, preserve a truncated
