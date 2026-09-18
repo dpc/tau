@@ -24,10 +24,13 @@ fn defaults_publish_no_cross_unit_limits() {
 /// without replacing the ordinary system prompt.
 #[test]
 fn request_is_the_cache_aligned_trailing_user_instruction() {
-    assert!(REQUEST.starts_with("<tau_internal>\n"));
-    assert!(REQUEST.ends_with("\n&lt;/tau_internal&gt;"));
-    assert!(REQUEST.contains("Do not make or request any tool calls."));
-    assert!(REQUEST.contains("Return only the summary."));
+    let request = REQUEST.as_str();
+    assert!(
+        tau_proto::TAU_INTERNAL_PAYLOAD_ENVELOPE.matches_whole(request),
+        "the request must be exactly one registered internal envelope"
+    );
+    assert!(request.contains("Do not make or request any tool calls."));
+    assert!(request.contains("Return only the summary."));
 
     let independent_byte_cap = Config::new(
         NonZeroU64::new(2048).expect("positive"),

@@ -2,6 +2,7 @@
 
 use std::io::{self, Write};
 use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::LazyLock;
 
 use serde::Serialize;
 
@@ -141,21 +142,33 @@ impl Config {
     }
 }
 
-/// Harness-authored user message appended after the ordinary request prefix.
+/// Harness-authored instruction body appended after the ordinary request
+/// prefix.
 ///
 /// Keeping the ordinary system prompt, tools, and history ahead of this exact
 /// message lets compatible providers reuse their warmed prefix cache.
-pub const REQUEST: &str = concat!(
-    "<tau_internal>\n",
+const REQUEST_BODY: &str = concat!(
     "The context window is being compacted. Summarize the preceding conversation in your response ",
     "so the task can continue effectively using only the normal system prompt, tool definitions, ",
     "and your summary.\n\n",
     "Preserve the current goal, user requirements, decisions, constraints, completed work, important ",
     "results, exact identifiers, paths and commands, current state, open problems, blockers, and the ",
     "next concrete actions.\n\n",
-    "Do not continue the task now. Do not make or request any tool calls. Return only the summary.\n",
-    "&lt;/tau_internal&gt;"
+    "Do not continue the task now. Do not make or request any tool calls. Return only the summary."
 );
+
+/// Registered internal envelope containing the cache-aligned summary request.
+pub static REQUEST: LazyLock<String> = LazyLock::new(|| {
+    let envelope = tau_proto::TAU_INTERNAL_PAYLOAD_ENVELOPE;
+    let tau_proto::PayloadEnvelopeOpening::Fixed(open) = envelope.opening else {
+        unreachable!("internal payload has a fixed opening");
+    };
+    format!(
+        "{open}\n{}\n{}",
+        envelope.escape_body(REQUEST_BODY),
+        envelope.exact_close,
+    )
+});
 
 /// Replaces the harness standalone trigger with the cache-aligned user request.
 ///
@@ -178,7 +191,7 @@ pub fn replace_trailing_trigger(
             items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
                 role: tau_proto::ContextRole::User,
                 content: vec![tau_proto::ContentPart::Text {
-                    text: REQUEST.to_owned(),
+                    text: REQUEST.as_str().to_owned(),
                 }],
                 phase: None,
                 responses_raw_json: None,

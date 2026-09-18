@@ -4923,7 +4923,7 @@ fn local_compaction_request_extends_the_actual_ordinary_wire_prefix() {
             "role": "user",
             "content": [{
                 "type": "input_text",
-                "text": tau_provider::local_summary_compaction::REQUEST,
+                "text": tau_provider::local_summary_compaction::REQUEST.as_str(),
             }],
         }))
     );

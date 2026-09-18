@@ -2174,7 +2174,7 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
         request.messages.last(),
         Some(&serde_json::json!({
             "role": "user",
-            "content": tau_provider::local_summary_compaction::REQUEST,
+            "content": tau_provider::local_summary_compaction::REQUEST.as_str(),
         }))
     );
     let wire = serde_json::to_string(&request).expect("summary request");
@@ -2647,7 +2647,7 @@ fn standalone_compaction_requires_exact_trailing_trigger() {
         request.messages.last(),
         Some(&serde_json::json!({
             "role": "user",
-            "content": tau_provider::local_summary_compaction::REQUEST,
+            "content": tau_provider::local_summary_compaction::REQUEST.as_str(),
         }))
     );
 }
