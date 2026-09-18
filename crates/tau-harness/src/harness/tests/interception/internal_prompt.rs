@@ -68,6 +68,7 @@ fn dropped_request_does_not_submit_prompt() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let text = "drop-me";
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -78,11 +79,11 @@ fn dropped_request_does_not_submit_prompt() {
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("requester"),
-        request(&agent_id, &crate::test_connection_id("drop-me")),
+        request(&agent_id, text),
     )
     .expect("park request");
     assert!(!event_log_contains_any_source(&h, |event| {
-        matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == "drop me")
+        matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == text)
     }));
     h.handle_extension_event(
         "internal-prompt-interceptor",
@@ -96,7 +97,7 @@ fn dropped_request_does_not_submit_prompt() {
         matches!(event, Event::ExtInternalPromptSubmitRequest(_))
     }));
     assert!(!event_log_contains_any_source(&h, |event| {
-        matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == "drop me")
+        matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == text)
     }));
 }
 
@@ -297,6 +298,7 @@ fn disconnected_generation_cannot_submit_parked_request() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let text = "stale-request";
     connect_ready_configured_extension(
         &mut h,
         "old-requester",
@@ -306,7 +308,7 @@ fn disconnected_generation_cannot_submit_parked_request() {
     connect_internal_prompt_interceptor(&mut h);
     h.handle_extension_event_inner(
         &crate::test_connection_id("old-requester"),
-        request(&agent_id, &crate::test_connection_id("stale-request")),
+        request(&agent_id, text),
     )
     .expect("park request");
 
@@ -331,7 +333,7 @@ fn disconnected_generation_cannot_submit_parked_request() {
     assert!(!event_log_contains_any_source(&h, |event| {
         matches!(
             event,
-            Event::AgentPromptSubmitted(prompt) if prompt.text == "stale request"
+            Event::AgentPromptSubmitted(prompt) if prompt.text == text
         )
     }));
 }
