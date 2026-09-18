@@ -651,17 +651,46 @@ fn tool_reconstruction_byte_overflow_flushes_and_stops_buffering() {
             .len(),
         1
     );
+    let historical_start_charge = RENDERER_QUEUE_MAX_BYTES - stager.retained_usage().bytes;
     assert!(
         stager
-            .admit(replay(tool_started("active"), RENDERER_QUEUE_MAX_BYTES, 4,))
+            .admit(replay(tool_started("active"), historical_start_charge, 4,))
             .is_empty()
     );
+    assert!(matches!(
+        stager.tool_reconciliation,
+        ToolReconciliation::Active(_)
+    ));
+    assert_eq!(stager.retained_usage().bytes, RENDERER_QUEUE_MAX_BYTES);
+    assert!(stager.retained_usage().items < RENDERER_QUEUE_MAX_ITEMS);
 
-    let ready = stager.admit(live(tool_error("active"), 5));
+    let ready = stager.admit(live(tool_progress("active"), 5));
 
-    assert!(matches!(ready.as_slice(), [terminal]
-        if matches!(terminal.event.as_ref(), Event::ToolError(_))));
-    assert_eq!(stager.admit(live(tool_started("later"), 6)).len(), 1);
+    assert!(matches!(
+        ready.as_slice(),
+        [start, progress]
+            if start.delivery_id == tau_cli_term::RendererDeliveryId::new(4)
+                && matches!(start.event.as_ref(), Event::ToolStarted(started)
+                    if started.call_id.as_str() == "active")
+                && matches!(
+                    &start.presentation,
+                    RendererPresentation::ReconstructedToolStart { owner }
+                        if owner.as_str() == "agent-1"
+                )
+                && progress.delivery_id == tau_cli_term::RendererDeliveryId::new(5)
+                && matches!(progress.event.as_ref(), Event::ToolProgress(progress)
+                    if progress.call_id.as_str() == "active")
+    ));
+    assert!(matches!(
+        stager.tool_reconciliation,
+        ToolReconciliation::Disabled
+    ));
+
+    let later = stager.admit(live(tool_started("later"), 6));
+    assert!(matches!(later.as_slice(), [start]
+        if start.delivery_id == tau_cli_term::RendererDeliveryId::new(6)
+            && matches!(start.event.as_ref(), Event::ToolStarted(started)
+                if started.call_id.as_str() == "later")));
 }
 
 /// Pending starts and buffered live frames share the item bound; overflow emits
