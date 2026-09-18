@@ -130,8 +130,9 @@ impl RequiredFact {
     }
 }
 
-/// Validates a stable lowercase identifier.
-fn validate_identifier(label: &str, value: &str) -> Result<(), String> {
+/// Validates a stable lowercase identifier shared by corpus and candidate
+/// records.
+pub(crate) fn validate_identifier(label: &str, value: &str) -> Result<(), String> {
     let valid = !value.is_empty()
         && value.len() <= 80
         && value.bytes().all(|byte| {

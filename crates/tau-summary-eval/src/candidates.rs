@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::corpus::validate_identifier;
+
 /// Stable schema version accepted for candidate sets.
 pub const CANDIDATE_SCHEMA_VERSION: u32 = 1;
 
@@ -78,7 +80,7 @@ impl CandidateSet {
                 self.schema_version
             ));
         }
-        validate_metadata("corpus_id", &self.corpus_id, 80)?;
+        validate_identifier("corpus_id", &self.corpus_id)?;
         if self.corpus_version == 0 {
             return Err("corpus_version must be positive".into());
         }
@@ -88,7 +90,7 @@ impl CandidateSet {
         }
         let mut ids = HashSet::new();
         for candidate in &self.candidates {
-            validate_metadata("case_id", &candidate.case_id, 80)?;
+            validate_identifier("case_id", &candidate.case_id)?;
             if !ids.insert(candidate.case_id.as_str()) {
                 return Err(format!("duplicate candidate case {:?}", candidate.case_id));
             }

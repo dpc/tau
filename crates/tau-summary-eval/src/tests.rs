@@ -14,6 +14,60 @@ fn checked_in_offline_oracle_passes_every_fact_and_case() {
     assert_eq!(result.matched_required_facts, result.total_required_facts);
 }
 
+/// Matching corpus and candidate identifiers may use the existing bounded
+/// identifier domain even when they contain a secret-marker substring.
+#[test]
+fn evaluation_accepts_matching_identifier_shaped_secret_marker_substrings() {
+    let mut corpus: serde_json::Value = serde_json::from_slice(CORPUS).expect("fixture corpus");
+    let mut candidates: serde_json::Value =
+        serde_json::from_slice(CANDIDATES).expect("fixture candidates");
+    corpus["corpus_id"] = serde_json::json!("task-summary");
+    corpus["cases"][0]["id"] = serde_json::json!("task-summary");
+    candidates["corpus_id"] = serde_json::json!("task-summary");
+    candidates["candidates"][0]["case_id"] = serde_json::json!("task-summary");
+
+    let corpus = serde_json::to_vec(&corpus).expect("changed corpus");
+    let candidates = serde_json::to_vec(&candidates).expect("changed candidates");
+    let result = evaluate(&corpus, &candidates).expect("identifier-shaped marker is valid");
+
+    assert_eq!(result.coverage_basis_points, 10_000);
+}
+
+/// Candidate corpus and case identifiers reject values outside the bounded
+/// corpus identifier domain before scoring can attempt an exact join.
+#[test]
+fn candidate_identifiers_match_the_bounded_corpus_identifier_domain() {
+    let invalid_identifiers = [
+        String::new(),
+        "Uppercase".into(),
+        "contains space".into(),
+        "non-ascii-é".into(),
+        "contains.dot".into(),
+        "a".repeat(81),
+    ];
+    for invalid_identifier in invalid_identifiers {
+        let mut candidates: CandidateSet =
+            serde_json::from_slice(CANDIDATES).expect("fixture candidates");
+        candidates.corpus_id = invalid_identifier.clone();
+        assert!(
+            candidates
+                .validate()
+                .expect_err("invalid corpus identifier")
+                .contains("must match [a-z0-9_-]{1,80}")
+        );
+
+        let mut candidates: CandidateSet =
+            serde_json::from_slice(CANDIDATES).expect("fixture candidates");
+        candidates.candidates[0].case_id = invalid_identifier;
+        assert!(
+            candidates
+                .validate()
+                .expect_err("invalid case identifier")
+                .contains("must match [a-z0-9_-]{1,80}")
+        );
+    }
+}
+
 /// Scoring stays deterministic and reports missing facts and forbidden claims
 /// separately.
 #[test]
