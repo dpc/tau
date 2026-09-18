@@ -1,4 +1,5 @@
 use std::os::unix::net as path_std_os_unix_net;
+use std::sync::mpsc as path_std_sync_mpsc;
 use std::{io as path_std_io, time as path_std_time};
 
 use super::*;
@@ -567,65 +568,14 @@ fn detailed_activity_mappings_cover_all_categories() {
 #[cfg(unix)]
 #[test]
 fn roster_request_times_out_on_silent_peer() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let socket_path = temp.path().join("harness.sock");
-    let listener = path_std_os_unix_net::UnixListener::bind(&socket_path).expect("bind listener");
-    let server = std::thread::spawn(move || {
-        let (_stream, _) = listener.accept().expect("accept client");
-        std::thread::sleep(Duration::from_millis(100));
-    });
-
-    let started = path_std_time::Instant::now();
-    let result = request_at_socket_with_timeout_typed(
-        &socket_path,
-        &tau_proto::SessionId::parse("s1").expect("session id"),
-        SessionAgentListScope::Current,
-        Duration::from_millis(20),
-    );
-
-    assert!(result.is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
-    server.join().expect("server thread");
+    assert_roster_request_times_out(RosterTimeoutPeerBehavior::Silent);
 }
 
 /// Unrelated directed frames do not reset the absolute one-shot RPC deadline.
 #[cfg(unix)]
 #[test]
 fn roster_request_deadline_survives_unrelated_frames() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let socket_path = temp.path().join("harness.sock");
-    let listener = path_std_os_unix_net::UnixListener::bind(&socket_path).expect("bind listener");
-    let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept client");
-        let mut writer = tau_proto::HarnessOutputWriter::new(path_std_io::BufWriter::new(stream));
-        for index in 0..20 {
-            if writer
-                .write_message(&HarnessOutputMessage::PeerSessionProbeResult(
-                    tau_proto::PeerSessionProbeResult {
-                        request_id: format!("unrelated-{index}"),
-                        available: false,
-                    },
-                ))
-                .is_err()
-            {
-                break;
-            }
-            let _ = writer.flush();
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    });
-
-    let started = path_std_time::Instant::now();
-    let result = request_at_socket_with_timeout_typed(
-        &socket_path,
-        &tau_proto::SessionId::parse("s1").expect("session id"),
-        SessionAgentListScope::Current,
-        Duration::from_millis(20),
-    );
-
-    assert!(result.is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
-    server.join().expect("server thread");
+    assert_roster_request_times_out(RosterTimeoutPeerBehavior::UnrelatedFrames);
 }
 
 /// Incremental bytes from one incomplete frame cannot defeat the absolute
@@ -633,39 +583,226 @@ fn roster_request_deadline_survives_unrelated_frames() {
 #[cfg(unix)]
 #[test]
 fn roster_request_deadline_stops_partial_frame_trickle() {
-    use std::io::Write as _;
+    assert_roster_request_times_out(RosterTimeoutPeerBehavior::PartialFrameTrickle);
+}
 
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum RosterTimeoutPeerBehavior {
+    Silent,
+    UnrelatedFrames,
+    PartialFrameTrickle,
+}
+
+#[cfg(unix)]
+fn assert_roster_request_times_out(behavior: RosterTimeoutPeerBehavior) {
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("harness.sock");
     let listener = path_std_os_unix_net::UnixListener::bind(&socket_path).expect("bind listener");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept client");
-        let frame = tau_proto::encode_message_to_vec(
-            &HarnessOutputMessage::PeerSessionProbeResult(tau_proto::PeerSessionProbeResult {
-                request_id: "unrelated".to_owned(),
-                available: false,
-            }),
-        )
-        .expect("encode frame");
-        for byte in frame {
-            if stream.write_all(&[byte]).is_err() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    });
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let (stop_tx, stop_rx) = path_std_sync_mpsc::channel();
+    let server = std::thread::spawn(move || run_roster_timeout_peer(listener, stop_rx, behavior));
 
     let started = path_std_time::Instant::now();
     let result = request_at_socket_with_timeout_typed(
         &socket_path,
         &tau_proto::SessionId::parse("s1").expect("session id"),
         SessionAgentListScope::Current,
-        Duration::from_millis(20),
+        Duration::from_millis(200),
     );
+    let elapsed = started.elapsed();
+    let _ = stop_tx.send(());
+    let server_result = server.join().expect("server thread");
 
-    assert!(result.is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
-    server.join().expect("server thread");
+    server_result.expect("peer must admit s1 and observe its current-scope roster request");
+    assert!(
+        matches!(
+            result,
+            Err(CliError::Participant(ref message))
+                if message == "agent roster request timed out"
+        ),
+        "expected exact roster timeout, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "roster timeout took {elapsed:?}"
+    );
+}
+
+#[cfg(unix)]
+fn run_roster_timeout_peer(
+    listener: path_std_os_unix_net::UnixListener,
+    stop: path_std_sync_mpsc::Receiver<()>,
+    behavior: RosterTimeoutPeerBehavior,
+) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let lifetime_deadline = path_std_time::Instant::now() + Duration::from_millis(1_500);
+    let stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => {
+                if stop.try_recv().is_ok() {
+                    return Err("client stopped before connecting".to_owned());
+                }
+                if path_std_time::Instant::now() >= lifetime_deadline {
+                    return Err("timed out accepting roster client".to_owned());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(format!("accept roster client: {error}")),
+        }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| format!("set peer read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| format!("set peer write timeout: {error}"))?;
+    let read_stream = stream
+        .try_clone()
+        .map_err(|error| format!("clone peer stream: {error}"))?;
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(read_stream));
+    let hello = reader
+        .read_message()
+        .map_err(|error| format!("read Hello: {error}"))?
+        .ok_or_else(|| "client disconnected before Hello".to_owned())?;
+    let HarnessInputMessage::Hello(hello) = hello else {
+        return Err(format!("expected Hello, got {hello:?}"));
+    };
+    let session_id =
+        tau_proto::SessionId::parse("s1").map_err(|error| format!("parse session id: {error}"))?;
+    let client_name = tau_proto::ExtensionName::parse("tau-list-agents")
+        .map_err(|error| format!("parse client name: {error}"))?;
+    let expected_hello = crate::ui_client::hello_message(client_name, Some(&session_id));
+    if HarnessInputMessage::Hello(hello.clone()) != expected_hello {
+        return Err(format!("unexpected roster Hello: {hello:?}"));
+    }
+
+    let mut writer = tau_proto::HarnessOutputWriter::new(path_std_io::BufWriter::new(
+        stream
+            .try_clone()
+            .map_err(|error| format!("clone peer writer: {error}"))?,
+    ));
+    writer
+        .write_message(&HarnessOutputMessage::SessionAccepted(
+            tau_proto::SessionAccepted {
+                session_id,
+                harness_protocol_version: None,
+            },
+        ))
+        .map_err(|error| format!("write SessionAccepted: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("flush SessionAccepted: {error}"))?;
+
+    let request = reader
+        .read_message()
+        .map_err(|error| format!("read GetSessionAgentList: {error}"))?
+        .ok_or_else(|| "client disconnected before GetSessionAgentList".to_owned())?;
+    let HarnessInputMessage::GetSessionAgentList(request) = request else {
+        return Err(format!("expected GetSessionAgentList, got {request:?}"));
+    };
+    if request.request_id.is_empty()
+        || request.session_id.as_str() != "s1"
+        || request.scope != SessionAgentListScope::Current
+    {
+        return Err(format!("unexpected roster request: {request:?}"));
+    }
+
+    match behavior {
+        RosterTimeoutPeerBehavior::Silent => wait_for_roster_peer_stop(&stop, lifetime_deadline),
+        RosterTimeoutPeerBehavior::UnrelatedFrames => {
+            let mut index = 0_u64;
+            while !roster_peer_should_stop(&stop, lifetime_deadline) {
+                if let Err(error) =
+                    writer.write_message(&HarnessOutputMessage::PeerSessionProbeResult(
+                        tau_proto::PeerSessionProbeResult {
+                            request_id: format!("unrelated-{index}"),
+                            available: false,
+                        },
+                    ))
+                {
+                    return roster_peer_finish_after_write_error(
+                        &stop,
+                        "write unrelated frame",
+                        error,
+                    );
+                }
+                if let Err(error) = writer.flush() {
+                    return roster_peer_finish_after_write_error(
+                        &stop,
+                        "flush unrelated frame",
+                        error,
+                    );
+                }
+                index += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(())
+        }
+        RosterTimeoutPeerBehavior::PartialFrameTrickle => {
+            let frame = tau_proto::encode_message_to_vec(
+                &HarnessOutputMessage::PeerSessionProbeResult(tau_proto::PeerSessionProbeResult {
+                    request_id: "unrelated-".repeat(128),
+                    available: false,
+                }),
+            )
+            .map_err(|error| format!("encode unrelated frame: {error}"))?;
+            let mut stream = stream;
+            for byte in frame {
+                if roster_peer_should_stop(&stop, lifetime_deadline) {
+                    return Ok(());
+                }
+                if let Err(error) = stream.write_all(&[byte]) {
+                    return roster_peer_finish_after_write_error(
+                        &stop,
+                        "write partial frame",
+                        error,
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            wait_for_roster_peer_stop(&stop, lifetime_deadline)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_roster_peer_stop(
+    stop: &path_std_sync_mpsc::Receiver<()>,
+    lifetime_deadline: path_std_time::Instant,
+) -> Result<(), String> {
+    let remaining = lifetime_deadline.saturating_duration_since(path_std_time::Instant::now());
+    match stop.recv_timeout(remaining) {
+        Ok(()) => Ok(()),
+        Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => Ok(()),
+        Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
+            Err("roster test dropped cleanup signal".to_owned())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn roster_peer_should_stop(
+    stop: &path_std_sync_mpsc::Receiver<()>,
+    lifetime_deadline: path_std_time::Instant,
+) -> bool {
+    stop.try_recv().is_ok() || path_std_time::Instant::now() >= lifetime_deadline
+}
+
+#[cfg(unix)]
+fn roster_peer_finish_after_write_error<E: std::fmt::Display>(
+    stop: &path_std_sync_mpsc::Receiver<()>,
+    action: &str,
+    error: E,
+) -> Result<(), String> {
+    match stop.recv_timeout(Duration::from_millis(20)) {
+        Ok(()) => Ok(()),
+        Err(_) => Err(format!("{action}: {error}")),
+    }
 }
 
 /// A saturated Unix listen backlog cannot hold connection establishment beyond
