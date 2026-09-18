@@ -101,6 +101,7 @@ fn wait_projection_is_content_free_and_exact() {
     assert_eq!(row["effective_timeout_minutes"], 5);
     assert_eq!(row["registration"], "active");
     assert_eq!(row["outcome"], "input_available");
+    assert_eq!(row["source_resolution"], "resolved");
     assert_eq!(row["activation_kind"], "watch_notification");
     assert!(!row.contains_key("requested_timeout_minutes"));
     assert_eq!(
@@ -120,11 +121,31 @@ fn wait_projection_is_content_free_and_exact() {
             "terminal_at_us",
             "outcome",
             "activation",
+            "source_resolution",
             "activation_kind",
             "active_wait_us",
             "activation_to_wait_terminal_us",
         ])
     );
+}
+
+/// A missing activation endpoint remains a delivered input outcome while its
+/// local source evidence is explicitly unavailable.
+#[test]
+fn wait_projection_marks_missing_activation_source_not_selected() {
+    let agent_id = AgentId::parse("agent-wait").expect("agent id");
+    let mut facts = wait_facts(FactKind::Activation(
+        tau_proto::ActivationKind::WatchNotification,
+    ));
+    facts.retain(|fact| fact.observation_id != id(4));
+    let by_id = observation_index(&agent_id, &facts).expect("observation index");
+    let rows = wait_rows(&agent_id, Some(UnixMicros::new(10)), &facts, &by_id).expect("wait rows");
+    let row = rows[0].value.as_object().expect("wait row");
+    assert_eq!(row["outcome"], "input_available");
+    assert_eq!(row["activation"], json!(id(4)));
+    assert_eq!(row["source_resolution"], "source_not_selected");
+    assert!(!row.contains_key("activation_kind"));
+    assert!(!row.contains_key("activation_to_wait_terminal_us"));
 }
 
 /// A selected unrelated event cannot masquerade as an activation endpoint.
@@ -261,6 +282,8 @@ fn wait_mode_outcome_matrix_matches_runtime_semantics() {
 /// order rather than reducing plural correlation to an unordered set.
 #[test]
 fn plural_wait_performance_fields_preserve_request_order() {
+    let agent_id = AgentId::parse("agent-wait").expect("agent id");
+    let wait_call = call(7);
     let targets = vec![call(2), call(1)];
     let sources = vec![
         tau_proto::WaitDeliveredSource {
@@ -276,34 +299,213 @@ fn plural_wait_performance_fields_preserve_request_order() {
             envelope: tau_proto::ToolOutputEnvelope::Identity,
         },
     ];
-    let mut row = Map::new();
-    add_wait_mode(
-        &mut row,
-        &ToolWaitMode::ExactAll {
-            targets: targets.clone(),
-        },
-    );
-    add_wait_outcome(
-        &mut row,
-        &settlement(
-            false,
-            ToolWaitOutcome::CompletionsDelivered {
-                sources: sources.clone(),
+    let facts = vec![
+        fact(
+            10,
+            0,
+            FactKind::Declaration(vec![
+                (wait_call, ToolCallId::from("wait-call")),
+                (call(2), ToolCallId::from("source-two")),
+                (call(1), ToolCallId::from("source-one")),
+            ]),
+        ),
+        fact(
+            11,
+            1,
+            FactKind::WaitObserved(tau_proto::AgentToolWaitObserved {
+                wait_call,
+                mode: ToolWaitMode::ExactAll {
+                    targets: targets.clone(),
+                },
+            }),
+        ),
+        fact(
+            4,
+            2,
+            FactKind::CanonicalTerminal {
+                call_id: ToolCallId::from("source-two"),
+                phase: Some(ToolSourcePhase::Background),
             },
         ),
-        &HashMap::new(),
-    )
-    .expect("plural outcome");
+        fact(
+            5,
+            3,
+            FactKind::CanonicalTerminal {
+                call_id: ToolCallId::from("wait-call"),
+                phase: Some(ToolSourcePhase::Foreground),
+            },
+        ),
+        fact(
+            6,
+            4,
+            FactKind::WaitSettled(tau_proto::AgentToolWaitSettled {
+                wait_observation: id(11),
+                wait_call,
+                registration: None,
+                wait_terminal: id(5),
+                outcome: ToolWaitOutcome::CompletionsDelivered {
+                    sources: sources.clone(),
+                },
+            }),
+        ),
+    ];
+    let by_id = observation_index(&agent_id, &facts).expect("observation index");
+    let rows = wait_rows(&agent_id, Some(UnixMicros::new(10)), &facts, &by_id).expect("wait rows");
+    let row = rows[0].value.as_object().expect("wait row");
     assert_eq!(row["mode"], json!("exact_all"));
     assert_eq!(
         row["target_calls"],
         serde_json::to_value(targets).expect("targets serialize")
     );
     assert_eq!(row["outcome"], json!("completions_delivered"));
+    let projected = row["sources"].as_array().expect("sources array");
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["source_call"], json!(sources[0].source_call));
     assert_eq!(
-        row["sources"],
-        serde_json::to_value(sources).expect("sources serialize")
+        projected[0]["source_terminal"],
+        json!(sources[0].source_terminal)
     );
+    assert_eq!(projected[0]["source_phase"], json!(sources[0].source_phase));
+    assert_eq!(projected[0]["envelope"], json!(sources[0].envelope));
+    assert_eq!(projected[0]["source_resolution"], "resolved");
+    assert_eq!(projected[1]["source_call"], json!(sources[1].source_call));
+    assert_eq!(
+        projected[1]["source_terminal"],
+        json!(sources[1].source_terminal)
+    );
+    assert_eq!(projected[1]["source_phase"], json!(sources[1].source_phase));
+    assert_eq!(projected[1]["envelope"], json!(sources[1].envelope));
+    assert_eq!(projected[1]["source_resolution"], "source_not_selected");
+}
+
+/// A missing single completion endpoint preserves its durable delivery outcome
+/// and reference while making the absent local evidence explicit.
+#[test]
+fn wait_projection_marks_missing_completion_source_not_selected() {
+    let agent_id = AgentId::parse("agent-wait").expect("agent id");
+    let wait_call = call(1);
+    let source_call = call(9);
+    let facts = vec![
+        fact(
+            1,
+            0,
+            FactKind::Declaration(vec![
+                (wait_call, ToolCallId::from("wait-call")),
+                (source_call, ToolCallId::from("source-call")),
+            ]),
+        ),
+        fact(
+            2,
+            1,
+            FactKind::WaitObserved(tau_proto::AgentToolWaitObserved {
+                wait_call,
+                mode: ToolWaitMode::Exact {
+                    target: source_call,
+                },
+            }),
+        ),
+        fact(
+            5,
+            2,
+            FactKind::CanonicalTerminal {
+                call_id: ToolCallId::from("wait-call"),
+                phase: Some(ToolSourcePhase::Foreground),
+            },
+        ),
+        fact(
+            6,
+            3,
+            FactKind::WaitSettled(tau_proto::AgentToolWaitSettled {
+                wait_observation: id(2),
+                wait_call,
+                registration: None,
+                wait_terminal: id(5),
+                outcome: ToolWaitOutcome::CompletionDelivered {
+                    source_call,
+                    source_terminal: id(8),
+                    source_phase: ToolSourcePhase::Foreground,
+                    envelope: tau_proto::ToolOutputEnvelope::Identity,
+                },
+            }),
+        ),
+    ];
+    let by_id = observation_index(&agent_id, &facts).expect("observation index");
+    let rows = wait_rows(&agent_id, Some(UnixMicros::new(10)), &facts, &by_id).expect("wait rows");
+    let row = rows[0].value.as_object().expect("wait row");
+    assert_eq!(row["outcome"], "completion_delivered");
+    assert_eq!(row["source_call"], json!(source_call));
+    assert_eq!(row["source_terminal"], json!(id(8)));
+    assert_eq!(row["source_resolution"], "source_not_selected");
+    assert!(!row.contains_key("completion_to_delivery_us"));
+}
+
+/// A selected completion endpoint remains resolved even when clock regression
+/// makes its delivery interval unavailable.
+#[test]
+fn wait_projection_resolves_source_without_qualified_timing() {
+    let agent_id = AgentId::parse("agent-wait").expect("agent id");
+    let wait_call = call(1);
+    let source_call = call(9);
+    let mut source_terminal = fact(
+        8,
+        2,
+        FactKind::CanonicalTerminal {
+            call_id: ToolCallId::from("source-call"),
+            phase: Some(ToolSourcePhase::Foreground),
+        },
+    );
+    source_terminal.clock_regressions = 1;
+    let facts = vec![
+        fact(
+            1,
+            0,
+            FactKind::Declaration(vec![
+                (wait_call, ToolCallId::from("wait-call")),
+                (source_call, ToolCallId::from("source-call")),
+            ]),
+        ),
+        fact(
+            2,
+            1,
+            FactKind::WaitObserved(tau_proto::AgentToolWaitObserved {
+                wait_call,
+                mode: ToolWaitMode::Exact {
+                    target: source_call,
+                },
+            }),
+        ),
+        source_terminal,
+        fact(
+            5,
+            3,
+            FactKind::CanonicalTerminal {
+                call_id: ToolCallId::from("wait-call"),
+                phase: Some(ToolSourcePhase::Foreground),
+            },
+        ),
+        fact(
+            6,
+            4,
+            FactKind::WaitSettled(tau_proto::AgentToolWaitSettled {
+                wait_observation: id(2),
+                wait_call,
+                registration: None,
+                wait_terminal: id(5),
+                outcome: ToolWaitOutcome::CompletionDelivered {
+                    source_call,
+                    source_terminal: id(8),
+                    source_phase: ToolSourcePhase::Foreground,
+                    envelope: tau_proto::ToolOutputEnvelope::Identity,
+                },
+            }),
+        ),
+    ];
+    let by_id = observation_index(&agent_id, &facts).expect("observation index");
+    let rows = wait_rows(&agent_id, Some(UnixMicros::new(10)), &facts, &by_id).expect("wait rows");
+    let row = rows[0].value.as_object().expect("wait row");
+    assert_eq!(row["outcome"], "completion_delivered");
+    assert_eq!(row["source_resolution"], "resolved");
+    assert!(!row.contains_key("completion_to_delivery_us"));
 }
 
 /// Matched outer-turn boundaries expose only durable identifiers, status,

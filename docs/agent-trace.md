@@ -433,10 +433,13 @@ wait: record_type, agent_id, wait_call, journal_seq, optional observed_at_us, mo
       exact_all mode: target_calls
       activating_input mode: effective_timeout_minutes
       completion_delivered: source_call, source_terminal, source_phase, envelope,
+                            source_resolution,
                             optional completion_to_delivery_us
       completions_delivered: ordered sources array of source_call,
-                             source_terminal, source_phase, and envelope
+                             source_terminal, source_phase, envelope, and
+                             source_resolution
       interrupted_by_activation/input_available: activation,
+                                                 source_resolution,
                                                  optional activation_kind/
                                                           activation_to_wait_terminal_us
       rejected: rejection_reason
@@ -494,6 +497,12 @@ second usage total.
 Tool and wait rows use only typed durable call/observation references. Missing
 referenced terminals remain `source_not_selected`, `unresolved`, or incomplete;
 the projector does not infer them from adjacency or parse provider arguments.
+For delivered wait sources and activation references, `source_resolution` is
+`resolved` only when the owning agent's selected journal contains the referenced
+endpoint and it passes the existing validation. An absent local endpoint is
+`source_not_selected`; a selected endpoint with the wrong event type, call, or
+phase remains a projection error. Resolution does not imply that timing is
+available or independently prove runtime delivery.
 Activating-input waits expose only the durable effective timeout, not the
 requested timeout. Standalone trigger and failure fields are categorical, and
 attempts contain normalized usage/cost without provider rates or bodies.

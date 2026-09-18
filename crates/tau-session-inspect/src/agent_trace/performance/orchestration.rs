@@ -1251,12 +1251,32 @@ fn add_wait_outcome(
                 "envelope".into(),
                 serde_json::to_value(envelope).expect("envelope serializes"),
             );
+            row.insert(
+                "source_resolution".into(),
+                json!(source_resolution(*source_terminal, by_id)),
+            );
         }
         ToolWaitOutcome::CompletionsDelivered { sources } => {
             row.insert("outcome".into(), json!("completions_delivered"));
             row.insert(
                 "sources".into(),
-                serde_json::to_value(sources).expect("sources serialize"),
+                Value::Array(
+                    sources
+                        .iter()
+                        .map(|source| {
+                            let mut value = serde_json::to_value(source)
+                                .expect("source serializes")
+                                .as_object()
+                                .expect("source serializes as an object")
+                                .clone();
+                            value.insert(
+                                "source_resolution".into(),
+                                json!(source_resolution(source.source_terminal, by_id)),
+                            );
+                            Value::Object(value)
+                        })
+                        .collect(),
+                ),
             );
         }
         ToolWaitOutcome::InterruptedByActivation { activation }
@@ -1273,6 +1293,10 @@ fn add_wait_outcome(
                 }),
             );
             row.insert("activation".into(), json!(activation));
+            row.insert(
+                "source_resolution".into(),
+                json!(source_resolution(*activation, by_id)),
+            );
             if let Some(Fact {
                 kind: FactKind::Activation(kind),
                 ..
@@ -1302,6 +1326,15 @@ fn add_wait_outcome(
         }
     }
     Ok(())
+}
+
+/// Classifies whether one referenced source endpoint is selected locally.
+fn source_resolution(source: ObservationId, by_id: &HashMap<ObservationId, &Fact>) -> &'static str {
+    if by_id.contains_key(&source) {
+        "resolved"
+    } else {
+        "source_not_selected"
+    }
 }
 
 /// Converts a rich trigger to its safe categorical discriminator.
