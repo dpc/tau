@@ -489,10 +489,17 @@ impl PipeStop {
 
 #[derive(Default)]
 struct CapturedPipe {
+    /// Raw retained prefix, bounded independently for this pipe.
+    retained_bytes: Vec<u8>,
+    /// Lossy UTF-8 rendering of the retained prefix after capture finishes.
     text: String,
+    /// Number of raw bytes retained before decoding.
     stored_bytes: usize,
+    /// Number of bytes observed from this pipe, including discarded overflow.
     bytes: usize,
+    /// Whether any observed read exceeded the remaining retained-byte capacity.
     truncated: bool,
+    /// Whether the complete retained prefix is valid UTF-8.
     valid_utf8: bool,
 }
 
@@ -506,7 +513,7 @@ impl CapturedPipe {
 
     fn push_bytes(&mut self, bytes: &[u8]) {
         self.bytes += bytes.len();
-        let room = MAX_CAPTURE_BYTES.saturating_sub(self.stored_bytes);
+        let room = MAX_CAPTURE_BYTES.saturating_sub(self.retained_bytes.len());
         if room < bytes.len() {
             self.truncated = true;
         }
@@ -514,12 +521,17 @@ impl CapturedPipe {
             return;
         }
         let take = room.min(bytes.len());
+        self.retained_bytes.extend_from_slice(&bytes[..take]);
         self.stored_bytes += take;
-        match std::str::from_utf8(&bytes[..take]) {
-            Ok(s) => self.text.push_str(s),
-            Err(_) => {
+    }
+
+    /// Decode the complete retained prefix once capture has stopped.
+    fn finish(&mut self) {
+        match String::from_utf8(std::mem::take(&mut self.retained_bytes)) {
+            Ok(text) => self.text = text,
+            Err(error) => {
                 self.valid_utf8 = false;
-                self.text.push_str(&String::from_utf8_lossy(&bytes[..take]));
+                self.text = String::from_utf8_lossy(error.as_bytes()).into_owned();
             }
         }
     }
@@ -570,6 +582,7 @@ where
                 }
             }
         }
+        captured.finish();
         captured
     })
 }
@@ -588,6 +601,7 @@ where
                 Ok(n) => captured.push_bytes(&buf[..n]),
             }
         }
+        captured.finish();
         captured
     })
 }

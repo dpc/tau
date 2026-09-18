@@ -2024,6 +2024,61 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
     );
 }
 
+/// A registered Rhai tool returning a `ShellJob` preserves Unicode from both
+/// pipes and reports the existing non-truncated result metadata unchanged.
+#[test]
+fn shell_job_result_preserves_unicode_and_utf8_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) {
+                register_tool("unicode_shell", #{}, Fn("unicode_shell"));
+            }
+            fn unicode_shell(args, call_info) {
+                return shell_spawn("printf '雪'; printf '🦀' >&2", #{ timeout: 5 });
+            }
+        "#,
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("unicode_shell", CborValue::Map(Vec::new())),
+    );
+
+    let frames = run_frames(&[configure_with_script(&script), started]);
+    let result = frames
+        .iter()
+        .find_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResultReported(result)) => Some(&result.result),
+            _ => None,
+        })
+        .expect("Unicode shell tool result");
+    let CborValue::Map(fields) = result else {
+        panic!("Unicode shell result must be a map");
+    };
+    assert!(fields.iter().any(|(key, value)| matches!(
+        (key, value),
+        (CborValue::Text(key), CborValue::Text(output))
+            if key == "output" && output == "雪\n[stderr]\n🦀"
+    )));
+    for field in ["success", "valid_utf8"] {
+        assert!(fields.iter().any(|(key, value)| matches!(
+            (key, value),
+            (CborValue::Text(key), CborValue::Bool(true)) if key == field
+        )));
+    }
+    assert!(fields.iter().any(|(key, value)| matches!(
+        (key, value),
+        (CborValue::Text(key), CborValue::Bool(false)) if key == "truncated"
+    )));
+    for field in ["total_lines", "total_bytes"] {
+        assert!(fields.iter().any(|(key, value)| matches!(
+            (key, value),
+            (CborValue::Text(key), CborValue::Null) if key == field
+        )));
+    }
+}
+
 /// An oversized timeout rejects its tool call without spawning the requested
 /// command.
 #[test]
