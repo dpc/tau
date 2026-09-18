@@ -71,6 +71,8 @@ fn register_schema_routes_invocations_to_owner() {
 }
 
 #[test]
+/// Replacing a schema must remove its old routes so they report no live
+/// provider.
 fn replacing_schema_removes_old_action_ids_for_connection() {
     let mut registry = ActionRegistry::new();
     registry
@@ -90,11 +92,10 @@ fn replacing_schema_removes_old_action_ids_for_connection() {
         )
         .expect("new schema should register");
 
-    assert!(
-        registry
-            .route_action_invoke(&invoke("email.old", 1))
-            .is_err()
-    );
+    assert!(matches!(
+        registry.route_action_invoke(&invoke("email.old", 1)),
+        Err(ActionRouteError::NoProvider { .. })
+    ));
     assert_eq!(
         registry.route_action_invoke(&invoke("email.new", 1)),
         Ok(tau_proto::ConnectionId::parse("conn-a")
@@ -158,6 +159,8 @@ fn duplicate_owner_action_routes_are_rejected_without_replacing_existing_owner()
 }
 
 #[test]
+/// Disconnecting an owner must remove its routes rather than failing schema
+/// validation later.
 fn disconnect_unregisters_actions() {
     let mut registry = ActionRegistry::new();
     registry
@@ -174,11 +177,10 @@ fn disconnect_unregisters_actions() {
             .unregister_connection(&test_connection_id("conn-a"))
             .is_some()
     );
-    assert!(
-        registry
-            .route_action_invoke(&invoke("email.out.approve", 1))
-            .is_err()
-    );
+    assert!(matches!(
+        registry.route_action_invoke(&invoke("email.out.approve", 1)),
+        Err(ActionRouteError::NoProvider { .. })
+    ));
 }
 
 #[test]
