@@ -1639,104 +1639,184 @@ fn prewarm_fingerprint_divergence_discards_chain_anchor() {
     );
 }
 
-/// Codex's WS `previous_response_id` cache is connection-local. When the
-/// pool opens a fresh socket for a chained turn, the new socket has no
-/// knowledge of the prior response id. The pool strips the id, replays the
-/// full prompt once over WS, and keeps the fresh socket warm for the next
-/// turn instead of sticky-falling back to HTTP.
+/// A cold socket must full-replay canonical history despite historical response
+/// metadata, then reuse the new socket-local anchor for its exact new suffix.
 #[test]
-fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
+fn cold_canonical_replay_omits_historical_anchor_then_reuses_new_ws_anchor() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
-    let mut on_update = |_: &crate::common::StreamState| {};
-
-    let session_id =
-        tau_proto::SessionId::parse("session-fresh").expect("known-safe SessionId must be valid");
-    let request = PromptPayload {
-        system_prompt: "sys",
-        context: context(&[]),
-        hosted_tools: &[],
-        tools: &[],
-        params: tau_proto::ModelParams::default(),
-        tool_choice: tau_proto::ToolChoice::default(),
-        compaction: None,
-        originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
-        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        debug_provider_requests: false,
-    };
-    run_turn_through_pool(
+    let historical_user = user_msg("historical user");
+    let historical_assistant = tau_proto::ContextItem::Message(tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![tau_proto::ContentPart::Text {
+            text: "historical assistant".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    });
+    let initial_context = block_context(vec![
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![historical_user],
+        }),
+        tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+            provider_response_id: Some("resp-historical".to_owned()),
+            backend: None,
+            output_items: vec![historical_assistant],
+            usage: None,
+        }),
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![user_msg("first cold follow-up")],
+        }),
+    ]);
+    let first_state = run_context_turn(
         &mut pool,
         &config,
         "session-fresh",
-        "sp-test",
-        &request,
-        &mut on_update,
-    )
-    .expect("fresh chained WS turn should rebuild warmth");
+        "sp-cold-replay",
+        initial_context,
+    );
+    {
+        let state = server.lock_state();
+        assert_eq!(state.upgrade_count, 1, "cold replay opens one socket");
+        let first_request = &state.requests[0];
+        assert!(
+            first_request.get("previous_response_id").is_none(),
+            "cold replay must not send historical response metadata as an anchor"
+        );
+        assert_eq!(
+            first_request["input"],
+            serde_json::json!([
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "historical user"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "historical assistant",
+                        "annotations": [],
+                    }],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "first cold follow-up"}],
+                },
+            ]),
+            "cold replay must include the complete canonical history in order"
+        );
+    }
 
-    let s = server.lock_state();
-    assert_eq!(s.upgrade_count, 1, "must open a replacement WS socket");
-    assert_eq!(s.requests.len(), 1, "expected one WS full replay envelope");
-    assert!(
-        s.requests[0].get("previous_response_id").is_none(),
-        "fresh WS socket must not receive a stale chain id"
+    let first_response_id = first_state.response_id.clone().expect("cold response id");
+    let mut next_blocks = initial_context.blocks.clone();
+    next_blocks.push(tau_proto::ContextBlock::AssistantResponse(
+        tau_proto::AssistantResponseBlock {
+            provider_response_id: Some(first_response_id.clone()),
+            backend: None,
+            output_items: first_state.into_output_items(),
+            usage: None,
+        },
+    ));
+    next_blocks.push(tau_proto::ContextBlock::UserInput(
+        tau_proto::UserInputBlock {
+            items: vec![user_msg("socket-local suffix")],
+        },
+    ));
+    run_context_turn(
+        &mut pool,
+        &config,
+        "session-fresh",
+        "sp-socket-local-reuse",
+        block_context(next_blocks),
+    );
+
+    let state = server.lock_state();
+    assert_eq!(
+        state.upgrade_count, 1,
+        "compatible follow-up reuses the socket"
+    );
+    assert_eq!(
+        state.turns_per_connection,
+        vec![2],
+        "one socket serves both turns"
+    );
+    let second_request = &state.requests[1];
+    assert_eq!(
+        second_request["previous_response_id"], first_response_id,
+        "the follow-up must use the anchor obtained on this socket"
+    );
+    assert_eq!(
+        second_request["input"],
+        serde_json::json!([{
+            "role": "user",
+            "content": [{"type": "input_text", "text": "socket-local suffix"}],
+        }]),
+        "compatible follow-up must send only its new suffix"
     );
 }
 
+/// Cold replay must retain a historical opaque compaction replacement exactly
+/// and in order while omitting its unavailable historical response anchor.
 #[test]
-fn fresh_open_with_previous_response_preserves_compacted_items() {
+fn cold_canonical_replay_preserves_compaction_replacement_item() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
-    let mut on_update = |_: &crate::common::StreamState| {};
-    let session_id = tau_proto::SessionId::parse("session-compacted")
-        .expect("known-safe SessionId must be valid");
-    let messages = vec![
-        tau_proto::ContextItem::Compaction(
-            tau_proto::OpaqueProviderItem::from_raw_json(
-                r#"{"type":"compaction","content":"compacted-sentinel"}"#,
-            )
-            .expect("valid compaction item"),
-        ),
-        user_msg("after compaction"),
-    ];
-    let request = PromptPayload {
-        system_prompt: "sys",
-        context: context(&messages),
-        hosted_tools: &[],
-        tools: &[],
-        params: tau_proto::ModelParams::default(),
-        tool_choice: tau_proto::ToolChoice::default(),
-        compaction: None,
-        originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
-        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
-        debug_provider_requests: false,
-    };
-
-    run_turn_through_pool(
+    let compaction = tau_proto::ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::from_raw_json(
+            r#"{"type":"compaction","id":"cmp-historical","content":"compacted-sentinel","metadata":{"ordinal":7}}"#,
+        )
+        .expect("valid compaction item"),
+    );
+    let context = block_context(vec![
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![user_msg("before compaction")],
+        }),
+        tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+            provider_response_id: Some("resp-compacted-historical".to_owned()),
+            backend: None,
+            output_items: vec![compaction],
+            usage: None,
+        }),
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![user_msg("after compaction")],
+        }),
+    ]);
+    run_context_turn(
         &mut pool,
         &config,
         "session-compacted",
-        "sp-test",
-        &request,
-        &mut on_update,
-    )
-    .expect("fresh chained WS turn should replay compacted context");
+        "sp-cold-compaction-replay",
+        context,
+    );
 
-    let s = server.lock_state();
-    let input = s.requests[0]
-        .get("input")
-        .and_then(serde_json::Value::as_array)
-        .expect("input array");
+    let state = server.lock_state();
+    let request = &state.requests[0];
     assert!(
-        input.iter().any(
-            |item| item.get("content").and_then(serde_json::Value::as_str)
-                == Some("compacted-sentinel")
-        ),
-        "fresh WS replay must keep compacted input items when stripping the stale chain id",
+        request.get("previous_response_id").is_none(),
+        "cold replay must not send the historical compaction response id as an anchor"
+    );
+    assert_eq!(
+        request["input"],
+        serde_json::json!([
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "before compaction"}],
+            },
+            {
+                "type": "compaction",
+                "id": "cmp-historical",
+                "content": "compacted-sentinel",
+                "metadata": {"ordinal": 7},
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "after compaction"}],
+            },
+        ]),
+        "cold replay must preserve the complete opaque compaction object and its position"
     );
 }
 
