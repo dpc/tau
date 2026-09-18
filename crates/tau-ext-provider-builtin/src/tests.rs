@@ -5207,6 +5207,207 @@ fn compact_finished_response_preserves_native_cache_usage() {
     assert_eq!(cache.write_tokens, Some(20));
 }
 
+/// Constructs a successful standalone terminal with material output and the
+/// supplied complete response-local usage observation.
+fn standalone_finished_with_usage(
+    usage: Option<tau_proto::ProviderTokenUsage>,
+) -> (
+    tau_proto::AgentPromptCreated,
+    tau_proto::ProviderBackend,
+    ProviderResponseFinished,
+) {
+    let mut prompt = minimal_prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    let backend = tau_proto::ProviderBackend {
+        kind: tau_proto::ProviderBackendKind::Responses,
+        base_url: "https://example.invalid".to_owned(),
+        transport: tau_proto::ProviderBackendTransport::Websocket,
+        stale_chain_fallback: false,
+    };
+    let output_items = vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![tau_proto::ContentPart::Text {
+            text: "standalone output that cancellation must reject".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    })];
+    let finished = compact_finished_response(
+        &prompt.agent_prompt_id,
+        &prompt,
+        backend.clone(),
+        output_items,
+        usage,
+        tau_proto::ProviderAttempt::new(4).expect("nonzero attempt"),
+    );
+    (prompt, backend, finished)
+}
+
+/// Returns a complete nonzero usage sample so cancellation tests prove that
+/// nested optional cache metadata survives alongside the scalar counters.
+fn complete_nonzero_standalone_usage(model: &tau_proto::ModelId) -> tau_proto::ProviderTokenUsage {
+    tau_proto::ProviderTokenUsage {
+        model: Some(model.clone()),
+        prompt_sent_tokens: 120,
+        prompt_cached_tokens: 80,
+        prompt_cache_read_ceiling_tokens: Some(100),
+        cache: Some(Box::new(tau_proto::ProviderCacheUsage {
+            read_tokens: Some(80),
+            write_tokens: Some(20),
+            ..Default::default()
+        })),
+        response_received_tokens: 7,
+        stats: Default::default(),
+    }
+}
+
+/// Targeted cancellation at the worker commit boundary must reject successful
+/// standalone output without discarding its complete billable usage evidence or
+/// granting cooldown-release authority.
+#[test]
+fn targeted_canceled_standalone_terminal_preserves_complete_usage() {
+    let prompt = minimal_prompt();
+    let usage = complete_nonzero_standalone_usage(&prompt.model);
+    let (prompt, backend, finished) = standalone_finished_with_usage(Some(usage.clone()));
+    let cancellation = CancellationState::default();
+    cancellation.cancel(prompt.agent_prompt_id.clone());
+    let provider = ProviderName::new("limited");
+    let probe = CooldownProbe {
+        provider: provider.clone(),
+        generation: 7,
+    };
+    let cooldowns = BTreeMap::from([(
+        provider,
+        SharedCooldown {
+            not_before: Instant::now() + Duration::from_secs(60),
+            class: RetryClass::UsageWindow,
+            generation: 7,
+        },
+    )]);
+
+    let (committed, released_provider) = validate_worker_output_and_probe_for_commit(
+        prepare_worker_report(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseFinishedReported(finished),
+        ))
+        .expect("prepare successful standalone terminal"),
+        (0, 0, false),
+        &prompt.agent_prompt_id,
+        &cancellation,
+        Some(&probe),
+        &cooldowns,
+    )
+    .expect("validate targeted cancellation")
+    .expect("replace successful terminal with canceled terminal");
+
+    let HarnessInputMessage::Emit(emit) = committed.message() else {
+        panic!("canceled terminal must remain an emitted report");
+    };
+    let Event::ProviderResponseFinishedReported(canceled) = emit.event.as_ref() else {
+        panic!("canceled terminal must remain a finished provider report");
+    };
+    assert_eq!(canceled.agent_prompt_id, prompt.agent_prompt_id);
+    assert_eq!(canceled.agent_id, prompt.agent_id);
+    assert_eq!(canceled.originator, prompt.originator);
+    assert_eq!(canceled.stop_reason, tau_proto::ProviderStopReason::Error);
+    assert_eq!(canceled.error.as_deref(), Some("(cancelled by harness)"));
+    assert!(canceled.output_items.is_empty());
+    assert_eq!(canceled.usage, Some(usage));
+    assert_eq!(canceled.backend, Some(backend));
+    assert_eq!(canceled.provider_attempt, tau_proto::ProviderAttempt::ONE);
+    assert!(released_provider.is_none());
+    assert!(!cancellation.is_canceled(&prompt.agent_prompt_id));
+}
+
+/// A changed global cancellation generation must preserve the same complete
+/// usage and backend evidence while retaining the canceled terminal authority.
+#[test]
+fn globally_canceled_standalone_terminal_preserves_complete_usage() {
+    let prompt = minimal_prompt();
+    let usage = complete_nonzero_standalone_usage(&prompt.model);
+    let (prompt, backend, finished) = standalone_finished_with_usage(Some(usage.clone()));
+    let cancellation = CancellationState::default();
+    let committed = validate_worker_output_for_commit(
+        prepare_worker_report(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseFinishedReported(finished),
+        ))
+        .expect("prepare successful standalone terminal"),
+        3,
+        4,
+        false,
+        &prompt.agent_prompt_id,
+        &cancellation,
+    )
+    .expect("validate global cancellation generation")
+    .expect("replace successful terminal with canceled terminal");
+
+    let HarnessInputMessage::Emit(emit) = committed.message() else {
+        panic!("canceled terminal must remain an emitted report");
+    };
+    let Event::ProviderResponseFinishedReported(canceled) = emit.event.as_ref() else {
+        panic!("canceled terminal must remain a finished provider report");
+    };
+    assert_eq!(canceled.agent_prompt_id, prompt.agent_prompt_id);
+    assert_eq!(canceled.stop_reason, tau_proto::ProviderStopReason::Error);
+    assert_eq!(canceled.error.as_deref(), Some("(cancelled by harness)"));
+    assert!(canceled.output_items.is_empty());
+    assert_eq!(canceled.usage, Some(usage));
+    assert_eq!(canceled.backend, Some(backend));
+    assert_eq!(canceled.provider_attempt, tau_proto::ProviderAttempt::ONE);
+}
+
+/// Cancellation must preserve the accounting distinction between absent usage
+/// and a present all-zero sample rather than normalizing either representation.
+#[test]
+fn canceled_standalone_terminal_preserves_absent_and_zero_usage() {
+    let zero_usage = tau_proto::ProviderTokenUsage::default();
+    for expected_usage in [None, Some(zero_usage)] {
+        let (prompt, _, finished) = standalone_finished_with_usage(expected_usage.clone());
+        let committed = validate_worker_output_for_commit(
+            prepare_worker_report(HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(finished),
+            ))
+            .expect("prepare successful standalone terminal"),
+            0,
+            1,
+            false,
+            &prompt.agent_prompt_id,
+            &CancellationState::default(),
+        )
+        .expect("validate global cancellation generation")
+        .expect("replace successful terminal with canceled terminal");
+        let HarnessInputMessage::Emit(emit) = committed.message() else {
+            panic!("canceled terminal must remain an emitted report");
+        };
+        let Event::ProviderResponseFinishedReported(canceled) = emit.event.as_ref() else {
+            panic!("canceled terminal must remain a finished provider report");
+        };
+        assert_eq!(canceled.usage, expected_usage);
+    }
+}
+
+/// Without targeted, global, or input-closure cancellation, commit validation
+/// must return the successful standalone terminal unchanged.
+#[test]
+fn uncanceled_standalone_terminal_remains_unchanged() {
+    let prompt = minimal_prompt();
+    let usage = complete_nonzero_standalone_usage(&prompt.model);
+    let (prompt, _, finished) = standalone_finished_with_usage(Some(usage));
+    let expected =
+        HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(finished));
+    let committed = validate_worker_output_for_commit(
+        prepare_worker_report(expected.clone()).expect("prepare successful standalone terminal"),
+        4,
+        4,
+        false,
+        &prompt.agent_prompt_id,
+        &CancellationState::default(),
+    )
+    .expect("validate uncanceled output")
+    .expect("preserve uncanceled terminal");
+
+    assert_eq!(committed.message(), &expected);
+}
+
 /// Ensures TRACE prompt diagnostics expose only fixed structural metadata,
 /// never model-visible prompt content that belongs in separately gated private
 /// capture.

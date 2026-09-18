@@ -5703,6 +5703,7 @@ fn validate_worker_output_for_commit(
         "(cancelled by harness)",
     );
     canceled.backend = finished.backend.clone();
+    canceled.usage = finished.usage.clone();
     Ok(Some(tau_client::PeerOutput::prepare(
         HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(canceled)),
     )?))
