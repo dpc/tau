@@ -20,13 +20,14 @@ pub(crate) fn compute_diff(old: &str, new: &str) -> tau_proto::DiffSummary {
             continue;
         }
 
-        // Hunk header (1-based line numbers like unified-diff).
+        // Unified-diff header starts are 1-based except on an empty side, where
+        // the zero-length range names the preceding line without adding one.
         let first = &group[0];
         let last = &group[group.len() - 1];
-        let old_start = first.old_range().start as u32 + 1;
-        let new_start = first.new_range().start as u32 + 1;
         let old_count = (last.old_range().end - first.old_range().start) as u32;
         let new_count = (last.new_range().end - first.new_range().start) as u32;
+        let old_start = first.old_range().start as u32 + u32::from(old_count != 0);
+        let new_start = first.new_range().start as u32 + u32::from(new_count != 0);
 
         let mut lines: Vec<tau_proto::DiffLine> = Vec::new();
         for op in &group {
