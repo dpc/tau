@@ -3770,15 +3770,97 @@ fn websocket_rejects_cumulative_response_overflow() {
 /// close.
 #[test]
 fn websocket_stalled_peer_cancels_without_close_wait() {
-    let mut polls = 0_u8;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
+    let address = listener.local_addr().expect("WebSocket server address");
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (released_tx, released_rx) = mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let socket = accept_websocket_peer(&listener);
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer read timeout");
+        socket
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer write timeout");
+        let mut socket = tungstenite::accept(socket).expect("upgrade WebSocket");
+        let _ = socket.read().expect("read response.create");
+        socket
+            .send(Message::Ping(Vec::new().into()))
+            .expect("send WebSocket ping");
+        assert!(matches!(socket.read(), Ok(Message::Pong(_))));
+        ready_tx.send(()).expect("report Pong readiness");
+
+        let mut bytes = [0_u8; 256];
+        let released = loop {
+            match socket.get_mut().read(&mut bytes) {
+                Ok(0) => break Ok(()),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::NotConnected
+                    ) =>
+                {
+                    break Ok(());
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        released_tx.send(released).expect("report socket release");
+    });
+
+    let canceled = Arc::new(AtomicBool::new(false));
+    let attempt_canceled = Arc::clone(&canceled);
+    let (attempt_tx, attempt_rx) = mpsc::sync_channel(1);
+    let attempt = std::thread::spawn(move || {
+        let captures = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&captures);
+        let outcome = run_attempt_with_capture(
+            &minimal_prompt(),
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: String::new(),
+                max_output_tokens: 0,
+                transport: Transport::Websocket,
+                prompt_cache: None,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            DebugCapture::with_test_sink(
+                true,
+                Arc::new(move |capture| captured.lock().expect("capture lock").push(capture)),
+            ),
+            &mut |_| {},
+            &mut || attempt_canceled.load(Ordering::SeqCst),
+            &test_network(),
+        );
+        let captures = std::mem::take(&mut *captures.lock().expect("capture lock"));
+        attempt_tx
+            .send((outcome, captures))
+            .expect("report canceled attempt");
+    });
+
+    ready_rx
+        .recv_timeout(Duration::from_secs(7))
+        .expect("WebSocket peer must receive Pong before cancellation");
     let started = Instant::now();
-    let (outcome, captures) =
-        run_websocket_messages_captured(vec![Message::Ping(Vec::new().into())], &mut || {
-            polls = polls.saturating_add(1);
-            8 <= polls
-        });
-    assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
+    canceled.store(true, Ordering::SeqCst);
+    let (outcome, captures) = attempt_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("WebSocket attempt must observe cancellation promptly");
     assert!(started.elapsed() < Duration::from_secs(3));
+    released_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("WebSocket peer must observe socket release")
+        .expect("canceled WebSocket must reach EOF or reset");
+    attempt.join().expect("WebSocket attempt must not panic");
+    server.join().expect("WebSocket peer must not panic");
+
+    assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
     assert_eq!(
         captures.len(),
         2,
