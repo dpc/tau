@@ -1,4 +1,125 @@
+#[cfg(unix)]
+use std::fs::Permissions;
+
 use super::*;
+
+/// A process-local permissive umask must not make a newly initialized UI
+/// directory or diagnostic log accessible to other accounts.
+#[cfg(unix)]
+#[test]
+fn init_creates_private_diagnostics_under_permissive_umask() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
+
+    const CHILD_MARKER: &str = "TAU_UI_LOGGING_PERMISSION_CHILD";
+    const ROOT_ENV: &str = "TAU_UI_LOGGING_PERMISSION_ROOT";
+    const TEST_NAME: &str =
+        "ui_logging::tests::init_creates_private_diagnostics_under_permissive_umask";
+
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("child state root"));
+        let logging = init(&root).expect("initialize private UI logging");
+        let parent_mode = std::fs::metadata(root.join("uis"))
+            .expect("UI parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let dir_mode = std::fs::metadata(logging.dir())
+            .expect("private UI directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let log_mode = std::fs::metadata(logging.log_path())
+            .expect("private UI log metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(parent_mode, 0o777);
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(log_mode, 0o600);
+        return;
+    }
+
+    let root = tempfile::tempdir().expect("temporary state root");
+    std::fs::set_permissions(root.path(), Permissions::from_mode(0o777))
+        .expect("make state root traversable");
+    let test_executable = std::env::current_exe().expect("current test executable");
+    let status = Command::new("sh")
+        .args([
+            "-c",
+            "umask 000; exec \"$1\" --exact \"$2\" --nocapture",
+            "sh",
+        ])
+        .arg(test_executable)
+        .arg(TEST_NAME)
+        .env(CHILD_MARKER, "1")
+        .env(ROOT_ENV, root.path())
+        .status()
+        .expect("run isolated permissive-umask test");
+    assert!(status.success(), "permission child failed: {status}");
+}
+
+/// An existing per-UI leaf must be rejected without changing its permissions
+/// or adopting its contents.
+#[cfg(unix)]
+#[test]
+fn private_ui_directory_creation_rejects_existing_leaf() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("temporary state root");
+    let existing = root.path().join("uis/ui-collision");
+    std::fs::create_dir_all(&existing).expect("existing UI directory");
+    std::fs::set_permissions(&existing, Permissions::from_mode(0o755))
+        .expect("set existing directory mode");
+    std::fs::write(existing.join("marker"), "preserve").expect("existing marker");
+
+    let error = create_private_ui_dir(root.path(), "ui-collision")
+        .expect_err("existing UI directory must be rejected");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::metadata(&existing)
+            .expect("existing directory metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing.join("marker")).expect("existing marker"),
+        "preserve"
+    );
+}
+
+/// An existing UI log must be rejected without changing its permissions or
+/// truncating its diagnostic bytes.
+#[cfg(unix)]
+#[test]
+fn private_ui_log_creation_rejects_existing_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("temporary UI directory");
+    let log_path = root.path().join("ui.log");
+    std::fs::write(&log_path, "preserve\n").expect("existing UI log");
+    std::fs::set_permissions(&log_path, Permissions::from_mode(0o644))
+        .expect("set existing log mode");
+
+    let error = create_private_ui_log(&log_path).expect_err("existing UI log must be rejected");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::metadata(&log_path)
+            .expect("existing log metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log_path).expect("existing log contents"),
+        "preserve\n"
+    );
+}
 
 /// A disabled tracing filter must not suppress the mandatory bounded
 /// foreground-restoration evidence written directly to the private UI log.

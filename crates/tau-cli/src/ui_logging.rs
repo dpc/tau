@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, LineWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -132,11 +132,10 @@ impl UiLogging {
 /// `TAU_LOG`, defaulting to first-party `tau_cli` info and global warnings.
 pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
     let ui_id = mint_ui_id();
-    let dir = state_dir.join("uis").join(&ui_id);
-    std::fs::create_dir_all(&dir)?;
+    let dir = create_private_ui_dir(state_dir, &ui_id)?;
 
     let log_path = dir.join("ui.log");
-    let mut file = File::create(&log_path)?;
+    let mut file = create_private_ui_log(&log_path)?;
     writeln!(file, "# tau ui log")?;
     writeln!(file, "ui_id={ui_id}")?;
     writeln!(file, "pid={}", std::process::id())?;
@@ -167,6 +166,35 @@ pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
         log_path,
         diagnostic_writer: Some(log_writer),
     })
+}
+
+/// Creates ordinary shared parents and an exclusively owned per-UI directory.
+fn create_private_ui_dir(state_dir: &Path, ui_id: &str) -> io::Result<PathBuf> {
+    let parent = state_dir.join("uis");
+    std::fs::create_dir_all(&parent)?;
+    let dir = parent.join(ui_id);
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
+    Ok(dir)
+}
+
+/// Exclusively creates a new per-UI diagnostic log with owner-only access.
+fn create_private_ui_log(log_path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.mode(0o600);
+    }
+    options.open(log_path)
 }
 
 /// Initialize tracing for an ephemeral terminal UI without creating a UI log.
