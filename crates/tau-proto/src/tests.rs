@@ -7862,16 +7862,19 @@ fn extension_data_debug_redacts_secret_payload_bytes() {
 }
 
 /// Proves the dedicated capture frame round-trips opaque bytes without
-/// becoming an event or exposing payload content through Debug.
+/// becoming an event or exposing payload content or its ordinary numeric byte
+/// representation through Debug.
 #[test]
 fn provider_capture_round_trips_with_redacted_debug() {
+    let zstd = b"raw-sensitive-bytes".to_vec();
+    let zstd_debug = format!("{zstd:?}");
     let message = crate::HarnessInputMessage::ProviderDebugCapture(crate::ProviderDebugCapture {
         session_id: crate::SessionId::parse("session").expect("session"),
         attribution: crate::ProviderCaptureAttribution::Prompt(
             crate::AgentPromptId::parse("prompt").expect("prompt"),
         ),
         class: crate::ProviderDebugCaptureClass::CompactHttpFailure,
-        zstd: b"raw-sensitive-bytes".to_vec(),
+        zstd,
     });
     let encoded = crate::encode_harness_input_to_vec(&message).expect("encode");
     let decoded = crate::decode_harness_input_from_slice(&encoded).expect("decode");
@@ -7879,6 +7882,7 @@ fn provider_capture_round_trips_with_redacted_debug() {
     let debug = format!("{message:?}");
     assert!(debug.contains("zstd_len"));
     assert!(!debug.contains("raw-sensitive-bytes"));
+    assert!(!debug.contains(&zstd_debug));
 }
 
 /// Ambient indicator declarations must remain transient and preserve the
