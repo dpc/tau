@@ -832,6 +832,7 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
         vec![
             shared_test_tool_spec("status"),
             shared_test_tool_spec("skill"),
+            shared_test_tool_spec("wait"),
         ],
     );
     let call = AgentToolCall {
@@ -865,13 +866,25 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
         id: "lifecycle-wait".into(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(Vec::new()),
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("timeout_minutes".to_owned()),
+            CborValue::Integer(1.into()),
+        )]),
     };
     h.prompt_coordination
         .prompt_runtime
         .record_tool_call_prompt(wait.id.clone(), prompt_id.clone());
     h.execute_agent_tool_call(&cid, &wait)
         .expect("accept lifecycle wait");
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::ToolStarted(started)
+                if started.call_id == wait.id && started.tool_name.as_str() == "wait"
+        )),
+        1,
+        "the frozen prompt admits the lifecycle wait"
+    );
     assert!(
         !h.agent_runtime
             .agent_registry
