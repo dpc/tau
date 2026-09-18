@@ -525,6 +525,54 @@ fn cancellation_expiry_and_admission_are_bounded() {
     assert!(store.descriptor(&descriptor.key).is_ok());
 }
 
+/// Ensures an active read makes finalization Busy without consuming the upload,
+/// and Abort releases that upload without disturbing the read or committed
+/// data.
+#[test]
+fn busy_finalize_preserves_upload_until_abort_releases_it() {
+    let temp = tempfile::tempdir().expect("private root");
+    let mut store = ArtifactStore::new(temp.path());
+    let (_, descriptor) = put(&mut store, "tool/session", "one", b"committed", 1);
+    let ArtifactValue::Opened { read, .. } = store
+        .open("reader", descriptor.key.clone())
+        .expect("open read")
+    else {
+        panic!("read")
+    };
+    let ArtifactValue::Upload { upload } = store
+        .begin(
+            "tool/session",
+            "uploader",
+            tau_proto::ArtifactSize::new(3).expect("size"),
+        )
+        .expect("begin upload")
+    else {
+        panic!("upload")
+    };
+    store
+        .write("uploader", &upload, 0, b"new")
+        .expect("write upload");
+
+    assert_eq!(
+        store.finalize("tool/session", "uploader", &upload, 2),
+        Err(ArtifactError::Busy)
+    );
+    assert!(store.uploads.contains_key(&upload));
+    store
+        .execute(
+            "tool/session",
+            "uploader",
+            ArtifactOp::Abort {
+                upload: upload.clone(),
+            },
+            2,
+        )
+        .expect("abort busy upload");
+    assert!(!store.uploads.contains_key(&upload));
+    assert!(store.read("reader", &read, 0, 9).is_ok());
+    assert!(store.descriptor(&descriptor.key).is_ok());
+}
+
 /// Fake client state machines exercise multi-chunk wire encoding, original-byte
 /// verification, and response-lost retry without a provider, network, or shell.
 #[test]

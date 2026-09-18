@@ -53,6 +53,9 @@ pub(crate) struct ArtifactTransferManager {
     requests: HashMap<ArtifactRequestId, tau_proto::ToolCallId>,
     /// Independent byte budget for imported originals moved into shell workers.
     import_write_budget: ImportWriteBudget,
+    #[cfg(test)]
+    /// Deterministically rejects the next ordinary transfer operation in tests.
+    reject_next_request: bool,
 }
 
 /// One off-loop preparation or finalization completion.
@@ -155,6 +158,8 @@ impl ArtifactTransferManager {
             transfers: HashMap::new(),
             requests: HashMap::new(),
             import_write_budget: ImportWriteBudget::default(),
+            #[cfg(test)]
+            reject_next_request: false,
         }
     }
 
@@ -170,6 +175,8 @@ impl ArtifactTransferManager {
             transfers: HashMap::new(),
             requests: HashMap::new(),
             import_write_budget: ImportWriteBudget::default(),
+            #[cfg(test)]
+            reject_next_request: false,
         }
     }
 
@@ -313,6 +320,7 @@ impl ArtifactTransferManager {
         let value = match result.result {
             Ok(value) => value,
             Err(error) => {
+                self.best_effort_release(&transfer);
                 finish_error(output, transfer, artifact_error_message(error));
                 return;
             }
@@ -452,23 +460,21 @@ impl ArtifactTransferManager {
         let Some(op) = op else {
             return;
         };
-        let result = self
-            .client
-            .as_ref()
-            .ok_or(tau_client::ClientError::InvalidArtifactRequest)
-            .and_then(|client| {
-                let session = self
-                    .session
-                    .clone()
-                    .ok_or(tau_client::ClientError::InvalidArtifactRequest)?;
-                client.start_request(session, op)
-            });
+        #[cfg(test)]
+        let result = if std::mem::take(&mut self.reject_next_request) {
+            Err(tau_client::ClientError::Overloaded)
+        } else {
+            self.start_request(op)
+        };
+        #[cfg(not(test))]
+        let result = self.start_request(op);
         match result {
             Ok(request_id) => {
                 self.requests.insert(request_id, call_id.clone());
             }
             Err(error) => {
                 if let Some(transfer) = self.transfers.remove(call_id) {
+                    self.best_effort_release(&transfer);
                     finish_error(
                         output,
                         transfer,
@@ -477,6 +483,21 @@ impl ArtifactTransferManager {
                 }
             }
         }
+    }
+
+    fn start_request(
+        &self,
+        op: tau_proto::ArtifactOp,
+    ) -> Result<ArtifactRequestId, tau_client::ClientError> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or(tau_client::ClientError::InvalidArtifactRequest)?;
+        let session = self
+            .session
+            .clone()
+            .ok_or(tau_client::ClientError::InvalidArtifactRequest)?;
+        client.start_request(session, op)
     }
 
     fn best_effort_release(&self, transfer: &Transfer) {

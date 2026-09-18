@@ -1,7 +1,7 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
-#[cfg(unix)]
-use std::time::Duration;
+use std::io::{Cursor, Error as IoError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use super::*;
 #[cfg(unix)]
@@ -9,6 +9,165 @@ use crate::config::ExtConfig;
 #[cfg(unix)]
 use crate::runtime::ShellRuntime;
 use crate::tool_lifecycle::ToolLifecycleRegistry;
+
+/// Minimal client extension used to obtain a real production artifact writer.
+struct ArtifactClientFixture;
+
+impl tau_client::TauExtension for ArtifactClientFixture {
+    type State = ArtifactTransferManager;
+
+    fn name(&self) -> &'static str {
+        "artifact-client-fixture"
+    }
+
+    fn register(self, _builder: &mut tau_client::ExtensionBuilder<Self::State>) {}
+}
+
+/// Thread-safe byte sink retaining complete protocol frames for assertions.
+#[derive(Clone, Default)]
+struct CapturedWriter {
+    /// Bytes successfully accepted before any configured failure.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Whether later writes should fail to close client admission.
+    fail: Arc<AtomicBool>,
+}
+
+impl std::io::Write for CapturedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.fail.load(Ordering::Acquire) {
+            return Err(IoError::other("forced artifact writer failure"));
+        }
+        self.bytes
+            .lock()
+            .expect("captured writer")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedWriter {
+    /// Waits for and returns the first outbound artifact operation matching
+    /// `predicate`.
+    fn wait_for_artifact_op(
+        &self,
+        predicate: impl Fn(&tau_proto::ArtifactOp) -> bool,
+    ) -> tau_proto::ArtifactRequest {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let bytes = self.bytes.lock().expect("captured writer").clone();
+            let mut reader = tau_proto::HarnessInputReader::new(Cursor::new(bytes));
+            while let Ok(Some(message)) = reader.read_message() {
+                if let tau_proto::HarnessInputMessage::ArtifactRequest(request) = message
+                    && predicate(&request.op)
+                {
+                    return request;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for artifact operation"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Counts complete outbound artifact operations matching `predicate`.
+    fn artifact_op_count(&self, predicate: impl Fn(&tau_proto::ArtifactOp) -> bool) -> usize {
+        let bytes = self.bytes.lock().expect("captured writer").clone();
+        let mut reader = tau_proto::HarnessInputReader::new(Cursor::new(bytes));
+        let mut count = 0;
+        while let Ok(Some(message)) = reader.read_message() {
+            if let tau_proto::HarnessInputMessage::ArtifactRequest(request) = message
+                && predicate(&request.op)
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Makes the production writer reject every later frame.
+    fn fail_writes(&self) {
+        self.fail.store(true, Ordering::Release);
+    }
+}
+
+/// Returns a configured real client runtime whose state owns an artifact
+/// manager.
+fn live_artifact_manager() -> (
+    tau_client::ManualExtensionRuntime<ArtifactTransferManager>,
+    CapturedWriter,
+) {
+    let configure = HarnessOutputMessage::Configure(tau_proto::Configure {
+        purpose: tau_proto::ConfigurePurpose::Runtime,
+        tool_prefix: None,
+        instance_name: "artifact-client-fixture".parse().expect("extension name"),
+        config: CborValue::Map(Vec::new()),
+        state_dir: None,
+        secrets: Default::default(),
+        settings_files: Default::default(),
+    });
+    let mut input = Vec::new();
+    tau_proto::HarnessOutputWriter::new(&mut input)
+        .write_message(&configure)
+        .expect("encode configure");
+    let writer = CapturedWriter::default();
+    let captured = writer.clone();
+    let runtime = tau_client::TauExtensionRunner::new(ArtifactClientFixture)
+        .start_manual_loop_with_state(Cursor::new(input), writer, |handle| {
+            ArtifactTransferManager::new(ArtifactClient::new(handle))
+        })
+        .expect("start artifact client fixture");
+    (runtime, captured)
+}
+
+/// Builds one admitted lifecycle and invocation for direct manager tests.
+fn active_invocation(
+    call_id: &str,
+    tool_name: &str,
+) -> (
+    ToolStarted,
+    ToolLifecycle,
+    Output,
+    mpsc::Receiver<tau_proto::HarnessInputMessage>,
+) {
+    let (tx, rx) = mpsc::channel();
+    let output = Output::channel(tx);
+    let invoke = ToolStarted {
+        invocation_policy: Default::default(),
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new(tool_name),
+        arguments: CborValue::Map(Vec::new()),
+        agent_id: "agent-artifact-error".parse().expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let lifecycle = ToolLifecycleRegistry::default().admit(
+        invoke.call_id.clone(),
+        invoke.tool_name.clone(),
+        invoke.agent_id.clone(),
+        output.clone(),
+    );
+    assert!(lifecycle.start_effect());
+    (invoke, lifecycle, output, rx)
+}
+
+/// Extracts the one terminal tool error from a direct output channel.
+fn expect_tool_error(rx: &mpsc::Receiver<tau_proto::HarnessInputMessage>) -> tau_proto::ToolError {
+    let tau_proto::HarnessInputMessage::Emit(emit) = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("tool terminal")
+    else {
+        panic!("expected terminal emit");
+    };
+    let Event::ToolErrorReported(error) = *emit.event else {
+        panic!("expected tool error");
+    };
+    error
+}
 
 /// Builds one export invocation and admitted lifecycle for direct preparation
 /// coverage.
@@ -392,4 +551,261 @@ fn oversized_matching_response_settles_transfer_but_stale_response_is_ignored() 
     );
     assert!(output_rx.try_recv().is_err());
     drop(rx);
+}
+
+/// Ensures a correlated terminal upload error releases its known server upload
+/// with one real Abort while preserving the original one-error outcome.
+#[test]
+fn correlated_upload_error_aborts_known_upload_once() {
+    let (mut runtime, captured) = live_artifact_manager();
+    let manager = runtime.state_mut();
+    manager.bind_session("artifact-session".parse().expect("session id"));
+    let (invoke, lifecycle, output, rx) = active_invocation("upload-error", EXPORT_TOOL_NAME);
+    let mut upload = ArtifactUpload::new(b"x".to_vec()).expect("upload");
+    upload
+        .accept(tau_proto::ArtifactValue::Upload {
+            upload: "known-upload".parse().expect("upload id"),
+        })
+        .expect("accept upload");
+    let request_id: ArtifactRequestId = "upload-error-request".parse().expect("request id");
+    manager
+        .requests
+        .insert(request_id.clone(), invoke.call_id.clone());
+    manager.transfers.insert(
+        invoke.call_id.clone(),
+        Transfer::Export {
+            invoke,
+            lifecycle,
+            upload,
+            filename: None,
+        },
+    );
+
+    manager.handle_result(
+        ArtifactResult {
+            request_id: request_id.clone(),
+            result: Err(ArtifactError::Busy),
+        },
+        &WorkScheduler::new(Default::default()),
+        &output,
+    );
+
+    let release = captured.wait_for_artifact_op(
+        |op| matches!(op, tau_proto::ArtifactOp::Abort { upload } if upload.as_str() == "known-upload"),
+    );
+    assert!(manager.transfers.is_empty());
+    assert!(manager.requests.is_empty());
+    assert_eq!(
+        expect_tool_error(&rx).message,
+        "artifact storage is busy; retry this tool call"
+    );
+    manager.handle_result(
+        ArtifactResult {
+            request_id,
+            result: Err(ArtifactError::Busy),
+        },
+        &WorkScheduler::new(Default::default()),
+        &output,
+    );
+    manager.handle_result(
+        ArtifactResult {
+            request_id: release.request_id,
+            result: Ok(tau_proto::ArtifactValue::Done),
+        },
+        &WorkScheduler::new(Default::default()),
+        &output,
+    );
+    manager.cancel(&"upload-error".into(), &output);
+    manager.shutdown();
+    assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    runtime.finish().expect("finish client fixture");
+    assert_eq!(
+        captured.artifact_op_count(
+            |op| matches!(op, tau_proto::ArtifactOp::Abort { upload } if upload.as_str() == "known-upload")
+        ),
+        1
+    );
+}
+
+/// Ensures a correlated terminal download error releases its known server read
+/// with one real Close and never publishes imported bytes.
+#[test]
+fn correlated_download_error_closes_known_read_once() {
+    let (mut runtime, captured) = live_artifact_manager();
+    let manager = runtime.state_mut();
+    manager.bind_session("artifact-session".parse().expect("session id"));
+    let (invoke, lifecycle, output, rx) = active_invocation("download-error", IMPORT_TOOL_NAME);
+    let key = ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"x").to_hex())).expect("key");
+    let descriptor = tau_proto::ArtifactDescriptor::new(key.clone(), 1).expect("descriptor");
+    let mut download = ArtifactDownload::new(key);
+    download
+        .accept(tau_proto::ArtifactValue::Opened {
+            read: "known-read".parse().expect("read id"),
+            descriptor,
+        })
+        .expect("accept opened");
+    let request_id: ArtifactRequestId = "download-error-request".parse().expect("request id");
+    manager
+        .requests
+        .insert(request_id.clone(), invoke.call_id.clone());
+    manager.transfers.insert(
+        invoke.call_id.clone(),
+        Transfer::Import {
+            invoke,
+            lifecycle,
+            download,
+        },
+    );
+
+    manager.handle_result(
+        ArtifactResult {
+            request_id,
+            result: Err(ArtifactError::Io),
+        },
+        &WorkScheduler::new(Default::default()),
+        &output,
+    );
+
+    captured.wait_for_artifact_op(
+        |op| matches!(op, tau_proto::ArtifactOp::Close { read } if read.as_str() == "known-read"),
+    );
+    assert_eq!(
+        expect_tool_error(&rx).message,
+        "artifact storage I/O failed"
+    );
+    assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    runtime.finish().expect("finish client fixture");
+    assert_eq!(
+        captured.artifact_op_count(
+            |op| matches!(op, tau_proto::ArtifactOp::Close { read } if read.as_str() == "known-read")
+        ),
+        1
+    );
+}
+
+/// Ensures a later local admission failure drops the transfer only after a real
+/// best-effort Abort attempt, while an initial failure invents no identity.
+#[test]
+fn local_request_failure_releases_only_known_transfer_identity() {
+    let (mut runtime, captured) = live_artifact_manager();
+    let manager = runtime.state_mut();
+    manager.bind_session("artifact-session".parse().expect("session id"));
+    let (invoke, lifecycle, output, rx) = active_invocation("local-error", EXPORT_TOOL_NAME);
+    let mut upload = ArtifactUpload::new(b"x".to_vec()).expect("upload");
+    upload
+        .accept(tau_proto::ArtifactValue::Upload {
+            upload: "local-known-upload".parse().expect("upload id"),
+        })
+        .expect("accept upload");
+    manager.transfers.insert(
+        invoke.call_id.clone(),
+        Transfer::Export {
+            invoke: invoke.clone(),
+            lifecycle,
+            upload,
+            filename: None,
+        },
+    );
+    manager.reject_next_request = true;
+
+    manager.start_next(&invoke.call_id, &output);
+
+    captured.wait_for_artifact_op(
+        |op| matches!(op, tau_proto::ArtifactOp::Abort { upload } if upload.as_str() == "local-known-upload"),
+    );
+    assert!(manager.transfers.is_empty());
+    assert_eq!(
+        expect_tool_error(&rx).message,
+        "artifact request failed: tau client detached FIFO or frame byte limit is exhausted"
+    );
+
+    let (initial, initial_lifecycle, initial_output, initial_rx) =
+        active_invocation("initial-error", EXPORT_TOOL_NAME);
+    manager.transfers.insert(
+        initial.call_id.clone(),
+        Transfer::Export {
+            invoke: initial.clone(),
+            lifecycle: initial_lifecycle,
+            upload: ArtifactUpload::new(b"x".to_vec()).expect("upload"),
+            filename: None,
+        },
+    );
+    manager.reject_next_request = true;
+    manager.start_next(&initial.call_id, &initial_output);
+    assert_eq!(
+        expect_tool_error(&initial_rx).message,
+        "artifact request failed: tau client detached FIFO or frame byte limit is exhausted"
+    );
+    runtime.finish().expect("finish client fixture");
+    assert_eq!(
+        captured.artifact_op_count(|op| matches!(op, tau_proto::ArtifactOp::Abort { .. })),
+        1,
+        "an initial Begin failure must not invent an upload identity"
+    );
+}
+
+/// Ensures failure to admit best-effort cleanup cannot replace or duplicate the
+/// original correlated tool error.
+#[test]
+fn cleanup_admission_failure_preserves_original_terminal() {
+    let (mut runtime, captured) = live_artifact_manager();
+    captured.fail_writes();
+    let handle = runtime.handle();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let request = tau_proto::ArtifactRequest {
+            request_id: "force-writer-close".parse().expect("request id"),
+            expected_session_id: "artifact-session".parse().expect("session id"),
+            op: tau_proto::ArtifactOp::Available,
+        };
+        if handle
+            .send_detached(tau_proto::HarnessInputMessage::ArtifactRequest(request))
+            .is_err()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client writer did not close after forced failure"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let manager = runtime.state_mut();
+    manager.bind_session("artifact-session".parse().expect("session id"));
+    let (invoke, lifecycle, output, rx) = active_invocation("cleanup-fails", EXPORT_TOOL_NAME);
+    let mut upload = ArtifactUpload::new(b"x".to_vec()).expect("upload");
+    upload
+        .accept(tau_proto::ArtifactValue::Upload {
+            upload: "cleanup-fails-upload".parse().expect("upload id"),
+        })
+        .expect("accept upload");
+    let request_id: ArtifactRequestId = "cleanup-fails-request".parse().expect("request id");
+    manager
+        .requests
+        .insert(request_id.clone(), invoke.call_id.clone());
+    manager.transfers.insert(
+        invoke.call_id.clone(),
+        Transfer::Export {
+            invoke,
+            lifecycle,
+            upload,
+            filename: None,
+        },
+    );
+
+    manager.handle_result(
+        ArtifactResult {
+            request_id,
+            result: Err(ArtifactError::Integrity),
+        },
+        &WorkScheduler::new(Default::default()),
+        &output,
+    );
+
+    assert_eq!(
+        expect_tool_error(&rx).message,
+        "artifact size or digest verification failed"
+    );
+    assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    let _ = runtime.finish();
 }
