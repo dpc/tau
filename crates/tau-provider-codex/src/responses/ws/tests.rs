@@ -786,6 +786,31 @@ impl TurnAbort for AbortAfterChecks {
     }
 }
 
+/// Test-only abort source that becomes canceled only at receive-owner waker
+/// registration.
+struct AbortOnWakerRegistration {
+    /// Authoritative cancellation state read without side effects.
+    aborted: Arc<AtomicBool>,
+    /// Records that the receive owner registered its wake callback.
+    registered: Arc<AtomicBool>,
+}
+
+impl TurnAbort for AbortOnWakerRegistration {
+    fn is_aborted(&mut self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+
+    fn register_waker(
+        &mut self,
+        waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        self.registered.store(true, Ordering::SeqCst);
+        self.aborted.store(true, Ordering::SeqCst);
+        waker();
+        Box::new(TestAbortWaker)
+    }
+}
+
 fn test_ws_conn() -> (WsConn, InboundSender, UnboundedReceiver<WsCommand>) {
     let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
     let (inbound_tx, inbound_rx) = mpsc::channel(16);
@@ -3150,21 +3175,28 @@ fn writer_failure_preempts_queued_provider_data() {
     assert_eq!(updates, 0);
 }
 
-/// Confirmed cancellation from the independent control path must beat provider
-/// data that was already waiting in the bounded lane.
+/// Confirmed cancellation at receive-owner registration must preempt a queued
+/// provider completion before the bounded lane is dequeued.
 #[test]
 fn cancellation_preempts_queued_provider_data() {
-    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    let (mut conn, inbound_tx, mut outbound_rx) = test_ws_conn();
     inbound_tx
         .send_blocking(InboundEvent::Event {
             read: None,
             text: r#"{"type":"response.completed","response":{"id":"must-not-commit"}}"#.into(),
         })
         .expect("queue provider completion");
-    conn.inbound_control.notify_abort();
     let config = test_responses_config();
     let fixture = PromptFixture::new();
-    let mut abort = AbortAfterChecks { remaining_false: 2 };
+    let aborted = Arc::new(AtomicBool::new(false));
+    let registered = Arc::new(AtomicBool::new(false));
+    let mut abort = AbortOnWakerRegistration {
+        aborted: Arc::clone(&aborted),
+        registered: Arc::clone(&registered),
+    };
+    let expected =
+        serde_json::to_string(&build_ws_envelope(&config, &fixture.payload(), None, None))
+            .expect("expected response.create request");
     let mut updates = 0;
     let result = conn.run_turn(
         &config,
@@ -3176,8 +3208,45 @@ fn cancellation_preempts_queued_provider_data() {
         &mut |_| {},
         &mut |_| updates += 1,
     );
+
+    assert!(
+        registered.load(Ordering::SeqCst),
+        "the receive owner must register its cancellation wake callback"
+    );
+    assert!(
+        aborted.load(Ordering::SeqCst),
+        "registration must publish authoritative cancellation"
+    );
+    let WsCommand::SendText(request) = outbound_rx.try_recv().expect("writer request enqueue");
+    assert_eq!(
+        request, expected,
+        "enqueue the expected response.create request"
+    );
+    let request: serde_json::Value =
+        serde_json::from_str(&request).expect("valid response.create request");
+    assert_eq!(request["type"], "response.create");
+    assert!(matches!(
+        outbound_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     assert!(matches!(result, Err(LlmError::Canceled)));
-    assert_eq!(updates, 0);
+    assert_eq!(updates, 0, "cancellation must not publish provider updates");
+    assert!(
+        conn.cached_response_anchor.is_none(),
+        "cancellation must not install a successful response anchor"
+    );
+    let InboundEvent::Event { read, text } = conn
+        .inbound_rx
+        .try_recv()
+        .expect("queued provider completion remains available")
+    else {
+        panic!("queued provider completion must remain a text event");
+    };
+    assert!(read.is_none());
+    assert_eq!(
+        text.as_str(),
+        r#"{"type":"response.completed","response":{"id":"must-not-commit"}}"#
+    );
 }
 
 /// Quota parsing is mode-independent: standard and Lite WebSocket turns both
