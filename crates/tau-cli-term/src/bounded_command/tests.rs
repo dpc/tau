@@ -1,12 +1,263 @@
+#[cfg(target_os = "linux")]
+use std::path as path_std_path;
 use std::sync::atomic::Ordering;
 use std::{
-    cell as path_std_cell, fs as path_std_fs, io as path_std_io, process as path_std_process,
-    time as path_std_time,
+    cell as path_std_cell, collections as path_std_collections, fs as path_std_fs,
+    io as path_std_io, process as path_std_process, time as path_std_time,
 };
 
+#[cfg(all(unix, not(target_os = "linux")))]
+use nix::sys::signal as path_nix_signal;
 use nix::unistd::Pid;
 
 use super::*;
+
+#[derive(Debug, PartialEq, Eq)]
+enum DescendantObservation {
+    Absent,
+    Zombie,
+    Live(String),
+}
+
+/// Polls only descendants Tau cannot reap directly. Linux zombies are terminal
+/// here because they have stopped executing; direct-child tests must still
+/// require PID disappearance after Tau's own wait.
+fn wait_for_descendant_termination_with<Observe, Now, Wait>(
+    pid: i32,
+    deadline: path_std_time::Instant,
+    mut observe: Observe,
+    mut now: Now,
+    mut wait: Wait,
+) -> Result<(), String>
+where
+    Observe: FnMut(i32) -> Result<DescendantObservation, String>,
+    Now: FnMut() -> path_std_time::Instant,
+    Wait: FnMut(),
+{
+    if pid <= 0 {
+        return Err(format!("descendant PID must be positive, got {pid}"));
+    }
+
+    loop {
+        let observation = observe(pid)
+            .map_err(|error| format!("could not observe descendant process {pid}: {error}"))?;
+        if matches!(
+            observation,
+            DescendantObservation::Absent | DescendantObservation::Zombie
+        ) {
+            return Ok(());
+        }
+        if deadline <= now() {
+            return Err(format!(
+                "descendant process {pid} did not terminate before the observation deadline; \
+                 last observation: {observation:?}"
+            ));
+        }
+        wait();
+    }
+}
+
+/// Gives orphan-descendant cleanup one second to become observable, remaining
+/// well below the controlled fixtures' three- and five-second sleep lifetimes.
+fn wait_for_descendant_termination(pid: i32) -> Result<(), String> {
+    let deadline = path_std_time::Instant::now() + path_std_time::Duration::from_secs(1);
+    wait_for_descendant_termination_with(
+        pid,
+        deadline,
+        observe_descendant,
+        path_std_time::Instant::now,
+        std::thread::yield_now,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn observe_descendant(pid: i32) -> Result<DescendantObservation, String> {
+    observe_linux_descendant_with(pid, |path| path_std_fs::read_to_string(path))
+}
+
+#[cfg(target_os = "linux")]
+fn observe_linux_descendant_with<Read>(
+    pid: i32,
+    read: Read,
+) -> Result<DescendantObservation, String>
+where
+    Read: FnOnce(&path_std_path::Path) -> path_std_io::Result<String>,
+{
+    let path = path_std_path::PathBuf::from(format!("/proc/{pid}/stat"));
+    let stat = match read(&path) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {
+            return Ok(DescendantObservation::Absent);
+        }
+        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
+    };
+    let (_, fields) = stat
+        .rsplit_once(") ")
+        .ok_or_else(|| format!("malformed process stat from {}", path.display()))?;
+    let (state, _) = fields
+        .split_once(' ')
+        .ok_or_else(|| format!("missing process state in {}", path.display()))?;
+    let mut state_chars = state.chars();
+    let state = state_chars
+        .next()
+        .filter(|_| state_chars.next().is_none())
+        .ok_or_else(|| format!("malformed process state in {}", path.display()))?;
+
+    if state == 'Z' {
+        Ok(DescendantObservation::Zombie)
+    } else {
+        Ok(DescendantObservation::Live(state.to_string()))
+    }
+}
+
+#[cfg(unix)]
+fn classify_kill_observation(
+    result: Result<(), path_nix_errno::Errno>,
+) -> Result<DescendantObservation, String> {
+    match result {
+        Ok(()) => Ok(DescendantObservation::Live(
+            "process still exists".to_owned(),
+        )),
+        Err(path_nix_errno::Errno::ESRCH) => Ok(DescendantObservation::Absent),
+        Err(error) => Err(format!("kill(pid, 0) failed: {error}")),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn observe_descendant(pid: i32) -> Result<DescendantObservation, String> {
+    classify_kill_observation(path_nix_signal::kill(Pid::from_raw(pid), None))
+}
+
+#[cfg(not(unix))]
+fn observe_descendant(pid: i32) -> Result<DescendantObservation, String> {
+    let status = path_std_process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null())
+        .status()
+        .map_err(|error| format!("could not run kill -0: {error}"))?;
+    if status.success() {
+        Ok(DescendantObservation::Live(
+            "kill -0 reports that the process exists".to_owned(),
+        ))
+    } else {
+        Ok(DescendantObservation::Absent)
+    }
+}
+
+/// The bounded descendant observer rejects invalid PIDs, errors after one
+/// monotonic deadline, and accepts transitions to either terminal state.
+#[test]
+fn descendant_termination_poll_is_bounded() {
+    let start = path_std_time::Instant::now();
+    let clock_ticks = path_std_cell::Cell::new(0);
+    let error = wait_for_descendant_termination_with(
+        41,
+        start + path_std_time::Duration::from_millis(2),
+        |_| Ok(DescendantObservation::Live("R".to_owned())),
+        || {
+            let tick = clock_ticks.get() + 1;
+            clock_ticks.set(tick);
+            start + path_std_time::Duration::from_millis(tick)
+        },
+        || {},
+    )
+    .expect_err("a persistently live process must exhaust the deadline");
+    assert!(error.contains("last observation: Live(\"R\")"));
+    assert_eq!(clock_ticks.get(), 2);
+
+    for terminal in [DescendantObservation::Zombie, DescendantObservation::Absent] {
+        let mut observations = path_std_collections::VecDeque::from([
+            DescendantObservation::Live("S".to_owned()),
+            terminal,
+        ]);
+        wait_for_descendant_termination_with(
+            42,
+            start + path_std_time::Duration::from_secs(1),
+            |_| {
+                Ok(observations
+                    .pop_front()
+                    .expect("bounded observation sequence"))
+            },
+            || start,
+            || {},
+        )
+        .expect("a terminal observation must complete the wait");
+    }
+
+    let error = wait_for_descendant_termination_with(
+        0,
+        start,
+        |_| unreachable!("invalid PIDs must be rejected before observation"),
+        || start,
+        || {},
+    )
+    .expect_err("zero is not a process PID");
+    assert!(error.contains("must be positive"));
+}
+
+/// Non-Linux Unix fallback classification accepts only ESRCH as absence and
+/// preserves successful and diagnostic kill observations.
+#[cfg(unix)]
+#[test]
+fn descendant_kill_observation_classifies_only_esrch_as_absent() {
+    assert_eq!(
+        classify_kill_observation(Ok(())),
+        Ok(DescendantObservation::Live(
+            "process still exists".to_owned()
+        ))
+    );
+    assert_eq!(
+        classify_kill_observation(Err(path_nix_errno::Errno::ESRCH)),
+        Ok(DescendantObservation::Absent)
+    );
+    let error = classify_kill_observation(Err(path_nix_errno::Errno::EPERM))
+        .expect_err("permission errors must not imply process absence");
+    assert!(error.contains("EPERM"));
+}
+
+/// Linux process-state parsing recognizes zombies without mistaking live
+/// states, malformed input, or observer failures for process absence.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_descendant_observation_classifies_process_state() {
+    for state in ['R', 'S', 'D', 'T'] {
+        let stat = format!("41 (command) name (worker)) {state} 1 2 3");
+        assert_eq!(
+            observe_linux_descendant_with(41, |_| Ok(stat)),
+            Ok(DescendantObservation::Live(state.to_string()))
+        );
+    }
+    assert_eq!(
+        observe_linux_descendant_with(41, |_| {
+            Ok("41 (command) name (worker)) Z 1 2 3".to_owned())
+        }),
+        Ok(DescendantObservation::Zombie)
+    );
+    assert_eq!(
+        observe_linux_descendant_with(41, |_| {
+            Err(path_std_io::Error::from(path_std_io::ErrorKind::NotFound))
+        }),
+        Ok(DescendantObservation::Absent)
+    );
+
+    for malformed in ["41 command S 1 2 3", "41 (command)", "41 (command) RR 1"] {
+        assert!(
+            observe_linux_descendant_with(41, |_| Ok(malformed.to_owned())).is_err(),
+            "malformed stat was accepted: {malformed:?}"
+        );
+    }
+    let error = observe_linux_descendant_with(41, |_| {
+        Err(path_std_io::Error::from(
+            path_std_io::ErrorKind::PermissionDenied,
+        ))
+    })
+    .expect_err("permission errors must not imply process absence");
+    assert!(error.contains("/proc/41/stat"));
+    assert!(error.to_ascii_lowercase().contains("permission denied"));
+}
 
 /// Foreground handoff binds ownership to Tau's actual process group, rejects an
 /// initial mismatch before `tcsetpgrp`, and confirms only Tau after set
@@ -621,16 +872,8 @@ fn bounded_command_errors_when_stdout_holder_survives_child() {
         .trim()
         .parse()
         .expect("pid");
-    std::thread::sleep(path_std_time::Duration::from_millis(200));
-    let alive = path_std_process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdin(path_std_process::Stdio::null())
-        .stdout(path_std_process::Stdio::null())
-        .stderr(path_std_process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    assert!(!alive, "stdout holder {pid} should have been killed");
+    wait_for_descendant_termination(pid)
+        .unwrap_or_else(|error| panic!("stdout holder cleanup failed: {error}"));
 }
 
 /// Ensures a hung child that never writes enough output to overflow is still
@@ -708,16 +951,8 @@ fn process_group_timeout_kills_descendant() {
         .trim()
         .parse()
         .expect("pid");
-    std::thread::sleep(path_std_time::Duration::from_millis(200));
-    let alive = path_std_process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdin(path_std_process::Stdio::null())
-        .stdout(path_std_process::Stdio::null())
-        .stderr(path_std_process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    assert!(!alive, "descendant process {pid} should have been killed");
+    wait_for_descendant_termination(pid)
+        .unwrap_or_else(|error| panic!("descendant cleanup failed: {error}"));
 }
 
 /// Ensures a post-spawn foreground handoff failure kills and reaps the already
