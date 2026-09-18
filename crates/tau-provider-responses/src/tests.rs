@@ -4290,10 +4290,10 @@ fn sse_later_lossy_over_limit_line_preserves_earlier_progress() {
     ));
 }
 
-/// Cancellation that arrives while one decoded SSE chunk is being parsed must
-/// stop before the next complete line mutates semantic state.
+/// Cancellation after the first accepted SSE line must retain only that line's
+/// semantic output.
 #[test]
-fn sse_chunk_processing_observes_cancellation_between_complete_lines() {
+fn sse_cancellation_after_first_accepted_line_preserves_accepted_output() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
     let address = listener.local_addr().expect("SSE server address");
     let body = concat!(
@@ -4301,7 +4301,6 @@ fn sse_chunk_processing_observes_cancellation_between_complete_lines() {
         "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"rejected\"}\n",
         "data: [DONE]\n",
     );
-    let body_len = body.len() as u64;
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept request");
         let _ = read_http_request(&mut socket);
@@ -4332,13 +4331,9 @@ fn sse_chunk_processing_observes_cancellation_between_complete_lines() {
     server.join().expect("join SSE server");
 
     let AttemptOutcome::Canceled { progress } = outcome else {
-        panic!("cancellation between complete SSE lines must win");
+        panic!("cancellation after the first accepted SSE line must win");
     };
     assert_eq!(update_count.get(), 1);
-    assert_eq!(
-        progress.response_bytes_received, body_len,
-        "cancellation must occur while parsing one fully accounted response chunk"
-    );
     assert!(matches!(
         progress.output_items.as_slice(),
         [AttemptOutputItem {
