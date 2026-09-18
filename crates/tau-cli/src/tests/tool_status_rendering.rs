@@ -4687,12 +4687,12 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
     assert!(vt.screen_contains(80, "read src/main.rs"));
 }
 
+/// Multi-line live tool payloads can extend above the visible active-tools
+/// area. Updating only elapsed seconds would force visible churn without
+/// changing useful content, so compact live rows retain a numeric duration
+/// without a full rerender until completion.
 #[test]
 fn live_multiline_payload_tool_uses_static_duration_placeholder() {
-    // Multi-line live tool payloads can extend above the visible active-tools
-    // area. Updating only the elapsed seconds would force visible churn without
-    // changing useful content, so keep the live duration stable until
-    // completion.
     let (_term, handle, vt) = setup(80, 8);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -4715,7 +4715,10 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
             responses_envelope: None,
         })],
     )));
-    renderer.handle(&tool_started("call-1", "read", args));
+    renderer.handle_recorded_at(
+        &tool_started("call-1", "read", args),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
     renderer.handle(&Event::ToolProgress(tau_proto::ToolProgress {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -4733,7 +4736,26 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "read src/main.rs 0s"));
+    let assert_numeric_duration = |text: String| {
+        let row = text
+            .lines()
+            .find(|row| row.contains("read src/main.rs"))
+            .expect("compact live tool row");
+        let duration = row
+            .split_once("read src/main.rs ")
+            .expect("tool header duration")
+            .1
+            .split_whitespace()
+            .next()
+            .expect("duration token");
+        assert!(
+            duration
+                .strip_suffix('s')
+                .is_some_and(|seconds| seconds.parse::<u64>().is_ok()),
+            "expected numeric-seconds duration in {row:?}"
+        );
+    };
+    assert_numeric_duration(vt.screen_text(80).join("\n"));
 
     renderer.apply_setting("show-tools", "full");
     sync(&handle);
@@ -4742,7 +4764,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
 
     renderer.apply_setting("show-tools", "compact");
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs 0s"));
+    assert_numeric_duration(vt.screen_text(80).join("\n"));
 
     renderer.apply_setting("show-tools", "full");
     sync(&handle);
@@ -4756,25 +4778,28 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     assert_eq!(handle.full_render_count(), full_renders_before);
     assert!(vt.screen_contains(80, "read src/main.rs -s"));
 
-    renderer.handle(&Event::ToolResult(ToolResult {
-        presentation: Default::default(),
-        call_id: "call-1".into(),
-        tool_name: tau_proto::ToolName::new("read"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Null,
-        provider_content: Vec::new(),
-        kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolUseState {
-            args: "src/main.rs".into(),
-            status: tau_proto::ToolUseStatus::Success,
-            status_text: "ok".into(),
-            payload: Some(tau_proto::ToolUsePayload::Text {
-                text: "line 1\nline 2".into(),
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
+            call_id: "call-1".into(),
+            tool_name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "src/main.rs".into(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "ok".into(),
+                payload: Some(tau_proto::ToolUsePayload::Text {
+                    text: "line 1\nline 2".into(),
+                }),
+                ..Default::default()
             }),
-            ..Default::default()
+            originator: tau_proto::PromptOriginator::User,
         }),
-        originator: tau_proto::PromptOriginator::User,
-    }));
+        tau_proto::UnixMicros::new(1_500_000),
+    );
     sync(&handle);
 
     assert!(vt.screen_contains(80, "read src/main.rs 0s ok"));
@@ -7251,7 +7276,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
         unreachable!("tool_started helper returns a tool start");
     };
     started.agent_id = agent_id("main");
-    renderer.handle(&failed_start);
+    renderer.handle_recorded_at(&failed_start, tau_proto::UnixMicros::new(1_000_000));
     renderer.handle(&Event::AgentManualCompactionRequested(
         self_compaction_requested("cr-failed", "call-failed"),
     ));
@@ -7282,7 +7307,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
         unreachable!("tool_started helper returns a tool start");
     };
     started.agent_id = agent_id("main");
-    renderer.handle(&rejected_start);
+    renderer.handle_recorded_at(&rejected_start, tau_proto::UnixMicros::new(2_000_000));
     renderer.handle(&Event::AgentManualCompactionRequested(
         self_compaction_requested("cr-rejected", "call-rejected"),
     ));
@@ -7300,7 +7325,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
         unreachable!("tool_started helper returns a tool start");
     };
     started.agent_id = agent_id("main");
-    renderer.handle(&cancelled_start);
+    renderer.handle_recorded_at(&cancelled_start, tau_proto::UnixMicros::new(3_000_000));
     renderer.handle(&Event::AgentManualCompactionRequested(
         self_compaction_requested("cr-cancelled", "call-cancelled"),
     ));
@@ -7334,24 +7359,35 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
         ("call-failed", "terminal failed"),
         ("call-rejected", "terminal rejected"),
     ] {
-        renderer.handle(&Event::ToolError(ToolError {
+        let recorded_at = match call_id {
+            "call-failed" => tau_proto::UnixMicros::new(1_500_000),
+            "call-rejected" => tau_proto::UnixMicros::new(2_500_000),
+            _ => unreachable!("known compact tool call"),
+        };
+        renderer.handle_recorded_at(
+            &Event::ToolError(ToolError {
+                presentation: Default::default(),
+                call_id: call_id.into(),
+                tool_name: tau_proto::ToolName::new("compact"),
+                tool_type: tau_proto::ToolType::Function,
+                message: message.to_owned(),
+                details: None,
+                originator: tau_proto::PromptOriginator::User,
+                display: None,
+            }),
+            recorded_at,
+        );
+    }
+    renderer.handle_recorded_at(
+        &Event::ToolCancelled(ToolCancelled {
             presentation: Default::default(),
-            call_id: call_id.into(),
+            call_id: "call-cancelled".into(),
             tool_name: tau_proto::ToolName::new("compact"),
             tool_type: tau_proto::ToolType::Function,
-            message: message.to_owned(),
-            details: None,
-            originator: tau_proto::PromptOriginator::User,
             display: None,
-        }));
-    }
-    renderer.handle(&Event::ToolCancelled(ToolCancelled {
-        presentation: Default::default(),
-        call_id: "call-cancelled".into(),
-        tool_name: tau_proto::ToolName::new("compact"),
-        tool_type: tau_proto::ToolType::Function,
-        display: None,
-    }));
+        }),
+        tau_proto::UnixMicros::new(3_500_000),
+    );
     sync(&handle);
 
     for status in [
