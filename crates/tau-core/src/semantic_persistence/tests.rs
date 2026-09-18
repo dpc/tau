@@ -509,6 +509,8 @@ fn release_preempts_due_lossy_touch_before_filesystem_io() {
 }
 
 /// Authoritative frames write in one FIFO across distinct prepared streams.
+/// Linux `/proc/self/fd` identifies the cross-stream writes this test observes.
+#[cfg(target_os = "linux")]
 #[test]
 fn authoritative_frames_preserve_cross_stream_fifo() {
     let root = tempfile::tempdir().expect("temporary root");
