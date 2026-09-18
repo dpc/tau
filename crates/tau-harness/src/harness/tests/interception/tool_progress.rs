@@ -298,6 +298,10 @@ fn parked_stale_generation_cannot_publish_canonical_progress() {
         )
         .expect("commit stale observation");
 
+    // Committed events alone cannot exclude a canonical fact parked by
+    // interception.
+    assert!(harness.runtime_io.publication.pending_intercept.is_none());
+    assert!(harness.runtime_io.publication.deferred.is_empty());
     assert!(matches!(
         committed_progress(&harness, "call-stale").as_slice(),
         [(Some(source), Event::ToolProgressReported(_))] if source == "tool-owner"
