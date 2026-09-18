@@ -8559,6 +8559,27 @@ fn resolve_prewarm_backend(
     Some((model.clone(), config))
 }
 
+/// Borrow every stable prefix field without changing ordinary inference
+/// lowering.
+fn prewarm_prompt(
+    prewarm: &tau_proto::AgentPromptPrewarmRequested,
+    debug_provider_requests: bool,
+) -> CodexPrompt<'_> {
+    CodexPrompt {
+        system_prompt: &prewarm.system_prompt,
+        context: &prewarm.context,
+        tools: &prewarm.tools,
+        hosted_tools: &prewarm.hosted_tools,
+        params: prewarm.model_params,
+        tool_choice: prewarm.tool_choice,
+        compaction: None,
+        originator: &prewarm.originator,
+        session_id: &prewarm.session_id,
+        agent_id: &prewarm.agent_id,
+        debug_provider_requests,
+    }
+}
+
 fn handle_resolved_prewarm(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     config: &ResolvedConfig,
@@ -8568,19 +8589,7 @@ fn handle_resolved_prewarm(
     abort: &mut impl TurnAbort,
 ) -> tau_proto::ProviderCacheRefreshStatus {
     let session_id_str = prewarm.session_id.as_str();
-    let request = CodexPrompt {
-        system_prompt: &prewarm.system_prompt,
-        context: &prewarm.context,
-        tools: &prewarm.tools,
-        hosted_tools: &[],
-        params: prewarm.model_params,
-        tool_choice: prewarm.tool_choice,
-        compaction: None,
-        originator: &prewarm.originator,
-        session_id: &prewarm.session_id,
-        agent_id: &prewarm.agent_id,
-        debug_provider_requests,
-    };
+    let request = prewarm_prompt(prewarm, debug_provider_requests);
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
     match codex_runtime.prewarm_operation(config, session_id_str, &request, refresh_id, abort) {
         PrewarmOutcome::Installed => {

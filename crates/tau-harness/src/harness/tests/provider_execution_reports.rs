@@ -574,8 +574,10 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     let model = cache_fixtures::model("provider");
     let mut write = cache_fixtures::prompt("provider", "vertical-write");
     write.system_prompt = "private stable cache prefix".to_owned();
+    write.hosted_tools = cache_fixtures::hosted_tools();
     let mut read = cache_fixtures::prompt("provider", "vertical-read");
     read.system_prompt = write.system_prompt.clone();
+    read.hosted_tools = write.hosted_tools.clone();
     harness.provider_runtime.cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &write,
@@ -627,6 +629,7 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
             system_prompt: read.system_prompt.clone(),
             context: read.context.clone(),
             tools: read.tools.clone(),
+            hosted_tools: read.hosted_tools.clone(),
             model: Some(read.model.clone()),
             model_params: read.model_params,
             tool_choice: read.tool_choice,
@@ -743,6 +746,7 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
 
     let mut deadline_read = cache_fixtures::prompt("provider", "vertical-deadline");
     deadline_read.system_prompt = read.system_prompt.clone();
+    deadline_read.hosted_tools = read.hosted_tools.clone();
     harness.provider_runtime.cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &deadline_read,
@@ -817,6 +821,7 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
 
     let mut disconnect_read = cache_fixtures::prompt("provider", "vertical-disconnect");
     disconnect_read.system_prompt = read.system_prompt.clone();
+    disconnect_read.hosted_tools = read.hosted_tools.clone();
     harness.provider_runtime.cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &disconnect_read,

@@ -5840,6 +5840,9 @@ pub struct AgentPromptPrewarmRequested {
     pub system_prompt: String,
     pub context: PromptContext,
     pub tools: Vec<ToolDefinition>,
+    /// Provider-hosted definitions from the exact prefix being warmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_tools: Vec<HostedToolDefinition>,
     /// Currently selected model as `"provider/model_id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,

@@ -144,6 +144,45 @@ fn exact_route_native_search_suppresses_only_external_search() {
     assert_eq!(external.retained_tools.len(), 2);
 }
 
+/// A configured route may truthfully advertise both hosted search and a safe
+/// cache contract; materialized definitions must survive scheduler admission.
+#[test]
+fn materialized_hosted_search_survives_cache_refresh() {
+    use tau_config::settings::ProviderCacheMaxIdle;
+
+    use crate::provider_cache_residency::{ProviderCacheResidency, tests as fixtures};
+
+    let mut eligible = fixtures::model("configured");
+    eligible.hosted_tool_capabilities = model(true).hosted_tool_capabilities;
+    let compiled = compile_web_tools(
+        &policy(serde_json::json!(["example.org"]), "omit"),
+        &eligible,
+        &[],
+    )
+    .expect("materialize selected hosted search");
+    assert!(!compiled.hosted_tools.is_empty());
+    let mut scheduler =
+        ProviderCacheResidency::runtime(tau_config::settings::ProviderCacheRefresh {
+            enabled: true,
+            max_idle_seconds: ProviderCacheMaxIdle::new(200).expect("valid idle"),
+        });
+    let route = crate::test_connection_id("configured");
+    for (id, usage) in [
+        ("hosted-write", fixtures::usage(0, 10)),
+        ("hosted-read", fixtures::usage(10, 0)),
+    ] {
+        let mut prompt = fixtures::prompt("configured", id);
+        prompt.hosted_tools = compiled.hosted_tools.clone();
+        scheduler.track_prompt(route.clone(), &prompt, Some(&eligible));
+        scheduler.finish_prompt(&prompt.agent_prompt_id, true, Some(&usage));
+    }
+    scheduler.open_tool_window();
+    scheduler.force_scheduled_due_for_test();
+    let admitted = scheduler.admit().pop().expect("hosted prefix is eligible");
+    assert_eq!(admitted.connection_id, route);
+    assert_eq!(admitted.request.prompt.hosted_tools, compiled.hosted_tools);
+}
+
 /// Domain policy requires declared enforcement and freezes the exact hidden
 /// policy on an eligible ordinary invocation.
 #[test]

@@ -4,6 +4,67 @@ use ciborium::value as path_ciborium_value;
 
 use super::*;
 
+/// Shared maintenance prefixes preserve hosted options in JSON and CBOR, while
+/// omitted legacy fields retain the empty-hosted interpretation.
+#[test]
+fn prewarm_and_refresh_hosted_tools_roundtrip() {
+    use std::num::NonZeroU32;
+
+    let hosted = vec![HostedToolDefinition::WebSearch {
+        access: ProviderWebSearchAccess::Cached,
+        context_size: Some(WebSearchContextSize::High),
+        allowed_domains: vec!["example.org".to_owned(), "example.net".to_owned()],
+    }];
+    let prefix = AgentPromptPrewarmRequested {
+        agent_id: agent_id("agent"),
+        session_id: test_session_id("session"),
+        system_prompt: "system".to_owned(),
+        context: PromptContext::default(),
+        tools: Vec::new(),
+        hosted_tools: hosted,
+        model: Some("provider/model".parse().expect("model")),
+        model_params: ModelParams::default(),
+        tool_choice: ToolChoice::Auto,
+        originator: PromptOriginator::User,
+    };
+    let refresh = AgentCacheRefreshRequested {
+        refresh_id: ProviderCacheRefreshId::parse("pcr-00000000000000000000000000000001")
+            .expect("refresh id"),
+        prompt: prefix.clone(),
+        stop_after_millis: NonZeroU32::new(1000).expect("nonzero"),
+    };
+    for event in [
+        Event::AgentPromptPrewarmRequested(prefix.clone()),
+        Event::AgentCacheRefreshRequested(refresh),
+    ] {
+        let json = serde_json::to_vec(&event).expect("encode JSON");
+        assert_eq!(
+            serde_json::from_slice::<Event>(&json).expect("decode JSON"),
+            event
+        );
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&event, &mut cbor).expect("encode CBOR");
+        assert_eq!(
+            ciborium::from_reader::<Event, _>(&cbor[..]).expect("decode CBOR"),
+            event
+        );
+    }
+    let mut omitted = serde_json::to_value(prefix).expect("encode prefix");
+    omitted
+        .as_object_mut()
+        .expect("object")
+        .remove("hosted_tools");
+    let decoded: AgentPromptPrewarmRequested =
+        serde_json::from_value(omitted).expect("decode omitted hosted field");
+    assert!(decoded.hosted_tools.is_empty());
+    assert!(
+        serde_json::to_value(decoded)
+            .expect("encode empty")
+            .get("hosted_tools")
+            .is_none()
+    );
+}
+
 /// Semantic size wrappers preserve scalar wire shape and existing arithmetic
 /// overflow behavior without accepting cross-domain operands.
 #[test]
@@ -1759,6 +1820,7 @@ fn representative_events() -> Vec<Event> {
             context: PromptContext { blocks: Vec::new() },
             tools: Vec::new(),
             model: Some("openai/gpt-4.1".parse().expect("model id")),
+            hosted_tools: Vec::new(),
             model_params: ModelParams::default(),
             tool_choice: ToolChoice::Auto,
             originator: PromptOriginator::User,
@@ -4414,7 +4476,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 7, "minor": 4})
+        serde_json::json!({"major": 7, "minor": 5})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4506,7 +4568,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 7, "minor": 4})
+        serde_json::json!({"major": 7, "minor": 5})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

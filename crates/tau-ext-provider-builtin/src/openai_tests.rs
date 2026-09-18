@@ -494,11 +494,35 @@ fn prewarm() -> tau_proto::AgentPromptPrewarmRequested {
         system_prompt: prompt.system_prompt,
         context: prompt.context,
         tools: prompt.tools,
+        hosted_tools: prompt.hosted_tools,
         model: Some(prompt.model),
         model_params: prompt.model_params,
         tool_choice: prompt.tool_choice,
         originator: prompt.originator,
     }
+}
+
+/// Both directed maintenance operations must pass hosted definitions to the
+/// Codex lowering boundary without dropping their access, size, or filters.
+#[test]
+fn prewarm_and_refresh_preserve_hosted_tools_for_lowering() {
+    let mut request = prewarm();
+    request.hosted_tools = vec![tau_proto::HostedToolDefinition::WebSearch {
+        access: tau_proto::ProviderWebSearchAccess::Cached,
+        context_size: Some(tau_proto::WebSearchContextSize::High),
+        allowed_domains: vec!["example.org".to_owned(), "example.net".to_owned()],
+    }];
+    let mut refresh = cache_refresh("pcr-00000000000000000000000000000001");
+    refresh.prompt = request.clone();
+    for prefix in [&request, &refresh.prompt] {
+        let lowered = prewarm_prompt(prefix, false);
+        assert_eq!(lowered.hosted_tools, request.hosted_tools);
+        assert_eq!(lowered.tools, request.tools);
+        assert_eq!(lowered.system_prompt, request.system_prompt);
+        assert_eq!(lowered.context, &request.context);
+        assert!(!lowered.debug_provider_requests);
+    }
+    assert!(prewarm_prompt(&prewarm(), false).hosted_tools.is_empty());
 }
 
 /// Builds one bounded cache refresh around the standard prewarm request.

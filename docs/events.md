@@ -307,7 +307,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   carries the create request id, created agent id, prompt `ctx_id`, failure
   stage, and a bounded sanitized message. It is not replayed.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
-  the next prompt prefix. Runtime/provider optimization state.
+  the next prompt prefix, including ordinary and provider-hosted tool definitions.
+  Runtime/provider optimization state; omitted hosted definitions mean none.
 - **`agent.compaction_triggered`** — Durable manual or harness-scheduled
   inline compaction request. Providers fold it into inline context management;
   standalone compaction instead begins with

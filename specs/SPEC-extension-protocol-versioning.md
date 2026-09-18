@@ -8,6 +8,11 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 7.5 carries provider-hosted tool definitions in the shared directed
+prewarm/cache-refresh prefix. Omission means no hosted tools; older peers can
+omit or ignore the additive field and continue degraded operation without hosted
+prefix fidelity. Exact hosted-prefix maintenance requires updated peers.
+
 Protocol 7.4 adds independently optional current/total compaction activity counts
 to existing transient updates. Older peers omit or ignore them and retain generic
 compaction presentation; completion and persistence authority are unchanged.

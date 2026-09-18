@@ -1346,6 +1346,7 @@ fn run_production_credential_scenario_with(
                     context: tau_proto::PromptContext::default(),
                     tools: Vec::new(),
                     model: Some(model.clone()),
+                    hosted_tools: Vec::new(),
                     model_params: Default::default(),
                     tool_choice: Default::default(),
                     originator: tau_proto::PromptOriginator::User,

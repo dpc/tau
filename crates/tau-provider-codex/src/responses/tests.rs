@@ -4710,14 +4710,21 @@ fn ws_envelope_adds_type_and_drops_stream() {
     assert_eq!(ws_body["input"], http_body["input"]);
 }
 
+/// Cache-only dispatch preserves hosted definitions while disabling generation
+/// and starting without a response anchor.
 #[test]
 fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
     let config = chain_test_config();
     let messages = vec![user_text("AGENTS.md context")];
+    let hosted = [tau_proto::HostedToolDefinition::WebSearch {
+        access: tau_proto::ProviderWebSearchAccess::Cached,
+        context_size: Some(tau_proto::WebSearchContextSize::High),
+        allowed_domains: vec!["example.org".to_owned()],
+    }];
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
-        hosted_tools: &[],
+        hosted_tools: &hosted,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -4734,6 +4741,15 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
 
     assert_eq!(body["type"], "response.create");
     assert_eq!(body["generate"], false);
+    assert_eq!(
+        body["tools"],
+        serde_json::json!([{
+            "type": "web_search",
+            "external_web_access": false,
+            "search_context_size": "high",
+            "filters": {"allowed_domains": ["example.org"]}
+        }])
+    );
     let object = body.as_object().expect("prewarm envelope object");
     assert!(object.get("stream").is_none());
     assert!(object.get("previous_response_id").is_none());

@@ -1,5 +1,10 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 7.5 includes provider-hosted definitions in the shared prewarm/refresh
+request. Missing definitions mean an empty list; exact hosted-prefix maintenance
+requires peers that preserve this field through lowering. See
+[SPEC-provider-cache-refresh-lifecycle](../../../specs/SPEC-provider-cache-refresh-lifecycle.md).
+
 Protocol 7.4 carries optional backend-neutral compaction current/total counts in
 the existing transient update. Omission preserves generic activity; the counts
 confer no completion authority and never become durable replacement metadata.

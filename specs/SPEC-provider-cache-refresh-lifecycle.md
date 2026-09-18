@@ -17,7 +17,11 @@ identity version, and process-secret full-prefix digest. Sensitive
 events use only point-to-point delivery to that captured connection.
 
 The request carries a validated random `pcr-*` identifier, the exact approved
-prefix, and `stop_after_millis` in `1..=30000`. It is transient, nonpersistent,
+prefix, including provider-hosted tool definitions and all their selected options,
+and `stop_after_millis` in `1..=30000`. Hosted definitions participate in the
+full-prefix digest and survive the shared prewarm/refresh request and Provider
+lowering unchanged; changing only hosted definitions cannot reuse evidence for
+another prefix. It is transient, nonpersistent,
 nonreplayed, and excluded from interception, broadcast, generic diagnostics,
 watchers, and UI. Content-free Provider terminal reports use one of `succeeded`,
 `failed`, `cancelled`, `unsupported`, or `deadline_exceeded`.

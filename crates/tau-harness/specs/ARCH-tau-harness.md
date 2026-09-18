@@ -232,7 +232,8 @@ request to the selected provider. The authority and crash cuts are governed by
 [SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
 The harness is the sole process-local owner of disabled-by-default Provider
-cache refresh scheduling. It derives keyed exact-prefix identities and economic
+cache refresh scheduling. Its retained prefix and keyed identity include ordinary
+and provider-hosted tools with all selected options. It derives economic
 eligibility only from current route policy, privacy, quota, price, and successful
 read/write observations. It sends sensitive refresh and cancellation requests
 only to the exact captured Provider route during a registered finite tool-batch

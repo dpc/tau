@@ -197,16 +197,18 @@ pub(crate) fn prompt(provider: &str, id: &str) -> AgentPromptCreated {
     }
 }
 
-/// Streaming prefix hashing must retain the exact digest identity produced by
-/// the previous contiguous JSON serialization.
+/// Streaming prefix hashing must include the same complete tuple as contiguous
+/// serialization, including nonempty hosted definitions.
 #[test]
 fn streaming_prefix_hash_matches_contiguous_serialization() {
-    let prompt = prompt("one", "prompt-hash");
+    let mut prompt = prompt("one", "prompt-hash");
+    prompt.hosted_tools = hosted_tools();
     let key = [7; 32];
     let expected_bytes = serde_json::to_vec(&(
         &prompt.system_prompt,
         &prompt.context,
         &prompt.tools,
+        &prompt.hosted_tools,
         &prompt.model,
         prompt.model_params,
         prompt.tool_choice,
@@ -227,6 +229,72 @@ fn streaming_prefix_hash_matches_contiguous_serialization() {
         .get(&prompt.agent_prompt_id)
         .expect("tracked prompt");
     assert_eq!(tracked.key.digest, expected.as_bytes()[..16]);
+}
+
+/// Nondefault hosted options exercise every part of the retained prefix.
+pub(crate) fn hosted_tools() -> Vec<tau_proto::HostedToolDefinition> {
+    vec![tau_proto::HostedToolDefinition::WebSearch {
+        access: tau_proto::ProviderWebSearchAccess::Cached,
+        context_size: Some(tau_proto::WebSearchContextSize::High),
+        allowed_domains: vec!["example.org".to_owned()],
+    }]
+}
+
+/// Hosted-only changes must separate evidence, while matching hosted
+/// definitions still qualify for refresh and arrive intact at the captured
+/// Provider.
+#[test]
+fn hosted_prefix_identity_evidence_and_refresh_are_exact() {
+    let (clock, mut scheduler) = owner();
+    let model = model("one");
+    let route = tau_proto::ConnectionId::parse("one-route").expect("route");
+    let mut write = prompt("one", "hosted-write");
+    write.hosted_tools = hosted_tools();
+    scheduler.track_prompt(route.clone(), &write, Some(&model));
+    let original_key = scheduler.tracked[&write.agent_prompt_id].key.clone();
+    scheduler.finish_prompt(&write.agent_prompt_id, true, Some(&usage(0, 10)));
+
+    let variants = [
+        Vec::new(),
+        vec![tau_proto::HostedToolDefinition::WebSearch {
+            access: tau_proto::ProviderWebSearchAccess::Live,
+            context_size: Some(tau_proto::WebSearchContextSize::High),
+            allowed_domains: vec!["example.org".to_owned()],
+        }],
+        vec![tau_proto::HostedToolDefinition::WebSearch {
+            access: tau_proto::ProviderWebSearchAccess::Cached,
+            context_size: Some(tau_proto::WebSearchContextSize::Low),
+            allowed_domains: vec!["example.org".to_owned()],
+        }],
+        vec![tau_proto::HostedToolDefinition::WebSearch {
+            access: tau_proto::ProviderWebSearchAccess::Cached,
+            context_size: Some(tau_proto::WebSearchContextSize::High),
+            allowed_domains: vec!["example.net".to_owned()],
+        }],
+    ];
+    for hosted_tools in variants {
+        let mut read = prompt("one", "different-hosted-read");
+        read.hosted_tools = hosted_tools;
+        scheduler.track_prompt(route.clone(), &read, Some(&model));
+        assert_ne!(scheduler.tracked[&read.agent_prompt_id].key, original_key);
+        scheduler.finish_prompt(&read.agent_prompt_id, true, Some(&usage(10, 0)));
+        assert!(
+            scheduler.scheduled.is_empty(),
+            "different prefix has no write"
+        );
+    }
+    let mut read = prompt("one", "matching-hosted-read");
+    read.hosted_tools = write.hosted_tools.clone();
+    scheduler.track_prompt(route.clone(), &read, Some(&model));
+    scheduler.finish_prompt(&read.agent_prompt_id, true, Some(&usage(10, 0)));
+    scheduler.open_tool_window();
+    clock.0.set(clock.0.get() + Duration::from_secs(90));
+    let refresh = scheduler
+        .admit()
+        .pop()
+        .expect("matching hosted prefix qualifies");
+    assert_eq!(refresh.connection_id, route);
+    assert_eq!(refresh.request.prompt.hosted_tools, write.hosted_tools);
 }
 
 /// Build response-local cache usage with explicit read/write counters.
