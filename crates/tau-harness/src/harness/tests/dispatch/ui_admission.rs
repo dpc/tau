@@ -3326,13 +3326,14 @@ fn ui_emitted_custom_event_routes_to_subscribed_extension() {
     )));
 }
 
-/// A failed retention-hint touch remains one content-free UI diagnostic and
-/// does not retract the accepted UI prompt dispatch.
+/// A successful synchronous UI admission trace can coexist with an explicitly
+/// observed asynchronous metadata-touch failure without retracting the prompt.
 #[test]
 fn ui_session_metadata_touch_worker_failure_does_not_retract_admission() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = echo_harness(temp.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
+    let expected_session_id = harness.session_runtime.current_session_id.clone();
     let agent_id = harness.agent_runtime.agent_registry.agents[&cid]
         .identity
         .agent_id
@@ -3340,6 +3341,20 @@ fn ui_session_metadata_touch_worker_failure_does_not_retract_admission() {
         .map(crate::parse_agent_id)
         .expect("durable agent id");
     let expected_trace_agent_id = cid.to_string();
+    let owner = harness
+        .session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable harness owner");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(path_std_time::Duration::from_secs(2)),
+        tau_core::DurabilityBarrierOutcome::Durable,
+        "setup must finish its persistence work before the metadata obstruction"
+    );
+    assert!(
+        owner.drain_failures().is_empty(),
+        "setup must not leave asynchronous persistence failures"
+    );
     let meta_path = harness
         .session_runtime
         .store
@@ -3430,6 +3445,32 @@ fn ui_session_metadata_touch_worker_failure_does_not_retract_admission() {
         "metadata failure traces must not retain prompt content"
     );
     drop(captured_traces);
+    let deadline = path_std_time::Instant::now() + path_std_time::Duration::from_secs(2);
+    loop {
+        let observed_failure = harness
+            .session_runtime
+            .persistence_owner
+            .as_ref()
+            .expect("durable harness owner")
+            .drain_failures()
+            .into_iter()
+            .any(|failure| {
+                failure.kind() == tau_core::PersistenceFailureKind::Sync
+                    && matches!(
+                        failure.stream(),
+                        Some(tau_core::StreamIdentity::Session(session_id))
+                            if session_id == &expected_session_id
+                    )
+            });
+        if observed_failure {
+            break;
+        }
+        assert!(
+            path_std_time::Instant::now() < deadline,
+            "metadata obstruction did not produce an asynchronous Sync failure for the current session"
+        );
+        std::thread::sleep(path_std_time::Duration::from_millis(5));
+    }
     path_std_fs::remove_dir(&meta_path).expect("remove metadata obstruction");
     stale_session_manifest(&harness);
     assert!(
