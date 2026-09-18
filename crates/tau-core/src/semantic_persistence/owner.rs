@@ -470,6 +470,9 @@ pub(crate) struct Shared {
     /// Deterministic pause after rollback poison discards append authority.
     #[cfg(test)]
     pub(crate) rollback_poison_pause: RollbackPoisonPause,
+    /// Deterministic pauses between provisional registration and enqueue.
+    #[cfg(test)]
+    pub(crate) preparation_pause: PreparationPause,
 }
 
 /// Test-only worker pause at the command-versus-derived-work scheduling cut.
@@ -511,6 +514,39 @@ pub(crate) struct RollbackPoisonPauseState {
     /// Whether the worker has retained the lock and reached the pause.
     pub(crate) reached: bool,
     /// Whether the test has released the paused worker.
+    pub(crate) released: bool,
+}
+
+/// Test-only pause between a provisional preparation registration and enqueue.
+#[cfg(test)]
+pub(crate) struct PreparationPause {
+    /// Armed cut and its reached/released state.
+    pub(crate) state: Mutex<PreparationPauseState>,
+    /// Waiters observing or releasing the pause.
+    pub(crate) wake: Condvar,
+}
+
+/// Named registration-to-enqueue cuts used by deterministic race tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreparationPauseCut {
+    /// An existing agent has registered its provisional generation.
+    AgentRegistered,
+    /// A session has registered its ordinary stream but not its restore stream.
+    SessionPartiallyRegistered,
+    /// A session has registered both provisional generations.
+    SessionRegistered,
+}
+
+/// State for one deterministic registration-to-enqueue pause.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct PreparationPauseState {
+    /// The next preparation cut to pause at.
+    pub(crate) armed: Option<PreparationPauseCut>,
+    /// Whether the armed cut has been reached.
+    pub(crate) reached: bool,
+    /// Whether the test has released the paused caller.
     pub(crate) released: bool,
 }
 
@@ -685,6 +721,11 @@ impl SemanticPersistenceOwner {
             #[cfg(test)]
             rollback_poison_pause: RollbackPoisonPause {
                 state: Mutex::new(RollbackPoisonPauseState::default()),
+                wake: Condvar::new(),
+            },
+            #[cfg(test)]
+            preparation_pause: PreparationPause {
+                state: Mutex::new(PreparationPauseState::default()),
                 wake: Condvar::new(),
             },
         });
@@ -890,6 +931,84 @@ impl SemanticPersistenceOwner {
             .unwrap_or_else(|error| error.into_inner());
         state.released = true;
         self.shared.rollback_poison_pause.wake.notify_all();
+    }
+
+    /// Arms one deterministic pause after provisional preparation registration.
+    #[cfg(test)]
+    pub(crate) fn arm_preparation_pause_for_test(&self, cut: PreparationPauseCut) {
+        let mut state = self
+            .shared
+            .preparation_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(state.armed.is_none(), "preparation pause already armed");
+        *state = PreparationPauseState {
+            armed: Some(cut),
+            reached: false,
+            released: false,
+        };
+    }
+
+    /// Waits until a preparation caller reaches the armed registration cut.
+    #[cfg(test)]
+    pub(crate) fn wait_for_preparation_pause_for_test(&self, timeout: Duration) -> bool {
+        let state = self
+            .shared
+            .preparation_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (state, _) = self
+            .shared
+            .preparation_pause
+            .wake
+            .wait_timeout_while(state, timeout, |state| !state.reached)
+            .unwrap_or_else(|error| error.into_inner());
+        state.reached
+    }
+
+    /// Releases a preparation caller from the armed registration cut.
+    #[cfg(test)]
+    pub(crate) fn release_preparation_pause_for_test(&self) {
+        let mut state = self
+            .shared
+            .preparation_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.released = true;
+        self.shared.preparation_pause.wake.notify_all();
+    }
+
+    /// Waits until at least `count` preparation commands are queued.
+    #[cfg(test)]
+    pub(crate) fn wait_for_preparation_commands_for_test(
+        &self,
+        count: usize,
+        timeout: Duration,
+    ) -> bool {
+        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (state, _) = self
+            .shared
+            .wake
+            .wait_timeout_while(state, timeout, |state| {
+                preparation_command_count(&state.commands) < count
+            })
+            .unwrap_or_else(|error| error.into_inner());
+        preparation_command_count(&state.commands) >= count
+    }
+
+    /// Waits until the sole persistence worker has completed its exit guard.
+    #[cfg(test)]
+    pub(crate) fn wait_for_worker_exit_for_test(&self, timeout: Duration) -> bool {
+        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (state, _) = self
+            .shared
+            .wake
+            .wait_timeout_while(state, timeout, |state| !state.worker_exited)
+            .unwrap_or_else(|error| error.into_inner());
+        state.worker_exited
     }
 
     /// Waits until one release command is durably present in the worker queue.
@@ -1114,13 +1233,24 @@ impl SemanticPersistenceOwner {
             journal_path,
             StreamLifecycle::Preparing,
         )?;
+        #[cfg(test)]
+        pause_preparation_for_test(&self.shared, PreparationPauseCut::AgentRegistered);
         let (reply, receive) = mpsc::sync_channel(1);
-        {
+        let queued = {
             let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.commands.push_back(WorkerCommand::PrepareAgent {
-                identity: Arc::clone(&lease.identity),
-                reply,
-            });
+            if state.available {
+                state.commands.push_back(WorkerCommand::PrepareAgent {
+                    identity: Arc::clone(&lease.identity),
+                    reply,
+                });
+                true
+            } else {
+                false
+            }
+        };
+        if !queued {
+            self.unregister(&lease);
+            return Err(PersistenceAdmissionError::Unavailable);
         }
         self.shared.wake.notify_one();
         match receive.recv() {
@@ -1132,7 +1262,10 @@ impl SemanticPersistenceOwner {
                 self.unregister(&lease);
                 Err(error)
             }
-            Err(_) => Err(PersistenceAdmissionError::Unavailable),
+            Err(_) => {
+                self.unregister(&lease);
+                Err(PersistenceAdmissionError::Unavailable)
+            }
         }
     }
 
@@ -1149,6 +1282,11 @@ impl SemanticPersistenceOwner {
             ordinary_path,
             StreamLifecycle::Preparing,
         )?;
+        #[cfg(test)]
+        pause_preparation_for_test(
+            &self.shared,
+            PreparationPauseCut::SessionPartiallyRegistered,
+        );
         let restore_lease = match self.register(
             StreamIdentity::SessionRestore(session_id),
             restore_path,
@@ -1160,15 +1298,27 @@ impl SemanticPersistenceOwner {
                 return Err(error);
             }
         };
+        #[cfg(test)]
+        pause_preparation_for_test(&self.shared, PreparationPauseCut::SessionRegistered);
         let (reply, receive) = mpsc::sync_channel(1);
-        {
+        let queued = {
             let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.commands.push_back(WorkerCommand::PrepareSession {
-                session: Arc::clone(&session_lease.identity),
-                restore: Arc::clone(&restore_lease.identity),
-                mode,
-                reply,
-            });
+            if state.available {
+                state.commands.push_back(WorkerCommand::PrepareSession {
+                    session: Arc::clone(&session_lease.identity),
+                    restore: Arc::clone(&restore_lease.identity),
+                    mode,
+                    reply,
+                });
+                true
+            } else {
+                false
+            }
+        };
+        if !queued {
+            self.unregister(&session_lease);
+            self.unregister(&restore_lease);
+            return Err(PersistenceAdmissionError::Unavailable);
         }
         self.shared.wake.notify_one();
         match receive.recv() {
@@ -1193,7 +1343,11 @@ impl SemanticPersistenceOwner {
                 self.unregister(&restore_lease);
                 Err(error)
             }
-            Err(_) => Err(PersistenceAdmissionError::Unavailable),
+            Err(_) => {
+                self.unregister(&session_lease);
+                self.unregister(&restore_lease);
+                Err(PersistenceAdmissionError::Unavailable)
+            }
         }
     }
 
@@ -1724,6 +1878,7 @@ pub(crate) fn invalidate_worker(shared: &Weak<Shared>) {
     if let Some(shared) = shared.upgrade() {
         let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         state.available = false;
+        let detached_preparations = detach_preparation_commands(&mut state.commands);
         if !state.shutting_down {
             push_failure(
                 &mut state,
@@ -1733,9 +1888,62 @@ pub(crate) fn invalidate_worker(shared: &Weak<Shared>) {
             );
         }
         drop(state);
+        drop(detached_preparations);
         shared.wake.notify_all();
         notify_operational(&shared);
     }
+}
+
+fn detach_preparation_commands(commands: &mut VecDeque<WorkerCommand>) -> Vec<WorkerCommand> {
+    let mut retained = VecDeque::with_capacity(commands.capacity());
+    let mut detached = Vec::new();
+    while let Some(command) = commands.pop_front() {
+        match command {
+            preparation @ (WorkerCommand::PrepareRoot { .. }
+            | WorkerCommand::PrepareAgent { .. }
+            | WorkerCommand::PrepareSession { .. }) => detached.push(preparation),
+            other => retained.push_back(other),
+        }
+    }
+    *commands = retained;
+    detached
+}
+
+#[cfg(test)]
+fn preparation_command_count(commands: &VecDeque<WorkerCommand>) -> usize {
+    commands
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                WorkerCommand::PrepareRoot { .. }
+                    | WorkerCommand::PrepareAgent { .. }
+                    | WorkerCommand::PrepareSession { .. }
+            )
+        })
+        .count()
+}
+
+#[cfg(test)]
+fn pause_preparation_for_test(shared: &Shared, cut: PreparationPauseCut) {
+    let mut state = shared
+        .preparation_pause
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if state.armed != Some(cut) {
+        return;
+    }
+    state.reached = true;
+    shared.preparation_pause.wake.notify_all();
+    while !state.released {
+        state = shared
+            .preparation_pause
+            .wake
+            .wait(state)
+            .unwrap_or_else(|error| error.into_inner());
+    }
+    state.armed = None;
 }
 
 pub(crate) fn report_failure(

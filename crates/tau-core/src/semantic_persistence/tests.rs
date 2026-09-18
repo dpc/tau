@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::backend::{ExistingPathKind, FilesystemBackend, PersistenceBackend};
+use super::owner::PreparationPauseCut;
 use super::worker::StreamLifecycle;
 use super::{
     DurabilityBarrierOutcome, PersistenceCapacity, PersistenceFailureKind, RetentionCharge,
@@ -607,6 +608,280 @@ fn worker_exit_makes_every_lease_unavailable() {
         )
         .expect_err("dead owner rejects every generation");
     assert!(error.to_string().contains("unavailable"));
+}
+
+/// Worker exit must disconnect every queued synchronous preparation and release
+/// the exact provisional agent/session registry charges.
+#[test]
+fn worker_exit_unblocks_queued_preparations_and_releases_registrations() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("owner"),
+    );
+    let mut store =
+        SessionStore::open_managed(root.path().join("sessions"), owner.clone()).expect("store");
+    store
+        .prepare_session("active-session", SessionPreparationMode::New)
+        .expect("prepare active stream");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable
+    );
+    backend.hold_writes.store(true, Ordering::SeqCst);
+    backend.exit_next_write.store(true, Ordering::SeqCst);
+    store
+        .append_session_event_at(
+            "active-session",
+            None,
+            loaded_event("active-session"),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("frame accepted before worker exit");
+    backend.wait_until_write_held();
+    let baseline = owner.ledger_for_test();
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let root_owner = owner.clone();
+    let root_path = root.path().join("queued-root");
+    let root_tx = result_tx.clone();
+    let root_thread = thread::spawn(move || {
+        root_tx
+            .send(root_owner.prepare_root(root_path).map(|_| ()))
+            .expect("root result receiver remains");
+    });
+    let agent_owner = owner.clone();
+    let agent_path = root.path().join("agents/queued-agent/events.cbor");
+    let agent_tx = result_tx.clone();
+    let agent_thread = thread::spawn(move || {
+        agent_tx
+            .send(
+                agent_owner
+                    .prepare_existing_agent(
+                        tau_proto::AgentId::parse("queued-agent").expect("agent id"),
+                        agent_path,
+                    )
+                    .map(|_| ()),
+            )
+            .expect("agent result receiver remains");
+    });
+    let session_owner = owner.clone();
+    let session_dir = root.path().join("sessions/queued-session");
+    let session_thread = thread::spawn(move || {
+        result_tx
+            .send(
+                session_owner
+                    .prepare_session(
+                        tau_proto::SessionId::parse("queued-session").expect("session id"),
+                        session_dir.join("events.cbor"),
+                        session_dir.join("restore-events.cbor"),
+                        SessionPreparationMode::New,
+                    )
+                    .map(|_| ()),
+            )
+            .expect("session result receiver remains");
+    });
+
+    assert!(
+        owner.wait_for_preparation_commands_for_test(3, Duration::from_secs(2)),
+        "all synchronous preparations reached the dead-worker queue"
+    );
+    assert_eq!(owner.ledger_for_test().2, baseline.2 + 3);
+    backend.release_writes();
+    assert!(
+        owner.wait_for_worker_exit_for_test(Duration::from_secs(2)),
+        "worker completed its real exit guard"
+    );
+    for _ in 0..3 {
+        assert!(matches!(
+            result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("preparation caller returned"),
+            Err(super::PersistenceAdmissionError::Unavailable)
+        ));
+    }
+    root_thread.join().expect("root preparation thread");
+    agent_thread.join().expect("agent preparation thread");
+    session_thread.join().expect("session preparation thread");
+    assert_eq!(
+        owner.ledger_for_test(),
+        baseline,
+        "failed provisional preparations release count and byte charges"
+    );
+}
+
+/// Availability must be rechecked after agent registration so worker exit
+/// cannot leave a newly queued command or provisional generation behind.
+#[test]
+fn agent_preparation_rechecks_availability_after_registration() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let baseline = owner.ledger_for_test();
+    owner.arm_preparation_pause_for_test(PreparationPauseCut::AgentRegistered);
+    let caller = owner.clone();
+    let path = root.path().join("agents/racing-agent/events.cbor");
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let thread = thread::spawn(move || {
+        result_tx
+            .send(caller.prepare_existing_agent(
+                tau_proto::AgentId::parse("racing-agent").expect("agent id"),
+                path,
+            ))
+            .expect("result receiver remains");
+    });
+    assert!(
+        owner.wait_for_preparation_pause_for_test(Duration::from_secs(2)),
+        "agent registered before enqueue"
+    );
+    owner.fail_stop();
+    assert!(owner.wait_for_worker_exit_for_test(Duration::from_secs(2)));
+    owner.release_preparation_pause_for_test();
+    assert!(matches!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("agent preparation returned"),
+        Err(super::PersistenceAdmissionError::Unavailable)
+    ));
+    thread.join().expect("agent preparation thread");
+    assert_eq!(owner.ledger_for_test(), baseline);
+    assert!(!owner.wait_for_preparation_commands_for_test(1, Duration::ZERO));
+}
+
+/// Availability must be rechecked after both session registrations so worker
+/// exit cannot retain either generation or enqueue work after invalidation.
+#[test]
+fn session_preparation_rechecks_availability_after_registration() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let baseline = owner.ledger_for_test();
+    owner.arm_preparation_pause_for_test(PreparationPauseCut::SessionRegistered);
+    let caller = owner.clone();
+    let directory = root.path().join("sessions/racing-session");
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let thread = thread::spawn(move || {
+        result_tx
+            .send(caller.prepare_session(
+                tau_proto::SessionId::parse("racing-session").expect("session id"),
+                directory.join("events.cbor"),
+                directory.join("restore-events.cbor"),
+                SessionPreparationMode::New,
+            ))
+            .expect("result receiver remains");
+    });
+    assert!(
+        owner.wait_for_preparation_pause_for_test(Duration::from_secs(2)),
+        "both session streams registered before enqueue"
+    );
+    owner.fail_stop();
+    assert!(owner.wait_for_worker_exit_for_test(Duration::from_secs(2)));
+    owner.release_preparation_pause_for_test();
+    assert!(matches!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("session preparation returned"),
+        Err(super::PersistenceAdmissionError::Unavailable)
+    ));
+    thread.join().expect("session preparation thread");
+    assert_eq!(owner.ledger_for_test(), baseline);
+}
+
+/// Exit between the two session registrations must release the first exact
+/// generation once without double-accounting a restore registration.
+#[test]
+fn session_partial_registration_is_released_after_worker_exit() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let baseline = owner.ledger_for_test();
+    owner.arm_preparation_pause_for_test(PreparationPauseCut::SessionPartiallyRegistered);
+    let caller = owner.clone();
+    let directory = root.path().join("sessions/partial-session");
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let thread = thread::spawn(move || {
+        result_tx
+            .send(caller.prepare_session(
+                tau_proto::SessionId::parse("partial-session").expect("session id"),
+                directory.join("events.cbor"),
+                directory.join("restore-events.cbor"),
+                SessionPreparationMode::New,
+            ))
+            .expect("result receiver remains");
+    });
+    assert!(
+        owner.wait_for_preparation_pause_for_test(Duration::from_secs(2)),
+        "ordinary session stream registered before restore registration"
+    );
+    assert_eq!(owner.ledger_for_test().2, baseline.2 + 1);
+    owner.fail_stop();
+    assert!(owner.wait_for_worker_exit_for_test(Duration::from_secs(2)));
+    owner.release_preparation_pause_for_test();
+    assert!(matches!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("partial session preparation returned"),
+        Err(super::PersistenceAdmissionError::Unavailable)
+    ));
+    thread.join().expect("session preparation thread");
+    assert_eq!(owner.ledger_for_test(), baseline);
+}
+
+/// The ordinary fail-stop lifecycle exit must release a queued preparation;
+/// the regression must not depend on the injected worker-exit write error.
+#[test]
+fn fail_stop_exit_unblocks_queued_preparation() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("owner"),
+    );
+    let mut store =
+        SessionStore::open_managed(root.path().join("sessions"), owner.clone()).expect("store");
+    store
+        .prepare_session("active-session", SessionPreparationMode::New)
+        .expect("prepare active stream");
+    backend.hold_writes.store(true, Ordering::SeqCst);
+    store
+        .append_session_event_at(
+            "active-session",
+            None,
+            loaded_event("active-session"),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("frame accepted before fail-stop");
+    backend.wait_until_write_held();
+
+    let caller = owner.clone();
+    let path = root.path().join("queued-root");
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let thread = thread::spawn(move || {
+        result_tx
+            .send(caller.prepare_root(path))
+            .expect("result receiver remains");
+    });
+    assert!(
+        owner.wait_for_preparation_commands_for_test(1, Duration::from_secs(2)),
+        "root preparation queued behind held frame"
+    );
+    owner.fail_stop();
+    backend.release_writes();
+    assert!(owner.wait_for_worker_exit_for_test(Duration::from_secs(2)));
+    assert!(matches!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("root preparation returned"),
+        Err(super::PersistenceAdmissionError::Unavailable)
+    ));
+    thread.join().expect("root preparation thread");
 }
 
 /// Queued plus in-flight frames share one exact hard admission boundary.
