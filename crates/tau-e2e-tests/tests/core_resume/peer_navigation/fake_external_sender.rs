@@ -2,8 +2,9 @@
 
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::os::fd::AsFd as _;
+use std::os::unix::fs::FileTypeExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
@@ -291,10 +292,12 @@ fn no_callback_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::error
     let root = bounded_runtime_tempdir()?;
     let session = SessionId::parse("no-callback").expect("known-safe SessionId must be valid");
     let mut sender = FakeExternalSender::start(root.path(), &session, fixture_request(&session))?;
+    let (claim_path, socket_path) = sender_metadata_paths(root.path(), &sender)?;
     let result = sender.authorize(Instant::now() + Duration::from_millis(20));
     assert!(result.is_err());
     drop(sender);
-    assert!(tau_harness::runtime_dir::find_harness_for_session(session.as_str())?.is_none());
+    assert_path_absent(&claim_path)?;
+    assert_path_absent(&socket_path)?;
     Ok(())
 }
 
@@ -304,14 +307,64 @@ fn post_hello_stall_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::
     let root = bounded_runtime_tempdir()?;
     let session = SessionId::parse("stalled-callback").expect("known-safe SessionId must be valid");
     let mut sender = FakeExternalSender::start(root.path(), &session, fixture_request(&session))?;
+    let (claim_path, socket_path) = sender_metadata_paths(root.path(), &sender)?;
     let mut stalled = tau_socket::SocketPeer::connect(sender.listener.path())?;
     stalled.send(&HarnessInputMessage::Hello(callback_hello(&session)))?;
     let result = sender.authorize(Instant::now() + Duration::from_millis(20));
     assert!(result.is_err());
     drop(stalled);
     drop(sender);
-    assert!(tau_harness::runtime_dir::find_harness_for_session(session.as_str())?.is_none());
+    assert_path_absent(&claim_path)?;
+    assert_path_absent(&socket_path)?;
     Ok(())
+}
+
+/// Captures the sole private claim and listener socket created by a live
+/// sender.
+fn sender_metadata_paths(
+    runtime_root: &Path,
+    sender: &FakeExternalSender,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let socket_path = sender.listener.path().to_path_buf();
+    let claim_entries = std::fs::read_dir(runtime_root.join("tau/harnesses/claims"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let claim_path = match claim_entries.as_slice() {
+        [claim] => claim.path(),
+        claims => {
+            return Err(
+                format!("expected one private sender claim, found {}", claims.len()).into(),
+            );
+        }
+    };
+    let claim_metadata = std::fs::symlink_metadata(&claim_path)?;
+    assert!(
+        claim_metadata.is_file(),
+        "private sender claim must be a regular file: {}",
+        claim_path.display()
+    );
+    let socket_metadata = std::fs::symlink_metadata(&socket_path)?;
+    assert!(
+        socket_metadata.file_type().is_socket(),
+        "private sender listener must be a socket: {}",
+        socket_path.display()
+    );
+    Ok((claim_path, socket_path))
+}
+
+/// Requires a sender-owned artifact to have been unlinked without hiding I/O
+/// failures.
+fn assert_path_absent(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "sender-owned artifact remains after drop: {}",
+                path.display()
+            ),
+        )),
+        Err(error) => Err(error),
+    }
 }
 
 fn fixture_request(sender_session: &SessionId) -> tau_proto::ExternalAgentMessageRequest {
