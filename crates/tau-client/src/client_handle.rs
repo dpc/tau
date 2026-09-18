@@ -17,10 +17,17 @@ pub struct ClientHandle {
     startup_complete: Arc<AtomicBool>,
     /// Linearizes every pre-Ready ConfigError against the terminal Ready frame.
     startup_gate: Arc<Mutex<StartupGate>>,
-    /// Initial Configure callbacks may emit immediate diagnostics before Ready.
-    configuring: Arc<AtomicBool>,
+    /// Initial Configure admission state and its accepted declarations.
+    configure_outputs: Arc<Mutex<ConfigureOutputs>>,
+}
+
+/// Initial Configure declaration admission and its finite accepted buffer.
+#[derive(Default)]
+struct ConfigureOutputs {
+    /// Whether declarations may still enter the initial Configure buffer.
+    accepting: bool,
     /// Configuration-derived declarations replayed after static declarations.
-    pending_configure_outputs: Arc<Mutex<Vec<tau_proto::HarnessInputMessage>>>,
+    pending: Vec<tau_proto::HarnessInputMessage>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,8 +95,7 @@ impl ClientHandle {
             tool_name_scope: Arc::new(OnceLock::new()),
             startup_complete: Arc::new(AtomicBool::new(false)),
             startup_gate: Arc::new(Mutex::new(StartupGate::PreReady)),
-            configuring: Arc::new(AtomicBool::new(false)),
-            pending_configure_outputs: Arc::new(Mutex::new(Vec::new())),
+            configure_outputs: Arc::new(Mutex::new(ConfigureOutputs::default())),
         }
     }
 
@@ -393,16 +399,18 @@ impl ClientHandle {
                         | tau_proto::Event::ExtPromptFragmentPublish(_)
                 )
         );
-        if self.configuring.load(Ordering::Acquire) && configure_derived_declaration {
-            self.pending_configure_outputs
+        let configuring = {
+            let mut configure_outputs = self
+                .configure_outputs
                 .lock()
-                .expect("lock pending Configure output")
-                .push(message);
-            return Ok(());
-        }
-        if !self.startup_complete.load(Ordering::Acquire)
-            && !self.configuring.load(Ordering::Acquire)
-        {
+                .expect("lock pending Configure output");
+            if configure_outputs.accepting && configure_derived_declaration {
+                configure_outputs.pending.push(message);
+                return Ok(());
+            }
+            configure_outputs.accepting
+        };
+        if !self.startup_complete.load(Ordering::Acquire) && !configuring {
             return Err(ClientError::handler(
                 "client output is unavailable before startup Ready",
             ));
@@ -825,7 +833,10 @@ impl ClientHandle {
     }
 
     pub(crate) fn set_configuring(&self, configuring: bool) {
-        self.configuring.store(configuring, Ordering::Release);
+        self.configure_outputs
+            .lock()
+            .expect("lock pending Configure output")
+            .accepting = configuring;
     }
 
     /// Atomically reject or publish the one terminal startup Ready frame.
@@ -846,10 +857,11 @@ impl ClientHandle {
     /// Replays accepted configuration-derived output after static declarations.
     pub(crate) fn flush_configure_outputs(&self) -> ClientResult<()> {
         let pending = std::mem::take(
-            &mut *self
-                .pending_configure_outputs
+            &mut self
+                .configure_outputs
                 .lock()
-                .expect("lock pending Configure output"),
+                .expect("lock pending Configure output")
+                .pending,
         );
         for message in pending {
             self.send_startup(message)?;
@@ -859,9 +871,10 @@ impl ClientHandle {
 
     /// Drops output derived from a rejected initial configuration.
     pub(crate) fn discard_configure_outputs(&self) {
-        self.pending_configure_outputs
+        self.configure_outputs
             .lock()
             .expect("lock pending Configure output")
+            .pending
             .clear();
     }
 
@@ -935,3 +948,6 @@ fn ensure_admissible_frame(output: &PeerOutput) -> ClientResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod client_handle_tests;
