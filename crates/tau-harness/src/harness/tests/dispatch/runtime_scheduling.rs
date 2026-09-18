@@ -72,7 +72,10 @@ fn waiting_status_does_not_preempt_active_inference() {
             agent_prompt_id: test_agent_prompt_id("waiting-active-inference"),
         },
     );
-    let admitted = Instant::now();
+    // Keep the ordinary real-clock drain before these synthetic deadlines.
+    let admitted = Instant::now()
+        .checked_add(Duration::from_secs(60 * 60))
+        .expect("synthetic admission fits clock range");
     let mut prompt = PendingPrompt::internal("scheduled status input".to_owned());
     prompt.delivery_schedule = Some(
         DeliverySchedule::new(
