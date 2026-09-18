@@ -1,4 +1,4 @@
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Error, ErrorKind, Read};
 use std::net::Shutdown;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
@@ -199,52 +199,187 @@ fn edit_file(
     edit_file_with_world(arguments, &mut world)
 }
 
-type TestExtensionReader = EventReader<BufReader<UnixStream>>;
+type TestExtensionReader = EventReader<BufReader<DeadlineSocket>>;
 type TestExtensionWriter = EventWriter<BufWriter<UnixStream>>;
 type TestExtensionDone = path_std_sync::mpsc::Receiver<Result<(), String>>;
+
+/// Shared deadline state for one test-side extension socket.
+struct DeadlineControl {
+    /// Socket handle used to restore timeout state or retire a failed
+    /// connection.
+    stream: UnixStream,
+    /// Absolute deadline armed for the current scoped wait.
+    deadline: Mutex<Option<Instant>>,
+}
+
+impl DeadlineControl {
+    /// Arms one absolute deadline until the returned guard is dropped.
+    fn arm(self: &Arc<Self>, deadline: Instant) -> DeadlineGuard {
+        let previous_timeout = self.stream.read_timeout().expect("read socket timeout");
+        let mut current = self.deadline.lock().expect("test read deadline");
+        assert!(current.is_none(), "test read deadline already armed");
+        *current = Some(deadline);
+        drop(current);
+        DeadlineGuard {
+            control: Arc::clone(self),
+            previous_timeout,
+            successful: false,
+        }
+    }
+
+    /// Returns the positive remaining duration or retires an expired
+    /// connection.
+    fn remaining(&self) -> std::io::Result<Option<Duration>> {
+        let deadline = *self.deadline.lock().expect("test read deadline");
+        let Some(deadline) = deadline else {
+            return Ok(None);
+        };
+        match deadline.checked_duration_since(Instant::now()) {
+            Some(remaining) if !remaining.is_zero() => Ok(Some(remaining)),
+            _ => {
+                self.retire();
+                Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "test extension read deadline expired",
+                ))
+            }
+        }
+    }
+
+    /// Shuts down a connection whose decoder can no longer be reused safely.
+    fn retire(&self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
+/// Socket reader that reapplies an absolute deadline before every underlying
+/// read.
+struct DeadlineSocket {
+    /// Socket carrying extension output.
+    stream: UnixStream,
+    /// Deadline shared with scoped wait guards.
+    control: Arc<DeadlineControl>,
+}
+
+impl DeadlineSocket {
+    /// Wraps a socket and returns its independently owned deadline control.
+    fn new(stream: UnixStream) -> (Self, Arc<DeadlineControl>) {
+        let control = Arc::new(DeadlineControl {
+            stream: stream
+                .try_clone()
+                .expect("deadline control socket clone should succeed"),
+            deadline: Mutex::new(None),
+        });
+        (
+            Self {
+                stream,
+                control: Arc::clone(&control),
+            },
+            control,
+        )
+    }
+}
+
+impl Read for DeadlineSocket {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let Some(remaining) = self.control.remaining()? else {
+                return self.stream.read(buffer);
+            };
+            self.stream.set_read_timeout(Some(remaining))?;
+            match self.stream.read(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    self.control.remaining()?;
+                    continue;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+/// Panic-safe restoration of the socket state used before a scoped wait.
+struct DeadlineGuard {
+    /// Deadline and socket state owned by this scope.
+    control: Arc<DeadlineControl>,
+    /// Socket timeout that was active before the wait.
+    previous_timeout: Option<Duration>,
+    /// Whether the scoped wait reached its expected event.
+    successful: bool,
+}
+
+impl Drop for DeadlineGuard {
+    fn drop(&mut self) {
+        if !self.successful {
+            self.control.retire();
+        }
+        *self.control.deadline.lock().expect("test read deadline") = None;
+        let _ = self.stream().set_read_timeout(self.previous_timeout);
+    }
+}
+
+impl DeadlineGuard {
+    /// Marks the scoped wait successful before restoring its prior socket
+    /// state.
+    fn finish(mut self) {
+        self.successful = true;
+    }
+
+    /// Returns the socket used to restore the prior timeout.
+    fn stream(&self) -> &UnixStream {
+        &self.control.stream
+    }
+}
 
 /// Test-side wrapper around [`HarnessInputReader`] that exposes an
 /// `Event`-flavoured API so the existing tests can stay mechanical. Non-event
 /// messages are skipped by `read_event`.
 struct EventReader<R> {
     inner: HarnessInputReader<R>,
+    /// Optional deadline control for socket-backed integration tests.
+    deadline: Option<Arc<DeadlineControl>>,
 }
 
 impl<R: std::io::Read> EventReader<R> {
-    fn new(inner: R) -> Self {
-        Self {
-            inner: HarnessInputReader::new(inner),
-        }
-    }
-
     fn read_event(&mut self) -> Result<Option<Event>, tau_proto::DecodeError> {
         loop {
+            self.check_deadline()?;
             match self.inner.read_message()? {
                 None => return Ok(None),
-                Some(HarnessInputMessage::Emit(emit)) => match *emit.event {
-                    Event::ToolProgressReported(progress)
-                        if progress.message.is_none()
-                            && progress.display.is_some()
-                            && progress.tool_name != SHELL_TOOL_NAME
-                            && progress.tool_name != GPT_SHELL_TOOL_NAME =>
-                    {
-                        continue;
+                Some(HarnessInputMessage::Emit(emit)) => {
+                    self.check_deadline()?;
+                    match *emit.event {
+                        Event::ToolProgressReported(progress)
+                            if progress.message.is_none()
+                                && progress.display.is_some()
+                                && progress.tool_name != SHELL_TOOL_NAME
+                                && progress.tool_name != GPT_SHELL_TOOL_NAME =>
+                        {
+                            continue;
+                        }
+                        // Most ext-shell tests exercise tool payload semantics rather
+                        // than the peer/canonical wire split. Normalize reports back
+                        // to their canonical payload shape here; focused protocol
+                        // tests inspect `read_raw_message` instead.
+                        Event::ToolResultReported(result) => {
+                            return Ok(Some(Event::ToolResult(result)));
+                        }
+                        Event::ToolErrorReported(error) => {
+                            return Ok(Some(Event::ToolError(error)));
+                        }
+                        Event::ToolCancelledReported(cancelled) => {
+                            return Ok(Some(Event::ToolCancelled(cancelled)));
+                        }
+                        event => return Ok(Some(event)),
                     }
-                    // Most ext-shell tests exercise tool payload semantics rather
-                    // than the peer/canonical wire split. Normalize reports back
-                    // to their canonical payload shape here; focused protocol
-                    // tests inspect `read_raw_message` instead.
-                    Event::ToolResultReported(result) => {
-                        return Ok(Some(Event::ToolResult(result)));
-                    }
-                    Event::ToolErrorReported(error) => {
-                        return Ok(Some(Event::ToolError(error)));
-                    }
-                    Event::ToolCancelledReported(cancelled) => {
-                        return Ok(Some(Event::ToolCancelled(cancelled)));
-                    }
-                    event => return Ok(Some(event)),
-                },
+                }
                 Some(_) => continue,
             }
         }
@@ -262,6 +397,40 @@ impl<R: std::io::Read> EventReader<R> {
 
     fn read_raw_message(&mut self) -> Result<Option<HarnessInputMessage>, tau_proto::DecodeError> {
         self.inner.read_message()
+    }
+
+    /// Checks an armed deadline before reading, skipping, or accepting a
+    /// message.
+    fn check_deadline(&self) -> Result<(), tau_proto::DecodeError> {
+        if let Some(control) = &self.deadline {
+            control
+                .remaining()
+                .map(|_| ())
+                .map_err(tau_proto::DecodeError::Io)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl EventReader<BufReader<DeadlineSocket>> {
+    /// Builds a test reader whose socket reads can be bounded by scoped
+    /// deadlines.
+    fn deadline_aware(stream: UnixStream) -> Self {
+        let (stream, deadline) = DeadlineSocket::new(stream);
+        Self {
+            inner: HarnessInputReader::new(BufReader::new(stream)),
+            deadline: Some(deadline),
+        }
+    }
+
+    /// Arms an absolute read deadline and restores prior state when the guard
+    /// drops.
+    fn arm_deadline(&self, deadline: Instant) -> DeadlineGuard {
+        self.deadline
+            .as_ref()
+            .expect("deadline-aware event reader")
+            .arm(deadline)
     }
 }
 
@@ -355,11 +524,11 @@ fn spawn_extension_with_exit_and_prefix(
         .map_err(|error| format!("extension should run: {error}"));
         let _ = done_tx.send(result);
     });
-    let reader = EventReader::new(BufReader::new(
+    let reader = EventReader::deadline_aware(
         harness_stream
             .try_clone()
             .expect("harness reader clone should succeed"),
-    ));
+    );
     let mut writer = EventWriter::new(BufWriter::new(harness_stream));
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
@@ -564,7 +733,7 @@ fn ui_shell_command(command_id: &str, command: &str) -> Event {
 /// Consumes startup events (tool registration declarations). The
 /// hello/subscribe/ready messages are filtered out by the test-side
 /// `EventReader` wrapper.
-fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
+fn drain_startup(reader: &mut TestExtensionReader) {
     for expected in [
         EventName::TOOL_REGISTRATION_DECLARED,                  // echo
         EventName::TOOL_REGISTRATION_DECLARED,                  // read
@@ -595,15 +764,23 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
 
 fn wait_for_user_shell_progress(reader: &mut TestExtensionReader, command_id: &str, text: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline_guard = reader.arm_deadline(deadline);
     loop {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for user shell progress"
         );
-        match reader.read_event().expect("read progress") {
+        match reader.read_event().unwrap_or_else(|error| {
+            if matches!(&error, tau_proto::DecodeError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+            {
+                panic!("timed out waiting for user shell progress");
+            }
+            panic!("read progress: {error}");
+        }) {
             Some(Event::ShellCommandProgressReported(progress))
                 if progress.command_id == command_id && progress.chunk.contains(text) =>
             {
+                deadline_guard.finish();
                 return;
             }
             Some(_) => {}
@@ -617,15 +794,23 @@ fn wait_for_user_shell_finished(
     command_id: &str,
 ) -> tau_proto::ShellCommandFinished {
     let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline_guard = reader.arm_deadline(deadline);
     loop {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for user shell finish"
         );
-        match reader.read_event().expect("read finish") {
+        match reader.read_event().unwrap_or_else(|error| {
+            if matches!(&error, tau_proto::DecodeError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+            {
+                panic!("timed out waiting for user shell finish");
+            }
+            panic!("read finish: {error}");
+        }) {
             Some(Event::ShellCommandFinishedReported(finished))
                 if finished.command_id == command_id =>
             {
+                deadline_guard.finish();
                 return finished;
             }
             Some(_) => {}
@@ -867,6 +1052,7 @@ fn test_action_invocation_id(value: impl AsRef<str>) -> tau_proto::ActionInvocat
 
 mod agent_discovery;
 mod argument_and_output_helpers;
+mod deadline_reader;
 mod directory_locking;
 mod extension_lifecycle;
 mod filesystem_tools;

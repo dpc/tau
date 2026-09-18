@@ -1991,14 +1991,22 @@ fn shell_tool_cancel_request_stops_running_command_quickly() {
     writer.flush().expect("flush invoke");
 
     let started = Instant::now();
+    let progress_deadline = reader.arm_deadline(started + Duration::from_secs(2));
     loop {
         assert!(started.elapsed() < Duration::from_secs(2));
-        match reader.read_event().expect("read") {
+        match reader.read_event().unwrap_or_else(|error| {
+            if matches!(&error, tau_proto::DecodeError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+            {
+                panic!("shell progress timed out");
+            }
+            panic!("read shell progress: {error}");
+        }) {
             Some(Event::ToolProgressReported(progress)) if progress.call_id == call_id => break,
             Some(_) => continue,
             None => panic!("extension closed before shell started"),
         }
     }
+    progress_deadline.finish();
 
     writer
         .write_event(&Event::ToolCancelRequest(ToolCancelRequest {
@@ -2008,14 +2016,22 @@ fn shell_tool_cancel_request_stops_running_command_quickly() {
     writer.flush().expect("flush cancel");
 
     let deadline = Instant::now() + Duration::from_secs(3);
+    let cancellation_deadline = reader.arm_deadline(deadline);
     loop {
         assert!(Instant::now() < deadline, "shell cancellation timed out");
-        match reader.read_event().expect("read") {
+        match reader.read_event().unwrap_or_else(|error| {
+            if matches!(&error, tau_proto::DecodeError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+            {
+                panic!("shell cancellation timed out");
+            }
+            panic!("read shell cancellation: {error}");
+        }) {
             Some(Event::ToolCancelled(cancelled)) if cancelled.call_id == call_id => break,
             Some(_) => continue,
             None => panic!("extension closed before cancellation"),
         }
     }
+    cancellation_deadline.finish();
 
     writer
         .write_frame(&disconnect_frame(None))
