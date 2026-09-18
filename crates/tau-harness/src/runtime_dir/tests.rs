@@ -1651,6 +1651,10 @@ fn claim_record_byte_limit_is_inclusive_and_bounded() {
     claim.file.write_all(&exact).expect("write exact claim");
     claim.file.flush().expect("flush exact claim");
     assert_eq!(
+        claim.file.metadata().expect("inspect exact claim").len(),
+        MAX_CLAIM_BYTES
+    );
+    assert_eq!(
         read_claim(&mut claim.file)
             .expect("read exact claim")
             .session_id,
@@ -1658,9 +1662,21 @@ fn claim_record_byte_limit_is_inclusive_and_bounded() {
     );
 
     claim.file.set_len(0).expect("truncate oversized claim");
+    claim
+        .file
+        .seek(SeekFrom::Start(0))
+        .expect("rewind oversized claim");
     exact.push(b' ');
     claim.file.write_all(&exact).expect("write oversized claim");
     claim.file.flush().expect("flush oversized claim");
+    assert_eq!(
+        claim
+            .file
+            .metadata()
+            .expect("inspect oversized claim")
+            .len(),
+        MAX_CLAIM_BYTES + 1
+    );
     assert!(read_claim(&mut claim.file).is_err());
 }
 
