@@ -2756,7 +2756,9 @@ fn session_store_validates_persisted_membership_events_on_load() {
 fn session_store_rejects_path_escaping_session_ids() {
     // Session ids are used as directory names. They must be a single safe path
     // component so raw protocol ids cannot escape the configured store root.
-    let sessions_dir = temp_dir("sessions-path-safe");
+    let outer = temp_dir("sessions-path-safe");
+    // Nest the store so the rejected traversal targets this fixture's sibling.
+    let sessions_dir = outer.join("sessions");
     let mut store = SessionStore::open_fixture(&sessions_dir).expect("open session store");
 
     let error = store
@@ -2767,14 +2769,15 @@ fn session_store_rejects_path_escaping_session_ids() {
         )
         .expect_err("path escaping id must fail");
     assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
-    assert!(!sessions_dir.join("..").join("escaped").exists());
+    assert!(!outer.join("escaped").exists());
 
     let error = store
         .session_events("/tmp/escaped")
         .expect_err("absolute id must fail");
     assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
 
-    let _ = std::fs::remove_dir_all(sessions_dir);
+    drop(store);
+    let _ = std::fs::remove_dir_all(outer);
 }
 
 /// Session storage and protocol decoding must enforce one identifier grammar
