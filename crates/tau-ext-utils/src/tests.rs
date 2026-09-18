@@ -1734,9 +1734,124 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
         }
     }
 
+    send_read_image_start(&mut writer, &key, "bounded-replacement", 49);
+    writer.flush().expect("flush bounded replacement");
+    loop {
+        let frame = reader
+            .read_message()
+            .expect("bounded replacement output")
+            .expect("frame");
+        let HarnessInputMessage::Emit(emit) = frame else {
+            continue;
+        };
+        if let Event::ToolErrorReported(error) = *emit.event
+            && error.call_id.as_str() == "bounded-replacement"
+        {
+            assert_eq!(error.message, "too many active image reads");
+            break;
+        }
+    }
+    let bounded_descriptor =
+        tau_proto::ArtifactDescriptor::new(key.clone(), bytes.len() as u64).expect("descriptor");
+    for (index, open) in bounded_opens.iter().enumerate() {
+        let result = if index + 1 == crate::artifact_image::MAX_ACTIVE_READS {
+            Err(tau_proto::ArtifactError::Unavailable)
+        } else {
+            Ok(tau_proto::ArtifactValue::Opened {
+                read: tau_proto::ArtifactReadId::parse(format!("bounded-read-{index}"))
+                    .expect("read id"),
+                descriptor: bounded_descriptor.clone(),
+            })
+        };
+        writer
+            .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+                tau_proto::ArtifactResult {
+                    request_id: open.request_id.clone(),
+                    result,
+                },
+            )))
+            .expect("bounded late Open result");
+    }
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: bounded_opens[0].request_id.clone(),
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("bounded-duplicate").expect("read id"),
+                    descriptor: bounded_descriptor,
+                }),
+            },
+        )))
+        .expect("duplicate bounded late Open");
+    writer.flush().expect("flush bounded late Opens");
+    for index in 0..crate::artifact_image::MAX_ACTIVE_READS - 1 {
+        let close = loop {
+            match reader
+                .read_message()
+                .expect("bounded cleanup output")
+                .expect("frame")
+            {
+                HarnessInputMessage::ArtifactRequest(request) => break request,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(
+                        emit.event.as_ref(),
+                        Event::ToolResultReported(result)
+                            if result.call_id.as_str().starts_with("bounded-")
+                    ) || matches!(
+                        emit.event.as_ref(),
+                        Event::ToolErrorReported(error)
+                            if error.call_id.as_str().starts_with("bounded-")
+                    ) || matches!(
+                        emit.event.as_ref(),
+                        Event::ToolCancelledReported(cancelled)
+                            if cancelled.call_id.as_str().starts_with("bounded-")
+                    ) =>
+                {
+                    panic!("late cleanup must not publish another bounded terminal");
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(close.expected_session_id, session_id);
+        let tau_proto::ArtifactOp::Close { read } = close.op else {
+            panic!("late successful canceled Open must only issue Close");
+        };
+        assert_eq!(read.as_str(), format!("bounded-read-{index}"));
+    }
+
     send_read_image_start(&mut writer, &key, "oversized", 50);
     writer.flush().expect("flush oversized start");
-    let oversized_open = next_artifact_request(&mut reader);
+    let oversized_open = loop {
+        match reader
+            .read_message()
+            .expect("post-cleanup output")
+            .expect("frame")
+        {
+            HarnessInputMessage::ArtifactRequest(request) => break request,
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ToolResultReported(result)
+                        if result.call_id.as_str().starts_with("bounded-")
+                ) || matches!(
+                    emit.event.as_ref(),
+                    Event::ToolErrorReported(error)
+                        if error.call_id.as_str().starts_with("bounded-")
+                ) || matches!(
+                    emit.event.as_ref(),
+                    Event::ToolCancelledReported(cancelled)
+                        if cancelled.call_id.as_str().starts_with("bounded-")
+                ) =>
+            {
+                panic!("late cleanup must not publish another bounded terminal");
+            }
+            _ => {}
+        }
+    };
+    assert!(
+        matches!(oversized_open.op, tau_proto::ArtifactOp::Open { .. }),
+        "cleanup retirement must reclaim capacity without duplicate Close"
+    );
     let oversized_descriptor = tau_proto::ArtifactDescriptor::new(
         key.clone(),
         (crate::read_image::MAX_SOURCE_BYTES + 1) as u64,
@@ -1918,8 +2033,12 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
     writer.flush().expect("flush stale race close");
 
     send_read_image_start(&mut writer, &key, "shutdown-open", 70);
+    send_read_image_start(&mut writer, &key, "shutdown-cleanup", 71);
+    send_read_image_start(&mut writer, &key, "disconnect-cleanup", 72);
     writer.flush().expect("flush shutdown start");
     let shutdown_open = next_artifact_request(&mut reader);
+    let shutdown_cleanup_open = next_artifact_request(&mut reader);
+    let _disconnect_cleanup_open = next_artifact_request(&mut reader);
     let shutdown_descriptor =
         tau_proto::ArtifactDescriptor::new(key.clone(), bytes.len() as u64).expect("descriptor");
     writer
@@ -1928,27 +2047,94 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
                 request_id: shutdown_open.request_id,
                 result: Ok(tau_proto::ArtifactValue::Opened {
                     read: tau_proto::ArtifactReadId::parse("shutdown-read").expect("read id"),
-                    descriptor: shutdown_descriptor,
+                    descriptor: shutdown_descriptor.clone(),
                 }),
             },
         )))
         .expect("shutdown open");
     writer.flush().expect("flush shutdown open");
     let _shutdown_read = next_artifact_request(&mut reader);
+    send_read_image_cancel(&mut writer, "shutdown-cleanup", 73);
+    send_read_image_cancel(&mut writer, "disconnect-cleanup", 74);
+    writer
+        .flush()
+        .expect("flush shutdown cleanup cancellations");
+    let mut shutdown_cancellations = 0;
+    while shutdown_cancellations < 2 {
+        let frame = reader
+            .read_message()
+            .expect("shutdown cancellation output")
+            .expect("frame");
+        if matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(*emit.event, Event::ToolCancelledReported(_))
+        ) {
+            shutdown_cancellations += 1;
+        }
+    }
     writer
         .write_message(&HarnessOutputMessage::Deliver(
             tau_proto::EventDelivery::live(
-                UnixMicros::new(71),
-                Event::SessionShutdown(tau_proto::SessionShutdown { session_id }),
+                UnixMicros::new(75),
+                Event::SessionShutdown(tau_proto::SessionShutdown {
+                    session_id: session_id.clone(),
+                }),
             ),
         ))
         .expect("session shutdown");
     writer.flush().expect("flush shutdown");
     let shutdown_close = next_artifact_request(&mut reader);
-    assert!(matches!(
-        shutdown_close.op,
-        tau_proto::ArtifactOp::Close { .. }
-    ));
+    assert_eq!(shutdown_close.expected_session_id, session_id);
+    let tau_proto::ArtifactOp::Close { read } = shutdown_close.op else {
+        panic!("session shutdown must close the active read");
+    };
+    assert_eq!(read.as_str(), "shutdown-read");
+    writer
+        .write_message(&HarnessOutputMessage::ArtifactResult(Box::new(
+            tau_proto::ArtifactResult {
+                request_id: shutdown_cleanup_open.request_id,
+                result: Ok(tau_proto::ArtifactValue::Opened {
+                    read: tau_proto::ArtifactReadId::parse("shutdown-cleanup-read")
+                        .expect("read id"),
+                    descriptor: shutdown_descriptor,
+                }),
+            },
+        )))
+        .expect("late Open after session shutdown");
+    writer.flush().expect("flush late shutdown Open");
+    let late_shutdown_close = loop {
+        match reader
+            .read_message()
+            .expect("late shutdown cleanup output")
+            .expect("frame")
+        {
+            HarnessInputMessage::ArtifactRequest(request) => break request,
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ToolResultReported(result)
+                        if result.call_id.as_str() == "shutdown-cleanup"
+                ) || matches!(
+                    emit.event.as_ref(),
+                    Event::ToolErrorReported(error)
+                        if error.call_id.as_str() == "shutdown-cleanup"
+                ) || matches!(
+                    emit.event.as_ref(),
+                    Event::ToolCancelledReported(cancelled)
+                        if cancelled.call_id.as_str() == "shutdown-cleanup"
+                ) =>
+            {
+                panic!("late shutdown cleanup must not publish another terminal");
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(late_shutdown_close.expected_session_id, session_id);
+    let tau_proto::ArtifactOp::Close { read } = late_shutdown_close.op else {
+        panic!("late shutdown cleanup must issue Close");
+    };
+    assert_eq!(read.as_str(), "shutdown-cleanup-read");
 
     writer
         .write_message(&HarnessOutputMessage::Disconnect(

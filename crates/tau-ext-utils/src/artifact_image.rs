@@ -30,7 +30,10 @@ pub(crate) struct ArtifactImageManager {
     /// Active tool calls and their exact transfer state.
     calls: HashMap<ToolCallId, ActiveCall>,
     /// Outstanding Artifact requests mapped back to their tool calls.
-    requests: HashMap<ArtifactRequestId, ToolCallId>,
+    requests: HashMap<ArtifactRequestId, ForegroundRequest>,
+    /// Canceled Opens retained only until their exact response can be cleaned
+    /// up.
+    cleanup_opens: HashMap<ArtifactRequestId, tau_proto::SessionId>,
     /// Verified jobs waiting for the single decoder.
     queued_decodes: VecDeque<DecodeJob>,
     /// Whether one decoder worker currently owns the process-wide decode
@@ -64,6 +67,14 @@ enum ActiveCall {
     },
 }
 
+/// Correlation retained for one foreground Artifact request.
+struct ForegroundRequest {
+    /// Tool call that owns the foreground request.
+    call_id: ToolCallId,
+    /// Exact session used when the request was sent.
+    session: tau_proto::SessionId,
+}
+
 /// One verified original awaiting off-loop decode.
 struct DecodeJob {
     /// Original routed invocation identity.
@@ -95,6 +106,7 @@ impl ArtifactImageManager {
             session: None,
             calls: HashMap::new(),
             requests: HashMap::new(),
+            cleanup_opens: HashMap::new(),
             queued_decodes: VecDeque::new(),
             decode_active: false,
             completions: Arc::new(Mutex::new(VecDeque::new())),
@@ -115,7 +127,7 @@ impl ArtifactImageManager {
 
     /// Starts one bounded foreground artifact image read.
     pub(crate) fn start(&mut self, invoke: ToolStarted) {
-        if MAX_ACTIVE_READS <= self.calls.len() {
+        if MAX_ACTIVE_READS <= self.calls.len() + self.cleanup_opens.len() {
             self.report_error(&invoke, "too many active image reads".to_owned());
             return;
         }
@@ -142,10 +154,20 @@ impl ArtifactImageManager {
     /// Accepts one exact correlated Artifact response.
     pub(crate) fn handle_result(&mut self, result: ArtifactResult) {
         let frame = HarnessOutputMessage::ArtifactResult(Box::new(result.clone()));
-        let Some(call_id) = self.requests.remove(&result.request_id) else {
+        if let Some(session) = self.cleanup_opens.remove(&result.request_id) {
+            if tau_proto::artifact_frame_fits(&frame)
+                && let Ok(tau_proto::ArtifactValue::Opened { read, .. }) = result.result
+            {
+                let _ = self
+                    .client
+                    .start_request(session, tau_proto::ArtifactOp::Close { read });
+            }
+            return;
+        }
+        let Some(request) = self.requests.remove(&result.request_id) else {
             return;
         };
-        let Some(mut call) = self.calls.remove(&call_id) else {
+        let Some(mut call) = self.calls.remove(&request.call_id) else {
             return;
         };
         if !tau_proto::artifact_frame_fits(&frame) {
@@ -209,19 +231,35 @@ impl ArtifactImageManager {
             }
             return;
         }
-        self.calls.insert(call_id.clone(), call);
-        self.start_next(&call_id);
+        self.calls.insert(request.call_id.clone(), call);
+        self.start_next(&request.call_id);
     }
 
     /// Cancels one active read and reports one ordinary foreground
     /// cancellation.
     pub(crate) fn cancel(&mut self, cancelled: &ToolCancelled) {
-        self.requests.retain(|_, owner| owner != &cancelled.call_id);
         self.queued_decodes
             .retain(|job| job.invoke.call_id != cancelled.call_id);
         let Some(call) = self.calls.remove(&cancelled.call_id) else {
             return;
         };
+        let retain_open_cleanup = matches!(
+            &call,
+            ActiveCall::Downloading { download, .. } if download.descriptor().is_none()
+        );
+        let request_ids = self
+            .requests
+            .iter()
+            .filter(|(_, request)| request.call_id == cancelled.call_id)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            if let Some(request) = self.requests.remove(&request_id)
+                && retain_open_cleanup
+            {
+                self.cleanup_opens.insert(request_id, request.session);
+            }
+        }
         if let ActiveCall::Decoding { cancelled, .. } = &call {
             cancelled.store(true, Ordering::Release);
         }
@@ -286,8 +324,9 @@ impl ArtifactImageManager {
         self.output_error.take()
     }
 
-    /// Releases all live transfers during session or process shutdown.
-    pub(crate) fn shutdown(&mut self) {
+    /// Releases foreground work while retaining canceled Open cleanup ownership
+    /// on a still-receiving transport.
+    pub(crate) fn shutdown_session(&mut self) {
         self.requests.clear();
         self.queued_decodes.clear();
         let calls = self.calls.drain().map(|(_, call)| call).collect::<Vec<_>>();
@@ -298,6 +337,12 @@ impl ArtifactImageManager {
             self.release(call);
         }
         self.session = None;
+    }
+
+    /// Discards all ownership when the transport can no longer receive replies.
+    pub(crate) fn shutdown_transport(&mut self) {
+        self.shutdown_session();
+        self.cleanup_opens.clear();
     }
 
     fn start_next(&mut self, call_id: &ToolCallId) {
@@ -311,10 +356,20 @@ impl ArtifactImageManager {
             .session
             .clone()
             .ok_or(tau_client::ClientError::InvalidArtifactRequest)
-            .and_then(|session| self.client.start_request(session, op));
+            .and_then(|session| {
+                self.client
+                    .start_request(session.clone(), op)
+                    .map(|request_id| (request_id, session))
+            });
         match result {
-            Ok(request_id) => {
-                self.requests.insert(request_id, call_id.clone());
+            Ok((request_id, session)) => {
+                self.requests.insert(
+                    request_id,
+                    ForegroundRequest {
+                        call_id: call_id.clone(),
+                        session,
+                    },
+                );
             }
             Err(error) => {
                 if let Some(call) = self.calls.remove(call_id) {

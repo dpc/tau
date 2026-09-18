@@ -623,7 +623,7 @@ impl TimerRuntime {
                     tau_client::ManualRuntimePoll::Message(message) => {
                         if matches!(message, tau_proto::HarnessOutputMessage::Disconnect(_)) {
                             if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
-                                images.shutdown();
+                                images.shutdown_transport();
                             }
                             let _state = runtime.finish_detached();
                             return Ok(());
@@ -638,7 +638,7 @@ impl TimerRuntime {
                     }
                     tau_client::ManualRuntimePoll::InputClosed => {
                         if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
-                            images.shutdown();
+                            images.shutdown_transport();
                         }
                         let _state = runtime.finish()?;
                         return Ok(());
@@ -1485,7 +1485,7 @@ fn handle_delivery(
             }
             runtime.state_mut().clear_session_state();
             if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
-                images.shutdown();
+                images.shutdown_session();
             }
         }
         Event::SessionAgentUnloaded(event) => {
