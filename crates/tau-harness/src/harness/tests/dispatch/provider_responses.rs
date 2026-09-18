@@ -95,155 +95,72 @@ fn provider_response_stats_are_public_provider_updates() {
     h.shutdown().expect("shutdown");
 }
 
-/// Switching `selected_model` mid-conversation must bust the chain.
-/// The prior response was produced by a different model — its
-/// stored state on the upstream API is meaningless for the new
-/// model, and sending `previous_response_id` would either error or
-/// silently mix incompatible reasoning.
+/// A loaded agent's changed resolved model is forwarded on the next prompt
+/// without dropping or duplicating any prior conversation content.
 #[test]
-fn model_switch_invalidates_chain_anchor() {
+fn changed_resolved_model_preserves_complete_materialized_history() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.config.selected_model = Some("test/model-a".into());
+    add_routed_test_model(&mut h, "other/model");
+    let cid = ensure_test_user_agent(&mut h);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("loaded agent")
+        .identity
+        .model_override = Some("echo/model".into());
 
     h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
-    let spid1 = prompt1.agent_prompt_id.clone();
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        automatic_compaction_decision: None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
-
-        agent_prompt_id: spid1,
-        agent_id: prompt1.agent_id.clone(),
-        output_items: vec![ContextItem::Message(MessageItem {
-            role: ContextRole::Assistant,
-
-            content: vec![ContentPart::Text {
-                text: "first answer".to_owned(),
-            }],
-
-            phase: None,
-            responses_raw_json: None,
-        })],
-
-        stop_reason: tau_proto::ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                prompt_cache_read_ceiling_tokens: None,
-                cache: None,
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: Some("resp_abc".to_owned()),
-        ws_pool_delta: None,
-    })
-    .expect("finish first");
-
-    // The selected role resolves to a different model.
-    h.config.selected_model = Some("test/model-b".into());
+    assert_eq!(prompt1.model, tau_proto::ModelId::from("echo/model"));
+    finish_materialized_turn(&mut h, &prompt1, Some("resp_model"), false);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("loaded agent")
+        .identity
+        .model_override = Some("other/model".into());
 
     h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
-    assert_eq!(
-        prompt2.context.flatten().last().and_then(text_part),
-        Some("second")
-    );
+    assert_eq!(prompt2.model, tau_proto::ModelId::from("other/model"));
+    assert_complete_followup_history(&prompt1, &prompt2);
 
     h.shutdown().expect("shutdown");
 }
 
-/// A turn that didn't yield a `response_id` (Chat Completions
-/// backend, an error, etc.) must NOT anchor a chain. The next prompt
-/// has to be a full replay — pretending we have a chain we don't
-/// would make the upstream API reject the next call.
+/// Completed provider turns preserve the same complete materialized history
+/// whether or not the provider reports a response identifier.
 #[test]
-fn missing_response_id_leaves_chain_unset() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    h.config.selected_model = Some("test/model".into());
+fn completed_turn_response_id_does_not_change_materialized_history() {
+    for provider_response_id in [None, Some("resp_history")] {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
 
-    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
-        .expect("submit first");
-    let prompt1 = read_nth_prompt_created(&h, 0);
-    let spid1 = prompt1.agent_prompt_id.clone();
+        h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
+            .expect("submit first");
+        let prompt1 = read_nth_prompt_created(&h, 0);
+        finish_materialized_turn(
+            &mut h,
+            &prompt1,
+            provider_response_id,
+            provider_response_id.is_some(),
+        );
 
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        automatic_compaction_decision: None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
+        h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
+            .expect("submit second");
+        let prompt2 = read_nth_prompt_created(&h, 1);
+        assert_complete_followup_history(&prompt1, &prompt2);
 
-        agent_prompt_id: spid1,
-        agent_id: prompt1.agent_id.clone(),
-        output_items: vec![ContextItem::Message(MessageItem {
-            role: ContextRole::Assistant,
-
-            content: vec![ContentPart::Text {
-                text: "first answer".to_owned(),
-            }],
-
-            phase: None,
-            responses_raw_json: None,
-        })],
-
-        stop_reason: tau_proto::ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                prompt_cache_read_ceiling_tokens: None,
-                cache: None,
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("finish first");
-
-    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
-        .expect("submit second");
-    let prompt2 = read_nth_prompt_created(&h, 1);
-
-    assert_eq!(
-        prompt2.context.flatten().last().and_then(text_part),
-        Some("second")
-    );
-
-    h.shutdown().expect("shutdown");
+        h.shutdown().expect("shutdown");
+    }
 }
 
 /// Provider loss preserves one deferred live occurrence through receipt and
@@ -3587,19 +3504,22 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     h.shutdown().expect("shutdown");
 }
 
-/// Changing role-derived model parameters mid-conversation must bust the chain.
-/// The Codex Responses upstream stored its reasoning state against
-/// the *previous* turn's effort/verbosity/thinking-summary; sending
-/// a `previous_response_id` from a request whose non-input fields
-/// drifted would silently decohere the model's reasoning. The
-/// fingerprint check catches this before the round-trip — mirrors
-/// Pi's `requestBodiesMatchExceptInput`.
+/// Updated role effort is resolved against the routed model and forwarded on
+/// the next prompt without dropping or duplicating prior conversation content.
 #[test]
-fn params_drift_invalidates_chain_anchor() {
+fn updated_role_effort_preserves_complete_materialized_history() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.config.selected_model = Some("test/model".into());
+    let model = tau_proto::ModelId::from("echo/model");
+    h.provider_runtime
+        .model_info
+        .get_mut(&model)
+        .expect("echo model")
+        .efforts = tau_proto::ReasoningEffortCapability::mapped(vec![
+        tau_proto::NativeReasoningEffort::Low,
+        tau_proto::NativeReasoningEffort::High,
+    ]);
     h.config
         .available_roles
         .get_mut(&h.config.selected_role.clone())
@@ -3609,55 +3529,11 @@ fn params_drift_invalidates_chain_anchor() {
     h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
-    let spid1 = prompt1.agent_prompt_id.clone();
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        automatic_compaction_decision: None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
-
-        agent_prompt_id: spid1,
-        agent_id: prompt1.agent_id.clone(),
-        output_items: vec![ContextItem::Message(MessageItem {
-            role: ContextRole::Assistant,
-
-            content: vec![ContentPart::Text {
-                text: "first answer".to_owned(),
-            }],
-
-            phase: None,
-            responses_raw_json: None,
-        })],
-
-        stop_reason: tau_proto::ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                prompt_cache_read_ceiling_tokens: None,
-                cache: None,
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: Some("resp_abc".to_owned()),
-        ws_pool_delta: None,
-    })
-    .expect("finish first");
-
-    // User dials effort up between turns by updating the selected role
-    // override.
+    assert_eq!(
+        prompt1.model_params.effort,
+        tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::Low)
+    );
+    finish_materialized_turn(&mut h, &prompt1, Some("resp_effort"), false);
     h.config
         .available_roles
         .get_mut(&h.config.selected_role.clone())
@@ -3669,80 +3545,97 @@ fn params_drift_invalidates_chain_anchor() {
     let prompt2 = read_nth_prompt_created(&h, 1);
 
     assert_eq!(
-        prompt2.context.flatten().last().and_then(text_part),
-        Some("second")
+        prompt2.model_params.effort,
+        tau_proto::ReasoningSelection::native(tau_proto::NativeReasoningEffort::High)
     );
+    assert_complete_followup_history(&prompt1, &prompt2);
+
+    h.shutdown().expect("shutdown");
 }
 
-/// Counterpart: when the per-request fingerprint inputs *don't*
-/// change between turns, the chain anchor must remain valid. Locks
-/// in the "compute fingerprint over (system_prompt, tools, params)"
-/// surface — if a future change quietly mixes in some other input
-/// that drifts across turns (e.g. cwd, current date, session id),
-/// this test starts failing.
-#[test]
-fn stable_params_preserve_chain_anchor() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    h.config.selected_model = Some("test/model".into());
+fn add_routed_test_model(h: &mut Harness, model: &str) {
+    let source = tau_proto::ModelId::from("echo/model");
+    let target = tau_proto::ModelId::from(model);
+    let mut info = h.provider_runtime.model_info[&source].clone();
+    info.id = target.clone();
+    let route = h.provider_runtime.model_routes[&source].clone();
+    h.provider_runtime.model_info.insert(target.clone(), info);
+    h.provider_runtime.model_routes.insert(target, route);
+}
 
-    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
-        .expect("submit first");
-    let prompt1 = read_nth_prompt_created(&h, 0);
-    let spid1 = prompt1.agent_prompt_id.clone();
+fn finish_materialized_turn(
+    h: &mut Harness,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider_response_id: Option<&str>,
+    responses_metadata: bool,
+) {
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
-
-        agent_prompt_id: spid1,
-        agent_id: prompt1.agent_id.clone(),
-        output_items: vec![ContextItem::Message(MessageItem {
-            role: ContextRole::Assistant,
-
-            content: vec![ContentPart::Text {
-                text: "first answer".to_owned(),
-            }],
-
-            phase: None,
-            responses_raw_json: None,
-        })],
-
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
+        output_items: vec![assistant_answer()],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                prompt_cache_read_ceiling_tokens: None,
-                cache: None,
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
+        usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
-        backend: Some(responses_backend()),
+        backend: responses_metadata.then(responses_backend),
         provider_attempt: Default::default(),
-        provider_response_id: Some("resp_xyz".to_owned()),
+        provider_response_id: provider_response_id.map(str::to_owned),
         ws_pool_delta: None,
     })
     .expect("finish first");
+}
 
-    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
-        .expect("submit second");
-    let prompt2 = read_nth_prompt_created(&h, 1);
+fn assistant_answer() -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text {
+            text: "first answer".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    })
+}
 
+fn assert_complete_followup_history(
+    prompt1: &tau_proto::AgentPromptCreated,
+    prompt2: &tau_proto::AgentPromptCreated,
+) {
+    let prefix = prompt1.context.flatten();
+    let history = prompt2.context.flatten();
+    assert_eq!(history.len(), prefix.len() + 2);
+    assert_eq!(&history[..prefix.len()], prefix.as_slice());
     assert_eq!(
-        prompt2.context.flatten().last().and_then(text_part),
-        Some("second")
+        history[prefix.len()],
+        assistant_answer(),
+        "accepted assistant output must follow the complete first prompt"
+    );
+    assert_eq!(
+        history[prefix.len() + 1],
+        ContextItem::Message(MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::Text {
+                text: "second".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        }),
+        "new user input must follow the accepted assistant output"
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|item| **item == assistant_answer())
+            .count(),
+        1,
+        "accepted assistant output must occur exactly once"
     );
 }
