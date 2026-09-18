@@ -3184,8 +3184,9 @@ fn compaction_boundary_validates_explicit_parent() {
 }
 
 /// Ensures bounded canonical opaque boundaries have the same complete core
-/// projection when appended live or reconstructed cold, while rejected
-/// boundaries cannot partially mutate that projection or consume a sequence.
+/// projection when appended live or reconstructed cold, while each isolated
+/// rejection cause cannot partially mutate that projection or consume a
+/// sequence.
 #[test]
 fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
     fn record(seq: u64, event: Event) -> PersistedAgentEvent {
@@ -3282,18 +3283,21 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         ));
     }
 
-    for (label, replacement_window, transaction_id) in [
+    for (label, replacement_window, transaction_id, expected_diagnostic) in [
         (
             "empty replacement",
             Vec::new(),
-            tau_proto::CompactionTransactionId::parse("ct-invalid-empty")
+            tau_proto::CompactionTransactionId::parse("ct-invalid")
                 .expect("bounded test transaction id"),
+            "invalid compaction replacement window: replacement window is empty",
         ),
         (
             "harness trigger",
             vec![ContextItem::CompactionTrigger],
-            tau_proto::CompactionTransactionId::parse("ct-invalid-trigger")
+            tau_proto::CompactionTransactionId::parse("ct-invalid")
                 .expect("bounded test transaction id"),
+            "invalid compaction replacement window: replacement window contains a harness \
+             compaction trigger",
         ),
         (
             "unknown transaction",
@@ -3305,6 +3309,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             )],
             tau_proto::CompactionTransactionId::parse("ct-other")
                 .expect("bounded test transaction id"),
+            "compaction boundary references unknown transaction",
         ),
     ] {
         let started = compaction_start("ct-invalid");
@@ -3332,9 +3337,12 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             }),
         );
 
+        let error = live
+            .apply_persisted_record(&invalid)
+            .expect_err("invalid compaction boundary must reject");
         assert!(
-            live.apply_persisted_record(&invalid).is_err(),
-            "{label} must reject"
+            error.to_string().contains(expected_diagnostic),
+            "{label} must reject for {expected_diagnostic:?}, got {error}"
         );
         assert_eq!(live, before, "{label} must leave the projection unchanged");
         assert_eq!(
