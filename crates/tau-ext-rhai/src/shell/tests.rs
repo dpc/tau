@@ -136,17 +136,28 @@ fn shell_cancel_observes_cancellation_before_wait() {
 }
 
 /// Ensures completion wakes a blocked cancellation watcher so ordinary shell
-/// completion cannot wedge while joining the watcher thread.
+/// completion cannot wedge while joining the watcher thread. The watcher
+/// reports readiness while holding the state mutex, and completion cannot
+/// acquire that mutex until `wait_while` has atomically released it to begin
+/// waiting.
 #[test]
 fn shell_cancel_completion_wakes_waiter() {
     let cancel = ShellCancel::default();
     let watcher_cancel = cancel.clone();
     let (tx, rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let watcher = std::thread::spawn(move || {
-        watcher_cancel.wait_until_requested_or_completed();
+        let guard = watcher_cancel.inner.lock_state();
+        ready_tx
+            .send(())
+            .expect("test readiness receiver should stay alive");
+        watcher_cancel.wait_until_requested_or_completed_with_guard(guard);
         tx.send(watcher_cancel.should_report_cancel())
             .expect("test receiver should stay alive");
     });
+    ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cancellation watcher should begin waiting");
     cancel.mark_completed();
     assert!(
         !rx.recv_timeout(Duration::from_secs(1))

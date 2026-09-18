@@ -53,6 +53,15 @@ impl ShellCancel {
     /// Block until cancellation is requested or the child process exits.
     fn wait_until_requested_or_completed(&self) {
         let guard = self.inner.lock_state();
+        self.wait_until_requested_or_completed_with_guard(guard);
+    }
+
+    /// Wait on the cancellation condition from a guard holding this cancel
+    /// state mutex.
+    fn wait_until_requested_or_completed_with_guard(
+        &self,
+        guard: std::sync::MutexGuard<'_, ShellCancelState>,
+    ) {
         drop(
             self.inner
                 .changed
