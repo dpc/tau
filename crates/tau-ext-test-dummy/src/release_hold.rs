@@ -8,7 +8,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use tau_client::{ClientError, ClientResult};
@@ -22,6 +22,10 @@ const RELEASE_FRAME_MAX_BYTES: usize = 4096;
 const PENDING_CONNECTION_LIMIT: usize = 8;
 /// Maximum time a serial reader lets one incomplete client occupy the worker.
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Optional exact-path notification that a test client reached serial assembly.
+#[cfg(test)]
+static FRAME_READ_HOOK: Mutex<Option<(PathBuf, mpsc::Sender<()>)>> = Mutex::new(None);
 
 /// Validated configuration for one authenticated release socket.
 #[derive(Clone, Debug)]
@@ -284,21 +288,26 @@ impl ReleaseWorker {
                 Ok(WorkerInput::Shutdown) | Err(mpsc::RecvError) => break,
                 Ok(WorkerInput::Connection(mut stream)) => {
                     pending.fetch_sub(1, Ordering::AcqRel);
-                    if let Err(error) = configure_client_timeout(&stream, CLIENT_READ_TIMEOUT) {
-                        if claim(&terminal, TerminalOwner::Worker) {
-                            terminals.send(
-                                worker_error(
-                                    &invoke,
-                                    format!("failed to bound release client read: {error}"),
-                                )
-                                .into(),
-                            );
+                    notify_frame_read_started(&socket_path);
+                    match read_release_frame(&mut stream, CLIENT_READ_TIMEOUT) {
+                        Ok(release) => {
+                            authenticated |= release.is_some_and(|release| {
+                                release.call_id == invoke.call_id && release.release_nonce == nonce
+                            });
                         }
-                        break;
+                        Err(error) => {
+                            if claim(&terminal, TerminalOwner::Worker) {
+                                terminals.send(
+                                    worker_error(
+                                        &invoke,
+                                        format!("failed to bound release client read: {error}"),
+                                    )
+                                    .into(),
+                                );
+                            }
+                            break;
+                        }
                     }
-                    authenticated |= read_release_frame(&mut stream).is_some_and(|release| {
-                        release.call_id == invoke.call_id && release.release_nonce == nonce
-                    });
                 }
                 Ok(WorkerInput::AcceptError(error)) => {
                     if claim(&terminal, TerminalOwner::Worker) {
@@ -334,6 +343,35 @@ impl ReleaseWorker {
         let _ = acceptor.join();
     }
 }
+
+/// Installs one exact-socket frame-read notification for lifecycle tests.
+#[cfg(test)]
+pub(super) fn install_frame_read_hook(socket_path: PathBuf, started: mpsc::Sender<()>) {
+    *FRAME_READ_HOOK.lock().expect("frame read hook") = Some((socket_path, started));
+}
+
+/// Removes the lifecycle-test frame-read notification.
+#[cfg(test)]
+pub(super) fn clear_frame_read_hook() {
+    FRAME_READ_HOOK.lock().expect("frame read hook").take();
+}
+
+/// Notifies a matching lifecycle test after a client is dequeued for assembly.
+#[cfg(test)]
+fn notify_frame_read_started(socket_path: &std::path::Path) {
+    let mut hook = FRAME_READ_HOOK.lock().expect("frame read hook");
+    if hook
+        .as_ref()
+        .is_some_and(|(expected_path, _)| expected_path == socket_path)
+        && let Some((_, started)) = hook.take()
+    {
+        let _ = started.send(());
+    }
+}
+
+/// Production builds have no lifecycle-test frame-read notification.
+#[cfg(not(test))]
+fn notify_frame_read_started(_socket_path: &std::path::Path) {}
 
 /// Applies the per-client read deadline and exposes setup failure to
 /// arbitration.
@@ -379,22 +417,52 @@ fn worker_error(invoke: &tau_proto::ToolStarted, message: String) -> ToolError {
     }
 }
 
-/// Reads one exactly bounded newline-terminated frame without waiting for EOF.
-fn read_release_frame(stream: &mut impl Read) -> Option<ReleaseFrame> {
+/// Reads one newline-terminated frame within a non-renewable elapsed budget.
+fn read_release_frame(
+    stream: &mut UnixStream,
+    budget: Duration,
+) -> std::io::Result<Option<ReleaseFrame>> {
+    let started = Instant::now();
+    read_release_frame_with(
+        stream,
+        budget,
+        || started.elapsed(),
+        configure_client_timeout,
+    )
+}
+
+/// Reads one exactly byte- and time-bounded frame through injectable test
+/// seams.
+fn read_release_frame_with<R>(
+    stream: &mut R,
+    budget: Duration,
+    mut elapsed: impl FnMut() -> Duration,
+    mut configure_timeout: impl FnMut(&R, Duration) -> std::io::Result<()>,
+) -> std::io::Result<Option<ReleaseFrame>>
+where
+    R: Read,
+{
     let mut bytes = Vec::with_capacity(RELEASE_FRAME_MAX_BYTES);
     let mut byte = [0];
     while bytes.len() < RELEASE_FRAME_MAX_BYTES {
+        let Some(remaining) = budget.checked_sub(elapsed()).filter(|time| !time.is_zero()) else {
+            return Ok(None);
+        };
+        configure_timeout(stream, remaining)?;
         match stream.read(&mut byte) {
-            Ok(0) => return None,
+            Ok(0) => return Ok(None),
             Ok(_) => {
                 bytes.push(byte[0]);
+                if budget <= elapsed() {
+                    return Ok(None);
+                }
                 if byte[0] == b'\n' {
                     bytes.pop();
-                    return serde_json::from_slice(&bytes).ok();
+                    return Ok(serde_json::from_slice(&bytes).ok());
                 }
             }
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         }
     }
-    None
+    Ok(None)
 }

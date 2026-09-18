@@ -5,7 +5,7 @@ use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tau_proto::{
     AgentPromptSubmitted, CborValue, Configure, Event, HarnessInputMessage, HarnessInputReader,
@@ -23,6 +23,8 @@ const NO_SIDE_EFFECT_READY_MARKER: &[u8] = b"hold_no_side_effect ready";
 const RELEASE_HOLD_READY_MARKER: &[u8] = b"hold_until_success_release ready";
 
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes installation of the single exact-path frame-read test hook.
+static FRAME_READ_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Panic-safe installation of one correlated production saturation hook.
 struct SaturationHookGuard;
@@ -30,6 +32,15 @@ struct SaturationHookGuard;
 impl Drop for SaturationHookGuard {
     fn drop(&mut self) {
         SATURATION_HOOK.lock().expect("saturation hook").take();
+    }
+}
+
+/// Panic-safe removal of one frame-read lifecycle test hook.
+struct FrameReadHookGuard;
+
+impl Drop for FrameReadHookGuard {
+    fn drop(&mut self) {
+        release_hold::clear_frame_read_hook();
     }
 }
 
@@ -431,6 +442,17 @@ fn unique_marker_path(label: &str) -> PathBuf {
 fn send_release_frame(socket_path: &std::path::Path, frame: &[u8]) {
     let mut stream = UnixStream::connect(socket_path).expect("connect release socket");
     stream.write_all(frame).expect("write release frame");
+}
+
+/// Writes a finite slowly progressing partial frame and stops when the worker
+/// rejects the client.
+fn write_progressing_partial(mut stream: UnixStream, writes: usize, interval: Duration) {
+    for _ in 0..writes {
+        if stream.write_all(b" ").is_err() {
+            return;
+        }
+        std::thread::sleep(interval);
+    }
 }
 
 fn cancel_restart(call_id: &str) -> HarnessOutputMessage {
@@ -1728,6 +1750,185 @@ fn release_hold_saturation_cancels_and_cleans_up_without_success() {
             .iter()
             .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolResultReported(_))))
     );
+    assert!(!socket_path.exists());
+    std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
+}
+
+/// Verifies a progressing partial client cannot renew its frame budget and
+/// delay correlated cancellation until the writer eventually stops.
+#[test]
+fn release_hold_progressing_partial_client_cannot_delay_cancellation() {
+    let _test_lock = FRAME_READ_TEST_LOCK.lock().expect("frame read test lock");
+    let socket_path = unique_socket_path("cancel-progressing");
+    let prefix = restart_input(&[
+        release_config(&socket_path, "fixture-nonce"),
+        invoke_restart(),
+    ]);
+    let suffix = restart_input(&[cancel_restart("call-1"), disconnect()]);
+    let (assembly_started, entered_assembly) = mpsc::channel();
+    release_hold::install_frame_read_hook(socket_path.clone(), assembly_started);
+    let _hook = FrameReadHookGuard;
+    let reader = SignalGatedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        ready: entered_assembly,
+        released: false,
+    };
+    let output = SharedWriter::with_readiness_marker(RELEASE_HOLD_READY_MARKER);
+    let readiness = output.readiness_barrier();
+    let client_path = socket_path.clone();
+    let client = std::thread::spawn(move || {
+        wait_for_readiness(&readiness);
+        let mut stream = UnixStream::connect(&client_path).expect("connect progressing client");
+        stream.write_all(b"{").expect("start partial frame");
+        write_progressing_partial(stream, 200, Duration::from_millis(10));
+    });
+
+    let started = Instant::now();
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng(reader, output.clone(), &mut rng).expect("run cancellation fixture");
+    let elapsed = started.elapsed();
+    client.join().expect("progressing release client");
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "cancellation waited {elapsed:?} for a progressing partial client"
+    );
+    let frames = decode_output(output.snapshot());
+    let terminals = frames
+        .iter()
+        .filter_map(emitted_event)
+        .filter(|event| {
+            matches!(event, Event::ToolCancelledReported(cancelled)
+                if cancelled.call_id.as_str() == "call-1")
+                || matches!(event, Event::ToolResultReported(result)
+                    if result.call_id.as_str() == "call-1")
+                || matches!(event, Event::ToolErrorReported(error)
+                    if error.call_id.as_str() == "call-1")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert!(matches!(
+        terminals[0],
+        Event::ToolCancelledReported(cancelled) if cancelled.call_id.as_str() == "call-1"
+    ));
+    assert!(!socket_path.exists());
+    std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
+}
+
+/// Verifies disconnect joins a worker reading a progressing partial client
+/// within the frame scale and emits no synthetic terminal.
+#[test]
+fn release_hold_progressing_partial_client_cannot_delay_disconnect() {
+    let _test_lock = FRAME_READ_TEST_LOCK.lock().expect("frame read test lock");
+    let socket_path = unique_socket_path("disconnect-progressing");
+    let prefix = restart_input(&[
+        release_config(&socket_path, "fixture-nonce"),
+        invoke_restart(),
+    ]);
+    let suffix = protocol_input(&[disconnect()]);
+    let (assembly_started, entered_assembly) = mpsc::channel();
+    release_hold::install_frame_read_hook(socket_path.clone(), assembly_started);
+    let _hook = FrameReadHookGuard;
+    let reader = SignalGatedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        ready: entered_assembly,
+        released: false,
+    };
+    let output = SharedWriter::with_readiness_marker(RELEASE_HOLD_READY_MARKER);
+    let readiness = output.readiness_barrier();
+    let client_path = socket_path.clone();
+    let client = std::thread::spawn(move || {
+        wait_for_readiness(&readiness);
+        let mut stream = UnixStream::connect(&client_path).expect("connect progressing client");
+        stream.write_all(b"{").expect("start partial frame");
+        write_progressing_partial(stream, 200, Duration::from_millis(10));
+    });
+
+    let started = Instant::now();
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng(reader, output.clone(), &mut rng).expect("run disconnect fixture");
+    let elapsed = started.elapsed();
+    client.join().expect("progressing release client");
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "disconnect waited {elapsed:?} for a progressing partial client"
+    );
+    let frames = decode_output(output.snapshot());
+    assert!(frames.iter().all(|frame| !matches!(
+        emitted_event(frame),
+        Some(Event::ToolResultReported(_))
+            | Some(Event::ToolErrorReported(_))
+            | Some(Event::ToolCancelledReported(_))
+    )));
+    assert!(!socket_path.exists());
+    std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
+}
+
+/// Verifies an expired progressing client is rejected without a timeout
+/// terminal and a later authenticated client can release the same hold.
+#[test]
+fn release_hold_accepts_authenticated_release_after_expired_client() {
+    let socket_path = unique_socket_path("release-after-expired");
+    let prefix = restart_input(&[
+        release_config(&socket_path, "fixture-nonce"),
+        invoke_restart(),
+    ]);
+    let suffix = protocol_input(&[disconnect()]);
+    let (client_done, client_finished) = mpsc::channel();
+    let reader = SignalGatedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        ready: client_finished,
+        released: false,
+    };
+    let output = SharedWriter::with_readiness_marker(RELEASE_HOLD_READY_MARKER);
+    let readiness = output.readiness_barrier();
+    let result = Arc::clone(&readiness);
+    let client_path = socket_path.clone();
+    let client = std::thread::spawn(move || {
+        wait_for_readiness(&readiness);
+        let stream = UnixStream::connect(&client_path).expect("connect progressing client");
+        let partial = std::thread::spawn(move || {
+            write_progressing_partial(stream, 200, Duration::from_millis(10));
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        send_release_frame(
+            &client_path,
+            b"{\"call_id\":\"call-1\",\"release_nonce\":\"fixture-nonce\"}\n",
+        );
+        wait_for_result(&result);
+        partial.join().expect("progressing partial writer");
+        client_done.send(()).expect("release protocol suffix");
+    });
+
+    let started = Instant::now();
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng(reader, output.clone(), &mut rng).expect("run release fixture");
+    let elapsed = started.elapsed();
+    client.join().expect("release clients");
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "authenticated release waited {elapsed:?} for expired client EOF"
+    );
+    let frames = decode_output(output.snapshot());
+    let terminals = frames
+        .iter()
+        .filter_map(emitted_event)
+        .filter(|event| {
+            matches!(event, Event::ToolResultReported(result)
+                if result.call_id.as_str() == "call-1")
+                || matches!(event, Event::ToolErrorReported(error)
+                    if error.call_id.as_str() == "call-1")
+                || matches!(event, Event::ToolCancelledReported(cancelled)
+                    if cancelled.call_id.as_str() == "call-1")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert!(matches!(terminals[0], Event::ToolResultReported(_)));
     assert!(!socket_path.exists());
     std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
 }
