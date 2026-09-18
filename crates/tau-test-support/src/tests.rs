@@ -126,6 +126,63 @@ fn runtime_daemon_echoes_one_client_and_joins() {
         .expect("one-client daemon should exit cleanly");
 }
 
+/// Daemon joins must retain a static-string panic payload rather than reporting
+/// the generic non-string fallback.
+#[test]
+fn daemon_join_reports_static_string_panic_payload() {
+    let daemon = DaemonHandle {
+        join_handle: thread::spawn(|| -> Result<(), HarnessError> {
+            std::panic::panic_any("static panic");
+        }),
+    };
+
+    let error = daemon
+        .join()
+        .expect_err("panicking daemon thread should report a join error");
+    assert!(matches!(
+        error,
+        HarnessError::ThreadJoin(message) if message == "daemon (static panic)"
+    ));
+}
+
+/// Daemon joins must retain an owned-string panic payload rather than reporting
+/// the generic non-string fallback.
+#[test]
+fn daemon_join_reports_owned_string_panic_payload() {
+    let daemon = DaemonHandle {
+        join_handle: thread::spawn(|| -> Result<(), HarnessError> {
+            std::panic::panic_any(String::from("owned panic"));
+        }),
+    };
+
+    let error = daemon
+        .join()
+        .expect_err("panicking daemon thread should report a join error");
+    assert!(matches!(
+        error,
+        HarnessError::ThreadJoin(message) if message == "daemon (owned panic)"
+    ));
+}
+
+/// Daemon joins must retain the documented fallback for panic payloads that are
+/// not strings.
+#[test]
+fn daemon_join_reports_non_string_panic_fallback() {
+    let daemon = DaemonHandle {
+        join_handle: thread::spawn(|| -> Result<(), HarnessError> {
+            std::panic::panic_any(7_u8);
+        }),
+    };
+
+    let error = daemon
+        .join()
+        .expect_err("panicking daemon thread should report a join error");
+    assert!(matches!(
+        error,
+        HarnessError::ThreadJoin(message) if message == "daemon (non-string panic payload)"
+    ));
+}
+
 /// Filesystem socket publication is not listener readiness: under concurrent
 /// startup, every worker holds a stream socket after `bind` but before
 /// `listen`, where the former path-existence predicate would pass and every

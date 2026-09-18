@@ -301,7 +301,7 @@ impl DaemonHandle {
             Ok(result) => result,
             Err(payload) => Err(HarnessError::ThreadJoin(format!(
                 "daemon ({})",
-                panic_payload_label(&payload)
+                panic_payload_label(payload.as_ref())
             ))),
         }
     }
