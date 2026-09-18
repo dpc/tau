@@ -1880,6 +1880,7 @@ impl Harness {
                 tau_core::ManualCompactionRecovery::Started { requested, .. }
                 | tau_core::ManualCompactionRecovery::Failed { requested, .. } => requested
                     .tool_source()
+                    .filter(|source| source.resume_inference)
                     .and_then(|source| {
                         self.session_runtime
                             .agent_store

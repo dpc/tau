@@ -4,6 +4,8 @@ use super::super::lifecycle::seed_restored_compaction_checkpoint;
 use super::*;
 use crate::agent::LoopCycleState;
 
+mod restore_collision;
+
 fn append_byte_fit_text(h: &mut Harness, cid: &AgentId, text: String) {
     let agent_id = durable_agent_id_for_conversation(h, cid);
     h.publish_for_agent(
