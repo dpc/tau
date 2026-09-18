@@ -3294,6 +3294,9 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
     h.shutdown().expect("shutdown");
 }
 
+/// Disconnecting an extension must remove its established prompt fragment and
+/// agent-context contribution while releasing its provider and pending-wait
+/// state.
 #[test]
 fn disconnect_removes_extension_prompt_and_agent_context() {
     let tmp = TempDir::new().expect("temp dir");
@@ -3302,6 +3305,19 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     let contributor = tau_proto::ConnectionId::parse("ctx-ext")
         .expect("test connection id must satisfy the identifier grammar");
     let agent_id = crate::parse_agent_id("agent-1");
+
+    h.prompt_coordination
+        .context_discovery
+        .agent_context_providers
+        .insert(contributor.clone());
+    set_test_agent_context_wait(
+        &mut h,
+        agent_id.clone(),
+        HashSet::from([contributor.clone()]),
+    );
+    let initialization_id = h.prompt_coordination.context_discovery.pending_agents[&agent_id]
+        .initialization_id
+        .clone();
 
     h.apply_extension_prompt_fragment(
         &crate::test_connection_id("ctx-ext"),
@@ -3316,23 +3332,25 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     h.apply_agent_context_publish(
         &crate::test_connection_id("ctx-ext"),
         tau_proto::ExtAgentContextPublish {
-            session_id: test_session_id("test-session"),
-            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
-                .expect("test identifier must be valid"),
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_initialization_id: initialization_id,
 
             agent_id: agent_id.clone(),
             key: tau_proto::AgentContextKey::from("skills"),
             value: tau_proto::AgentContextValue(serde_json::json!(["stale"])),
         },
     );
-    h.prompt_coordination
-        .context_discovery
-        .agent_context_providers
-        .insert(contributor.clone());
-    set_test_agent_context_wait(
-        &mut h,
-        agent_id.clone(),
-        HashSet::from([contributor.clone()]),
+    assert_eq!(
+        h.prompt_coordination
+            .context_discovery
+            .agent_context
+            .template_value(Some(&agent_id)),
+        serde_json::json!({
+            "skills": [{
+                "extension_name": "ctx-ext",
+                "value": ["stale"]
+            }]
+        })
     );
 
     h.handle_disconnect(&crate::test_connection_id("ctx-ext"));
