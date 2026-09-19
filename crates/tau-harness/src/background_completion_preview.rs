@@ -378,7 +378,7 @@ impl fmt::Write for BoundedTextPrefix {
         for ch in text.chars() {
             let bytes = ch.len_utf8();
             self.total_bytes += bytes;
-            if self.prefix.len() + bytes <= self.limit {
+            if self.total_bytes <= self.limit {
                 self.prefix.push(ch);
             }
         }

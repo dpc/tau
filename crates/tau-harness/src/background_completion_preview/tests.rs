@@ -172,6 +172,79 @@ fn error_summary_bounds_utf8_and_escapes_exact_close() {
     assert!(budget.remaining <= 520);
 }
 
+/// A non-fitting UTF-8 character permanently ends the retained text prefix.
+#[test]
+fn bounded_text_prefix_does_not_resume_after_utf8_overflow() {
+    let retained = "a".repeat(ERROR_SUMMARY_MESSAGE_BYTES - 1);
+    let message = format!("{retained}éZ");
+    let mut sink = BoundedTextPrefix::new(ERROR_SUMMARY_MESSAGE_BYTES);
+
+    sink.write_str(&message).expect("bounded text prefix");
+
+    assert_eq!(sink.prefix, retained);
+    assert_eq!(sink.total_bytes, message.len());
+}
+
+/// Prefix truncation remains monotonic when canonical rendering splits writes
+/// immediately after a rejected UTF-8 character.
+#[test]
+fn bounded_text_prefix_does_not_resume_across_split_writes() {
+    let retained = "a".repeat(ERROR_SUMMARY_MESSAGE_BYTES - 1);
+    let mut sink = BoundedTextPrefix::new(ERROR_SUMMARY_MESSAGE_BYTES);
+
+    sink.write_str(&retained).expect("bounded text prefix");
+    sink.write_str("é").expect("bounded text prefix");
+    sink.write_str("Z").expect("bounded text prefix");
+
+    assert_eq!(sink.prefix, retained);
+    assert_eq!(sink.total_bytes, ERROR_SUMMARY_MESSAGE_BYTES + 2);
+}
+
+/// Error-summary delivery exposes the exact normalized prefix and accounts for
+/// its retained bytes without admitting text after a UTF-8 boundary overflow.
+#[test]
+fn error_summary_retains_exact_utf8_prefix() {
+    let retained = "a".repeat(ERROR_SUMMARY_MESSAGE_BYTES - 1);
+    let message = format!("{retained}éZ");
+    let error = error(
+        "read",
+        &message,
+        Some(CborValue::Text(
+            "d".repeat(BACKGROUND_PREVIEW_GROUP_BODY_BYTES + 1),
+        )),
+    );
+    let preview = BackgroundCompletionPreview::from_error(&error, BackgroundErrorOutcome::Error);
+    let measurement = tau_proto::measure_provider_tool_result_text(
+        error.details.as_ref().expect("error details"),
+        ProviderToolResultStatus::Error { message: &message },
+    );
+    let expected = tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE
+        .render_attributed(
+            &[
+                ("call_id", "call-error".to_owned()),
+                ("tool", "read".to_owned()),
+                ("tool_outcome", "error".to_owned()),
+                ("delivery", "summary".to_owned()),
+                ("rendered_bytes", measurement.rendered_bytes.to_string()),
+                ("retrieval", "wait".to_owned()),
+                ("process_outcome", "not_applicable".to_owned()),
+                ("message_bytes", message.len().to_string()),
+                ("message_truncated", "true".to_owned()),
+            ],
+            &retained,
+        )
+        .expect("registered background envelope");
+    let mut budget = BackgroundPreviewBudget::default();
+
+    let text = preview.render(&mut budget);
+
+    assert_eq!(text, expected);
+    assert_eq!(
+        budget.remaining,
+        BACKGROUND_PREVIEW_GROUP_BODY_BYTES - retained.len()
+    );
+}
+
 /// Typed cancellation never relies on the canonical error prose.
 #[test]
 fn cancellation_summary_uses_typed_outcome_and_empty_body() {
