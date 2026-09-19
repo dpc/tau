@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::AsFd as _;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -51,7 +51,7 @@ impl ExtensionStderrMirror {
     /// process stderr, or disables mirroring when duplication fails.
     pub(crate) fn stderr() -> Option<Self> {
         let stderr = std::io::stderr();
-        Self::from_stderr_duplicate(rustix::io::dup(stderr.as_fd()))
+        Self::from_stderr_duplicate(duplicate_stderr(stderr.as_fd()))
     }
 
     /// Continues mirror setup only after inherited-stderr duplication succeeds.
@@ -122,6 +122,11 @@ impl ExtensionStderrMirror {
             }
         }
     }
+}
+
+/// Duplicates a mirror sink without allowing it to survive an extension exec.
+fn duplicate_stderr(stderr: BorrowedFd<'_>) -> rustix::io::Result<rustix::fd::OwnedFd> {
+    rustix::io::fcntl_dupfd_cloexec(stderr, 3)
 }
 
 /// Per-child streaming framer and dropped-record accounting.

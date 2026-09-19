@@ -19,6 +19,17 @@ fn stderr_duplication_failure_disables_mirror_setup() {
     assert!(ExtensionStderrMirror::from_stderr_duplicate(Err(rustix::io::Errno::BADF)).is_none());
 }
 
+/// The production duplication helper marks its private mirror sink
+/// close-on-exec.
+#[test]
+fn stderr_duplicate_closes_on_exec() {
+    let file = tempfile::tempfile().expect("test sink must open");
+    let duplicated = duplicate_stderr(file.as_fd()).expect("test sink must duplicate");
+    let flags = rustix::io::fcntl_getfd(duplicated.as_fd()).expect("duplicate flags must read");
+
+    assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+}
+
 /// Returns framed boundary and raw payload pairs for compact assertions.
 fn frame(parts: &[&[u8]], finish: bool) -> Vec<(RecordBoundary, Vec<u8>)> {
     let mut framer = StderrFramer::default();
