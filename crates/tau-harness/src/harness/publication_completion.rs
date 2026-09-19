@@ -2861,6 +2861,9 @@ impl Harness {
         persist: bool,
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
+        if let Event::AgentDisplayNameSet(name) = event {
+            self.project_committed_agent_display_name(name);
+        }
         if let Event::AgentPromptSubmitted(prompt) = event
             && prompt.submission_source == tau_proto::PromptSubmissionSource::HumanUi
             && let Some(cid) =
@@ -4288,6 +4291,34 @@ impl Harness {
             self.drain_publish_idle_dispatches();
             self.process_notification_delivery_deadlines_at(Instant::now());
             self.try_advance_queue();
+        }
+    }
+
+    /// Project one committed display name into the exact current runtime for
+    /// its stable agent identity.
+    pub(super) fn project_committed_agent_display_name(
+        &mut self,
+        name: &tau_proto::AgentDisplayNameSet,
+    ) {
+        let Some(cid) = self
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .get(&name.agent_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) else {
+            return;
+        };
+        if agent.identity.agent_id.as_ref() != Some(&name.agent_id)
+            || agent.identity.session_id != self.session_runtime.current_session_id
+        {
+            return;
+        }
+        if let Some(display_name) = normalize_display_name(Some(&name.display_name)) {
+            agent.identity.display_name = Some(display_name);
         }
     }
 

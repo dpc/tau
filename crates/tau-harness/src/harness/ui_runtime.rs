@@ -2367,9 +2367,6 @@ impl Harness {
             self.send_ui_error_response(client_id, format!("unknown agent: {agent_id}"));
             return Ok(true);
         };
-        if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-            conv.identity.display_name = Some(display_name.clone());
-        }
         self.publish_for_agent(
             &cid,
             Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {

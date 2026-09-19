@@ -4720,6 +4720,260 @@ fn interception_drop_prevents_final_delivery() {
     assert_eq!(h.runtime_io.event_log.next_seq(), after_registration_seq);
 }
 
+/// Display-name requests remain unprojected while interception is pending, and
+/// a committed replacement updates only the stable agent named by that payload.
+#[test]
+fn intercepted_display_name_projects_only_committed_replacement_target() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let session_id = h.session_runtime.current_session_id.clone();
+    let first_cid = ensure_test_user_agent(&mut h);
+    let first_id = durable_agent_id_for_conversation(&h, &first_cid);
+    let second_cid = h.create_durable_user_agent(session_id.clone(), "engineer");
+    let second_id = durable_agent_id_for_conversation(&h, &second_cid);
+    for (agent_id, display_name) in [(&first_id, "Alpha"), (&second_id, "Delta")] {
+        h.handle_ui_set_agent_display_name(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiSetAgentDisplayName {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+                display_name: display_name.to_owned(),
+            },
+        )
+        .expect("seed display name");
+    }
+
+    let interceptor = connect_test_tool(&mut h, "display-name-interceptor");
+    h.handle_extension_event(
+        "display-name-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register display-name interceptor");
+    h.handle_ui_set_agent_display_name(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiSetAgentDisplayName {
+            session_id: session_id.clone(),
+            agent_id: first_id.clone(),
+            display_name: "Beta".to_owned(),
+        },
+    )
+    .expect("request intercepted rename");
+
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&first_cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Alpha"),
+        "pending rename must not project eagerly"
+    );
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent(first_id.as_str())
+            .expect("first tree")
+            .display_name(),
+        Some("Alpha")
+    );
+    let (pending, persist) = intercepted_payload(&interceptor);
+    assert!(persist);
+    assert!(matches!(
+        pending,
+        Event::AgentDisplayNameSet(ref name)
+            if name.agent_id == first_id && name.display_name == "Beta"
+    ));
+
+    h.handle_extension_event(
+        "display-name-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::AgentDisplayNameSet(
+                tau_proto::AgentDisplayNameSet {
+                    agent_id: second_id.clone(),
+                    display_name: "  Charlie  ".to_owned(),
+                },
+            )))),
+        })),
+    )
+    .expect("commit retargeted replacement");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&first_cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Alpha")
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&second_cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Charlie")
+    );
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent(second_id.as_str())
+            .expect("second tree")
+            .display_name(),
+        Some("Charlie")
+    );
+    h.shutdown().expect("shutdown");
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", tmp.path(), tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let first_cid = resumed.agent_runtime.agent_registry.agent_routes[&first_id].clone();
+    let second_cid = resumed.agent_runtime.agent_registry.agent_routes[&second_id].clone();
+    assert_eq!(
+        resumed.agent_runtime.agent_registry.agents[&first_cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Alpha")
+    );
+    assert_eq!(
+        resumed.agent_runtime.agent_registry.agents[&second_cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Charlie")
+    );
+    resumed.shutdown().expect("shutdown resumed harness");
+}
+
+/// Dropped and invalid queued renames never project, while a later committed
+/// request wins in publication order without rollback to submitted names.
+#[test]
+fn intercepted_display_name_drop_and_invalid_replacement_preserve_commit_order() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let session_id = h.session_runtime.current_session_id.clone();
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_ui_set_agent_display_name(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiSetAgentDisplayName {
+            session_id: session_id.clone(),
+            agent_id: agent_id.clone(),
+            display_name: "Alpha".to_owned(),
+        },
+    )
+    .expect("seed name");
+    let _interceptor = connect_test_tool(&mut h, "display-order-interceptor");
+    h.handle_extension_event(
+        "display-order-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    for display_name in ["Beta", "Charlie"] {
+        h.handle_ui_set_agent_display_name(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiSetAgentDisplayName {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+                display_name: display_name.to_owned(),
+            },
+        )
+        .expect("queue rename");
+    }
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Alpha")
+    );
+    h.handle_extension_event(
+        "display-order-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop Beta");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Alpha")
+    );
+    h.handle_extension_event(
+        "display-order-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit Charlie");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Charlie")
+    );
+
+    h.handle_ui_set_agent_display_name(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiSetAgentDisplayName {
+            session_id,
+            agent_id: agent_id.clone(),
+            display_name: "Delta".to_owned(),
+        },
+    )
+    .expect("queue invalid replacement source");
+    h.handle_extension_event(
+        "display-order-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::AgentDisplayNameSet(
+                tau_proto::AgentDisplayNameSet {
+                    agent_id: agent_id.clone(),
+                    display_name: "   ".to_owned(),
+                },
+            )))),
+        })),
+    )
+    .expect("reject invalid replacement at semantic admission");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Charlie")
+    );
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .display_name(),
+        Some("Charlie")
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentDisplayNameSet(name) if name.agent_id == agent_id => {
+                    Some(name.display_name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["Alpha", "Charlie"]
+    );
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn interception_pass_through_reaches_log_after_last_interceptor() {
     let tmp = TempDir::new().expect("tempdir");

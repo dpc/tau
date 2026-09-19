@@ -492,13 +492,26 @@ fn explicit_display_name_equal_to_role_survives_restore() {
         let mut h = echo_harness(&sp).expect("start");
         let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer-junior");
         let agent_id = crate::parse_agent_id(cid.as_str());
+        let observer =
+            connect_test_client(&mut h, "display-name-observer", tau_proto::ClientKind::Ui);
+        h.runtime_io
+            .bus
+            .set_subscriptions(
+                &crate::test_connection_id("display-name-observer"),
+                Vec::new(),
+                vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
+                )],
+            )
+            .expect("observer subscription");
+        observer.lock().expect("observer frames").clear();
 
         h.handle_ui_set_agent_display_name(
             crate::harness::harness_connection_id(),
             tau_proto::UiSetAgentDisplayName {
                 session_id: h.session_runtime.current_session_id.clone(),
                 agent_id: agent_id.clone(),
-                display_name: "engineer-junior".to_owned(),
+                display_name: "  engineer-junior  ".to_owned(),
             },
         )
         .expect("set explicit display name");
@@ -509,6 +522,27 @@ fn explicit_display_name_equal_to_role_survives_restore() {
                 .get(&cid)
                 .and_then(|conversation| conversation.identity.display_name.as_deref()),
             Some("engineer-junior")
+        );
+        assert_eq!(
+            h.session_runtime
+                .agent_store
+                .agent(agent_id.as_str())
+                .expect("agent tree")
+                .display_name(),
+            Some("engineer-junior")
+        );
+        assert_eq!(
+            observer
+                .lock()
+                .expect("observer frames")
+                .iter()
+                .filter_map(|frame| peel_inner_event(&frame.frame))
+                .filter_map(|event| match event {
+                    Event::AgentDisplayNameSet(name) => Some(name.display_name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["engineer-junior"]
         );
         h.shutdown().expect("shutdown");
         agent_id
@@ -534,6 +568,187 @@ fn explicit_display_name_equal_to_role_survives_restore() {
     );
 
     resumed.shutdown().expect("shutdown");
+}
+
+/// A rejected display-name admission must leave live and canonical state at the
+/// prior name, must not catch up later, and must not block a fresh rename.
+#[test]
+fn display_name_admission_full_has_no_eager_projection_or_retry() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let session_id = h.session_runtime.current_session_id.clone();
+    let rename = |h: &mut Harness, display_name: &str| {
+        h.handle_ui_set_agent_display_name(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiSetAgentDisplayName {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+                display_name: display_name.to_owned(),
+            },
+        )
+        .expect("rename request");
+    };
+
+    rename(&mut h, "Alpha");
+    let committed_before = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::AgentDisplayNameSet(_)))
+        .count();
+    reject_next_semantic_admission(&h);
+    rename(&mut h, "Beta");
+
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Alpha")
+    );
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .display_name(),
+        Some("Alpha")
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentDisplayNameSet(_)))
+            .count(),
+        committed_before,
+        "the rejected rename must not enter canonical observations"
+    );
+
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable persistence owner")
+        .signal_capacity_ready_for_test();
+    rename(&mut h, "  Gamma  ");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Gamma")
+    );
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .display_name(),
+        Some("Gamma")
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentDisplayNameSet(name) => Some(name.display_name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["Alpha", "Gamma"],
+        "capacity recovery must not retry the rejected Beta rename"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Committed display-name projection must use the current route and reject
+/// stale runtime identity or session incarnations without reviving anything.
+#[test]
+fn committed_display_name_projection_targets_only_matching_current_runtime() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let committed = tau_proto::AgentDisplayNameSet {
+        agent_id: agent_id.clone(),
+        display_name: "  Canonical  ".to_owned(),
+    };
+
+    h.agent_runtime
+        .agent_registry
+        .agent_routes
+        .remove(&agent_id);
+    h.project_committed_agent_display_name(&committed);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .is_none()
+    );
+
+    let absent_cid = crate::parse_agent_id("absent-runtime");
+    h.agent_runtime
+        .agent_registry
+        .agent_routes
+        .insert(agent_id.clone(), absent_cid.clone());
+    h.project_committed_agent_display_name(&committed);
+    assert!(
+        !h.agent_runtime
+            .agent_registry
+            .agents
+            .contains_key(&absent_cid),
+        "projection must not revive a route whose runtime is absent"
+    );
+
+    h.agent_runtime
+        .agent_registry
+        .agent_routes
+        .insert(agent_id.clone(), cid.clone());
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("current runtime")
+        .identity
+        .agent_id = Some(tau_proto::AgentId::parse("stale-agent").expect("agent id"));
+    h.project_committed_agent_display_name(&committed);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .is_none()
+    );
+
+    let current_session = h.session_runtime.current_session_id.clone();
+    let agent = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("current runtime");
+    agent.identity.agent_id = Some(agent_id.clone());
+    agent.identity.session_id = tau_proto::SessionId::parse("stale-session").expect("session id");
+    h.project_committed_agent_display_name(&committed);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .is_none()
+    );
+
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("current runtime")
+        .identity
+        .session_id = current_session;
+    h.project_committed_agent_display_name(&committed);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .display_name
+            .as_deref(),
+        Some("Canonical")
+    );
+    h.shutdown().expect("shutdown");
 }
 
 /// A role-derived name written by a custom template is durable data. Resuming
