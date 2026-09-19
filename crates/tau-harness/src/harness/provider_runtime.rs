@@ -880,13 +880,12 @@ impl Harness {
             windows: windows.into_values().collect(),
             route_bindings: bindings.into_values().collect(),
         };
-        if tau_proto::validate_provider_quota_state(
+        if !self.quota_event_is_valid(
+            source_id,
             &changed.provider,
             &changed.windows,
             &changed.route_bindings,
-        )
-        .is_err()
-        {
+        ) {
             return;
         }
         self.provider_runtime.quota.insert(

@@ -878,6 +878,128 @@ fn model_change_preserves_provider_sequence_space() {
     );
 }
 
+/// A sparse quota patch cannot restore a binding for a withdrawn route, and
+/// rejecting it preserves both the canonical snapshot and provider sequence.
+#[test]
+fn withdrawn_route_binding_patch_is_observable_but_rejected() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "owner",
+        "owner",
+        tau_proto::ClientKind::Provider,
+    );
+    let owner = crate::test_connection_id("owner");
+    let model = quota_model();
+    let mut retained_model = quota_model();
+    retained_model.id = "chatgpt/gpt-5.7-sol".into();
+    harness.apply_provider_models_snapshot(&owner, vec![model.clone(), retained_model.clone()]);
+    let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-withdrawn-route").expect("epoch");
+    harness.handle_provider_quota_replace(
+        &owner,
+        tau_proto::ProviderQuotaReplace {
+            provider: tau_proto::ProviderName::new("chatgpt"),
+            profile_epoch: epoch.clone(),
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
+            establishes_new_epoch: true,
+            windows: vec![quota_window(1_000)],
+            route_bindings: vec![quota_binding()],
+        },
+    );
+
+    harness.apply_provider_models_snapshot(&owner, vec![retained_model.clone()]);
+    let provider = tau_proto::ProviderName::new("chatgpt");
+    let withdrawn_snapshot = harness.provider_runtime.quota[&provider].snapshot.clone();
+    assert_eq!(
+        withdrawn_snapshot.sequence,
+        tau_proto::ProviderQuotaSequence::new(1)
+    );
+    assert_eq!(withdrawn_snapshot.windows, vec![quota_window(1_000)]);
+    assert!(withdrawn_snapshot.route_bindings.is_empty());
+    let canonical_count = committed_quota_events(&harness)
+        .iter()
+        .filter(|(_, event)| matches!(event, Event::HarnessProviderQuotaChanged(_)))
+        .count();
+
+    let invalid_patch = tau_proto::ProviderQuotaPatch {
+        provider: provider.clone(),
+        profile_epoch: epoch.clone(),
+        sequence: tau_proto::ProviderQuotaSequence::new(2),
+        windows: Vec::new(),
+        removed_window_keys: Vec::new(),
+        route_bindings: vec![quota_binding()],
+    };
+    harness
+        .handle_extension_event_inner_with_persist(
+            &owner,
+            Event::ProviderQuotaPatchReported(invalid_patch.clone()),
+            Some(false),
+        )
+        .expect("submit withdrawn-route quota patch");
+
+    assert_eq!(
+        harness.provider_runtime.quota[&provider].snapshot, withdrawn_snapshot,
+        "rejected patch must not mutate canonical state or consume its sequence"
+    );
+    let committed = committed_quota_events(&harness);
+    assert!(matches!(
+        committed.last(),
+        Some((Some(source), Event::ProviderQuotaPatchReported(patch)))
+            if source == &owner && patch == &invalid_patch
+    ));
+    assert_eq!(
+        committed
+            .iter()
+            .filter(|(_, event)| matches!(event, Event::HarnessProviderQuotaChanged(_)))
+            .count(),
+        canonical_count,
+        "the raw report remains observable without a canonical successor"
+    );
+
+    harness.apply_provider_models_snapshot(&owner, vec![model, retained_model]);
+    assert!(
+        harness.provider_runtime.quota[&provider]
+            .snapshot
+            .route_bindings
+            .is_empty(),
+        "route reintroduction must not revive the rejected binding"
+    );
+    let late_events = connect_test_client(&mut harness, "late-quota-ui", tau_proto::ClientKind::Ui);
+    let selectors = vec![EventSelector::Exact(
+        tau_proto::EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
+    )];
+    harness
+        .complete_subscription(
+            &crate::test_connection_id("late-quota-ui"),
+            selectors.clone(),
+            selectors,
+        )
+        .expect("subscribe after route reintroduction");
+    let late_snapshot = late_events
+        .lock()
+        .expect("events")
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery) => match delivery.event.as_ref() {
+                Event::HarnessProviderQuotaChanged(changed) => Some(changed.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("canonical quota catch-up");
+    assert_eq!(late_snapshot, withdrawn_snapshot);
+
+    harness.handle_provider_quota_patch(&owner, invalid_patch);
+    let accepted = &harness.provider_runtime.quota[&provider].snapshot;
+    assert_eq!(
+        accepted.sequence,
+        tau_proto::ProviderQuotaSequence::new(2),
+        "the rejected sequence remains reusable once its exact route exists"
+    );
+    assert_eq!(accepted.route_bindings, vec![quota_binding()]);
+}
+
 /// Withdrawing the last effective model clears sensitive account state while
 /// retaining an empty running-harness capability for late subscribers; a later
 /// accepted replacement restores current state and supersedes that capability.
