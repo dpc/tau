@@ -659,6 +659,42 @@ fn configured_shell_tool_style_overrides_model_default() {
     assert!(!tools.contains(&"replace".to_owned()));
 }
 
+/// Ensures a non-Codex global override supersedes an explicit Codex preference
+/// for both capability validation and the selected internal edit backing.
+#[test]
+fn configured_non_codex_style_overrides_explicit_codex_preference() {
+    for (style, backing) in [
+        (ShellToolStyle::Edit, "edit"),
+        (ShellToolStyle::Replace, "replace"),
+    ] {
+        let mut policy = policy_harness(&["shell:tool-style:codex"], AgentRole::default());
+        let model = policy.harness.config.selected_model.clone().expect("model");
+        policy.harness.config.tool_policy = ToolPolicy {
+            default_shell_tool_style: Some(style),
+            ..ToolPolicy::default()
+        };
+        policy
+            .harness
+            .provider_runtime
+            .model_info
+            .get_mut(&model)
+            .expect("model info")
+            .supported_tool_types = vec![ToolType::Function];
+
+        assert_eq!(policy.harness.shell_tool_style_error(Some(&model)), None);
+        let selected = policy
+            .harness
+            .gather_effective_tool_specs_for_role_model(ROLE, Some(&model))
+            .into_iter()
+            .find(|spec| spec.name.as_str() == backing)
+            .expect("configured edit backing");
+        assert_eq!(
+            policy.harness.tool_model_visible_name(&selected).as_str(),
+            "edit"
+        );
+    }
+}
+
 /// Ensures forced Codex never silently loses its Custom patch tool when model
 /// capability metadata is empty or Function-only, and rejects conflicting
 /// explicit style tags even when a global style is configured.
@@ -709,6 +745,32 @@ fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
         conflicting.harness.shell_tool_style_error(Some(model)),
         Some("conflicting shell tool style tags".to_owned())
     );
+
+    let mut configured = policy_harness(&[], AgentRole::default());
+    configured
+        .harness
+        .config
+        .tool_policy
+        .default_shell_tool_style = Some(ShellToolStyle::Codex);
+    let model = configured
+        .harness
+        .config
+        .selected_model
+        .as_ref()
+        .expect("model");
+    assert_eq!(
+        configured.harness.shell_tool_style_error(Some(model)),
+        Some("Codex shell tool style requires Custom tool support".to_owned())
+    );
+
+    let legacy = policy_harness(&["shell:chatgpt"], AgentRole::default());
+    let model = legacy
+        .harness
+        .config
+        .selected_model
+        .as_ref()
+        .expect("model");
+    assert_eq!(legacy.harness.shell_tool_style_error(Some(model)), None);
 }
 
 /// Ensures repeated identical provider tags select their one intended surface

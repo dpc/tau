@@ -2860,13 +2860,15 @@ impl Harness {
         .then_some("Codex shell tool style requires Custom tool support".to_owned())
     }
 
-    /// Returns whether config or an explicit model style tag, rather than the
-    /// legacy ChatGPT default, required the Custom/Text Codex surface.
+    /// Returns whether the configured style, or an unoverridden explicit model
+    /// style tag, required the Custom/Text Codex surface.
     pub(super) fn codex_style_is_forced(&self, model_tags: &[tau_proto::ModelTag]) -> bool {
-        self.config.tool_policy.default_shell_tool_style == Some(ShellToolStyle::Codex)
-            || model_tags
+        match self.config.tool_policy.default_shell_tool_style {
+            Some(style) => style == ShellToolStyle::Codex,
+            None => model_tags
                 .iter()
-                .any(|tag| tag.as_str() == "shell:tool-style:codex")
+                .any(|tag| tag.as_str() == "shell:tool-style:codex"),
+        }
     }
 
     pub(super) fn resolve_enabled_tool_spec_for_role(
