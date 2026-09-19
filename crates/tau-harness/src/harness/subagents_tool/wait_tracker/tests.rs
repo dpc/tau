@@ -1711,7 +1711,7 @@ fn no_arg_wait_consumes_oldest_completed_background_result_for_owner() {
 
 /// Owner-local completion FIFOs must match a simple reference model across a
 /// 4,096-call workload while lazy tombstones retire each queue node at most
-/// once.
+/// once and scans remain bounded by a linear multiple of the workload.
 #[test]
 fn large_owner_local_completion_queues_match_reference_with_linear_retirement() {
     const OWNERS: usize = 4;
@@ -1796,6 +1796,87 @@ fn large_owner_local_completion_queues_match_reference_with_linear_retirement() 
     assert!(tracker.completed_membership.is_empty());
     assert!(tracker.completion_order_by_owner.is_empty());
     assert_eq!(tracker.completion_nodes_retired(), CALLS);
+    assert!(
+        tracker.completion_nodes_visited() <= CALLS * 4,
+        "ordinary completion draining must not repeatedly scan stale prefixes"
+    );
+}
+
+/// A bare-wait workload that always has another completion available must prune
+/// each consumed node before selecting its successor, even beyond tombstone
+/// cache eviction.
+#[test]
+fn replenished_completion_queue_prunes_stale_prefixes_during_selection() {
+    const CALLS: usize = 1_100;
+    let owner = conv("replenished-owner");
+    let mut tracker = WaitTracker::default();
+
+    for index in 0..CALLS {
+        let call_id = format!("replenished-{index:04}");
+        tracker.record_tool_invoke(call_id.clone().into(), slow_tool_name(), owner.clone());
+        tracker.record_tool_result(
+            &background_placeholder(&call_id),
+            owner.clone(),
+            observation(),
+        );
+        tracker.record_background_result(
+            background_result(&call_id, &call_id),
+            owner.clone(),
+            observation(),
+        );
+
+        let reply = start_reply(start_wait_any(
+            &mut tracker,
+            &owner,
+            &format!("wait-{index:04}"),
+        ));
+        assert_eq!(
+            cbor_map_text(&reply_result(reply), ORIGINAL_TOOL_CALL_ID_HEADER),
+            Some(call_id.as_str())
+        );
+        assert_eq!(
+            tracker
+                .completion_order_by_owner
+                .get(&owner)
+                .map(VecDeque::len),
+            Some(1),
+            "successful selection must not retain an older stale prefix"
+        );
+    }
+
+    assert_eq!(tracker.completion_nodes_retired(), CALLS - 1);
+    assert!(tracker.completion_nodes_visited() <= CALLS * 2);
+}
+
+/// One lookup over an entirely stale queue must visit and retire each node once
+/// rather than repeatedly rescanning the remaining suffix.
+#[test]
+fn all_stale_completion_queue_is_pruned_with_linear_visits() {
+    const CALLS: usize = 128;
+    let owner = conv("all-stale-owner");
+    let mut tracker = WaitTracker::default();
+
+    for index in 0..CALLS {
+        let call_id: ToolCallId = format!("stale-{index:03}").into();
+        tracker.record_tool_invoke(call_id.clone(), slow_tool_name(), owner.clone());
+        tracker.record_tool_result(
+            &background_placeholder(call_id.as_str()),
+            owner.clone(),
+            observation(),
+        );
+        tracker.record_background_result(
+            background_result(call_id.as_str(), call_id.as_str()),
+            owner.clone(),
+            observation(),
+        );
+        tracker.consume_completed_call(&call_id);
+    }
+
+    let visits_before = tracker.completion_nodes_visited();
+    assert!(tracker.oldest_completed_for_owner(&owner).is_none());
+    assert_eq!(tracker.completion_nodes_visited() - visits_before, CALLS);
+    assert_eq!(tracker.completion_nodes_retired(), CALLS);
+    assert!(!tracker.completion_order_by_owner.contains_key(&owner));
 }
 
 /// Reusing a completed call ID must not revive its stale FIFO position ahead of
@@ -3217,6 +3298,70 @@ fn wait_all_reuse_then_interruption_restores_old_generation() {
     assert_eq!(
         tracker.calls.get(&ToolCallId::from("reused")),
         Some(&WaitCallState::Pending)
+    );
+}
+
+/// Selection may prune a stale node behind an older reserved generation, but it
+/// must preserve that reservation's FIFO position until interruption releases
+/// the original payload.
+#[test]
+fn stale_pruning_preserves_older_plural_reservation_before_later_completion() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    for (call_id, reference) in [
+        ("reserved", call_ref(1, 0)),
+        ("other", call_ref(2, 0)),
+        ("stale", call_ref(3, 0)),
+        ("later", call_ref(4, 0)),
+    ] {
+        track_call(&mut tracker, &owner, call_id, reference);
+        tracker.record_tool_result(
+            &background_placeholder(call_id),
+            owner.clone(),
+            observation(),
+        );
+    }
+    tracker.record_background_result(
+        background_result("reserved", "reserved payload"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.retain_call_ref("wait-all".into(), call_ref(5, 0));
+    assert!(
+        start_wait_all(&mut tracker, &owner, "wait-all", &["reserved", "other"])
+            .reply
+            .is_none()
+    );
+    tracker.record_background_result(
+        background_result("stale", "stale payload"),
+        owner.clone(),
+        observation(),
+    );
+    tracker.consume_completed_call(&ToolCallId::from("stale"));
+    tracker.record_background_result(
+        background_result("later", "later payload"),
+        owner.clone(),
+        observation(),
+    );
+
+    let retired_before = tracker.completion_nodes_retired();
+    let later = start_reply(start_wait_any(&mut tracker, &owner, "wait-later"));
+    assert_eq!(
+        cbor_map_text(&reply_result(later), ORIGINAL_TOOL_CALL_ID_HEADER),
+        Some("later")
+    );
+    assert_eq!(tracker.completion_nodes_retired(), retired_before + 1);
+
+    assert_eq!(
+        tracker
+            .activate_waits_for(&owner, observation().expect("observation"))
+            .len(),
+        1
+    );
+    let reserved = start_reply(start_wait_any(&mut tracker, &owner, "wait-reserved"));
+    assert_eq!(
+        cbor_map_text(&reply_result(reserved), ORIGINAL_TOOL_CALL_ID_HEADER),
+        Some("reserved")
     );
 }
 

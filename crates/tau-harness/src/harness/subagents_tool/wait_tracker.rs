@@ -460,6 +460,9 @@ pub(super) struct WaitTracker {
     /// tests.
     #[cfg(test)]
     completion_nodes_retired: usize,
+    /// Completion queue nodes visited by oldest-selection scans in tests.
+    #[cfg(test)]
+    completion_nodes_visited: usize,
     /// Oldest-first bounded order for `NormalReturned` and `Consumed` states.
     terminal_order: VecDeque<ToolCallId>,
 }
@@ -496,6 +499,8 @@ impl WaitTracker {
             next_completion_generation: CompletionGeneration(0),
             #[cfg(test)]
             completion_nodes_retired: 0,
+            #[cfg(test)]
+            completion_nodes_visited: 0,
             terminal_order: VecDeque::new(),
         }
     }
@@ -2917,7 +2922,13 @@ impl WaitTracker {
             let queue = self.completion_order_by_owner.get(owner)?;
             let mut first_stale = None;
             let mut selected = None;
+            #[cfg(test)]
+            let mut visited = 0;
             for (index, node) in queue.iter().enumerate() {
+                #[cfg(test)]
+                {
+                    visited += 1;
+                }
                 let live_current = self.completed_membership.get(&node.call_id)
                     == Some(&node.generation)
                     && self.call_owners.get(&node.call_id) == Some(owner)
@@ -2937,7 +2948,7 @@ impl WaitTracker {
                     || self.released_completions.contains_key(&node.generation);
                 if !live {
                     first_stale.get_or_insert(index);
-                    continue;
+                    break;
                 }
                 if self.released_completions.contains_key(&node.generation)
                     || self
@@ -2951,6 +2962,10 @@ impl WaitTracker {
                     });
                     break;
                 }
+            }
+            #[cfg(test)]
+            {
+                self.completion_nodes_visited += visited;
             }
             if let Some(selected) = selected {
                 return Some(selected);
@@ -3006,6 +3021,12 @@ impl WaitTracker {
     #[cfg(test)]
     fn completion_nodes_retired(&self) -> usize {
         self.completion_nodes_retired
+    }
+
+    /// Returns the number of completion queue nodes visited in tests.
+    #[cfg(test)]
+    fn completion_nodes_visited(&self) -> usize {
+        self.completion_nodes_visited
     }
 
     fn record_terminal_state(&mut self, call_id: ToolCallId, state: WaitCallState) {
