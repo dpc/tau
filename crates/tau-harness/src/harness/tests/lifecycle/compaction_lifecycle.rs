@@ -6,6 +6,145 @@ use super::super::dispatch::{
 };
 use super::*;
 
+/// A standalone prompt whose captured route disappears before delivery releases
+/// every prompt-local snapshot without rolling back unrelated ordinary usage.
+#[test]
+fn standalone_route_failure_clears_dispatch_bookkeeping_without_request_rollback() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let parent = h
+        .selected_head_for_agent(&cid)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    let model: tau_proto::ModelId = "test/model".into();
+    h.session_runtime
+        .current_session_state
+        .token_usage
+        .start_request(&model);
+    let usage_before = h.session_runtime.current_session_state.token_usage.clone();
+    let compact_prompt_id = test_agent_prompt_id("ap-standalone-route-loss");
+    let transaction_id = tau_proto::CompactionTransactionId::parse("ct-standalone-route-loss")
+        .expect("transaction id");
+    connect_test_tool(&mut h, "standalone-route-interceptor");
+    h.handle_extension_event(
+        "standalone-route-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register prompt-start interceptor");
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id,
+            transaction_id: transaction_id.clone(),
+            compact_prompt_id: compact_prompt_id.clone(),
+            cut: parent,
+            resume_through: None,
+            model: model.clone(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+        }),
+    );
+    assert!(matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::AgentPromptStarted(started))
+            if started.agent_prompt_id == compact_prompt_id
+    ));
+    assert_eq!(
+        h.prompt_coordination
+            .prompt_runtime
+            .models
+            .get(&compact_prompt_id),
+        Some(&model)
+    );
+    assert!(matches!(
+        h.prompt_coordination
+            .prompt_runtime
+            .operations
+            .get(&compact_prompt_id),
+        Some((tau_proto::PromptOperation::StandaloneCompaction, _))
+    ));
+
+    h.provider_runtime.model_routes.remove(&model);
+    h.handle_extension_event(
+        "standalone-route-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release prompt-start after route loss");
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionFailed(failed)
+            if failed.transaction_id == transaction_id
+                && failed.reason == tau_proto::StandaloneCompactionFailureReason::RouteFailed
+    )));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.agent_prompt_id == compact_prompt_id
+    )));
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .models
+            .contains_key(&compact_prompt_id)
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .operations
+            .contains_key(&compact_prompt_id)
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(compact_prompt_id.as_str())
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_dispatches
+            .contains(&compact_prompt_id)
+    );
+    assert!(
+        !h.provider_runtime
+            .pending_prompts
+            .contains_key(&compact_prompt_id)
+    );
+    assert_eq!(
+        h.session_runtime.current_session_state.token_usage,
+        usage_before
+    );
+
+    h.dispose_prompt_dispatch_bookkeeping(&compact_prompt_id);
+    assert_eq!(
+        h.session_runtime.current_session_state.token_usage, usage_before,
+        "repeat disposal remains inert"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A successful standalone response retains its exact compacted boundary and
 /// prompt ownership through append rejection, then clears both exactly once
 /// after durable admission and cold replay.

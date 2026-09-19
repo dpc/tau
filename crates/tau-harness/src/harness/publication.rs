@@ -1187,13 +1187,14 @@ impl Harness {
             .estimated_cost_rates
             .remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
+        let model = self
+            .prompt_coordination
+            .prompt_runtime
+            .models
+            .remove(agent_prompt_id);
         if operation.map(|operation| operation.0)
             != Some(tau_proto::PromptOperation::StandaloneCompaction)
-            && let Some(model) = self
-                .prompt_coordination
-                .prompt_runtime
-                .models
-                .remove(agent_prompt_id)
+            && let Some(model) = model
         {
             self.session_runtime
                 .current_session_state
