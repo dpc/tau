@@ -63,8 +63,10 @@ per-agent metadata set/unset facts. Metadata is committed through the same
 interceptable publish path as other ordinary events; the folded latest metadata
 snapshot is replayed to subscribers before `session.agent_loaded`, and
 inheritable entries are copied to child agents when an explicit or derived
-parent is known. Tests should assert durable stores, not only runtime delivery,
-when changing durable facts.
+parent is known. Explicit initial child metadata overrides a colliding inherited
+entry as a whole, including its value and inheritable flag; noncolliding parent
+entries still inherit. Tests should assert durable stores, not only runtime
+delivery, when changing durable facts.
 
 The atomically replaced `sessions/<id>/meta.json` manifest is canonical for a
 durable session's existence and creation time, including an empty session.

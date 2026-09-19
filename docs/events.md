@@ -354,6 +354,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   their event log; ephemeral agents replay it from memory only. It carries
   optional `parent_agent`; inheritable metadata from that parent is copied into
   the new agent after this fact commits and before the agent is announced loaded.
+  Explicit initial child entries win collisions as whole entries, including
+  their values and inheritance flags.
 - **`agent.user_interaction_recorded`** — Content-free durable fact committed
   when a visible user submission is accepted, including a queued submission that
   may later be recalled. The persisted record supplies the acceptance timestamp;

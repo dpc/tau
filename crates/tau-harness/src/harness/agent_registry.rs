@@ -2563,8 +2563,15 @@ impl Harness {
                 .agent_registry
                 .session_loaded
                 .insert(agent_id.clone());
-            let _ = (role, initial_metadata);
+            let _ = role;
+            let explicit_metadata_keys: HashSet<_> = initial_metadata
+                .iter()
+                .map(|metadata| metadata.key.clone())
+                .collect();
             for (key, entry) in self.inherited_metadata_for_cid(cid) {
+                if explicit_metadata_keys.contains(&key) {
+                    continue;
+                }
                 self.enqueue_publish(
                     None,
                     Event::AgentMetadataSet(tau_proto::AgentMetadataSet {

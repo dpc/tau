@@ -450,6 +450,122 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     h.shutdown().expect("shutdown");
 }
 
+/// Explicit UI child metadata must override a colliding inherited entry as a
+/// whole while noncolliding inheritable parent metadata remains copied durably.
+#[test]
+fn ui_child_metadata_overrides_colliding_parent_entry() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.submit_user_prompt(test_session_id("s1"), "parent prompt".to_owned())
+        .expect("submit parent");
+    let parent_cid = test_user_agent(&h);
+    let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
+    let collision_key = tau_proto::AgentMetadataKey::new("collision-key");
+    let inherited_key = tau_proto::AgentMetadataKey::new("inherited-key");
+    for (key, value) in [
+        (collision_key.clone(), "parent collision"),
+        (inherited_key.clone(), "parent inherited"),
+    ] {
+        h.publish_event(
+            None,
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: parent_agent_id.clone(),
+                key,
+                value: CborValue::Text(value.to_owned()),
+                mutation_id: None,
+                inheritable: true,
+            }),
+        );
+    }
+    let existing_agent_ids: std::collections::HashSet<_> = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .values()
+        .filter_map(|agent| agent.identity.agent_id.clone())
+        .collect();
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "metadata-override-create".to_owned(),
+            literal: false,
+            parent_agent: Some(parent_agent_id),
+            session_id: test_session_id("s1"),
+            role: h.config.selected_role.clone(),
+            model_override: None,
+            effort_override: None,
+            metadata: vec![tau_proto::AgentInitialMetadata {
+                key: collision_key.clone(),
+                value: CborValue::Text("child explicit".to_owned()),
+                inheritable: false,
+            }],
+            initial_prompt: None,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create child");
+
+    let child_agent_id = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .values()
+        .filter_map(|agent| agent.identity.agent_id.clone())
+        .find(|agent_id| !existing_agent_ids.contains(agent_id))
+        .expect("new child agent id");
+    let child_events = h
+        .session_runtime
+        .agent_store
+        .agent_events(child_agent_id.as_str())
+        .expect("child events");
+    assert!(child_events.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentStarted(started)
+            if started.metadata.iter().any(|metadata|
+                metadata.key == collision_key
+                    && metadata.value == CborValue::Text("child explicit".to_owned())
+                    && !metadata.inheritable)
+    )));
+    assert!(child_events.iter().all(|record| !matches!(
+        &record.event,
+        Event::AgentMetadataSet(set) if set.key == collision_key
+    )));
+    assert!(child_events.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentMetadataSet(set)
+            if set.key == inherited_key
+                && set.value == CborValue::Text("parent inherited".to_owned())
+                && set.inheritable
+    )));
+
+    let replayed = h
+        .session_runtime
+        .agent_store
+        .load_agent(child_agent_id.as_str())
+        .expect("load child")
+        .expect("replayed child");
+    assert_eq!(
+        replayed.metadata().get(&collision_key),
+        Some(&tau_core::AgentMetadataEntry {
+            value: CborValue::Text("child explicit".to_owned()),
+            inheritable: false,
+        })
+    );
+    assert_eq!(
+        replayed.metadata().get(&inherited_key),
+        Some(&tau_core::AgentMetadataEntry {
+            value: CborValue::Text("parent inherited".to_owned()),
+            inheritable: true,
+        })
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A manually created agent has no explicit task or `:name`, so the durable
 /// start fact must not synthesize its role as presentation metadata.
 #[test]

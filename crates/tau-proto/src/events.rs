@@ -3941,10 +3941,10 @@ pub struct UiCreateAgent {
     /// remains loaded. It is not part of the durable agent identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_override: Option<crate::ReasoningIntent>,
-    /// Initial metadata facts to publish for the new agent.
+    /// Initial metadata to embed in the new agent's durable creation fact.
     ///
-    /// The harness fills in the newly-created agent id when publishing these
-    /// as durable `agent.metadata_set` events.
+    /// These entries override colliding inherited parent metadata as complete
+    /// entries, including their inheritance flags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata: Vec<AgentInitialMetadata>,
     /// Optional first prompt to append after agent context has been loaded.
@@ -3967,7 +3967,8 @@ pub struct UiCreateAgent {
     /// bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
-    /// Optional parent agent whose inheritable metadata should be copied.
+    /// Optional parent agent whose noncolliding inheritable metadata should be
+    /// copied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_agent: Option<AgentId>,
     /// Whether the new agent should keep its semantic transcript and session
