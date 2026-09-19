@@ -1,6 +1,6 @@
 use std::str::FromStr;
 use std::time::Duration;
-use std::{ffi as path_std_ffi, path as path_std_path};
+use std::{ffi as path_std_ffi, path as path_std_path, process as path_std_process};
 
 use tau_config::settings as path_tau_config_settings;
 use tau_config::settings::{
@@ -326,6 +326,182 @@ profiles:
     let config = resolve_config_in_without_environment(&dirs).expect("resolve configured fallback");
 
     assert!(!config.extensions.contains_key("core-shell"));
+}
+
+/// Ensures the foreground resolver applies the process-wide Hidden force after
+/// command-line global and per-instance ReadOnly configuration.
+#[test]
+fn foreground_config_hidden_force_overrides_cli_state_access() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+    let overrides = [
+        HarnessConfigCliOverride::from_str("tau_state_access=read_only").expect("global override"),
+        HarnessConfigCliOverride::from_str("extensions.core-shell.tau_state_access=read_only")
+            .expect("instance override"),
+    ];
+
+    let config = resolve_config_with_cli_overrides_in(
+        &dirs,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        &overrides,
+        Some("hidden".into()),
+    )
+    .expect("resolve foreground config");
+
+    assert!(
+        config.extensions.values().all(|extension| {
+            extension.tau_state_access == path_tau_config_settings::TauStateAccess::Hidden
+        }),
+        "the process-wide force must replace every CLI-resolved extension value"
+    );
+}
+
+/// Ensures the foreground resolver applies the process-wide ReadOnly force
+/// after command-line global and per-instance Hidden configuration.
+#[test]
+fn foreground_config_read_only_force_overrides_cli_state_access() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+    let overrides = [
+        HarnessConfigCliOverride::from_str("tau_state_access=hidden").expect("global override"),
+        HarnessConfigCliOverride::from_str("extensions.core-shell.tau_state_access=hidden")
+            .expect("instance override"),
+    ];
+
+    let config = resolve_config_with_cli_overrides_in(
+        &dirs,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        &overrides,
+        Some("read_only".into()),
+    )
+    .expect("resolve foreground config");
+
+    assert!(
+        config.extensions.values().all(|extension| {
+            extension.tau_state_access == path_tau_config_settings::TauStateAccess::ReadOnly
+        }),
+        "the process-wide force must replace every CLI-resolved extension value"
+    );
+}
+
+/// Ensures an absent foreground force preserves normal global and per-instance
+/// state-access precedence.
+#[test]
+fn foreground_config_without_force_preserves_state_access_precedence() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+    let overrides = [
+        HarnessConfigCliOverride::from_str("tau_state_access=hidden").expect("global override"),
+        HarnessConfigCliOverride::from_str("extensions.core-shell.tau_state_access=read_only")
+            .expect("instance override"),
+    ];
+
+    let config =
+        resolve_config_with_cli_overrides_in(&dirs, None, None, &[], &[], &[], &overrides, None)
+            .expect("resolve foreground config");
+
+    assert_eq!(
+        config.extensions["core-shell"].tau_state_access,
+        path_tau_config_settings::TauStateAccess::ReadOnly
+    );
+    assert_eq!(
+        config.extensions["std-websearch"].tau_state_access,
+        path_tau_config_settings::TauStateAccess::Hidden
+    );
+}
+
+/// Ensures malformed process-wide state-access input fails through the
+/// foreground resolver rather than being silently discarded.
+#[test]
+fn foreground_config_rejects_invalid_state_access_force() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+
+    let error = resolve_config_with_cli_overrides_in(
+        &dirs,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        Some("Hidden".into()),
+    )
+    .expect_err("invalid force must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains(path_tau_config_settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV)
+    );
+}
+
+/// Ensures the deterministic environment-free resolver ignores an ambient
+/// process-wide state-access force without mutating the parent test process.
+#[test]
+fn environment_free_config_ignores_ambient_state_access_force() {
+    let output = path_std_process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "settings::tests::environment_free_config_ignores_ambient_state_access_force_child",
+        ])
+        .env(
+            path_tau_config_settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV,
+            "read_only",
+        )
+        .output()
+        .expect("run isolated resolver child");
+    assert!(
+        output.status.success(),
+        "resolver child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Exercises the environment-free resolver inside the isolated process used by
+/// the ambient-force regression.
+#[test]
+#[ignore = "run only through the isolated parent regression"]
+fn environment_free_config_ignores_ambient_state_access_force_child() {
+    let tempdir = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("harness.yaml"),
+        "tau_state_access: hidden\n",
+    )
+    .expect("write harness config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+
+    let config =
+        resolve_config_in_without_environment(&dirs).expect("resolve environment-free config");
+
+    assert!(config.extensions.values().all(|extension| {
+        extension.tau_state_access == path_tau_config_settings::TauStateAccess::Hidden
+    }));
 }
 
 /// Ensures profile extension toggles name real built-ins or base-configured

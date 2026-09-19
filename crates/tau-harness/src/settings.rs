@@ -1077,8 +1077,31 @@ pub(crate) fn resolve_config_with_cli_overrides(
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<Config, Box<dyn std::error::Error>> {
     let dirs = path_tau_config_settings::TauDirs::default();
-    let mut settings = load_settings_for_cli_overrides_in(
+    resolve_config_with_cli_overrides_in(
         &dirs,
+        profile_selection,
+        startup_role,
+        environment_extension_names,
+        extension_overrides,
+        role_overrides,
+        harness_config_overrides,
+        std::env::var_os(tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_config_with_cli_overrides_in(
+    dirs: &path_tau_config_settings::TauDirs,
+    profile_selection: Option<&ProfileSelection>,
+    startup_role: Option<&str>,
+    environment_extension_names: &[String],
+    extension_overrides: &[ExtensionCliOverride],
+    role_overrides: &[RoleCliOverride],
+    harness_config_overrides: &[HarnessConfigCliOverride],
+    tau_state_access_environment: Option<std::ffi::OsString>,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let mut settings = load_settings_for_cli_overrides_in(
+        dirs,
         profile_selection,
         role_overrides,
         harness_config_overrides,
@@ -1092,15 +1115,14 @@ pub(crate) fn resolve_config_with_cli_overrides(
         environment_extension_names,
         extension_overrides,
     )?;
-    Ok(Config {
-        extensions: resolved_extensions
-            .extensions
-            .into_iter()
-            .map(|extension| (extension.name.clone(), extension))
-            .collect(),
-        extension_startup_diagnostics: resolved_extensions.diagnostics,
-        harness_settings: settings,
-    })
+    let mut resolved_extensions = resolved_extensions;
+    let tau_state_access_force =
+        tau_config::settings::parse_tau_state_access_env(tau_state_access_environment)?;
+    apply_tau_state_access_force(&mut resolved_extensions, tau_state_access_force);
+    Ok(config_from_resolved_extensions(
+        resolved_extensions,
+        settings,
+    ))
 }
 
 pub(crate) fn resolve_config_in(
