@@ -470,6 +470,67 @@ fn output_length_continuation_delivers_exactly_one_captured_successor() {
         .expect("source length response");
     let successor = read_nth_prompt_created(&h, 1);
     assert_ne!(successor.agent_prompt_id, source.agent_prompt_id);
+    let cid = h
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .get(&successor.agent_prompt_id)
+        .cloned()
+        .expect("successor prompt owner");
+    let successor_provider = h
+        .provider_runtime
+        .pending_prompts
+        .get(&successor.agent_prompt_id)
+        .cloned()
+        .expect("successor provider route");
+    let agent = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("successor agent");
+    assert_eq!(
+        agent.dispatch.in_flight_prompt.as_ref(),
+        Some(&successor.agent_prompt_id)
+    );
+    assert!(matches!(
+        &agent.turn.turn_state,
+        AgentTurnState::AgentThinking { agent_prompt_id }
+            if agent_prompt_id == &successor.agent_prompt_id
+    ));
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(&source.agent_prompt_id)
+    );
+    assert!(
+        !h.provider_runtime
+            .pending_prompts
+            .contains_key(&source.agent_prompt_id)
+    );
+
+    let _requester = connect_test_client(&mut h, "length-retry-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event_inner(
+        &crate::test_connection_id("length-retry-ui"),
+        Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: tau_proto::RetryPromptRequestId::parse("length-successor-retry")
+                .expect("retry request id"),
+            session_id: h.session_runtime.current_session_id.clone(),
+            target_agent_id: Some(successor.agent_id.clone()),
+            agent_prompt_id: None,
+        }),
+    )
+    .expect("retry active successor");
+    let retry = h
+        .ui_runtime
+        .pending_retry_prompts
+        .values()
+        .find(|pending| pending.ui_request_id.as_str() == "length-successor-retry")
+        .expect("directed successor retry");
+    assert_eq!(retry.agent_prompt_id, successor.agent_prompt_id);
+    assert_eq!(retry.provider_connection_id, successor_provider);
+
     assert_eq!(successor.model, source.model);
     assert_eq!(successor.operation, tau_proto::PromptOperation::Inference);
     assert!(successor.context.blocks.iter().any(|block| matches!(

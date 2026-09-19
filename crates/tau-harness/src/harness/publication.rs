@@ -1230,6 +1230,41 @@ impl Harness {
         cid
     }
 
+    /// Preserve an exact output-length successor's existing Thinking projection
+    /// while failed-route cleanup transfers settlement to its local terminal.
+    pub(super) fn failed_route_output_length_thinking(
+        &self,
+        cid: &AgentId,
+        agent_prompt_id: &AgentPromptId,
+    ) -> Option<AgentTurnState> {
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
+        match (
+            &agent.dispatch.in_flight_prompt,
+            &agent.turn.output_length_continuation,
+            &agent.dispatch.activation_dispatch,
+            &agent.turn.turn_state,
+        ) {
+            (
+                Some(in_flight_prompt),
+                path_crate_agent::OutputLengthContinuationState::Active(continuation),
+                path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                    agent_prompt_id: dispatch_prompt_id,
+                    ..
+                },
+                AgentTurnState::AgentThinking {
+                    agent_prompt_id: thinking_prompt_id,
+                },
+            ) if in_flight_prompt == agent_prompt_id
+                && continuation.plan.agent_prompt_id == *agent_prompt_id
+                && dispatch_prompt_id == agent_prompt_id
+                && thinking_prompt_id == agent_prompt_id =>
+            {
+                Some(agent.turn.turn_state.clone())
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn recover_failed_provider_prompt_route(
         &mut self,
         event: &Event,
@@ -1260,6 +1295,9 @@ impl Harness {
             .agents
             .get(&agent_prompt_id)
             .cloned();
+        let preserved_turn_state = cid
+            .as_ref()
+            .and_then(|cid| self.failed_route_output_length_thinking(cid, &agent_prompt_id));
         let failed_compaction = cid.as_ref().and_then(|cid| {
             self.agent_runtime
                 .agent_registry
@@ -1314,6 +1352,11 @@ impl Harness {
                     )
                 })
             {
+                if let Some(turn_state) = preserved_turn_state
+                    && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
+                {
+                    agent.turn.turn_state = turn_state;
+                }
                 self.terminalize_unroutable_owned_dispatch(&cid, Some(&prompt.model));
             } else {
                 self.set_agent_turn_state(&cid, AgentTurnState::Idle);

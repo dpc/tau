@@ -5,6 +5,7 @@ use super::super::dispatch::{
     provider_tool_response,
 };
 use super::*;
+use crate::agent::OutputLengthContinuationState;
 use crate::harness::{
     AgentPublishCompletion, CommittedGatedFinal, CommittedGatedFinalReducer,
     CommittedOutputLengthToolEffect, ConversationHeadSync, GatedFinalDisposition,
@@ -183,6 +184,21 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
             crate::agent::OutputLengthContinuationState::Planned(_)
         )
     }));
+    assert!(h.agent_runtime.agent_registry.agents.values().any(|agent| {
+        agent.identity.agent_id.as_ref() == Some(&source.agent_id)
+            && agent.dispatch.in_flight_prompt.is_none()
+    }));
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(&source.agent_prompt_id)
+    );
+    assert!(
+        !h.provider_runtime
+            .pending_prompts
+            .contains_key(&source.agent_prompt_id)
+    );
     h.config.selected_model = Some("changed/model".into());
     let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
     let (_observer_id, mut observer) = connect_socket_ui(&mut h);
@@ -2354,6 +2370,33 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
         h.runtime_io.publication.pending_intercept.is_some(),
         "local Failed terminal is parked"
     );
+    let successor_id = match &h.agent_runtime.agent_registry.agents[&source_cid]
+        .turn
+        .output_length_continuation
+    {
+        OutputLengthContinuationState::Active(continuation) => {
+            continuation.plan.agent_prompt_id.clone()
+        }
+        other => panic!("expected active output-length successor, got {other:?}"),
+    };
+    let agent = &h.agent_runtime.agent_registry.agents[&source_cid];
+    assert!(matches!(
+        &agent.turn.turn_state,
+        AgentTurnState::AgentThinking { agent_prompt_id }
+            if agent_prompt_id == &successor_id
+    ));
+    assert_eq!(agent.dispatch.in_flight_prompt, None);
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(&successor_id)
+    );
+    assert!(
+        !h.provider_runtime
+            .pending_prompts
+            .contains_key(&successor_id)
+    );
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
         &tau_proto::UiCancelPrompt {
@@ -2361,6 +2404,14 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
             target_agent_id: Some(source.agent_id.clone()),
             agent_prompt_id: None,
         },
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
+            .pending_cancel
+            .as_ref()
+            .and_then(|pending| pending.agent_prompt_id.as_ref()),
+        Some(&successor_id)
     );
     h.handle_extension_event(
         "length-created-interceptor",
@@ -2375,7 +2426,7 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
         .agent_store
         .agent_events(source.agent_id.as_str())
         .expect("durable events");
-    let successor_id = records
+    let reserved_successor_id = records
         .iter()
         .find_map(|record| match &record.event {
             Event::ProviderResponseFinished(response) => {
@@ -2390,13 +2441,14 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
             _ => None,
         })
         .expect("reserved successor");
+    assert_eq!(reserved_successor_id, successor_id);
     assert_eq!(
         records
             .iter()
             .filter(|record| matches!(
                 &record.event,
                 Event::AgentPromptStarted(started)
-                    if started.agent_prompt_id == successor_id
+                    if started.agent_prompt_id == reserved_successor_id
             ))
             .count(),
         1
@@ -2407,7 +2459,7 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
             .filter(|record| matches!(
                 &record.event,
                 Event::ProviderResponseFinished(response)
-                    if response.agent_prompt_id == successor_id
+                    if response.agent_prompt_id == reserved_successor_id
                         && matches!(
                             response.output_length_disposition,
                             tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -2425,6 +2477,30 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
             .agents
             .values()
             .all(|agent| agent.dispatch.pending_cancel.is_none())
+    );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .turn
+            .turn_state,
+        AgentTurnState::Idle
+    ));
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&source_cid)
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id
+                        == tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id)
+            ))
+            .count(),
+        1
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&source_cid]
@@ -2492,6 +2568,33 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
         h.runtime_io.publication.pending_intercept.is_some(),
         "synthetic failure prompt-start is parked"
     );
+    let successor_id = match &h.agent_runtime.agent_registry.agents[&source_cid]
+        .turn
+        .output_length_continuation
+    {
+        OutputLengthContinuationState::Active(continuation) => {
+            continuation.plan.agent_prompt_id.clone()
+        }
+        other => panic!("expected active output-length successor, got {other:?}"),
+    };
+    let agent = &h.agent_runtime.agent_registry.agents[&source_cid];
+    assert!(matches!(
+        &agent.turn.turn_state,
+        AgentTurnState::AgentThinking { agent_prompt_id }
+            if agent_prompt_id == &successor_id
+    ));
+    assert_eq!(agent.dispatch.in_flight_prompt, None);
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(&successor_id)
+    );
+    assert!(
+        !h.provider_runtime
+            .pending_prompts
+            .contains_key(&successor_id)
+    );
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
         &tau_proto::UiCancelPrompt {
@@ -2499,6 +2602,14 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
             target_agent_id: Some(source.agent_id.clone()),
             agent_prompt_id: None,
         },
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
+            .pending_cancel
+            .as_ref()
+            .and_then(|pending| pending.agent_prompt_id.as_ref()),
+        Some(&successor_id)
     );
     h.handle_extension_event(
         "length-failure-race",
@@ -2537,6 +2648,30 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
             .agents
             .values()
             .all(|agent| agent.dispatch.pending_cancel.is_none())
+    );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .turn
+            .turn_state,
+        AgentTurnState::Idle
+    ));
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&source_cid)
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id
+                        == tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id)
+            ))
+            .count(),
+        1
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&source_cid]

@@ -1,6 +1,7 @@
 //! Tests for provider lifecycle behavior.
 
 use super::*;
+use crate::agent::{ActivationDispatchState, OutputLengthContinuationState};
 use crate::harness::HarnessSessionLaunchMode;
 
 /// Provider debug captures must never select another durable session's path.
@@ -141,6 +142,13 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
     h.submit_user_prompt(test_session_id("s1"), "route-bound continuation".to_owned())
         .expect("submit");
     let source = read_nth_prompt_created(&h, 0);
+    let source_cid = h
+        .agent_runtime
+        .agent_registry
+        .agent_routes
+        .get(source.agent_id.as_str())
+        .cloned()
+        .expect("source route");
     let _interceptor = connect_test_tool(&mut h, "length-owner-interceptor");
     h.handle_extension_event(
         "length-owner-interceptor",
@@ -237,6 +245,36 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
         .expect("route failure terminal");
     assert!(start_position < failure_position);
     assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == owner.agent_prompt_id
+                        && matches!(
+                            response.output_length_disposition,
+                            tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                                outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+                                ..
+                            }
+                        )
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id
+                        == tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id)
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
         event_log_events(&h)
             .iter()
             .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
@@ -244,6 +282,173 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
         1,
         "reserved successor never reaches provider delivery"
     );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .turn
+            .turn_state,
+        AgentTurnState::Idle
+    ));
+    assert!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
+            .pending_cancel
+            .is_none()
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&source_cid)
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Failed-route Thinking preservation requires one exact output-length
+/// successor identity across every runtime owner and projection.
+#[test]
+fn output_length_failed_route_thinking_preservation_requires_exact_identity() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    h.submit_user_prompt(test_session_id("s1"), "check route ownership".to_owned())
+        .expect("submit");
+    let source = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(reasoning_only_length_response(&source, 5))
+        .expect("source length response");
+    let successor = read_nth_prompt_created(&h, 1);
+    let cid = h
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .get(&successor.agent_prompt_id)
+        .cloned()
+        .expect("successor prompt owner");
+
+    assert!(matches!(
+        h.failed_route_output_length_thinking(&cid, &successor.agent_prompt_id),
+        Some(AgentTurnState::AgentThinking { agent_prompt_id })
+            if agent_prompt_id == successor.agent_prompt_id
+    ));
+
+    let different_prompt = test_agent_prompt_id("different-successor");
+    let (original_in_flight, original_output_length, original_activation, original_turn_state) = {
+        let agent = &h.agent_runtime.agent_registry.agents[&cid];
+        (
+            agent.dispatch.in_flight_prompt.clone(),
+            agent.turn.output_length_continuation.clone(),
+            agent.dispatch.activation_dispatch.clone(),
+            agent.turn.turn_state.clone(),
+        )
+    };
+
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .in_flight_prompt = Some(different_prompt.clone());
+    assert!(
+        h.failed_route_output_length_thinking(&cid, &successor.agent_prompt_id)
+            .is_none()
+    );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .in_flight_prompt = original_in_flight;
+
+    if let OutputLengthContinuationState::Active(continuation) = &mut h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn
+        .output_length_continuation
+    {
+        continuation.plan.agent_prompt_id = different_prompt.clone();
+    } else {
+        panic!("expected active output-length continuation");
+    }
+    assert!(
+        h.failed_route_output_length_thinking(&cid, &successor.agent_prompt_id)
+            .is_none()
+    );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn
+        .output_length_continuation = original_output_length.clone();
+
+    if let ActivationDispatchState::DispatchUncertain {
+        agent_prompt_id, ..
+    } = &mut h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .activation_dispatch
+    {
+        *agent_prompt_id = different_prompt;
+    } else {
+        panic!("expected uncertain successor dispatch");
+    }
+    assert!(
+        h.failed_route_output_length_thinking(&cid, &successor.agent_prompt_id)
+            .is_none()
+    );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .activation_dispatch = original_activation;
+
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn
+        .turn_state = AgentTurnState::Idle;
+    assert!(
+        h.failed_route_output_length_thinking(&cid, &successor.agent_prompt_id)
+            .is_none()
+    );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn
+        .turn_state = original_turn_state;
+
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn
+        .output_length_continuation = OutputLengthContinuationState::None;
+    assert!(
+        h.failed_route_output_length_thinking(&cid, &successor.agent_prompt_id)
+            .is_none()
+    );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn
+        .output_length_continuation = original_output_length;
+
     h.shutdown().expect("shutdown");
 }
 

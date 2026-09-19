@@ -3638,7 +3638,9 @@ impl Harness {
             notify_watchers,
         );
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
-        if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
+            && conv.dispatch.in_flight_prompt.as_ref() == Some(&response.agent_prompt_id)
+        {
             conv.dispatch.in_flight_prompt = None;
         }
     }
