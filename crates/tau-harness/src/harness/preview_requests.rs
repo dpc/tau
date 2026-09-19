@@ -672,6 +672,7 @@ impl Harness {
                 if is_secret {
                     with_extension_data_scope_lock(&root, || {
                         run_extension_data_write_file_with_limit(
+                            &self.session_runtime.state_dir,
                             &root,
                             path.into_string(),
                             contents,
@@ -689,6 +690,7 @@ impl Harness {
             } => {
                 if is_secret {
                     run_extension_data_compare_and_swap_file(
+                        &self.session_runtime.state_dir,
                         &root,
                         path.into_string(),
                         expected_generation,
@@ -706,6 +708,7 @@ impl Harness {
                 if is_secret {
                     with_extension_data_scope_lock(&root, || {
                         run_extension_data_create_file_with_limit(
+                            &self.session_runtime.state_dir,
                             &root,
                             path.into_string(),
                             contents,
@@ -734,7 +737,11 @@ impl Harness {
             tau_proto::ExtensionDataRequestOp::DeleteFile { path } => {
                 if is_secret {
                     with_extension_data_scope_lock(&root, || {
-                        run_extension_data_delete_file(&root, path.into_string())
+                        run_secret_data_delete_file(
+                            &self.session_runtime.state_dir,
+                            &root,
+                            path.into_string(),
+                        )
                     })
                 } else {
                     run_extension_data_delete_file(&root, path.into_string())
@@ -743,7 +750,12 @@ impl Harness {
             tau_proto::ExtensionDataRequestOp::RenameFile { from, to } => {
                 if is_secret {
                     with_extension_data_scope_lock(&root, || {
-                        run_extension_data_rename_file(&root, from.into_string(), to.into_string())
+                        run_secret_data_rename_file(
+                            &self.session_runtime.state_dir,
+                            &root,
+                            from.into_string(),
+                            to.into_string(),
+                        )
                     })
                 } else {
                     run_extension_data_rename_file(&root, from.into_string(), to.into_string())

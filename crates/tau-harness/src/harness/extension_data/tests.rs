@@ -2,6 +2,139 @@ use std::fs as path_std_fs;
 
 use super::*;
 
+/// Proves a successful Secret mutation synchronizes every containing directory
+/// from the leaf parent through Tau's state root, including a freshly prepared
+/// scope hierarchy that the current mutation did not create.
+#[test]
+fn secret_mutation_barriers_cover_nested_and_scope_hierarchies() {
+    let state = Path::new("/tau-state");
+    let root = state.join("secrets/ext/provider-work");
+    let nested = root.join("providers/new-provider/auth.json");
+    let mut nested_barriers = Vec::new();
+
+    let result = finish_secret_mutation_with(Ok(7), &nested, state, |directory| {
+        nested_barriers.push(directory.to_path_buf());
+        Ok(())
+    })
+    .expect("all nested barriers");
+
+    assert_eq!(result, 7);
+    assert_eq!(
+        nested_barriers,
+        [
+            root.join("providers/new-provider"),
+            root.join("providers"),
+            root.clone(),
+            state.join("secrets/ext"),
+            state.join("secrets"),
+            state.to_path_buf(),
+        ]
+    );
+
+    let direct = root.join("auth.json");
+    let mut direct_barriers = Vec::new();
+    finish_secret_mutation_with(Ok(()), &direct, state, |directory| {
+        direct_barriers.push(directory.to_path_buf());
+        Ok(())
+    })
+    .expect("fresh scope barriers");
+    assert_eq!(
+        direct_barriers,
+        [
+            root,
+            state.join("secrets/ext"),
+            state.join("secrets"),
+            state.to_path_buf(),
+        ]
+    );
+}
+
+/// Proves a containing-directory sync failure prevents Secret mutation success
+/// and a retry revisits the complete hierarchy instead of relying on which
+/// directories its own `mkdir` calls created.
+#[test]
+fn secret_mutation_barrier_failure_is_returned_and_retry_revisits_existing_dirs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = temp.path().join("tau-state");
+    let root = state.join("secrets/ext/provider-work");
+    let path = root.join("providers/new-provider/auth.json");
+    let mut first_attempt = Vec::new();
+
+    let error = write_extension_data_file_with_limit_locked_with(
+        &state,
+        &root,
+        "providers/new-provider/auth.json".to_owned(),
+        b"published".to_vec(),
+        MAX_SECRET_DATA_FILE_BYTES,
+        |directory| {
+            first_attempt.push(directory.to_path_buf());
+            if directory == root {
+                Err(path_std_io::Error::other("injected directory sync failure"))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect_err("directory sync failure prevents success");
+    assert_eq!(error.kind, tau_proto::ExtensionDataErrorKind::Io);
+    assert_eq!(
+        path_std_fs::read(&path).expect("file publication precedes ancestor barriers"),
+        b"published"
+    );
+    assert_eq!(
+        first_attempt,
+        [
+            root.join("providers/new-provider"),
+            root.join("providers"),
+            root.clone(),
+        ]
+    );
+
+    let mut retry = Vec::new();
+    let result = write_extension_data_file_with_limit_locked_with(
+        &state,
+        &root,
+        "providers/new-provider/auth.json".to_owned(),
+        b"published".to_vec(),
+        MAX_SECRET_DATA_FILE_BYTES,
+        |directory| {
+            retry.push(directory.to_path_buf());
+            Ok(())
+        },
+    )
+    .expect("retry barriers");
+    assert_eq!(result, tau_proto::ExtensionDataValue::WriteFile);
+    assert_eq!(
+        retry,
+        [
+            root.join("providers/new-provider"),
+            root.join("providers"),
+            root.clone(),
+            state.join("secrets/ext"),
+            state.join("secrets"),
+            state.to_path_buf(),
+        ]
+    );
+}
+
+/// Proves a failed file mutation does not run publication barriers or disguise
+/// the original mutation error.
+#[test]
+fn secret_mutation_failure_skips_directory_barriers() {
+    let error = path_std_io::Error::other("injected file mutation failure");
+    let result = finish_secret_mutation_with::<()>(
+        Err(error),
+        Path::new("/tau-state/secrets/ext/provider-work/auth.json"),
+        Path::new("/tau-state"),
+        |_| panic!("failed mutation must skip directory barriers"),
+    );
+
+    assert_eq!(
+        result.expect_err("mutation failure").to_string(),
+        "injected file mutation failure"
+    );
+}
+
 /// Ensures extension data reads reject oversized files before allocating the
 /// whole contents on the harness request path.
 #[test]
@@ -215,6 +348,7 @@ fn compare_and_swap_replaces_only_the_expected_generation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("secret");
     run_extension_data_write_file_with_limit(
+        temp.path(),
         &root,
         "providers/chatgpt/oauth.json".to_owned(),
         b"first".to_vec(),
@@ -225,6 +359,7 @@ fn compare_and_swap_replaces_only_the_expected_generation() {
 
     assert!(matches!(
         run_extension_data_compare_and_swap_file(
+            temp.path(),
             &root,
             "providers/chatgpt/oauth.json".to_owned(),
             first_generation.clone(),
@@ -234,6 +369,7 @@ fn compare_and_swap_replaces_only_the_expected_generation() {
         Ok(tau_proto::ExtensionDataValue::CompareAndSwapFile)
     ));
     let error = run_extension_data_compare_and_swap_file(
+        temp.path(),
         &root,
         "providers/chatgpt/oauth.json".to_owned(),
         first_generation,
@@ -265,6 +401,7 @@ fn compare_and_swap_rejects_a_symlink_leaf() {
     symlink(&outside, root.join("credential.json")).expect("symlink");
 
     let error = run_extension_data_compare_and_swap_file(
+        temp.path(),
         &root,
         "credential.json".to_owned(),
         blake3::hash(b"outside").to_hex().to_string(),

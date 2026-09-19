@@ -361,6 +361,7 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
             let publication = with_extension_data_scope_lock(&secret_root, || {
                 for (path, record) in publications {
                     write_extension_data_file_with_limit_locked(
+                        state_dir,
                         &secret_root,
                         path,
                         record,

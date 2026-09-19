@@ -348,6 +348,37 @@ fn sync_parent_dir(path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn finish_secret_mutation<T>(
+    mutation: Result<T, std::io::Error>,
+    path: &Path,
+    state_dir: &Path,
+) -> Result<T, std::io::Error> {
+    finish_secret_mutation_with(mutation, path, state_dir, |directory| {
+        path_std_fs::File::open(directory)?.sync_all()
+    })
+}
+
+fn finish_secret_mutation_with<T>(
+    mutation: Result<T, std::io::Error>,
+    path: &Path,
+    state_dir: &Path,
+    mut sync_directory: impl FnMut(&Path) -> Result<(), std::io::Error>,
+) -> Result<T, std::io::Error> {
+    let value = mutation?;
+    let mut directory = path
+        .parent()
+        .ok_or_else(|| path_std_io::Error::other("secret path has no containing hierarchy"))?;
+    loop {
+        sync_directory(directory)?;
+        if directory == state_dir {
+            return Ok(value);
+        }
+        directory = directory.parent().ok_or_else(|| {
+            path_std_io::Error::other("secret path is outside the Tau state directory")
+        })?;
+    }
+}
+
 fn extension_data_temp_path(path: &Path) -> std::path::PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
@@ -502,21 +533,10 @@ pub(super) fn run_extension_data_write_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    run_extension_data_write_file_with_limit(root, path, contents, EXTENSION_DATA_MAX_FILE_BYTES)
+    write_extension_data_file_with_limit(root, path, contents, EXTENSION_DATA_MAX_FILE_BYTES)
 }
 
-/// Replaces one file while enforcing the selected scope's whole-file limit.
-pub(super) fn run_extension_data_write_file_with_limit(
-    root: &Path,
-    path: String,
-    contents: Vec<u8>,
-    max_bytes: u64,
-) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    write_extension_data_file_with_limit_locked(root, path, contents, max_bytes)
-}
-
-/// Replace one complete file while the caller holds the Secret-scope lock.
-pub(super) fn write_extension_data_file_with_limit_locked(
+fn write_extension_data_file_with_limit(
     root: &Path,
     path: String,
     contents: Vec<u8>,
@@ -537,16 +557,74 @@ pub(super) fn write_extension_data_file_with_limit_locked(
     Ok(tau_proto::ExtensionDataValue::WriteFile)
 }
 
+/// Replaces one Secret file while enforcing its whole-file limit and durable
+/// containing-directory publication contract.
+pub(super) fn run_extension_data_write_file_with_limit(
+    state_dir: &Path,
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    write_extension_data_file_with_limit_locked(state_dir, root, path, contents, max_bytes)
+}
+
+/// Replace one complete file while the caller holds the Secret-scope lock.
+pub(super) fn write_extension_data_file_with_limit_locked(
+    state_dir: &Path,
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    write_extension_data_file_with_limit_locked_with(
+        state_dir,
+        root,
+        path,
+        contents,
+        max_bytes,
+        |directory| path_std_fs::File::open(directory)?.sync_all(),
+    )
+}
+
+fn write_extension_data_file_with_limit_locked_with(
+    state_dir: &Path,
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+    sync_directory: impl FnMut(&Path) -> Result<(), std::io::Error>,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents, max_bytes)?;
+    let rel = sanitize_extension_data_path(&path, false)?;
+    let path = checked_extension_data_path(root, &rel, true)?;
+    if path.exists() && !path.is_file() {
+        return Err(ExtensionDataError::new(
+            tau_proto::ExtensionDataErrorKind::NotFile,
+            format!("`{}` is not a file", rel.display()),
+        ));
+    }
+    finish_secret_mutation_with(
+        atomic_replace_extension_data_file(&path, &contents),
+        &path,
+        state_dir,
+        sync_directory,
+    )
+    .map_err(|error| {
+        ExtensionDataError::io(format!("failed to write `{}`", rel.display()), error)
+    })?;
+    Ok(tau_proto::ExtensionDataValue::WriteFile)
+}
+
 pub(super) fn run_extension_data_create_file(
     root: &Path,
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    run_extension_data_create_file_with_limit(root, path, contents, EXTENSION_DATA_MAX_FILE_BYTES)
+    create_extension_data_file_with_limit(root, path, contents, EXTENSION_DATA_MAX_FILE_BYTES)
 }
 
-/// Creates one file while enforcing the selected scope's whole-file limit.
-pub(super) fn run_extension_data_create_file_with_limit(
+fn create_extension_data_file_with_limit(
     root: &Path,
     path: String,
     contents: Vec<u8>,
@@ -562,6 +640,35 @@ pub(super) fn run_extension_data_create_file_with_limit(
         ));
     }
     create_extension_data_file(&path, &contents).map_err(|error| {
+        ExtensionDataError::io(format!("failed to create `{}`", rel.display()), error)
+    })?;
+    Ok(tau_proto::ExtensionDataValue::CreateFile)
+}
+
+/// Creates one Secret file while enforcing its whole-file limit and durable
+/// containing-directory publication contract.
+pub(super) fn run_extension_data_create_file_with_limit(
+    state_dir: &Path,
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents, max_bytes)?;
+    let rel = sanitize_extension_data_path(&path, false)?;
+    let path = checked_extension_data_path(root, &rel, true)?;
+    if path.exists() && !path.is_file() {
+        return Err(ExtensionDataError::new(
+            tau_proto::ExtensionDataErrorKind::NotFile,
+            format!("`{}` is not a file", rel.display()),
+        ));
+    }
+    finish_secret_mutation(
+        create_extension_data_file(&path, &contents),
+        &path,
+        state_dir,
+    )
+    .map_err(|error| {
         ExtensionDataError::io(format!("failed to create `{}`", rel.display()), error)
     })?;
     Ok(tau_proto::ExtensionDataValue::CreateFile)
@@ -631,6 +738,7 @@ pub(super) fn run_scoped_extension_data_append_file(
 /// retains the normal synchronous file and parent-directory durability
 /// contract.
 pub(super) fn run_extension_data_compare_and_swap_file(
+    state_dir: &Path,
     root: &Path,
     path: String,
     expected_generation: String,
@@ -661,7 +769,12 @@ pub(super) fn run_extension_data_compare_and_swap_file(
                 format!("`{}` changed since it was read", rel.display()),
             ));
         }
-        atomic_replace_extension_data_file(&path, &contents).map_err(|error| {
+        finish_secret_mutation(
+            atomic_replace_extension_data_file(&path, &contents),
+            &path,
+            state_dir,
+        )
+        .map_err(|error| {
             ExtensionDataError::io(format!("failed to write `{}`", rel.display()), error)
         })?;
         Ok(tau_proto::ExtensionDataValue::CompareAndSwapFile)
@@ -745,6 +858,19 @@ pub(super) fn run_extension_data_delete_file(
     }
 }
 
+/// Deletes one Secret file and durably publishes every containing Tau-owned
+/// directory entry before reporting success.
+pub(super) fn run_secret_data_delete_file(
+    state_dir: &Path,
+    root: &Path,
+    path: String,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    let rel = sanitize_extension_data_path(&path, false)?;
+    let result = run_extension_data_delete_file(root, path)?;
+    finish_secret_mutation(Ok(result), &root.join(rel), state_dir)
+        .map_err(|error| ExtensionDataError::io("failed to publish secret deletion", error))
+}
+
 pub(super) fn run_extension_data_rename_file(
     root: &Path,
     from: String,
@@ -777,6 +903,22 @@ pub(super) fn run_extension_data_rename_file(
         )
     })?;
     Ok(tau_proto::ExtensionDataValue::RenameFile)
+}
+
+/// Renames one Secret file and durably publishes both containing Tau-owned
+/// directory hierarchies before reporting success.
+pub(super) fn run_secret_data_rename_file(
+    state_dir: &Path,
+    root: &Path,
+    from: String,
+    to: String,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    let from_rel = sanitize_extension_data_path(&from, false)?;
+    let to_rel = sanitize_extension_data_path(&to, false)?;
+    let result = run_extension_data_rename_file(root, from, to)?;
+    finish_secret_mutation(Ok(()), &root.join(from_rel), state_dir)
+        .and_then(|()| finish_secret_mutation(Ok(result), &root.join(to_rel), state_dir))
+        .map_err(|error| ExtensionDataError::io("failed to publish secret rename", error))
 }
 
 pub(super) fn run_extension_data_list_files(
