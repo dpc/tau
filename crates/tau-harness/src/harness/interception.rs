@@ -1459,7 +1459,11 @@ impl Harness {
         sync: Option<&ConversationHeadSync>,
     ) -> bool {
         sync.is_some_and(|sync| {
-            sync.continuation.is_some() || matches!(event, Event::AgentInferenceDispatchStarted(_))
+            !matches!(
+                sync.completion(),
+                Some(AgentPublishCompletion::StandaloneExecutionAccounting { .. })
+            ) && (sync.continuation.is_some()
+                || matches!(event, Event::AgentInferenceDispatchStarted(_)))
         })
     }
 

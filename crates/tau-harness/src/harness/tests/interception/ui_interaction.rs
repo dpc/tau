@@ -694,10 +694,9 @@ fn standalone_agent_teardown_rejects_ui_interaction_before_accounting_wait() {
     h.shutdown().expect("shutdown");
 }
 
-/// Even a shutdown blocked on standalone accounting rejects pending input
-/// before returning its error.
+/// Shutdown rejects pending input before force-settling standalone accounting.
 #[test]
-fn standalone_shutdown_rejects_ui_interaction_before_accounting_wait() {
+fn standalone_shutdown_rejects_ui_interaction_before_accounting_settlement() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
@@ -710,15 +709,10 @@ fn standalone_shutdown_rejects_ui_interaction_before_accounting_wait() {
     );
     let ui = connect_test_client(&mut h, "interaction-ui", tau_proto::ClientKind::Ui);
     submit(&mut h, &id, "pending before accounting shutdown");
-    let error = h.shutdown().expect_err("accounting still parked");
-    assert!(error.to_string().contains("accounting remains uncommitted"));
+    h.shutdown().expect("force-settle parked accounting");
     assert_eq!(ui_errors(&ui), 1);
     assert_eq!(interactions(&h, &id), 0);
-    release_interaction(&mut h);
-    assert!(h.has_unsettled_standalone_accounting_publication());
-    assert_eq!(interactions(&h, &id), 0);
-    release_teardown_obligation(&mut h);
-    h.shutdown().expect("shutdown after accounting commits");
+    assert!(!h.has_unsettled_standalone_accounting_publication());
     assert_eq!(interactions(&h, &id), 0);
     assert_eq!(
         event_log_events(&h)

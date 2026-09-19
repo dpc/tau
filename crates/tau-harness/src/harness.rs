@@ -2713,22 +2713,6 @@ impl Harness {
         in_process_cleanup_grace: Duration,
     ) -> Result<(), HarnessError> {
         self.cancel_ui_interactions_for_shutdown();
-        let active_standalone_prompts = self
-            .prompt_coordination
-            .standalone_accounting
-            .owners
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for prompt_id in active_standalone_prompts {
-            self.publish_final_unknown_standalone_accounting(&prompt_id);
-        }
-        self.retry_pending_standalone_accounting_publications();
-        if self.has_unsettled_standalone_accounting_publication() {
-            return Err(HarnessError::Participant(
-                "cannot shut down while standalone accounting remains uncommitted".to_owned(),
-            ));
-        }
         if !self.session_runtime.shutdown_published {
             self.fail_start_operations_for_session_shutdown();
             self.fail_all_pending_initial_prompts(
@@ -2745,7 +2729,36 @@ impl Harness {
                 .current_session_generation
                 .saturating_next();
             self.cancel_ui_prompt_publications_for_shutdown();
-            self.quiesce_synchronized_publications_for_shutdown();
+        }
+        // First preserve and settle every already prepared fact. Two bounded
+        // rounds cover an initial whose commit unlocks its queued correction.
+        self.settle_standalone_accounting_for_shutdown();
+        if self.has_unsettled_standalone_accounting_publication() {
+            return Err(HarnessError::Participant(
+                "cannot shut down while standalone accounting remains uncommitted after final settlement"
+                    .to_owned(),
+            ));
+        }
+        // Retry facts and cancellation initials deliberately leave the current
+        // attempt or correction owner open. Only after their exact facts settle
+        // may shutdown derive Final Unknown closures for those remaining
+        // owners.
+        let active_standalone_prompts = self
+            .prompt_coordination
+            .standalone_accounting
+            .owners
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for prompt_id in active_standalone_prompts {
+            self.publish_final_unknown_standalone_accounting(&prompt_id);
+        }
+        self.settle_standalone_accounting_for_shutdown();
+        if self.has_unsettled_standalone_accounting_publication() {
+            return Err(HarnessError::Participant(
+                "cannot shut down while standalone accounting remains uncommitted after final settlement"
+                    .to_owned(),
+            ));
         }
         let _published = self.publish_current_session_shutdown();
         self.quiesce_synchronized_publications_for_shutdown();
@@ -2890,6 +2903,16 @@ impl Harness {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// Force-passes canonical accounting through final-teardown interception
+    /// and gives resulting semantic-admission rejections bounded retries.
+    fn settle_standalone_accounting_for_shutdown(&mut self) {
+        for _ in 0..2 {
+            self.quiesce_synchronized_publications_for_shutdown();
+            self.retry_pending_standalone_accounting_publications();
+        }
+        self.quiesce_synchronized_publications_for_shutdown();
     }
 
     #[cfg(test)]

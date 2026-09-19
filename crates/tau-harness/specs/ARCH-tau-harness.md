@@ -391,7 +391,11 @@ restore that ledger without recreating the old runtime branch. Post-dispatch
 cancellation publishes one Unknown awaiting observation; only a terminal from
 the same live provider generation may correct it without counting another
 request. Provider loss, shutdown, and unload close remaining owners as Final
-Unknown before runtime authority disappears.
+Unknown before runtime authority disappears. Final shutdown first force-passes
+already prepared accounting facts through its existing teardown interception
+policy, preserving their exact usage and order; it performs only a bounded
+semantic-admission retry and reports failure instead of discarding an
+uncommitted fact.
 Peer requests routed to harness-internal tools use separate runtime loaded-agent
 correlation for execution, wait, ephemeral, and unload lifecycle; they never
 acquire transcript tool-call ownership, so their terminal facts remain

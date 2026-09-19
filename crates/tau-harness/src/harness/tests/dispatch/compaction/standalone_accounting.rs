@@ -1708,10 +1708,10 @@ fn unload_waits_for_dual_retained_accounting_retry_batch() {
     h.shutdown().expect("shutdown");
 }
 
-/// Final shutdown must fail before invalidating an accounting fact parked at an
-/// interceptor, then succeed after that exact fact commits.
+/// Final shutdown must force-pass an accounting fact parked at an interceptor
+/// and commit that exact fact once before retiring the session.
 #[test]
-fn parked_standalone_accounting_blocks_shutdown_until_committed() {
+fn parked_standalone_accounting_is_force_settled_during_shutdown() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
@@ -1747,27 +1747,17 @@ fn parked_standalone_accounting_blocks_shutdown_until_committed() {
     )
     .expect("park accounting publication");
     assert!(h.has_unsettled_standalone_accounting_publication());
+    let expected = h
+        .runtime_io
+        .publication
+        .pending_intercept
+        .as_ref()
+        .expect("parked accounting")
+        .event
+        .clone();
 
-    let error = h
-        .shutdown()
-        .expect_err("shutdown must not discard parked accounting");
-    assert!(
-        error.to_string().contains("accounting remains uncommitted"),
-        "{error}"
-    );
-    assert_eq!(
-        h.session_runtime.current_session_id,
-        test_session_id("s1"),
-        "failed shutdown must preserve the accounting session"
-    );
-
-    h.handle_extension_event(
-        interceptor,
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("commit parked accounting");
+    h.shutdown()
+        .expect("shutdown force-passes canonical accounting");
     assert!(!h.has_unsettled_standalone_accounting_publication());
     assert_eq!(
         event_log_events(&h)
@@ -1780,7 +1770,535 @@ fn parked_standalone_accounting_blocks_shutdown_until_committed() {
             .count(),
         1
     );
-    h.shutdown().expect("shutdown after accounting commit");
+    let committed = event_log_events(&h)
+        .into_iter()
+        .find(|event| match event {
+            Event::ProviderStandaloneExecutionAccounted(accounted) => {
+                accounted.agent_prompt_id == compact.agent_prompt_id
+            }
+            _ => false,
+        })
+        .expect("committed accounting");
+    assert_eq!(committed, expected);
+}
+
+/// Final shutdown must drain an accounting fact queued behind an unrelated
+/// parked publication through the same bounded force-pass sequence.
+#[test]
+fn deferred_standalone_accounting_is_force_settled_during_shutdown() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    let interceptor = "deferred-accounting-shutdown";
+    connect_test_tool(&mut h, interceptor);
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE),
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED),
+            ],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register publication interceptor");
+    h.publish_event(
+        None,
+        Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
+            message: "park before accounting".to_owned(),
+            level: tau_proto::NoticeLevel::Info,
+            purpose: tau_proto::NoticePurpose::Diagnostic,
+        }),
+    );
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact).expect("valid compact response"),
+    )
+    .expect("queue accounting behind parked notice");
+    let expected = h
+        .runtime_io
+        .publication
+        .deferred
+        .iter()
+        .find_map(|publish| {
+            matches!(
+                publish.event(),
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+            )
+            .then(|| publish.event().clone())
+        })
+        .expect("deferred accounting");
+
+    h.shutdown()
+        .expect("shutdown drains and force-passes deferred accounting");
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| event == &expected)
+            .count(),
+        1
+    );
+}
+
+/// Settling a parked retry observation must still close the next current
+/// attempt as Final Unknown before shutdown retires its owner.
+#[test]
+fn parked_retry_accounting_is_followed_by_final_shutdown_closure() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    let interceptor = "parked-retry-accounting-shutdown";
+    connect_test_tool(&mut h, interceptor);
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register accounting interceptor");
+    report_standalone_retry(&mut h, &compact, 1);
+
+    h.shutdown()
+        .expect("shutdown settles retry and closes current attempt");
+    let events = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent events");
+    let accounting = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderStandaloneExecutionAccounted(accounted)
+                if accounted.agent_prompt_id == compact.agent_prompt_id =>
+            {
+                Some(accounted)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(accounting.len(), 2);
+    assert_eq!(accounting[0].logical_attempt.get(), 1);
+    assert_eq!(accounting[1].logical_attempt.get(), 2);
+    assert_eq!(
+        accounting[1].finality,
+        tau_proto::StandaloneExecutionAccountingFinality::Final
+    );
+    assert_eq!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .total
+            .requests,
+        2
+    );
+    assert!(
+        !h.prompt_coordination
+            .standalone_accounting
+            .owners
+            .contains_key(&compact.agent_prompt_id)
+    );
+}
+
+/// Settling a parked cancellation initial must still publish its Final Unknown
+/// correction when no late terminal arrived before shutdown.
+#[test]
+fn parked_cancellation_initial_is_followed_by_final_shutdown_correction() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    let interceptor = "parked-cancellation-accounting-shutdown";
+    connect_test_tool(&mut h, interceptor);
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register accounting interceptor");
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(agent_id.clone()),
+            agent_prompt_id: Some(compact.agent_prompt_id.clone()),
+        },
+    );
+
+    h.shutdown()
+        .expect("shutdown settles initial and publishes final correction");
+    let events = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent events");
+    let initial = events
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+                        && accounted.finality
+                            == tau_proto::StandaloneExecutionAccountingFinality::AwaitingCancelledTerminal
+            )
+        })
+        .expect("cancellation initial");
+    let correction = events
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                    if corrected.agent_prompt_id == compact.agent_prompt_id
+                        && corrected.usage == tau_proto::StandaloneExecutionUsage::Unknown
+            )
+        })
+        .expect("final unknown correction");
+    assert!(initial < correction);
+    assert_eq!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .total
+            .requests,
+        1
+    );
+    assert!(
+        !h.prompt_coordination
+            .standalone_accounting
+            .owners
+            .contains_key(&compact.agent_prompt_id)
+    );
+}
+
+/// Final shutdown must return an explicit error when its bounded force-pass
+/// settlement budget exhausts, retaining the exact accounting fact.
+#[test]
+fn shutdown_reports_accounting_admission_failure_after_bounded_settlement() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    let interceptor = "rejected-accounting-shutdown";
+    connect_test_tool(&mut h, interceptor);
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register accounting interceptor");
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact).expect("valid compact response"),
+    )
+    .expect("park accounting publication");
+    let expected = h
+        .runtime_io
+        .publication
+        .pending_intercept
+        .as_ref()
+        .expect("parked accounting")
+        .event
+        .clone();
+    reject_semantic_admissions(&h, 3);
+
+    let error = h
+        .shutdown()
+        .expect_err("bounded settlement must report persistent admission failure");
+    assert!(
+        error
+            .to_string()
+            .contains("accounting remains uncommitted after final settlement"),
+        "{error}"
+    );
+    assert_eq!(
+        h.prompt_coordination.standalone_accounting.retained.len(),
+        1
+    );
+    let retained = h
+        .prompt_coordination
+        .standalone_accounting
+        .retained
+        .values()
+        .next()
+        .expect("exact retained accounting");
+    assert_eq!(*retained.publication.approved_event, expected);
+    assert!(
+        !h.session_runtime.shutdown_published,
+        "failed accounting settlement must precede session shutdown publication"
+    );
+}
+
+/// Final shutdown must force-pass a parked late-terminal correction after its
+/// initial cancellation observation, without counting a second request.
+#[test]
+fn parked_standalone_accounting_correction_is_force_settled_during_shutdown() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(agent_id.clone()),
+            agent_prompt_id: Some(compact.agent_prompt_id.clone()),
+        },
+    );
+    let interceptor = "parked-accounting-correction-shutdown";
+    connect_test_tool(&mut h, interceptor);
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTING_CORRECTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register accounting-correction interceptor");
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact).expect("valid late terminal"),
+    )
+    .expect("park accounting correction");
+    let expected = h
+        .runtime_io
+        .publication
+        .pending_intercept
+        .as_ref()
+        .expect("parked correction")
+        .event
+        .clone();
+
+    h.shutdown()
+        .expect("shutdown force-passes canonical correction");
+    let events = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent events");
+    let initial = events
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+            )
+        })
+        .expect("committed initial");
+    let correction = events
+        .iter()
+        .position(|record| record.event == expected)
+        .expect("committed exact correction");
+    assert!(initial < correction);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                    if corrected.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .total
+            .requests,
+        1
+    );
+}
+
+/// A bounded retry that commits a retained cancellation initial may unlock a
+/// parked correction; the same shutdown must force-pass that correction.
+#[test]
+fn shutdown_force_settles_correction_unlocked_by_final_retry() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    reject_next_semantic_admission(&h);
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(agent_id.clone()),
+            agent_prompt_id: Some(compact.agent_prompt_id.clone()),
+        },
+    );
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact).expect("valid late terminal"),
+    )
+    .expect("queue correction behind retained initial");
+    let expected = h
+        .prompt_coordination
+        .standalone_accounting
+        .pending_corrections
+        .values()
+        .next()
+        .expect("pending correction")
+        .corrected
+        .clone();
+    let interceptor = "unlocked-accounting-correction-shutdown";
+    connect_test_tool(&mut h, interceptor);
+    h.handle_extension_event(
+        interceptor,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTING_CORRECTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register correction interceptor");
+    reject_next_semantic_admission(&h);
+
+    h.shutdown()
+        .expect("bounded retry unlocks and force-passes correction");
+    let events = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent events");
+    let initial = events
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id
+            )
+        })
+        .expect("committed initial");
+    let correction = events
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                    if corrected == &expected
+            )
+        })
+        .expect("committed exact correction");
+    assert!(initial < correction);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                    if corrected.agent_prompt_id == compact.agent_prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        !h.prompt_coordination
+            .standalone_accounting
+            .owners
+            .contains_key(&compact.agent_prompt_id)
+    );
 }
 
 /// Seed one terminal standalone transaction and its session-correlated spend.

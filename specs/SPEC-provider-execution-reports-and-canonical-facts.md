@@ -145,6 +145,11 @@ awaiting observation without recreating provider-report correction authority.
 Provider-generation loss, graceful shutdown, and agent unload revoke correction
 authority and publish a Final Unknown/Rejected observation for every still
 dispatched owner before removing its runtime or persistence route.
+Final shutdown force-passes any already prepared initial observation or
+correction through the ordinary final-teardown interception policy before
+deriving an Unknown closure for an otherwise open owner. It retries an exact
+semantic-admission rejection only within that bounded settlement pass and
+returns an explicit shutdown error if the fact still cannot commit.
 
 Session token totals and the agent cost ledger consume only committed standalone
 accounting facts, at most once per idempotency key. Live commit and cold replay

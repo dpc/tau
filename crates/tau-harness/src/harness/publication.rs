@@ -2269,20 +2269,24 @@ impl Harness {
             return;
         }
         if sync_head_for.as_ref().is_some_and(|sync| {
-            sync.completion().is_some()
-                && (sync.session_generation != self.session_runtime.current_session_generation
-                    || !self
-                        .agent_runtime
-                        .agent_registry
-                        .agents
-                        .get(&sync.cid)
-                        .is_some_and(|agent| {
-                            agent.identity.session_id == self.session_runtime.current_session_id
-                                && !agent.dispatch.terminating
-                                && sync.agent_id.as_ref().is_none_or(|agent_id| {
-                                    agent.identity.agent_id.as_deref() == Some(agent_id.as_str())
-                                })
-                        }))
+            sync.completion().is_some_and(|completion| {
+                !matches!(
+                    completion,
+                    AgentPublishCompletion::StandaloneExecutionAccounting { .. }
+                )
+            }) && (sync.session_generation != self.session_runtime.current_session_generation
+                || !self
+                    .agent_runtime
+                    .agent_registry
+                    .agents
+                    .get(&sync.cid)
+                    .is_some_and(|agent| {
+                        agent.identity.session_id == self.session_runtime.current_session_id
+                            && !agent.dispatch.terminating
+                            && sync.agent_id.as_ref().is_none_or(|agent_id| {
+                                agent.identity.agent_id.as_deref() == Some(agent_id.as_str())
+                            })
+                    }))
         }) {
             self.emit_info("dropping stale completion publication after agent/session teardown");
             if let Some(owner) = start_owner.take() {
