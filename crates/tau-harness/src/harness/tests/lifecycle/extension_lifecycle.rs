@@ -7321,8 +7321,8 @@ fn terminal_output_events_are_deferred_in_order_until_ready() {
     h.shutdown().expect("shutdown");
 }
 
-/// Disconnecting the last per-agent context waiter must resume a prompt that
-/// already committed but was deferred before its model snapshot was frozen.
+/// Disconnecting the last per-agent context waiter must remove its tool and
+/// context before resuming the prompt while preserving healthy contributions.
 #[test]
 fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     let td = TempDir::new().expect("tempdir");
@@ -7330,6 +7330,8 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     h.config.selected_model = Some("test/model".into());
     let conn_id = "disconnecting-agent-context";
     let _sink = connect_handshaking_tool(&mut h, conn_id);
+    let healthy_id = "healthy-agent-context";
+    let _healthy_sink = connect_handshaking_tool(&mut h, healthy_id);
     h.handle_extension_message(
         &crate::test_connection_id(conn_id),
         TestMessage::Subscribe(Subscribe {
@@ -7352,6 +7354,43 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
         TestMessage::Ready(Default::default()),
     )
     .expect("ready");
+    h.handle_extension_message(
+        &crate::test_connection_id(healthy_id),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("healthy ready");
+    for (provider, name) in [
+        (conn_id, "disconnecting_context_tool"),
+        (healthy_id, "healthy_context_tool"),
+    ] {
+        h.tool_routing.registry.register(
+            &crate::test_connection_id(provider),
+            ToolSpec {
+                provider_scope: None,
+                name: ToolName::new(name),
+                model_visible_name: None,
+                description: Some(format!("{name} description")),
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                tags: Vec::new(),
+                enabled_by_default: true,
+                background_support: None,
+                examples: Vec::new(),
+            },
+        );
+    }
+    h.handle_extension_event_inner(
+        &crate::test_connection_id(healthy_id),
+        Event::ExtPromptFragmentPublish(tau_proto::ExtPromptFragmentPublish {
+            fragment: tau_proto::PromptFragment::new(
+                "disconnect-context-order",
+                tau_proto::PromptPriority::new(50),
+                "{{#each agent_context.disconnect_test}}{{value}}{{/each}}",
+            ),
+        }),
+    )
+    .expect("publish context-rendering fragment");
 
     h.dispatch_user_prompt(test_session_id("s1"), "resume after disconnect".to_owned())
         .expect("dispatch user prompt");
@@ -7372,20 +7411,29 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     let initialization_id = h.prompt_coordination.context_discovery.pending_agents[&agent_id]
         .initialization_id
         .clone();
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtAgentContextPublish(
-            tau_proto::ExtAgentContextPublish {
-                session_id: test_session_id("s1"),
-                agent_initialization_id: initialization_id,
-
-                agent_id: agent_id.clone(),
-                key: "disconnect-test".into(),
-                value: tau_proto::AgentContextValue(serde_json::json!("stale")),
-            },
-        )),
-    )
-    .expect("publish context before disconnect");
+    for (provider, value) in [(healthy_id, "healthy"), (conn_id, "stale")] {
+        h.handle_extension_event(
+            provider,
+            TestProtocolItem::Event(Event::ExtAgentContextPublish(
+                tau_proto::ExtAgentContextPublish {
+                    session_id: test_session_id("s1"),
+                    agent_initialization_id: initialization_id.clone(),
+                    agent_id: agent_id.clone(),
+                    key: "disconnect_test".into(),
+                    value: tau_proto::AgentContextValue(serde_json::json!(value)),
+                },
+            )),
+        )
+        .expect("publish context before disconnect");
+    }
+    assert!(
+        h.prompt_coordination
+            .context_discovery
+            .agent_context
+            .template_value(Some(&agent_id))
+            .to_string()
+            .contains("healthy")
+    );
     assert!(
         h.prompt_coordination
             .context_discovery
@@ -7394,6 +7442,20 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
             .to_string()
             .contains("stale")
     );
+    assert_eq!(
+        h.tool_routing
+            .registry
+            .providers_for("disconnecting_context_tool")
+            .len(),
+        1
+    );
+    assert_eq!(
+        h.tool_routing
+            .registry
+            .providers_for("healthy_context_tool")
+            .len(),
+        1
+    );
 
     h.handle_disconnect(&crate::test_connection_id(conn_id));
 
@@ -7401,16 +7463,51 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     assert!(
         !h.prompt_coordination
             .context_discovery
-            .agent_context
-            .template_value(Some(&agent_id))
-            .to_string()
-            .contains("stale")
+            .pending_agents
+            .contains_key(&agent_id)
     );
-    assert!(event_log_events(&h).iter().any(|event| matches!(
-        event,
-        Event::AgentPromptCreated(prompt)
-            if prompt_context_contains(prompt, "resume after disconnect")
-    )));
+    assert!(
+        h.prompt_coordination
+            .context_discovery
+            .frozen_agents
+            .contains_key(&agent_id)
+    );
+    let rendered_context = h
+        .prompt_coordination
+        .context_discovery
+        .agent_context
+        .template_value(Some(&agent_id))
+        .to_string();
+    assert!(rendered_context.contains("healthy"));
+    assert!(!rendered_context.contains("stale"));
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("disconnecting_context_tool")
+            .is_empty()
+    );
+    assert_eq!(
+        h.tool_routing
+            .registry
+            .providers_for("healthy_context_tool")
+            .len(),
+        1
+    );
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt)
+                if prompt_context_contains(&prompt, "resume after disconnect") =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("disconnect resumes deferred prompt");
+    assert!(prompt.system_prompt.contains("healthy"));
+    assert!(!prompt.system_prompt.contains("stale"));
+    assert!(!prompt_has_tool(&prompt, "disconnecting_context_tool"));
+    assert!(prompt_has_tool(&prompt, "healthy_context_tool"));
 }
 
 /// Staged captured-model presence followed by final absence is coalesced into

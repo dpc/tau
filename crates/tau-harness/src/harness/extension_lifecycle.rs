@@ -158,6 +158,11 @@ impl Harness {
         self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);
         self.publish_session_skills_projection();
+        if is_extension {
+            // Context removal can synchronously finalize agent discovery and
+            // dispatch a prompt, so remove dead tools before that snapshot.
+            self.unregister_connection_tools_for_disconnect(connection_id);
+        }
         // Remove prompt/context projections before resolving an interception
         // owned by this connection. Resolution may synchronously commit
         // deferred readiness and dispatch a prompt snapshot.
@@ -173,7 +178,6 @@ impl Harness {
             .remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
         if is_extension {
-            self.unregister_connection_tools_for_disconnect(connection_id);
             self.tool_routing
                 .action_registry
                 .unregister_connection(connection_id);
