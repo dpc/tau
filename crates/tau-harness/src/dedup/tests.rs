@@ -32,7 +32,7 @@ fn rebuild_records_only_above_threshold() {
         result_entry("call_big", &big),
     ];
     let mut map = ResultDedupMap::new();
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         entries
             .iter()
             .enumerate()
@@ -60,7 +60,7 @@ fn rebuild_does_not_record_short_dedup_pointer() {
         result_entry("call_b", pointer),
     ];
     let mut map = ResultDedupMap::new();
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         entries
             .iter()
             .enumerate()
@@ -101,7 +101,7 @@ fn rebuild_records_large_internal_envelope_spelling_for_every_terminal_status() 
         &cancelled_payload,
     );
     let mut map = ResultDedupMap::new();
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         [&success, &error, &cancelled]
             .into_iter()
             .enumerate()
@@ -145,7 +145,7 @@ fn rebuild_keeps_first_call_id_on_duplicate() {
         result_entry("call_second", &big),
     ];
     let mut map = ResultDedupMap::new();
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         entries
             .iter()
             .enumerate()
@@ -178,7 +178,7 @@ fn rebuild_keeps_first_item_within_one_tool_results_node() {
             .into(),
     };
     let mut map = ResultDedupMap::new();
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         [(NodeId::new(1), &entry)],
         Some(NodeId::new(1)),
         DEFAULT_THRESHOLD_BYTES,
@@ -194,7 +194,7 @@ fn rebuild_keeps_first_item_within_one_tool_results_node() {
 #[test]
 fn needs_rebuild_detects_head_jump() {
     let mut map = ResultDedupMap::new();
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         std::iter::empty::<(NodeId, &AgentEntry)>(),
         Some(NodeId::new(5)),
         DEFAULT_THRESHOLD_BYTES,
@@ -280,7 +280,7 @@ fn note_head_advanced_does_not_clear() {
     let big = "p".repeat(1024);
     let entries = [result_entry("call_a", &big)];
     let mut map = ResultDedupMap::new();
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         entries
             .iter()
             .enumerate()
@@ -324,7 +324,7 @@ fn long_branch_rebuild_is_single_pass_and_preserves_oldest_anchor() {
         .inspect(|_| visited += 1);
     let mut map = ResultDedupMap::new();
 
-    map.rebuild_from_branch(
+    map.rebuild_from_transcript(
         branch_from_tip,
         Some(NodeId::new(9_999)),
         DEFAULT_THRESHOLD_BYTES,

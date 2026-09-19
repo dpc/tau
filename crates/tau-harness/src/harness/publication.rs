@@ -62,13 +62,14 @@ impl Harness {
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
         {
-            let branch_from_tip = std::iter::successors(head, |node_id| {
-                tree.node(*node_id).and_then(|node| node.parent_id)
-            })
-            .filter_map(|node_id| tree.node(node_id).map(|node| (node_id, &node.entry)));
-            rebuilt.rebuild_from_branch(branch_from_tip, head, DEFAULT_THRESHOLD_BYTES);
+            let active_transcript = tree.active_provider_window(head).transcript;
+            rebuilt.rebuild_from_transcript(
+                active_transcript.into_iter().rev(),
+                head,
+                DEFAULT_THRESHOLD_BYTES,
+            );
         } else {
-            rebuilt.rebuild_from_branch(std::iter::empty(), head, DEFAULT_THRESHOLD_BYTES);
+            rebuilt.rebuild_from_transcript(std::iter::empty(), head, DEFAULT_THRESHOLD_BYTES);
         }
         let conv = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
         conv.execution.result_dedup = rebuilt;
@@ -2641,12 +2642,12 @@ impl Harness {
                     // ToolUse blocks downstream.
                     c.identity.head = outcome.selected_head_id;
                     // Keep the dedup map's "built for" cursor in lockstep with
-                    // the just-folded linear extension. The dedup-decision
-                    // path already inserted any new (hash, call_id) entry
-                    // before the publish, so the map's contents already match
-                    // what a fresh rebuild from this new head would produce.
-                    // Bumping the cursor here lets the next tool result skip
-                    // the rebuild entirely (the steady-state hot path).
+                    // ordinary linear extensions. The dedup-decision path
+                    // already inserted any new (hash, call_id) entry before
+                    // publication, so the map matches a rebuild at the new
+                    // head. Compaction is the exception: it changes the logical
+                    // provider window without removing physical ancestry, so
+                    // invalidate and rebuild from the surviving transcript.
                     //
                     // We pass *every* fold through this hook, including ones
                     // that didn't touch the dedup map (a user message from
@@ -2658,7 +2659,9 @@ impl Harness {
                     // gate this call on the event variant: that would re-couple
                     // `commit_event` to per-tool semantics that the dedup
                     // module deliberately owns.
-                    if let Some(node_id) = outcome.selected_head_id {
+                    if matches!(&event, Event::AgentCompacted(_)) {
+                        c.execution.result_dedup.invalidate_active_transcript();
+                    } else if let Some(node_id) = outcome.selected_head_id {
                         c.execution.result_dedup.note_head_advanced_to(node_id);
                     }
                 }

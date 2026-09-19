@@ -105,19 +105,19 @@ impl ResultDedupMap {
         self.built_for != current
     }
 
-    /// Replace contents from a freshly walked branch. Called after
-    /// [`Self::needs_rebuild`] reports a mismatch, or eagerly on
-    /// session resume. `branch` must walk from tip to root;
+    /// Replace contents from a freshly assembled active transcript. Called
+    /// after [`Self::needs_rebuild`] reports a mismatch, or eagerly on
+    /// session resume. `transcript` must walk from tip to root;
     /// reverse candidate lookup then preserves the oldest canonical anchor.
-    pub(crate) fn rebuild_from_branch<'a>(
+    pub(crate) fn rebuild_from_transcript<'a>(
         &mut self,
-        branch: impl IntoIterator<Item = (NodeId, &'a AgentEntry)>,
+        transcript: impl IntoIterator<Item = (NodeId, &'a AgentEntry)>,
         new_head: Option<NodeId>,
         threshold: usize,
     ) {
         self.map.clear();
         self.pending.clear();
-        for (node_id, entry) in branch {
+        for (node_id, entry) in transcript {
             let AgentEntry::ToolResults { items } = entry else {
                 continue;
             };
@@ -228,6 +228,12 @@ impl ResultDedupMap {
         if self.built_for.is_some() {
             self.built_for = Some(new_head);
         }
+    }
+
+    /// Forces the next intake to rebuild after the logical provider window
+    /// changes.
+    pub(crate) fn invalidate_active_transcript(&mut self) {
+        self.built_for = None;
     }
 
     #[cfg(test)]

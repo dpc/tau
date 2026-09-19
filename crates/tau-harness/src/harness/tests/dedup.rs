@@ -413,6 +413,273 @@ fn run_tool_error(
         .expect("recorded result item for call_id")
 }
 
+/// Complete one successful standalone compaction through normal publication.
+fn publish_test_compaction(
+    h: &mut Harness,
+    cid: &crate::AgentId,
+    cut: tau_proto::AgentHead,
+    suffix_end: tau_proto::AgentHead,
+    transaction: &str,
+) {
+    super::dispatch::enable_remote_compaction_for_test_model(h);
+    let model = h
+        .provider_runtime
+        .model_info
+        .get_mut(&tau_proto::ModelId::from("test/model"))
+        .expect("test model");
+    model.supports_standalone_compaction = true;
+    model.context_window = tau_proto::TokenCount::new(100_000);
+    let agent_id = h.agent_runtime.agent_registry.agents[cid]
+        .identity
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse(transaction).expect("transaction id");
+    let compact_prompt_id: tau_proto::AgentPromptId = format!("ap-{transaction}")
+        .parse()
+        .expect("agent prompt id");
+    h.publish_for_agent(
+        cid,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id,
+            transaction_id: transaction_id.clone(),
+            compact_prompt_id,
+            cut,
+            resume_through: None,
+            model: tau_proto::ModelId::from("test/model"),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+        }),
+    );
+    let prompt = event_log_events(h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt)
+                if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("standalone compaction prompt");
+    h.handle_provider_response_finished(super::dispatch::standalone_compaction_success_response(
+        &prompt,
+        "summary without prior tool output",
+    ))
+    .expect("publish successful compaction");
+    let compacted = event_log_events(h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentCompacted(compacted) if compacted.transaction_id == transaction_id => {
+                Some(compacted)
+            }
+            _ => None,
+        })
+        .expect("committed compaction boundary");
+    assert_eq!(compacted.cut, cut);
+    assert_eq!(compacted.suffix_end, suffix_end);
+}
+
+/// A committed compaction removes an old success anchor from the active
+/// transcript. A later identical result remains full and becomes a fresh
+/// anchor.
+#[test]
+fn compaction_prunes_live_success_dedup_anchors() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let success = CborValue::Text("s".repeat(2048));
+
+    let _ = run_tool_result(
+        &mut h,
+        "s1",
+        &cid,
+        "call_success_old",
+        "read",
+        success.clone(),
+    );
+    let compacted_through = h
+        .selected_head_for_agent(&cid)
+        .expect("non-empty transcript");
+    publish_test_compaction(
+        &mut h,
+        &cid,
+        compacted_through,
+        compacted_through,
+        "dedup-live",
+    );
+
+    let success_new = run_tool_result(
+        &mut h,
+        "s1",
+        &cid,
+        "call_success_new",
+        "read",
+        success.clone(),
+    );
+    assert_eq!(
+        success_new.output.raw, success,
+        "a compacted-away success cannot remain a pointer anchor"
+    );
+    let success_repeat =
+        run_tool_result(&mut h, "s1", &cid, "call_success_repeat", "read", success);
+    let CborValue::Text(pointer) = success_repeat.output.raw else {
+        panic!("repeat should become a pointer")
+    };
+    assert!(
+        pointer.contains("call_success_new") && !pointer.contains("call_success_old"),
+        "repeat must point to the new visible anchor: {pointer:?}"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Error dedup shares success-anchor eligibility: compaction removes an old
+/// error anchor, while the first identical post-compaction error remains full.
+#[test]
+fn compaction_prunes_live_error_dedup_anchors() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let message = "compile failed: ".to_owned() + &"E0277 ".repeat(200);
+    let details = CborValue::Text("stderr block".repeat(128));
+
+    let _ = run_tool_error(
+        &mut h,
+        "s1",
+        &cid,
+        "call_error_old",
+        "shell",
+        message.clone(),
+        Some(details.clone()),
+    );
+    let compacted_through = h
+        .selected_head_for_agent(&cid)
+        .expect("non-empty transcript");
+    publish_test_compaction(
+        &mut h,
+        &cid,
+        compacted_through,
+        compacted_through,
+        "dedup-error",
+    );
+
+    let error_new = run_tool_error(
+        &mut h,
+        "s1",
+        &cid,
+        "call_error_new",
+        "shell",
+        message.clone(),
+        Some(details.clone()),
+    );
+    assert_eq!(
+        error_new.status,
+        ToolResultStatus::Error { message },
+        "a compacted-away error cannot remain a pointer anchor"
+    );
+    assert_eq!(error_new.output.raw, details);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold restore rebuilds dedup eligibility from the logical active transcript,
+/// excluding physically retained results removed by compaction.
+#[test]
+fn compaction_prunes_dedup_anchors_after_session_restore() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let result = CborValue::Text("r".repeat(2048));
+
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        let _ = run_tool_result(
+            &mut h,
+            "s1",
+            &cid,
+            "call_before_compaction",
+            "read",
+            result.clone(),
+        );
+        let compacted_through = h
+            .selected_head_for_agent(&cid)
+            .expect("non-empty transcript");
+        publish_test_compaction(
+            &mut h,
+            &cid,
+            compacted_through,
+            compacted_through,
+            "dedup-cold",
+        );
+        h.shutdown().expect("shutdown");
+        drop(h);
+        wait_for_session_unlock(&state, "s1");
+    }
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let cid = ensure_test_user_agent(&mut h);
+    let restored = run_tool_result(
+        &mut h,
+        "s1",
+        &cid,
+        "call_after_restore",
+        "read",
+        result.clone(),
+    );
+    assert_eq!(
+        restored.output.raw, result,
+        "cold rebuild must not index a compacted-away physical ancestor"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Prefix compaction preserves complete suffix rounds, so a full result in that
+/// logical suffix remains an eligible dedup anchor.
+#[test]
+fn compaction_retains_dedup_anchors_in_the_logical_suffix() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let compacted = CborValue::Text("c".repeat(2048));
+    let retained = CborValue::Text("k".repeat(2048));
+
+    let _ = run_tool_result(&mut h, "s1", &cid, "call_compacted", "read", compacted);
+    let cut = h
+        .selected_head_for_agent(&cid)
+        .expect("compacted prefix head");
+    let _ = run_tool_result(
+        &mut h,
+        "s1",
+        &cid,
+        "call_retained",
+        "read",
+        retained.clone(),
+    );
+    let suffix_end = h
+        .selected_head_for_agent(&cid)
+        .expect("retained suffix head");
+    publish_test_compaction(&mut h, &cid, cut, suffix_end, "dedup-suffix");
+
+    let repeat = run_tool_result(&mut h, "s1", &cid, "call_repeat", "read", retained);
+    let CborValue::Text(pointer) = repeat.output.raw else {
+        panic!("retained suffix repeat should become a pointer")
+    };
+    assert!(
+        pointer.contains("call_retained"),
+        "repeat must point to the surviving suffix anchor: {pointer:?}"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Two large identical results land on the same conversation's
 /// branch in sequence. The first is recorded verbatim; the second's
 /// content is replaced with a pointer back to the first call_id.
