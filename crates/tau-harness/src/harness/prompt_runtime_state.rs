@@ -30,6 +30,9 @@ pub(crate) struct PendingUncertainSupersession {
 /// Runtime-only state associated with provider prompts and their continuations.
 #[derive(Default)]
 pub(crate) struct PromptRuntimeState {
+    /// Next runtime-only identity for one ordinary queued-steer publication
+    /// batch.
+    next_ordinary_steer_batch_id: u64,
     /// Content-free pre-checkpoint timing awaiting its exact committed owner.
     pub(super) pending_materialization_timings:
         HashMap<AgentPromptId, PrecheckpointMaterializationTiming>,
@@ -94,6 +97,18 @@ pub(crate) struct PromptRuntimeState {
 }
 
 impl PromptRuntimeState {
+    /// Allocates one process-local identity for an ordinary queued-steer batch.
+    pub(super) fn allocate_ordinary_steer_batch_id(
+        &mut self,
+    ) -> super::interception::OrdinarySteerBatchId {
+        let id = super::interception::OrdinarySteerBatchId(self.next_ordinary_steer_batch_id);
+        self.next_ordinary_steer_batch_id = self
+            .next_ordinary_steer_batch_id
+            .checked_add(1)
+            .expect("ordinary steer batch identity space exhausted");
+        id
+    }
+
     /// Returns the prompt snapshot that owns one provider-emitted tool call.
     pub(crate) fn tool_call_prompt(&self, call_id: &ToolCallId) -> Option<&AgentPromptId> {
         self.tool_call_prompts.get(call_id)

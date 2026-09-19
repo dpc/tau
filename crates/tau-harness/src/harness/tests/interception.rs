@@ -3163,6 +3163,435 @@ fn unload_disposes_parked_prompt_delivery() {
         "delivery-unload-owner",
     );
 }
+
+/// Ordinary queued steers retain their exact payload and FIFO suffix through a
+/// recoverable semantic-admission rejection before dispatching one successor.
+#[test]
+fn ordinary_queued_steers_retry_after_capacity_recovery() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        agent_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let watcher_messages_before = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.recipient_id == watcher_id
+                && message.kind == tau_proto::AgentMessageKind::WatchPrompt
+        })
+        .count();
+    let first = PendingPrompt::human_ui_watch_notified("retained first steer".to_owned())
+        .with_ctx_id(Some("first-ctx".to_owned()));
+    let second = PendingPrompt::human_ui("retained second steer".to_owned())
+        .with_ctx_id(Some("second-ctx".to_owned()));
+
+    reject_next_semantic_admission(&h);
+    h.publish_prompts_as_steered(&cid, vec![first.clone(), second.clone()], None);
+
+    let retained = h
+        .prompt_coordination
+        .prompt_runtime
+        .pending_publish_completions
+        .get(&cid)
+        .expect("ordinary steer retained");
+    let AgentPublishCompletion::OrdinarySteer {
+        retry_prompts,
+        resume_suffix_on_commit,
+        owned_publication: Some(publication),
+        ..
+    } = retained
+    else {
+        panic!("ordinary steer owns rejected publication");
+    };
+    assert_eq!(retry_prompts, &vec![first, second]);
+    assert!(*resume_suffix_on_commit);
+    assert!(matches!(
+        publication.approved_event.as_ref(),
+        Event::AgentPromptSteered(steered)
+            if steered.text == "retained first steer"
+                && steered.ctx_id.as_deref() == Some("first-ctx")
+    ));
+    assert_eq!(prompt_created_count(&h), 0);
+    assert_eq!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.recipient_id == watcher_id
+                    && message.kind == tau_proto::AgentMessageKind::WatchPrompt
+            })
+            .count(),
+        watcher_messages_before,
+        "rejected ordinary steer must not notify watchers"
+    );
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent records before recovery")
+            .iter()
+            .all(|record| !matches!(record.event, Event::AgentPromptSteered(_)))
+    );
+
+    h.handle_publication_capacity_ready();
+
+    let steers = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records after recovery")
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptSteered(steered) => {
+                Some((steered.text.clone(), steered.ctx_id.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steers,
+        vec![
+            (
+                "retained first steer".to_owned(),
+                Some("first-ctx".to_owned())
+            ),
+            (
+                "retained second steer".to_owned(),
+                Some("second-ctx".to_owned())
+            ),
+        ]
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(created) if created.agent_id == agent_id
+            ))
+            .count(),
+        1,
+        "the retained suffix dispatches one successor for its owning agent"
+    );
+    let watcher_messages_after = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.recipient_id == watcher_id
+                && message.kind == tau_proto::AgentMessageKind::WatchPrompt
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        watcher_messages_after.len(),
+        watcher_messages_before + 1,
+        "retained watcher-eligible steer notifies exactly once after commit: {watcher_messages_after:?}"
+    );
+    assert_eq!(
+        watcher_messages_after
+            .last()
+            .expect("one new watcher prompt")
+            .message,
+        "retained first steer"
+    );
+}
+
+/// A rejected interceptor-approved ordinary steer retries without interception,
+/// while only its exact deferred suffix transfers into retained ownership.
+#[test]
+fn ordinary_steer_retry_preserves_replacement_and_unrelated_deferred_publish() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let other_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let other_agent_id = durable_agent_id_for_conversation(&h, &other_cid);
+    let interceptor = connect_test_tool(&mut h, "ordinary-steer-retry-owner");
+    h.handle_extension_event(
+        "ordinary-steer-retry-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register ordinary steer interceptor");
+
+    let first = PendingPrompt::human_ui("original first steer".to_owned())
+        .with_ctx_id(Some("original-ctx".to_owned()));
+    let second = PendingPrompt::user("untouched second steer".to_owned());
+    let third = PendingPrompt::internal("untouched third steer".to_owned());
+    h.publish_prompts_as_steered(
+        &cid,
+        vec![first.clone(), second.clone(), third.clone()],
+        None,
+    );
+    h.publish_prompts_as_steered(
+        &other_cid,
+        vec![PendingPrompt::user("unrelated deferred steer".to_owned())],
+        None,
+    );
+
+    let (mut replacement, _) = intercepted_payload(&interceptor);
+    interceptor.lock().expect("interceptor events").clear();
+    let Event::AgentPromptSteered(replaced) = &mut replacement else {
+        panic!("first ordinary steer intercepted");
+    };
+    replaced.text = "approved replacement steer".to_owned();
+    replaced.ctx_id = Some("approved-ctx".to_owned());
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "ordinary-steer-retry-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(replacement))),
+        })),
+    )
+    .expect("release replacement into semantic admission rejection");
+
+    let retained = h
+        .prompt_coordination
+        .prompt_runtime
+        .pending_publish_completions
+        .get(&cid)
+        .expect("replacement retained");
+    let AgentPublishCompletion::OrdinarySteer {
+        retry_prompts,
+        owned_publication: Some(publication),
+        ..
+    } = retained
+    else {
+        panic!("ordinary replacement owns retry");
+    };
+    assert_eq!(retry_prompts, &vec![first, second, third]);
+    assert!(matches!(
+        publication.approved_event.as_ref(),
+        Event::AgentPromptSteered(steered)
+            if steered.text == "approved replacement steer"
+                && steered.ctx_id.as_deref() == Some("approved-ctx")
+    ));
+    assert!(matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::AgentPromptSteered(steered))
+            if steered.agent_id == other_agent_id
+                && steered.text == "unrelated deferred steer"
+    ));
+    assert!(
+        h.runtime_io.publication.deferred.iter().all(|pending| {
+            !matches!(
+                pending.event(),
+                Event::AgentPromptSteered(steered) if steered.agent_id == agent_id
+            )
+        }),
+        "only the rejected ordinary suffix transfers out of the deferred FIFO"
+    );
+
+    interceptor.lock().expect("interceptor events").clear();
+    h.handle_extension_event(
+        "ordinary-steer-retry-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit unrelated deferred steer");
+    h.handle_publication_capacity_ready();
+
+    for expected in ["untouched second steer", "untouched third steer"] {
+        let (event, _) = intercepted_payload(&interceptor);
+        interceptor.lock().expect("interceptor events").clear();
+        assert!(
+            matches!(
+                &event,
+                Event::AgentPromptSteered(steered) if steered.text == expected
+            ),
+            "expected {expected:?}, got {event:?}"
+        );
+        h.handle_extension_event(
+            "ordinary-steer-retry-owner",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("commit untouched suffix member");
+    }
+
+    let steers = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("ordinary agent records")
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptSteered(steered) => Some(steered.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steers,
+        vec![
+            "approved replacement steer".to_owned(),
+            "untouched second steer".to_owned(),
+            "untouched third steer".to_owned(),
+        ]
+    );
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent_events(other_agent_id.as_str())
+            .expect("unrelated agent records")
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                Event::AgentPromptSteered(steered)
+                    if steered.text == "unrelated deferred steer"
+            ))
+    );
+}
+
+/// A middle-member rejection preserves the committed prefix and retries only
+/// the rejected steer before giving the untouched suffix its first
+/// interception.
+#[test]
+fn ordinary_steer_middle_rejection_preserves_committed_prefix() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let interceptor = connect_test_tool(&mut h, "ordinary-middle-retry-owner");
+    h.handle_extension_event(
+        "ordinary-middle-retry-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register middle steer interceptor");
+    let prompts = vec![
+        PendingPrompt::human_ui("committed prefix steer".to_owned()),
+        PendingPrompt::user("rejected middle steer".to_owned()),
+        PendingPrompt::internal("untouched suffix steer".to_owned()),
+    ];
+
+    h.publish_prompts_as_steered(&cid, prompts.clone(), None);
+    let (first, _) = intercepted_payload(&interceptor);
+    assert!(matches!(
+        first,
+        Event::AgentPromptSteered(steered) if steered.text == "committed prefix steer"
+    ));
+    interceptor.lock().expect("interceptor events").clear();
+    h.handle_extension_event(
+        "ordinary-middle-retry-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit prefix steer");
+
+    let (middle, _) = intercepted_payload(&interceptor);
+    assert!(matches!(
+        middle,
+        Event::AgentPromptSteered(steered) if steered.text == "rejected middle steer"
+    ));
+    interceptor.lock().expect("interceptor events").clear();
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "ordinary-middle-retry-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject middle steer admission");
+
+    let AgentPublishCompletion::OrdinarySteer {
+        retry_prompts,
+        owned_publication: Some(publication),
+        ..
+    } = h
+        .prompt_coordination
+        .prompt_runtime
+        .pending_publish_completions
+        .get(&cid)
+        .expect("middle steer retained")
+    else {
+        panic!("middle ordinary steer owns retry");
+    };
+    assert_eq!(retry_prompts, &prompts[1..]);
+    assert!(matches!(
+        publication.approved_event.as_ref(),
+        Event::AgentPromptSteered(steered) if steered.text == "rejected middle steer"
+    ));
+    let before_recovery = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("records before middle retry")
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptSteered(steered) => Some(steered.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(before_recovery, vec!["committed prefix steer".to_owned()]);
+
+    h.handle_publication_capacity_ready();
+    let (suffix, _) = intercepted_payload(&interceptor);
+    assert!(matches!(
+        suffix,
+        Event::AgentPromptSteered(steered) if steered.text == "untouched suffix steer"
+    ));
+    h.handle_extension_event(
+        "ordinary-middle-retry-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit untouched suffix");
+
+    let after_recovery = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("records after middle retry")
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptSteered(steered) => Some(steered.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after_recovery,
+        vec![
+            "committed prefix steer".to_owned(),
+            "rejected middle steer".to_owned(),
+            "untouched suffix steer".to_owned(),
+        ]
+    );
+}
+
 /// A first-suffix persistence failure drops the interceptor-approved
 /// continuation and retains exact retry state for later semantic work.
 #[test]

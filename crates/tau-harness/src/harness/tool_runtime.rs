@@ -1316,6 +1316,11 @@ impl Harness {
     ) {
         let prompt_count = prompts.len();
         let retry_prompts = prompts.clone();
+        let ordinary_batch_id = completion.is_none().then(|| {
+            self.prompt_coordination
+                .prompt_runtime
+                .allocate_ordinary_steer_batch_id()
+        });
         for (index, prompt) in prompts.into_iter().enumerate() {
             self.promote_lifecycle_notification_turn(cid);
             let agent_id = self
@@ -1334,18 +1339,39 @@ impl Harness {
                 .map(|correlation| AgentPublishCompletion::InitialPromptSubmission { correlation })
                 .or_else(|| {
                     completion.clone().map(|mut completion| {
-                        if let AgentPublishCompletion::StandaloneContinuation {
-                            retry_prompts: suffix,
-                            complete_on_commit,
-                            owned_publication,
-                            ..
-                        } = &mut completion
-                        {
-                            *suffix = retry_prompts[index..].to_vec();
-                            *complete_on_commit = index + 1 == prompt_count;
-                            *owned_publication = None;
+                        match &mut completion {
+                            AgentPublishCompletion::OrdinarySteer {
+                                retry_prompts: suffix,
+                                resume_suffix_on_commit,
+                                owned_publication,
+                                ..
+                            } => {
+                                *suffix = retry_prompts[index..].to_vec();
+                                *resume_suffix_on_commit = false;
+                                *owned_publication = None;
+                            }
+                            AgentPublishCompletion::StandaloneContinuation {
+                                retry_prompts: suffix,
+                                complete_on_commit,
+                                owned_publication,
+                                ..
+                            } => {
+                                *suffix = retry_prompts[index..].to_vec();
+                                *complete_on_commit = index + 1 == prompt_count;
+                                *owned_publication = None;
+                            }
+                            _ => {}
                         }
                         completion
+                    })
+                })
+                .or_else(|| {
+                    Some(AgentPublishCompletion::OrdinarySteer {
+                        batch_id: ordinary_batch_id
+                            .expect("ordinary publication allocated one batch identity"),
+                        retry_prompts: retry_prompts[index..].to_vec(),
+                        resume_suffix_on_commit: false,
+                        owned_publication: None,
                     })
                 });
             let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {

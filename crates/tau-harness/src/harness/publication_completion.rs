@@ -500,6 +500,7 @@ impl Harness {
                 | AgentPublishCompletion::OwedCompactionFact { .. }
                 | AgentPublishCompletion::StandaloneExecutionAccounting { .. }
                 | AgentPublishCompletion::RollingCompactionStart { .. }
+                | AgentPublishCompletion::OrdinarySteer { .. }
                 | AgentPublishCompletion::StandaloneContinuation { .. } => None,
             }
         });
@@ -975,6 +976,30 @@ impl Harness {
         if let AgentPublishCompletion::ToolTerminal { .. } = completion {
             return;
         }
+        if let AgentPublishCompletion::OrdinarySteer {
+            batch_id,
+            retry_prompts,
+            resume_suffix_on_commit,
+            ..
+        } = completion
+        {
+            if resume_suffix_on_commit && retry_prompts.len() > 1 {
+                self.publish_prompts_as_steered(
+                    cid,
+                    retry_prompts[1..].to_vec(),
+                    Some(AgentPublishCompletion::OrdinarySteer {
+                        batch_id,
+                        retry_prompts: Vec::new(),
+                        resume_suffix_on_commit: false,
+                        owned_publication: None,
+                    }),
+                );
+            }
+            if resume_suffix_on_commit {
+                self.dispatch_activation_after_publish_idle(cid);
+            }
+            return;
+        }
         let AgentPublishCompletion::StandaloneContinuation {
             transaction_id,
             model,
@@ -1206,6 +1231,15 @@ impl Harness {
         ) {
             self.discard_deferred_agent_publish_batch(&cid, &completion);
         }
+        if let AgentPublishCompletion::OrdinarySteer {
+            batch_id,
+            resume_suffix_on_commit,
+            ..
+        } = &mut completion
+        {
+            *resume_suffix_on_commit = true;
+            self.discard_deferred_ordinary_steer_batch(&cid, *batch_id);
+        }
         self.prompt_coordination
             .prompt_runtime
             .pending_publish_completions
@@ -1336,7 +1370,8 @@ impl Harness {
         }
 
         let retry_prompts = match &completion {
-            AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => {
+            AgentPublishCompletion::OrdinarySteer { retry_prompts, .. }
+            | AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => {
                 Some(retry_prompts.clone())
             }
             _ => None,
@@ -1365,6 +1400,9 @@ impl Harness {
                 publication.semantic_parent,
                 None,
             );
+            if continuation_after_retry.is_none() {
+                return;
+            }
             if self
                 .prompt_coordination
                 .prompt_runtime

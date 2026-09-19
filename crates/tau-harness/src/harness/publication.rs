@@ -952,6 +952,7 @@ impl Harness {
                 completion,
                 AgentPublishCompletion::InitialPromptSubmission { .. }
                     | AgentPublishCompletion::UncertainSupersession { .. }
+                    | AgentPublishCompletion::OrdinarySteer { .. }
             )
         });
         let prompt_id = match &event {

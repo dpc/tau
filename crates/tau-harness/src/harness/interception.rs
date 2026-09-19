@@ -549,6 +549,10 @@ pub(crate) enum OwnedPublicationRetryPolicy {
     ApprovedEventWithoutInterception,
 }
 
+/// Process-local identity for one folded ordinary queued-steer suffix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OrdinarySteerBatchId(pub(crate) u64);
+
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
@@ -669,6 +673,19 @@ pub(crate) enum AgentPublishCompletion {
         /// rejection.
         owned_publication: Option<OwnedPublication>,
     },
+    /// Retain one ordinary queued steer and its untouched FIFO suffix through
+    /// append rejection.
+    OrdinarySteer {
+        /// Runtime-only identity shared by exactly this folded suffix.
+        batch_id: OrdinarySteerBatchId,
+        /// Uncommitted suffix beginning with this exact publication.
+        retry_prompts: Vec<crate::agent::PendingPrompt>,
+        /// Whether commit must resume the untouched suffix and dispatch seam.
+        resume_suffix_on_commit: bool,
+        /// Exact interceptor-approved steer retained after persistence
+        /// rejection.
+        owned_publication: Option<OwnedPublication>,
+    },
     /// Resume the successful standalone compaction after the final steer in its
     /// completion batch commits.
     StandaloneContinuation {
@@ -733,6 +750,9 @@ impl AgentPublishCompletion {
                 owned_publication, ..
             }
             | Self::RollingCompactionStart { owned_publication }
+            | Self::OrdinarySteer {
+                owned_publication, ..
+            }
             | Self::StandaloneContinuation {
                 owned_publication, ..
             } => owned_publication.as_ref(),
@@ -781,6 +801,9 @@ impl AgentPublishCompletion {
                 owned_publication, ..
             }
             | Self::RollingCompactionStart { owned_publication }
+            | Self::OrdinarySteer {
+                owned_publication, ..
+            }
             | Self::StandaloneContinuation {
                 owned_publication, ..
             } => Some(owned_publication),
@@ -808,7 +831,8 @@ impl AgentPublishCompletion {
             | Self::StandaloneContextRejection { .. }
             | Self::OwedCompactionFact { .. }
             | Self::StandaloneExecutionAccounting { .. }
-            | Self::RollingCompactionStart { .. } => Some(OwnedPublicationBranch::SemanticParent),
+            | Self::RollingCompactionStart { .. }
+            | Self::OrdinarySteer { .. } => Some(OwnedPublicationBranch::SemanticParent),
             Self::InitialPromptSubmission { .. } => None,
         }
     }
@@ -870,6 +894,7 @@ impl AgentPublishCompletion {
             | Self::OwedCompactionFact { .. }
             | Self::StandaloneExecutionAccounting { .. }
             | Self::RollingCompactionStart { .. }
+            | Self::OrdinarySteer { .. }
             | Self::StandaloneContinuation { .. } => None,
         };
         response.is_some_and(|response| {
@@ -898,6 +923,7 @@ impl AgentPublishCompletion {
             | Self::OwedCompactionFact { .. }
             | Self::StandaloneExecutionAccounting { .. }
             | Self::RollingCompactionStart { .. }
+            | Self::OrdinarySteer { .. }
             | Self::InitialPromptSubmission { .. } => {
                 unreachable!("non-standalone completions do not own compaction transactions")
             }
@@ -1465,6 +1491,27 @@ impl Harness {
         });
     }
 
+    /// Remove only deferred members of one rejected ordinary steer suffix.
+    pub(crate) fn discard_deferred_ordinary_steer_batch(
+        &mut self,
+        cid: &AgentId,
+        batch_id: OrdinarySteerBatchId,
+    ) {
+        self.runtime_io.publication.deferred.retain(|publish| {
+            !matches!(
+                publish
+                    .sync_head_for
+                    .as_ref()
+                    .filter(|sync| &sync.cid == cid)
+                    .and_then(ConversationHeadSync::completion),
+                Some(AgentPublishCompletion::OrdinarySteer {
+                    batch_id: queued,
+                    ..
+                }) if *queued == batch_id
+            )
+        });
+    }
+
     /// Cancel synchronized checkpoints/completions owned by one unloading
     /// agent, suspend an in-flight responder, and resume unrelated FIFO
     /// work.
@@ -1937,7 +1984,8 @@ impl Harness {
             _ => DebugEventSensitivity::Ordinary,
         };
         let notify_watchers = match &completion {
-            AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
+            AgentPublishCompletion::OrdinarySteer { retry_prompts, .. }
+            | AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
                 .first()
                 .is_some_and(path_crate_agent::PendingPrompt::should_notify_watchers),
             AgentPublishCompletion::ToolTerminal { .. }
@@ -1965,6 +2013,7 @@ impl Harness {
         let suppress_activation_dispatch = !matches!(
             &completion,
             AgentPublishCompletion::UncertainSupersession { .. }
+                | AgentPublishCompletion::OrdinarySteer { .. }
         );
         let persist = event.defaults_to_persist()
             || matches!(
