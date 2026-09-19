@@ -254,6 +254,164 @@ fn memory_only_store_never_touches_durable_root() {
     assert!(!agents_dir.join(agent_id.as_str()).exists());
 }
 
+/// Managed role lookup clones only the creation role rather than the retained
+/// owned-payload suffix.
+#[test]
+fn managed_agent_started_role_ignores_retained_history_suffix() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store opens");
+    let agent_id = AgentId::parse("managed-role").expect("agent id");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation appends");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            injected_message_event(&agent_id, "x".repeat(1024 * 1024)),
+        )
+        .expect("owned payload appends");
+
+    assert_eq!(
+        store
+            .agent_started_role(agent_id.as_str())
+            .expect("role lookup"),
+        Some("engineer".to_owned())
+    );
+}
+
+/// A present managed projection without a creation event returns no role and
+/// must not fall through to the durable journal.
+#[test]
+fn managed_agent_started_role_missing_start_does_not_fall_back() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("managed-missing-start").expect("agent id");
+    {
+        let mut writer = AgentStore::open_fixture(temp.path()).expect("writer opens");
+        writer
+            .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+            .expect("creation appends");
+    }
+    let owner = path_std_sync::Arc::new(
+        crate::SemanticPersistenceOwner::new(Default::default()).expect("persistence owner"),
+    );
+    let mut store = AgentStore::open_managed(temp.path(), owner).expect("managed store");
+    store
+        .prepare_existing_agent(agent_id.as_str())
+        .expect("existing agent prepares");
+    store.managed_projections.insert(
+        agent_id.clone(),
+        ManagedAgentProjection::empty(agent_id.clone()),
+    );
+
+    assert_eq!(
+        store
+            .agent_started_role(agent_id.as_str())
+            .expect("role lookup"),
+        None
+    );
+}
+
+/// Memory-only and non-managed durable role lookup retain the full
+/// `agent_events` fallback behavior.
+#[test]
+fn agent_started_role_preserves_existing_fallbacks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let durable_id = AgentId::parse("durable-role").expect("agent id");
+    let no_start_id = AgentId::parse("durable-no-start").expect("agent id");
+    {
+        let mut writer = AgentStore::open_fixture(temp.path()).expect("writer opens");
+        writer
+            .append_agent_event(durable_id.as_str(), None, started_event(&durable_id))
+            .expect("creation appends");
+        writer
+            .append_agent_event(
+                no_start_id.as_str(),
+                None,
+                injected_message_event(&no_start_id, "no creation record".to_owned()),
+            )
+            .expect("non-creation event appends");
+    }
+    let durable = AgentStore::open(temp.path()).expect("read-only store opens");
+    assert_eq!(
+        durable
+            .agent_started_role(durable_id.as_str())
+            .expect("durable role lookup"),
+        Some("engineer".to_owned())
+    );
+    assert_eq!(
+        durable
+            .agent_started_role(no_start_id.as_str())
+            .expect("no-start durable lookup"),
+        None
+    );
+
+    let ephemeral_id = AgentId::parse("ephemeral-role").expect("agent id");
+    let mut ephemeral = AgentStore::open_memory_only(temp.path().join("ephemeral"));
+    ephemeral
+        .append_agent_event(ephemeral_id.as_str(), None, started_event(&ephemeral_id))
+        .expect("memory-only creation appends");
+    assert_eq!(
+        ephemeral
+            .agent_started_role(ephemeral_id.as_str())
+            .expect("memory-only role lookup"),
+        Some("engineer".to_owned())
+    );
+
+    assert!(matches!(
+        durable.agent_started_role("../invalid"),
+        Err(AgentStoreError::InvalidAgentId { .. })
+    ));
+}
+
+/// Non-managed role lookup validates the complete durable history before
+/// exposing an otherwise valid creation role.
+#[test]
+fn agent_started_role_preserves_non_managed_validation_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("invalid-durable-role").expect("agent id");
+    let journal_path;
+    {
+        let mut writer = AgentStore::open_fixture(temp.path()).expect("writer opens");
+        writer
+            .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+            .expect("creation appends");
+        journal_path = writer.agent_dir(agent_id.as_str()).join("events.cbor");
+    }
+    let duplicate_start = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([9; 16]),
+        seq: PersistedAgentEventSeq::new(2),
+        source: None,
+        event: started_event(&agent_id),
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: AgentJournalFoldSemantics::CommitOrder,
+        recorded_at: UnixMicros::new(43),
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&duplicate_start, &mut encoded).expect("duplicate start encodes");
+    let mut journal = OpenOptions::new()
+        .append(true)
+        .open(journal_path)
+        .expect("journal opens");
+    journal
+        .write_all(&(encoded.len() as u64).to_le_bytes())
+        .expect("frame length appends");
+    journal.write_all(&encoded).expect("frame appends");
+
+    let store = AgentStore::open_lazy(temp.path()).expect("lazy store opens");
+    let events_error = store
+        .agent_events(agent_id.as_str())
+        .expect_err("full event load rejects the invalid sequence");
+    let role_error = store
+        .agent_started_role(agent_id.as_str())
+        .expect_err("role lookup preserves the full-load failure");
+    assert_eq!(role_error.to_string(), events_error.to_string());
+    assert_eq!(
+        std::mem::discriminant(&role_error),
+        std::mem::discriminant(&events_error)
+    );
+}
+
 /// Permanent retired-ID tombstones reserve the namespace in discovery and at
 /// the durable reservation boundary.
 #[test]

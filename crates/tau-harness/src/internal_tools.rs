@@ -644,14 +644,9 @@ impl<'a> InternalToolHost<'a> {
                         .harness
                         .session_runtime
                         .agent_store
-                        .agent_events(agent_id.as_str())
+                        .agent_started_role(agent_id.as_str())
                         .ok()
-                        .and_then(|events| {
-                            events.into_iter().find_map(|record| match record.event {
-                                tau_proto::Event::AgentStarted(started) => Some(started.role),
-                                _ => None,
-                            })
-                        })
+                        .flatten()
                         .unwrap_or_else(|| self.harness.config.selected_role.clone());
                     InternalAgentSummary {
                         group: self.harness.role_group_name_for_role(&role),

@@ -1258,14 +1258,46 @@ fn cold_restore_classifies_unroutable_extension_worker_as_unavailable() {
         summary.agent_id == worker_agent_id.as_str()
             && summary.state == path_crate_internal_tools::InternalAgentState::RestoredUnavailable
     }));
+    let live_parent = summaries
+        .iter()
+        .find(|summary| summary.agent_id == parent_agent_id.as_str())
+        .expect("live parent summary");
+    let parent_role = live_parent.role.clone();
+    let parent_group = live_parent.group.clone();
+    resumed
+        .agent_runtime
+        .agent_registry
+        .stopped_ids
+        .insert(parent_agent_id.clone());
+    let represented_summaries =
+        path_crate_internal_tools::InternalToolHost::new(&mut resumed).current_agent_summaries();
+    assert_eq!(
+        represented_summaries
+            .iter()
+            .filter(|summary| summary.agent_id == parent_agent_id.as_str())
+            .count(),
+        1,
+        "a represented live id must suppress its stopped projection"
+    );
     resumed.remove_agent(&parent_cid);
+    resumed.config.selected_role = "fallback-role".to_owned();
     let summaries =
         path_crate_internal_tools::InternalToolHost::new(&mut resumed).current_agent_summaries();
+    let stopped_parent = summaries
+        .iter()
+        .find(|summary| summary.agent_id == parent_agent_id.as_str())
+        .expect("stopped parent summary");
+    assert_eq!(
+        stopped_parent.state,
+        path_crate_internal_tools::InternalAgentState::Stopped
+    );
+    assert_eq!(stopped_parent.role, parent_role);
+    assert_eq!(stopped_parent.group, parent_group);
     assert!(
         summaries
-            .iter()
-            .any(|summary| summary.agent_id == parent_agent_id.as_str()
-                && summary.state == path_crate_internal_tools::InternalAgentState::Stopped)
+            .windows(2)
+            .all(|pair| pair[0].agent_id <= pair[1].agent_id),
+        "agent summaries remain sorted by public id"
     );
     resumed.shutdown().expect("shutdown resumed harness");
 }

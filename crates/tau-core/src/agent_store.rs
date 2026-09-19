@@ -1677,6 +1677,30 @@ impl AgentStore {
         Ok(events)
     }
 
+    /// Returns the role from the first creation event while avoiding a clone of
+    /// an already-retained durable history.
+    pub fn agent_started_role(&self, agent_id: &str) -> Result<Option<String>, AgentStoreError> {
+        let parsed_agent_id = parse_agent_id_for_store(agent_id)?;
+        if !self.agent_is_memory_only(&parsed_agent_id)
+            && let Some(projection) = self.managed_projections.get(&parsed_agent_id)
+        {
+            return Ok(projection.events.iter().find_map(|record| {
+                let Event::AgentStarted(started) = &record.event else {
+                    return None;
+                };
+                Some(started.role.clone())
+            }));
+        }
+        self.agent_events(agent_id).map(|events| {
+            events.into_iter().find_map(|record| {
+                let Event::AgentStarted(started) = record.event else {
+                    return None;
+                };
+                Some(started.role)
+            })
+        })
+    }
+
     /// Returns the per-agent storage root this store is rooted at
     /// (typically `<state_dir>/agents/`).
     #[must_use]
