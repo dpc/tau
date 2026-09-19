@@ -20,6 +20,7 @@ use tau_proto::{
 #[cfg(test)]
 use crate::event_log::EventLog;
 use crate::extension::ExtensionConnectCommand;
+use crate::extension_isolation_tempdir::ExtensionIsolationTempDir;
 use crate::harness::SessionGeneration;
 
 /// Grace period before a blocked supervised writer is forcefully unblocked.
@@ -966,7 +967,7 @@ pub(crate) struct SupervisedWriterHandle {
     ///
     /// The child namespace references these paths as bind-mount sources, so
     /// their parent must retain them until the child is reaped.
-    _isolation_tempdir: Option<tempfile::TempDir>,
+    _isolation_tempdir: Option<ExtensionIsolationTempDir>,
 }
 
 impl SupervisedWriterHandle {
@@ -1179,7 +1180,7 @@ pub(crate) fn spawn_supervised_writer_thread_with_isolation_tempdir(
     child: Child,
     protocol_io: Option<ProtocolIoMeter>,
     harness_tx: Sender<HarnessEvent>,
-    isolation_tempdir: Option<tempfile::TempDir>,
+    isolation_tempdir: Option<ExtensionIsolationTempDir>,
 ) -> (Sender<WriterCommand>, SupervisedWriterHandle) {
     let child_pid = child.id();
     let watchdog = Arc::new(WriterWatchdog::new());

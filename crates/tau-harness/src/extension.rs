@@ -23,6 +23,7 @@ use crate::event::{
     spawn_reader_thread_after_initialized, spawn_supervised_writer_thread_with_isolation_tempdir,
     spawn_writer_thread,
 };
+use crate::extension_isolation_tempdir::ExtensionIsolationTempDir;
 use crate::extension_stderr_mirror::{
     ExtensionStderrIdentity, ExtensionStderrLogger, ExtensionStderrMirror,
 };
@@ -286,7 +287,7 @@ fn supervised_command(
     state_dir: &Path,
     memory_only: bool,
     provider_settings: &std::collections::BTreeMap<String, Vec<u8>>,
-) -> Result<(Command, Option<tempfile::TempDir>), HarnessError> {
+) -> Result<(Command, Option<ExtensionIsolationTempDir>), HarnessError> {
     let (mut command, empty_mask) =
         isolated_supervised_command(config, kind, state_dir, memory_only, provider_settings)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -304,7 +305,7 @@ fn isolated_supervised_command(
     state_dir: &Path,
     memory_only: bool,
     provider_settings: &std::collections::BTreeMap<String, Vec<u8>>,
-) -> Result<(Command, Option<tempfile::TempDir>), HarnessError> {
+) -> Result<(Command, Option<ExtensionIsolationTempDir>), HarnessError> {
     #[cfg(test)]
     {
         let _ = (kind, state_dir, memory_only, provider_settings);
@@ -364,9 +365,7 @@ fn isolated_supervised_command(
                 config.name
             )));
         }
-        let empty_mask = tempfile::Builder::new()
-            .prefix("tau-extension-state-mask-")
-            .tempdir()?;
+        let empty_mask = ExtensionIsolationTempDir::new()?;
         let outer_mask = empty_mask.path().join("outer");
         let runtime_socket_mask = empty_mask.path().join("runtime-sockets");
         let staging_root = empty_mask.path().join("staging");

@@ -39,6 +39,7 @@ mod error;
 mod event;
 mod event_log;
 mod extension;
+mod extension_isolation_tempdir;
 mod extension_launcher;
 mod extension_stderr_mirror;
 mod format;

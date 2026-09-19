@@ -1,3 +1,5 @@
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt as _;
 use std::process::Stdio;
 use std::{net as path_std_net, process as path_std_process};
 
@@ -5,6 +7,7 @@ use tau_proto::{Event, HarnessOutputReader};
 
 use super::*;
 use crate::event_log::EventLog;
+use crate::extension_isolation_tempdir::ExtensionIsolationTempDir;
 
 fn disconnected_event_named(name: &str) -> HarnessEvent {
     HarnessEvent::Disconnected {
@@ -636,6 +639,48 @@ fn graceful_supervised_writer_cleanup_cancels_watchdog() {
         Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
             if connection_id.as_str() == "graceful-writer"
     ));
+}
+
+/// Ensures the supervised writer retains the isolation tree until its direct
+/// child is reaped, then drops the cleanup owner and removes the snapshot.
+#[test]
+fn supervised_writer_reap_releases_provider_snapshot() {
+    let isolation = ExtensionIsolationTempDir::new().expect("isolation tempdir");
+    let isolation_root = isolation.path().to_path_buf();
+    let snapshot = isolation_root.join("provider-profile-snapshot");
+    std::fs::create_dir(&snapshot).expect("snapshot directory");
+    std::fs::write(snapshot.join("profile.json"), b"{}").expect("snapshot profile");
+    std::fs::set_permissions(&snapshot, Permissions::from_mode(0o500)).expect("read-only snapshot");
+    let mut child = path_std_process::Command::new("sh")
+        .arg("-c")
+        .arg("cat >/dev/null")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+    let stdin = child.stdin.take().expect("child stdin");
+    let (harness_tx, harness_rx) = mpsc::channel();
+    let (writer_tx, mut writer) = spawn_supervised_writer_thread_with_isolation_tempdir(
+        crate::test_connection_id("snapshot-cleanup"),
+        stdin,
+        child,
+        None,
+        harness_tx,
+        Some(isolation),
+    );
+
+    drop(writer_tx);
+    wait_for_supervised_cleanup(&harness_rx, "snapshot-cleanup");
+    writer.join().expect("join writer");
+    assert!(
+        isolation_root.exists(),
+        "writer handle must retain isolation ownership after child reaping"
+    );
+
+    drop(writer);
+    assert!(
+        !isolation_root.exists(),
+        "dropping the reaped writer must remove the read-only snapshot"
+    );
 }
 
 /// Reaching child wait after the outer deadline must not start a second grace

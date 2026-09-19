@@ -613,8 +613,10 @@ fn in_process_join_detaches_threads_blocked_in_teardown_at_shared_deadline() {
 /// Configure bytes and is read-only before namespace setup.
 #[test]
 fn provider_settings_mount_materializes_exact_read_only_snapshot() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let root = temp.path().join("snapshot");
+    assert_unprivileged_snapshot_cleanup_test();
+    let temp = ExtensionIsolationTempDir::new().expect("isolation tempdir");
+    let isolation_root = temp.path().to_path_buf();
+    let root = isolation_root.join("provider-profile-snapshot");
     let files = BTreeMap::from([
         ("a.json".to_owned(), b"{\"a\":1}".to_vec()),
         ("b.json".to_owned(), b"{\"b\":2}".to_vec()),
@@ -641,6 +643,95 @@ fn provider_settings_mount_materializes_exact_read_only_snapshot() {
             .mode()
             & 0o777,
         0o500
+    );
+    drop(temp);
+    assert!(
+        !isolation_root.exists(),
+        "cleanup owner must remove the read-only nonempty snapshot tree"
+    );
+}
+
+/// Ensures cleanup ownership begins before snapshot setup and repairs disposal
+/// after an error that follows read-only materialization.
+#[test]
+fn provider_snapshot_setup_error_removes_isolation_root() {
+    assert_unprivileged_snapshot_cleanup_test();
+    let mut isolation_root = None;
+    assert!(fail_after_provider_snapshot_materialization(&mut isolation_root).is_err());
+    let isolation_root = isolation_root.expect("setup reached snapshot materialization");
+
+    assert!(
+        !isolation_root.exists(),
+        "setup failure must dispose the already materialized snapshot"
+    );
+}
+
+/// Materializes through the production owner, then propagates a later setup
+/// failure so the owner's early-return cleanup path runs.
+fn fail_after_provider_snapshot_materialization(
+    isolation_root: &mut Option<PathBuf>,
+) -> io::Result<()> {
+    let temp = ExtensionIsolationTempDir::new()?;
+    let root = temp.path().to_path_buf();
+    materialize_provider_settings_snapshot(
+        &root.join("provider-profile-snapshot"),
+        &BTreeMap::from([("profile.json".to_owned(), b"{}".to_vec())]),
+    )?;
+    *isolation_root = Some(root);
+    Err(io::Error::other("later setup failure"))
+}
+
+/// Ensures a prepared isolation owner removes a nonempty snapshot when process
+/// spawning fails before ownership can move to the supervised writer.
+#[test]
+fn provider_snapshot_spawn_error_removes_isolation_root() {
+    assert_unprivileged_snapshot_cleanup_test();
+    let isolation_root = {
+        let temp = ExtensionIsolationTempDir::new().expect("isolation tempdir");
+        let isolation_root = temp.path().to_path_buf();
+        materialize_provider_settings_snapshot(
+            &isolation_root.join("provider-profile-snapshot"),
+            &BTreeMap::from([("profile.json".to_owned(), b"{}".to_vec())]),
+        )
+        .expect("materialize snapshot");
+        let error = Command::new(format!(
+            "/tau-missing-snapshot-cleanup-child-{}",
+            std::process::id()
+        ))
+        .spawn()
+        .expect_err("missing executable must fail");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        isolation_root
+    };
+
+    assert!(
+        !isolation_root.exists(),
+        "spawn failure must dispose the prepared snapshot"
+    );
+}
+
+/// Ensures partial construction without a provider snapshot remains harmless.
+#[test]
+fn partial_isolation_owner_removes_root_without_snapshot() {
+    let temp = ExtensionIsolationTempDir::new().expect("isolation tempdir");
+    let isolation_root = temp.path().to_path_buf();
+    std::fs::create_dir(temp.path().join("outer")).expect("partial isolation path");
+
+    drop(temp);
+
+    assert!(!isolation_root.exists());
+}
+
+/// Requires ordinary DAC semantics so root privileges cannot conceal the
+/// read-only-parent cleanup regression these tests protect.
+fn assert_unprivileged_snapshot_cleanup_test() {
+    // SAFETY: geteuid only reads the process credential and has no
+    // preconditions.
+    #[allow(unsafe_code)]
+    let effective_uid = unsafe { libc::geteuid() };
+    assert_ne!(
+        effective_uid, 0,
+        "snapshot cleanup regression tests require an unprivileged effective UID"
     );
 }
 
