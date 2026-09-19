@@ -51,28 +51,48 @@ impl ClientWriterLifecycle {
     /// so a stalled writer cannot block harness shutdown. Generic transports
     /// lack cancellation but the worker still returns at the same deadline.
     pub(crate) fn start_bounded_close(self, grace: Duration) -> Option<thread::JoinHandle<()>> {
+        self.start_bounded_close_with_spawner(grace, |task| {
+            thread::Builder::new()
+                .name("tau-client-final-close".to_owned())
+                .spawn(task)
+        })
+    }
+
+    /// Starts bounded close with an injected worker spawner for focused failure
+    /// testing.
+    fn start_bounded_close_with_spawner<T>(
+        self,
+        grace: Duration,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<T>,
+    ) -> Option<T> {
         self.consumer.close_after_current();
         let consumer = self.consumer;
-        let socket_shutdown = self.socket_shutdown;
-        let fallback_shutdown = socket_shutdown
-            .as_ref()
-            .and_then(|stream| stream.try_clone().ok());
-        match thread::Builder::new()
-            .name("tau-client-final-close".to_owned())
-            .spawn(move || {
-                let _retired = consumer.wait_for_retirement(grace);
-                if let Some(stream) = socket_shutdown {
-                    let _ = stream.shutdown(Shutdown::Both);
-                }
-            }) {
+        let socket_shutdown = self.socket_shutdown.map(Arc::new);
+        let worker_stream = socket_shutdown.as_ref().map(Arc::clone);
+        match spawn(Box::new(move || {
+            let _retired = consumer.wait_for_retirement(grace);
+            if let Some(stream) = worker_stream {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        })) {
             Ok(handle) => Some(handle),
             Err(_) => {
-                if let Some(stream) = fallback_shutdown {
+                if let Some(stream) = socket_shutdown {
                     let _ = stream.shutdown(Shutdown::Both);
                 }
                 None
             }
         }
+    }
+
+    /// Exercises final-close worker creation with a caller-provided spawner.
+    #[cfg(test)]
+    pub(crate) fn start_bounded_close_with_spawner_for_test<T>(
+        self,
+        grace: Duration,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<T>,
+    ) -> Option<T> {
+        self.start_bounded_close_with_spawner(grace, spawn)
     }
 
     /// Requests terminal delivery, then closes or cancels the owned transport.
