@@ -3380,6 +3380,7 @@ impl Harness {
 
     fn drain_publish_idle_dispatches_for(&mut self, allowed: Option<&HashSet<AgentId>>) {
         let mut attempted = Vec::new();
+        let mut render_failed_agents = HashSet::new();
         while self.publish_chain_is_idle() {
             for index in 0..self.runtime_io.publication.idle_dispatches.len() {
                 if allowed.is_some_and(|allowed| {
@@ -3446,6 +3447,9 @@ impl Harness {
                     if allowed.is_some_and(|allowed| !allowed.contains(&deferred.cid)) {
                         return None;
                     }
+                    if render_failed_agents.contains(&deferred.cid) {
+                        return None;
+                    }
                     if attempted
                         .iter()
                         .any(|prior| Self::same_deferred_prompt_dispatch(prior, deferred))
@@ -3469,7 +3473,8 @@ impl Harness {
             }
             if deferred.obligation.is_committed() && !self.validate_prompt_render_for_dispatch(&cid)
             {
-                break;
+                render_failed_agents.insert(cid);
+                continue;
             }
             if deferred.obligation.is_committed()
                 && self.schedule_standalone_auto_compaction_for_activation(&cid, true)

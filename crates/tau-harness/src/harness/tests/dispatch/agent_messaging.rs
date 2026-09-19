@@ -4689,6 +4689,146 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 
+/// One agent's strict-template failure must remain retryable without blocking a
+/// healthy agent's independent committed message wake in the same drain.
+#[test]
+fn render_failed_message_wake_does_not_block_other_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let first_cid = ensure_test_user_agent(&mut h);
+    let second_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let first_agent_id = durable_agent_id_for_conversation(&h, &first_cid);
+    let second_agent_id = durable_agent_id_for_conversation(&h, &second_cid);
+
+    for (cid, agent_id, message_id) in [
+        (&first_cid, &first_agent_id, "render-fairness-first"),
+        (&second_cid, &second_agent_id, "render-fairness-second"),
+    ] {
+        h.set_agent_turn_state(
+            cid,
+            AgentTurnState::AgentThinking {
+                agent_prompt_id: test_agent_prompt_id(format!("{message_id}-hold")),
+            },
+        );
+        h.publish_for_agent(
+            cid,
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: tau_proto::AgentMessageId::parse(message_id)
+                    .expect("test identifier must satisfy its grammar"),
+                sender_id: crate::parse_agent_id("manager"),
+                sender_session_id: None,
+                recipient_id: agent_id.clone(),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
+                watch_lifecycle: None,
+                sender_notice: None,
+                recipient_notice: None,
+                message: format!("wake for {message_id}"),
+            }),
+        );
+        h.set_agent_turn_state(cid, AgentTurnState::Idle);
+    }
+
+    let bad_cid = h
+        .next_runnable_agent(None)
+        .expect("one message wake must be runnable")
+        .agent_id;
+    let good_cid = if bad_cid == first_cid {
+        second_cid.clone()
+    } else {
+        first_cid.clone()
+    };
+    let bad_agent_id = durable_agent_id_for_conversation(&h, &bad_cid);
+    let good_agent_id = durable_agent_id_for_conversation(&h, &good_cid);
+    let retained_wakes = h.agent_runtime.agent_registry.agents[&bad_cid]
+        .dispatch
+        .pending_message_wakes
+        .clone();
+    let selected_role = h.config.selected_role.clone();
+    let mut bad_role = h.config.available_roles[&selected_role].clone();
+    bad_role.prompt_override = Some("render-fairness-bad".to_owned());
+    h.config
+        .available_roles
+        .insert("render-fairness-bad".to_owned(), bad_role);
+    h.prompt_coordination
+        .context_discovery
+        .system_prompt_templates
+        .insert(
+            "render-fairness-bad".to_owned(),
+            "{{missing_strict_value}}".to_owned(),
+        );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&bad_cid)
+        .expect("bad agent")
+        .identity
+        .role = Some("render-fairness-bad".to_owned());
+
+    h.try_advance_queue();
+
+    let events = event_log_events(&h);
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started) if started.agent_id == bad_agent_id
+    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_id == good_agent_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&bad_cid]
+            .dispatch
+            .pending_message_wakes,
+        retained_wakes
+    );
+    assert_eq!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .filter(|notice| notice.message.contains("until its template is repaired"))
+            .count(),
+        1,
+        "one drain must not retry the same render failure"
+    );
+
+    h.prompt_coordination
+        .context_discovery
+        .system_prompt_templates
+        .insert("render-fairness-bad".to_owned(), "REPAIRED".to_owned());
+    h.try_advance_queue();
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_id == bad_agent_id
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        h.agent_runtime.agent_registry.agents[&bad_cid]
+            .dispatch
+            .pending_message_wakes
+            .is_empty()
+    );
+}
+
 /// Agent-to-agent input interrupts an exact wait only at its bounded wait-tool
 /// deadline, preserving an aggregation window without stalling indefinitely.
 #[test]

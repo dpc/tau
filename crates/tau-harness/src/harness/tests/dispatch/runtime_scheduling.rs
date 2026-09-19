@@ -1980,6 +1980,154 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
     h.shutdown().expect("shutdown");
 }
 
+/// A retained render-invalid committed activation must not consume or reorder
+/// its obligation while a later healthy agent dispatches and the failed agent
+/// remains eligible for a later repaired drain.
+#[test]
+fn render_failed_deferred_dispatch_does_not_block_other_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let bad_cid = ensure_test_user_agent(&mut h);
+    let good_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let bad_agent_id = durable_agent_id_for_conversation(&h, &bad_cid);
+    let good_agent_id = durable_agent_id_for_conversation(&h, &good_cid);
+    let context_provider = tau_proto::ConnectionId::parse("render-fairness-context")
+        .expect("test connection id must satisfy the identifier grammar");
+    for agent_id in [&bad_agent_id, &good_agent_id] {
+        set_test_agent_context_wait(
+            &mut h,
+            agent_id.clone(),
+            path_std_collections::HashSet::from([context_provider.clone()]),
+        );
+    }
+
+    h.dispatch_prompt_for_agent(
+        &bad_cid,
+        PendingPrompt::user("render-invalid activation".to_owned()),
+    )
+    .expect("defer render-invalid activation");
+    h.dispatch_prompt_for_agent(
+        &good_cid,
+        PendingPrompt::user("healthy activation".to_owned()),
+    )
+    .expect("defer healthy activation");
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 2);
+    let retained_obligation = h.runtime_io.publication.idle_dispatches[0].clone();
+    assert_eq!(retained_obligation.cid, bad_cid);
+
+    let selected_role = h.config.selected_role.clone();
+    let mut bad_role = h.config.available_roles[&selected_role].clone();
+    bad_role.prompt_override = Some("deferred-render-fairness-bad".to_owned());
+    h.config
+        .available_roles
+        .insert("deferred-render-fairness-bad".to_owned(), bad_role);
+    h.prompt_coordination
+        .context_discovery
+        .system_prompt_templates
+        .insert(
+            "deferred-render-fairness-bad".to_owned(),
+            "{{missing_strict_value}}".to_owned(),
+        );
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&bad_cid)
+        .expect("bad agent")
+        .identity
+        .role = Some("deferred-render-fairness-bad".to_owned());
+    finish_test_agent_context_wait(&mut h, &bad_agent_id);
+    finish_test_agent_context_wait(&mut h, &good_agent_id);
+
+    h.drain_publish_idle_dispatches();
+
+    let events = event_log_events(&h);
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started) if started.agent_id == bad_agent_id
+    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_id == good_agent_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
+    let retained = &h.runtime_io.publication.idle_dispatches[0];
+    assert_eq!(retained.cid, retained_obligation.cid);
+    assert_eq!(
+        retained.activation_through,
+        retained_obligation.activation_through
+    );
+    assert_eq!(retained.activation_cut, retained_obligation.activation_cut);
+    assert_eq!(
+        retained.activation_source_seq,
+        retained_obligation.activation_source_seq
+    );
+    assert_eq!(retained.obligation, retained_obligation.obligation);
+    assert_eq!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .filter(|notice| notice.message.contains("until its template is repaired"))
+            .count(),
+        1,
+        "one drain must not retry the same render failure"
+    );
+
+    h.drain_publish_idle_dispatches();
+    assert_eq!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .filter(|notice| notice.message.contains("until its template is repaired"))
+            .count(),
+        2,
+        "a later drain may retry once without spinning"
+    );
+    let retained = &h.runtime_io.publication.idle_dispatches[0];
+    assert_eq!(retained.cid, retained_obligation.cid);
+    assert_eq!(
+        retained.activation_through,
+        retained_obligation.activation_through
+    );
+    assert_eq!(retained.activation_cut, retained_obligation.activation_cut);
+    assert_eq!(
+        retained.activation_source_seq,
+        retained_obligation.activation_source_seq
+    );
+    assert_eq!(retained.obligation, retained_obligation.obligation);
+
+    h.prompt_coordination
+        .context_discovery
+        .system_prompt_templates
+        .insert(
+            "deferred-render-fairness-bad".to_owned(),
+            "REPAIRED".to_owned(),
+        );
+    h.drain_publish_idle_dispatches();
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_id == bad_agent_id
+            ))
+            .count(),
+        1
+    );
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
+}
+
 /// Readiness coalescing keeps incomparable branch activations as distinct
 /// obligations; dispatching the selected sibling does not consume the dormant
 /// branch, which becomes runnable after the sibling turn finishes and

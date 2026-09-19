@@ -393,6 +393,7 @@ impl Harness {
             return;
         }
         self.try_publish_ready_uncertain_supersessions();
+        let mut render_failed_agents = HashSet::new();
         loop {
             let has_captured_output_length_owner = self
                 .agent_runtime
@@ -415,7 +416,8 @@ impl Harness {
             }
             let mut materialization_timing = PrecheckpointMaterializationTiming::enabled();
             let selection_started = materialization_timing.as_ref().map(|_| Instant::now());
-            let Some(selected) = self.next_runnable_agent(allowed) else {
+            let Some(selected) = self.next_runnable_agent_excluding(allowed, &render_failed_agents)
+            else {
                 break;
             };
             if let (Some(timing), Some(started)) =
@@ -482,7 +484,8 @@ impl Harness {
                 if !output_length_owner_ready {
                     let preflight_started = materialization_timing.as_ref().map(|_| Instant::now());
                     if !self.validate_prompt_render_for_dispatch(&agent_id) {
-                        return;
+                        render_failed_agents.insert(agent_id);
+                        continue;
                     }
                     if let (Some(timing), Some(started)) =
                         (materialization_timing.as_mut(), preflight_started)
@@ -782,11 +785,26 @@ impl Harness {
         }
     }
 
-    fn next_runnable_agent(
+    #[cfg(test)]
+    pub(crate) fn next_runnable_agent(
         &self,
         allowed: Option<&HashSet<AgentId>>,
     ) -> Option<RunnableAgentSelection> {
-        self.next_runnable_agent_inner::<false>(allowed, &mut RunnableSelectionWork::default())
+        self.next_runnable_agent_excluding(allowed, &HashSet::new())
+    }
+
+    /// Selects one runnable agent while excluding render failures already seen
+    /// by the current drain pass.
+    fn next_runnable_agent_excluding(
+        &self,
+        allowed: Option<&HashSet<AgentId>>,
+        excluded: &HashSet<AgentId>,
+    ) -> Option<RunnableAgentSelection> {
+        self.next_runnable_agent_inner::<false>(
+            allowed,
+            excluded,
+            &mut RunnableSelectionWork::default(),
+        )
     }
 
     /// Runs the production selector with exact work accounting.
@@ -796,7 +814,7 @@ impl Harness {
         allowed: Option<&HashSet<AgentId>>,
     ) -> (Option<RunnableAgentSelection>, [usize; 8]) {
         let mut work = RunnableSelectionWork::default();
-        let selected = self.next_runnable_agent_inner::<true>(allowed, &mut work);
+        let selected = self.next_runnable_agent_inner::<true>(allowed, &HashSet::new(), &mut work);
         (
             selected,
             [
@@ -816,6 +834,7 @@ impl Harness {
     fn next_runnable_agent_inner<const MEASURE: bool>(
         &self,
         allowed: Option<&HashSet<AgentId>>,
+        excluded: &HashSet<AgentId>,
         work: &mut RunnableSelectionWork,
     ) -> Option<RunnableAgentSelection> {
         let mut first = None;
@@ -838,6 +857,7 @@ impl Harness {
                 })
                 .is_some_and(|operation| operation.phase != StartPhase::AwaitDispatchCommit);
             if startup_blocks_other_activation
+                || excluded.contains(agent_id)
                 || allowed.is_some_and(|allowed| !allowed.contains(agent_id))
                 || (allowed.is_none()
                     && self
