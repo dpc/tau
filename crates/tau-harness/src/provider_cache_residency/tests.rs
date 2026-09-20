@@ -315,13 +315,21 @@ pub(crate) fn usage(read: u64, write: u64) -> tau_proto::ProviderTokenUsage {
 }
 
 fn owner() -> (FakeClock, ProviderCacheResidency<FakeClock, FixedJitter>) {
+    owner_with_idle(200)
+}
+
+/// Build one scheduler with a caller-selected integral idle horizon.
+fn owner_with_idle(
+    max_idle_seconds: u64,
+) -> (FakeClock, ProviderCacheResidency<FakeClock, FixedJitter>) {
     let clock = FakeClock(Rc::new(Cell::new(Instant::now())));
     (
         clock.clone(),
         ProviderCacheResidency::new(
             ProviderCacheRefresh {
                 enabled: true,
-                max_idle_seconds: ProviderCacheMaxIdle::new(200).expect("valid test bound"),
+                max_idle_seconds: ProviderCacheMaxIdle::new(max_idle_seconds)
+                    .expect("valid test bound"),
             },
             clock,
             FixedJitter(10),
@@ -577,6 +585,42 @@ fn deterministic_clock_jitter_and_break_even() {
         scheduler.next_deadline(),
         clock.0.get().checked_add(Duration::from_secs(90))
     );
+}
+
+/// Integral one- through nine-second horizons keep a one-second dispatch
+/// opportunity, while ten seconds retains the existing bounded-jitter formula.
+#[test]
+fn short_idle_horizons_use_fixed_pre_stop_lead() {
+    for (horizon, expected_due) in [(1, 0), (9, 8), (10, 9)] {
+        let (clock, mut scheduler) = owner_with_idle(horizon);
+        observe_write_and_read(&mut scheduler, &format!("idle-{horizon}"));
+        scheduler.open_tool_window();
+
+        assert_eq!(
+            scheduler.next_deadline(),
+            clock.0.get().checked_add(Duration::from_secs(expected_due)),
+            "horizon {horizon} should become due at its pre-stop lead"
+        );
+        if 0 < expected_due {
+            clock
+                .0
+                .set(clock.0.get() + Duration::from_secs(expected_due - 1));
+            assert!(
+                scheduler.admit().is_empty(),
+                "horizon {horizon} must not dispatch before its due instant"
+            );
+            clock.0.set(clock.0.get() + Duration::from_secs(1));
+        }
+        let refresh = scheduler
+            .admit()
+            .pop()
+            .unwrap_or_else(|| panic!("horizon {horizon} should dispatch when due"));
+        assert_eq!(
+            refresh.request.stop_after_millis.get(),
+            1_000,
+            "horizon {horizon} should retain exactly one second before its exclusive stop"
+        );
+    }
 }
 
 /// Observation authorizations retain their zero origin, increment, and

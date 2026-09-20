@@ -634,8 +634,10 @@ cooldown, exact idle/residency deadline, route or prefix change, shutdown, or
 rotation suppresses or cancels work. The Provider reports a correlated terminal;
 cancel delivery alone does not release scheduler capacity. Each qualifying read
 creates a new observation generation, and each generation authorizes at most one
-attempt; failure never creates a prompt retry. Keys, evidence, jitter, and
-lifecycle state are process-only and never journaled or restored.
+attempt. Effective horizons from one through nine seconds become due one second
+before their exclusive stop (immediately for one second); longer horizons retain
+bounded random jitter. Failure never creates a prompt retry. Keys, evidence,
+jitter, and lifecycle state are process-only and never journaled or restored.
 
 Hardcoded ChatGPT/Codex comparison prices come from OpenAI's provider-owned
 [API pricing table](https://developers.openai.com/api/docs/pricing). Astra

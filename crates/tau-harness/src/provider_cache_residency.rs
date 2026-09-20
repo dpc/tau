@@ -363,7 +363,7 @@ impl<C: CacheClock, J: CacheJitter> ProviderCacheResidency<C, J> {
         let horizon = stop.saturating_duration_since(now);
         let maximum_jitter = 30_u64.min(horizon.as_secs() / 10);
         let jitter = if maximum_jitter == 0 {
-            Duration::ZERO
+            Duration::from_secs(1)
         } else {
             Duration::from_secs(self.jitter.seconds(1, maximum_jitter))
         };

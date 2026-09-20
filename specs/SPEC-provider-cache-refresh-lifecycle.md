@@ -52,8 +52,10 @@ uncached/read/write prices. It requires an observed write followed by
 
 Each later qualifying read creates a new observation generation and reschedules
 at most one attempt for that generation. The effective horizon is the lesser of
-TTL and configured idle duration. Jitter is zero below ten seconds, otherwise
-uniformly `1..=min(30, horizon/10)` seconds, and dispatch is `stop-jitter`.
+TTL and configured idle duration. Integral horizons below ten seconds use a fixed
+one-second pre-stop lead; longer horizons use a uniformly selected
+`1..=min(30, horizon/10)` second lead. Dispatch is `stop-lead`, so a one-second
+horizon is immediately due while the exclusive stop remains unchanged.
 Evidence is bounded to 1,024 global and 128 per Provider with deterministic
 oldest eviction.
 
