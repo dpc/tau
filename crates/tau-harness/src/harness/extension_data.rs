@@ -488,6 +488,35 @@ pub(super) fn rename_extension_data_file(from: &Path, to: &Path) -> Result<(), s
     sync_parent_dir(from)
 }
 
+/// Atomically renames a non-Secret data file only when the destination is
+/// absent.
+pub(super) fn rename_extension_data_file_noreplace(
+    from: &Path,
+    to: &Path,
+) -> Result<(), std::io::Error> {
+    if let Some(parent) = to.parent() {
+        create_private_dir_all(parent)?;
+    }
+    rename_noreplace(from, to)?;
+    sync_parent_dir(to)?;
+    sync_parent_dir(from)
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(from: &Path, to: &Path) -> Result<(), std::io::Error> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+
+    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(path_std_io::Error::from)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace(_from: &Path, _to: &Path) -> Result<(), std::io::Error> {
+    Err(path_std_io::Error::new(
+        path_std_io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable on this platform",
+    ))
+}
+
 pub(super) fn delete_extension_data_file(path: &Path) -> Result<(), std::io::Error> {
     std::fs::remove_file(path)?;
     sync_parent_dir(path)
@@ -876,6 +905,17 @@ pub(super) fn run_extension_data_rename_file(
     from: String,
     to: String,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    run_extension_data_rename_file_with(root, from, to, rename_extension_data_file_noreplace)
+}
+
+/// Validates a rename request and applies the selected scope-specific rename
+/// operation.
+pub(super) fn run_extension_data_rename_file_with(
+    root: &Path,
+    from: String,
+    to: String,
+    rename_file: impl FnOnce(&Path, &Path) -> Result<(), std::io::Error>,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
     let from_rel = sanitize_extension_data_path(&from, false)?;
     let to_rel = sanitize_extension_data_path(&to, false)?;
     let from = checked_extension_data_path(root, &from_rel, false)?;
@@ -892,7 +932,7 @@ pub(super) fn run_extension_data_rename_file(
             format!("`{}` already exists", to_rel.display()),
         ));
     }
-    rename_extension_data_file(&from, &to).map_err(|error| {
+    rename_file(&from, &to).map_err(|error| {
         ExtensionDataError::io(
             format!(
                 "failed to rename `{}` to `{}`",
@@ -915,7 +955,7 @@ pub(super) fn run_secret_data_rename_file(
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
     let from_rel = sanitize_extension_data_path(&from, false)?;
     let to_rel = sanitize_extension_data_path(&to, false)?;
-    let result = run_extension_data_rename_file(root, from, to)?;
+    let result = run_extension_data_rename_file_with(root, from, to, rename_extension_data_file)?;
     finish_secret_mutation(Ok(()), &root.join(from_rel), state_dir)
         .and_then(|()| finish_secret_mutation(Ok(result), &root.join(to_rel), state_dir))
         .map_err(|error| ExtensionDataError::io("failed to publish secret rename", error))

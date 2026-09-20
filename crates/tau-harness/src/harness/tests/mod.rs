@@ -4,7 +4,7 @@
 //! The shared helpers and imports live here so each submodule can
 //! pull them in with `use super::*;`.
 
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Error, ErrorKind, Read, Write};
 use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -790,6 +790,202 @@ fn extension_data_file_helpers_create_append_replace_delete_private_files() {
         assert_eq!(file_mode, 0o600);
     }
 }
+
+/// Ensures Linux native no-replace rename preserves both files on collision.
+#[cfg(target_os = "linux")]
+#[test]
+fn extension_data_noreplace_rename_rejects_existing_destination() {
+    let tmp = TempDir::new().expect("tempdir");
+    let from = tmp.path().join("from");
+    let to = tmp.path().join("to");
+    std::fs::write(&from, b"loser").expect("write source");
+    std::fs::write(&to, b"winner").expect("write destination");
+
+    let error =
+        super::rename_extension_data_file_noreplace(&from, &to).expect_err("reject collision");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&from).expect("read source"), b"loser");
+    assert_eq!(std::fs::read(&to).expect("read destination"), b"winner");
+}
+
+/// Ensures the non-Secret request path selects native no-replace rename.
+#[cfg(target_os = "linux")]
+#[test]
+fn extension_data_rename_uses_native_noreplace_operation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(&root).expect("create root");
+    std::fs::write(root.join("from"), b"source").expect("write source");
+
+    let result = super::run_extension_data_rename_file(&root, "from".to_owned(), "to".to_owned())
+        .expect("rename file");
+
+    assert!(matches!(result, tau_proto::ExtensionDataValue::RenameFile));
+    assert!(!root.join("from").exists());
+    assert_eq!(
+        std::fs::read(root.join("to")).expect("read destination"),
+        b"source"
+    );
+}
+
+/// Reproduces destination creation after validation and proves it cannot be
+/// clobbered.
+#[cfg(target_os = "linux")]
+#[test]
+fn extension_data_rename_rejects_destination_created_after_precheck() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(&root).expect("create root");
+    std::fs::write(root.join("from"), b"loser").expect("write source");
+
+    let error = super::run_extension_data_rename_file_with(
+        &root,
+        "from".to_owned(),
+        "to".to_owned(),
+        |from, to| {
+            std::fs::write(to, b"winner").expect("publish competing destination");
+            super::rename_extension_data_file_noreplace(from, to)
+        },
+    )
+    .expect_err("reject raced destination");
+
+    assert_eq!(error.kind, tau_proto::ExtensionDataErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(root.join("from")).expect("read source"),
+        b"loser"
+    );
+    assert_eq!(
+        std::fs::read(root.join("to")).expect("read destination"),
+        b"winner"
+    );
+}
+
+/// Exercises two harness-process equivalents that validate distinct sources
+/// before racing native no-replace publication into one shared User-scope root.
+#[cfg(target_os = "linux")]
+#[test]
+fn extension_data_rename_two_process_shared_root_preserves_loser() {
+    const CHILD_ROLE_ENV: &str = "TAU_TEST_EXTENSION_RENAME_CHILD_ROLE";
+    const SHARED_ROOT_ENV: &str = "TAU_TEST_EXTENSION_RENAME_SHARED_ROOT";
+    const TEST_FILTER: &str = "extension_data_rename_two_process_shared_root_preserves_loser";
+
+    if let Some(role) = std::env::var_os(CHILD_ROLE_ENV) {
+        let role = role.to_string_lossy();
+        let root = PathBuf::from(
+            std::env::var_os(SHARED_ROOT_ENV).expect("child shared root environment"),
+        );
+        let result = super::run_extension_data_rename_file_with(
+            &root,
+            role.to_string(),
+            "destination".to_owned(),
+            |from, to| {
+                std::fs::write(root.join(format!(".ready-{role}")), b"").expect("publish ready");
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !(root.join(".ready-a").exists() && root.join(".ready-b").exists()) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for competing rename"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                super::rename_extension_data_file_noreplace(from, to)
+            },
+        );
+        let outcome = match result {
+            Ok(tau_proto::ExtensionDataValue::RenameFile) => "renamed",
+            Err(error) if error.kind == tau_proto::ExtensionDataErrorKind::AlreadyExists => {
+                "collision"
+            }
+            other => panic!("unexpected child rename result: {other:?}"),
+        };
+        std::fs::write(root.join(format!(".result-{role}")), outcome)
+            .expect("publish child result");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("shared-root");
+    std::fs::create_dir_all(&root).expect("create shared root");
+    std::fs::write(root.join("a"), b"source-a").expect("write source a");
+    std::fs::write(root.join("b"), b"source-b").expect("write source b");
+    let current_exe = std::env::current_exe().expect("current test binary");
+    let spawn_child = |role: &str| {
+        path_std_process_Command::new(&current_exe)
+            .arg(TEST_FILTER)
+            .arg("--nocapture")
+            .env(CHILD_ROLE_ENV, role)
+            .env(SHARED_ROOT_ENV, &root)
+            .spawn()
+            .expect("spawn rename child")
+    };
+    let child_a = spawn_child("a");
+    let child_b = spawn_child("b");
+    let output_a = child_a.wait_with_output().expect("wait for child a");
+    let output_b = child_b.wait_with_output().expect("wait for child b");
+    assert!(
+        output_a.status.success(),
+        "child a failed: {}",
+        String::from_utf8_lossy(&output_a.stderr)
+    );
+    assert!(
+        output_b.status.success(),
+        "child b failed: {}",
+        String::from_utf8_lossy(&output_b.stderr)
+    );
+
+    let result_a = std::fs::read_to_string(root.join(".result-a")).expect("read result a");
+    let result_b = std::fs::read_to_string(root.join(".result-b")).expect("read result b");
+    assert!(
+        (result_a == "renamed" && result_b == "collision")
+            || (result_a == "collision" && result_b == "renamed")
+    );
+    let (winner, loser, winner_contents, loser_contents) = if result_a == "renamed" {
+        ("a", "b", b"source-a".as_slice(), b"source-b".as_slice())
+    } else {
+        ("b", "a", b"source-b".as_slice(), b"source-a".as_slice())
+    };
+    assert!(!root.join(winner).exists());
+    assert_eq!(
+        std::fs::read(root.join(loser)).expect("read losing source"),
+        loser_contents
+    );
+    assert_eq!(
+        std::fs::read(root.join("destination")).expect("read destination"),
+        winner_contents
+    );
+}
+
+/// Ensures unavailable native support maps to Io without moving either
+/// namespace entry.
+#[test]
+fn extension_data_rename_does_not_fallback_when_noreplace_is_unsupported() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(&root).expect("create root");
+    std::fs::write(root.join("from"), b"source").expect("write source");
+
+    let error = super::run_extension_data_rename_file_with(
+        &root,
+        "from".to_owned(),
+        "to".to_owned(),
+        |_from, _to| {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "unsupported test operation",
+            ))
+        },
+    )
+    .expect_err("report unsupported operation");
+
+    assert_eq!(error.kind, tau_proto::ExtensionDataErrorKind::Io);
+    assert_eq!(
+        std::fs::read(root.join("from")).expect("read source"),
+        b"source"
+    );
+    assert!(!root.join("to").exists());
+}
+
 #[test]
 fn minted_agent_ids_use_default_random_alphanumeric_template() {
     let agent_id = super::mint_agent_id_for_role("engineer");

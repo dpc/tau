@@ -148,7 +148,8 @@ use tau_config::secret_sources::SecretSources;
 use crate::harness::extension_data::{
     append_extension_data_file, atomic_replace_extension_data_file, checked_extension_data_path,
     create_extension_data_file, delete_extension_data_file, list_extension_data_entries,
-    rename_extension_data_file, sanitize_extension_data_path,
+    rename_extension_data_file, rename_extension_data_file_noreplace,
+    run_extension_data_rename_file_with, sanitize_extension_data_path,
 };
 use crate::harness::extensions::{
     DeferredExtensionMessage, ExtensionActivationStage, ExtensionFrameAdmission,

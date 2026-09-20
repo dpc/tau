@@ -44,6 +44,7 @@ listenfd.workspace = true
 rand.workspace = true
 rustix = { version = "0.38", default-features = false, features = [
   "event",
+  "fs",
   "std",
 ] }
 serde.workspace = true
