@@ -5,6 +5,7 @@ use super::*;
 use crate::agent::LoopCycleState;
 
 mod restore_collision;
+mod role_drift;
 
 fn append_byte_fit_text(h: &mut Harness, cid: &AgentId, text: String) {
     let agent_id = durable_agent_id_for_conversation(h, cid);

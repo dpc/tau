@@ -202,10 +202,12 @@ provider-qualified model. While an ordinary prompt or tool round is active, the
 harness claims the request at the first provider-closed boundary: a complete
 normal or cancelled turn, or a complete call/result round before post-tool
 continuation inference. Already queued ordinary activation remains behind the
-compaction. Model or role drift and sibling/rewound branch selection close the
-request with a categorical pre-start failure; requester disconnect does not.
-Cold replay restores an unclaimed request and permits exactly one durable start
-or pre-start failure.
+compaction. Model drift and sibling/rewound branch selection close the request
+with a categorical pre-start failure; requester disconnect does not. The
+effective role recorded at acceptance is replay correlation rather than a
+separate stale-role constraint: role drift remains eligible when the target
+still resolves to the captured model. Cold replay restores an unclaimed request
+and permits exactly one durable start or pre-start failure.
 
 An already committed automatic recovery chain retains priority. New proactive
 work is suppressed behind a queued UI intent. Automatic success satisfies the
