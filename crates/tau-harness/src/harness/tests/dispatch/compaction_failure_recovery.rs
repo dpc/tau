@@ -385,6 +385,7 @@ fn reactive_replay_terminalizes_plan_suppressed_by_prior_failure_once() {
                     error: Some("legacy planned overflow".to_owned()),
                     failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
                     context_limit_telemetry: None,
+                    final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                     recovery_disposition:
                         tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
                     originator: tau_proto::PromptOriginator::User,

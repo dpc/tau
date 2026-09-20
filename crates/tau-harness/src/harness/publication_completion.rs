@@ -1637,6 +1637,7 @@ impl Harness {
                         error: Some("output-length continuation branch was deselected".to_owned()),
                         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                         context_limit_telemetry: None,
+                        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         output_length_disposition:
                             tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -5007,8 +5008,8 @@ impl Harness {
             | Event::ProviderPromptSubmitted(value) => Some(&value.agent_prompt_id),
             Event::ProviderResponseUpdatedReported(value)
             | Event::ProviderResponseUpdated(value) => Some(&value.agent_prompt_id),
-            Event::ProviderResponseFinishedReported(value)
-            | Event::ProviderResponseFinished(value) => Some(&value.agent_prompt_id),
+            Event::ProviderResponseFinishedReported(value) => Some(&value.agent_prompt_id),
+            Event::ProviderResponseFinished(value) => Some(&value.agent_prompt_id),
             Event::ProviderCacheMissDiagnosticReported(value)
             | Event::ProviderCacheMissDiagnostic(value) => Some(&value.agent_prompt_id),
             Event::ProviderRetryPromptResultReported(value) => {

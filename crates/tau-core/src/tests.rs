@@ -333,6 +333,7 @@ fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,

@@ -853,8 +853,10 @@ fn event_has_binary_content(event: &Event) -> bool {
         Event::AgentCompacted(compacted) => {
             context_items_have_binary_content(&compacted.replacement_window)
         }
-        Event::ProviderResponseFinishedReported(finished)
-        | Event::ProviderResponseFinished(finished) => {
+        Event::ProviderResponseFinishedReported(finished) => {
+            context_items_have_binary_content(&finished.output_items)
+        }
+        Event::ProviderResponseFinished(finished) => {
             context_items_have_binary_content(&finished.output_items)
         }
         _ => false,
@@ -932,9 +934,9 @@ fn provider_debug_event_json(event: &Event) -> serde_json::Value {
         | Event::ProviderResponseUpdatedReported(updated) => {
             projection::ProviderEvent::Updated(updated)
         }
-        Event::ProviderResponseFinished(finished)
-        | Event::ProviderResponseFinishedReported(finished) => {
-            projection::ProviderEvent::Finished(finished)
+        Event::ProviderResponseFinished(finished) => projection::ProviderEvent::Finished(finished),
+        Event::ProviderResponseFinishedReported(finished) => {
+            projection::ProviderEvent::FinishedReported(finished)
         }
         _ => unreachable!("caller selected a Provider response event"),
     };
@@ -1111,8 +1113,10 @@ fn redact_event_binary_content(event: &mut Event) {
         Event::AgentCompacted(compacted) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
         }
-        Event::ProviderResponseFinishedReported(finished)
-        | Event::ProviderResponseFinished(finished) => {
+        Event::ProviderResponseFinishedReported(finished) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
+        }
+        Event::ProviderResponseFinished(finished) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
         }
         _ => {}

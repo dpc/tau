@@ -1508,6 +1508,218 @@ fn delegated_working_final_projects_after_bounded_escape() {
     h.shutdown().expect("shutdown");
 }
 
+/// An external Working worker stays unavailable until an accepted budget
+/// escape, including response-only and continuation crash cuts.
+#[test]
+fn delegated_final_status_cold_cuts_working_external() {
+    assert_delegated_final_status_cold_cuts(true, false);
+}
+
+/// A harness-owned Working worker retains delegated recovery until an accepted
+/// budget escape, without replaying a prior dispatch or requester result.
+#[test]
+fn delegated_final_status_cold_cuts_working_harness() {
+    assert_delegated_final_status_cold_cuts(true, true);
+}
+
+/// Status-visible Unreported external workers cannot recover as completed from
+/// challenged candidates; a later explicit Done final establishes completion.
+#[test]
+fn delegated_final_status_cold_cuts_unreported_external() {
+    assert_delegated_final_status_cold_cuts(false, false);
+}
+
+/// Status-visible Unreported harness workers preserve ordinary reminder
+/// activation recovery without restoring status or transient request authority.
+#[test]
+fn delegated_final_status_cold_cuts_unreported_harness() {
+    assert_delegated_final_status_cold_cuts(false, true);
+}
+
+/// Exercise exact candidate/accepted prefixes and two cold boots per cut.
+/// Keep each lifecycle separately timed rather than packing 48 boots into one
+/// test's CI deadline.
+fn assert_delegated_final_status_cold_cuts(working: bool, harness_owned: bool) {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(RejectingStatusTool)]);
+    let source = if harness_owned {
+        HARNESS_CONNECTION_ID
+    } else {
+        "cold-final-provider-client"
+    };
+    if !harness_owned {
+        connect_test_tool(&mut h, source);
+    }
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert("cold-final-call".into(), parent);
+    let mut query = ext_query("cold-final-query");
+    query.tool_call_id = Some("cold-final-call".into());
+    h.handle_start_agent_request(&crate::test_connection_id(source), query)
+        .expect("start parented worker");
+    let cid = ext_query_cid(&h, "cold-final-query").expect("worker");
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let originator = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .originator
+        .clone();
+    if working {
+        h.report_agent_work_status(
+            &cid,
+            crate::WorkStatusReport::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                "cold final".to_owned(),
+            )
+            .expect("valid Working report"),
+        )
+        .expect("accept Working");
+    }
+    for index in 0..3 {
+        let prompt_id = match &h.agent_runtime.agent_registry.agents[&cid].turn.turn_state {
+            AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+            other => panic!("missing prompt {index}: {other:?}"),
+        };
+        assert!(
+            h.prompt_coordination.prompt_runtime.tool_specs[&prompt_id]
+                .iter()
+                .any(|spec| h.tool_model_visible_name(spec).as_str() == "status")
+        );
+        // Working exercises budget escape; Unreported exercises an
+        // explicit terminal status after the same two candidate cuts.
+        if index == 2 && !working {
+            h.report_agent_work_status(
+                &cid,
+                crate::WorkStatusReport::new(
+                    tau_proto::AgentWorkStatusPhase::Done,
+                    "cold final".to_owned(),
+                )
+                .expect("valid Done report"),
+            )
+            .expect("accept Done");
+        }
+        let mut response = provider_text_response(&prompt_id, agent_id.clone(), "candidate");
+        response.originator = originator.clone();
+        h.handle_provider_response_finished(response)
+            .expect("handle worker terminal");
+    }
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("read worker journal");
+    let terminals = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            if let Event::ProviderResponseFinished(response) = &record.event {
+                Some((index, response.final_status_disposition))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 3);
+    assert_eq!(
+        terminals[0].1,
+        tau_proto::FinalStatusDisposition::Challenged
+    );
+    assert_eq!(
+        terminals[1].1,
+        tau_proto::FinalStatusDisposition::Challenged
+    );
+    assert_eq!(terminals[2].1, tau_proto::FinalStatusDisposition::Accepted);
+    let first = terminals[0].0;
+    let reminder = records
+        .iter()
+        .enumerate()
+        .skip(first + 1)
+        .find_map(|(i, record)| matches!(record.event, Event::AgentPromptSteered(_)).then_some(i))
+        .expect("challenge reminder");
+    let checkpoint = records
+        .iter()
+        .enumerate()
+        .skip(reminder + 1)
+        .find_map(|(i, record)| {
+            matches!(record.event, Event::AgentInferenceDispatchStarted(_)).then_some(i)
+        })
+        .expect("challenge continuation checkpoint");
+    h.shutdown().expect("finish source boot");
+    drop(h);
+    for (cut, completed) in [
+        (first + 1, false),
+        (reminder + 1, false),
+        (checkpoint + 1, false),
+        (terminals[1].0 + 1, false),
+        (terminals[2].0 + 1, true),
+        (records.len(), true),
+    ] {
+        rewrite_agent_records(&state, &agent_id, &records[..cut]);
+        for resume_index in 0..2 {
+            let mut restored =
+                echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+                    .expect("cold resume exact cut");
+            let runtime = restored.restored_agent_runtime_from_log(agent_id.as_str());
+            assert_eq!(runtime.originator.is_user(), completed, "cut={cut}");
+            assert_eq!(runtime.parent_agent.is_none(), completed, "cut={cut}");
+            assert_eq!(runtime.resumable, completed || harness_owned, "cut={cut}");
+            if !completed {
+                assert_eq!(runtime.originator, originator);
+            }
+            if let Some(route) = restored
+                .agent_runtime
+                .agent_registry
+                .agent_routes
+                .get(&agent_id)
+            {
+                let worker = &restored.agent_runtime.agent_registry.agents[route];
+                assert_eq!(
+                    worker.turn.work_status.phase(),
+                    tau_proto::AgentWorkStatusPhase::Unreported
+                );
+            }
+            let events = event_log_events(&restored);
+            let new_prompts = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => {
+                        Some(prompt)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            // The durable reminder owns one new activation only when
+            // its successor checkpoint had not survived.
+            let resumes_reminder = harness_owned && cut == reminder + 1 && resume_index == 0;
+            assert_eq!(new_prompts.len(), usize::from(resumes_reminder));
+            for prompt in new_prompts {
+                assert!(!records[..cut].iter().any(|record| matches!(
+                    &record.event,
+                    Event::AgentInferenceDispatchStarted(checkpoint)
+                        if checkpoint.agent_prompt_id == prompt.agent_prompt_id
+                )));
+            }
+            let unexpected = events
+                .iter()
+                .filter(|event| match event {
+                    Event::StartAgentRequest(request) => request.query_id == "cold-final-query",
+                    Event::StartAgentResult(result) => result.query_id == "cold-final-query",
+                    _ => false,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                unexpected.is_empty(),
+                "cold recovery must not recreate worker requests, results, or provider work: cut={cut}, harness={harness_owned}, events={unexpected:?}"
+            );
+            restored.shutdown().expect("finish restored boot");
+        }
+    }
+}
+
 /// The production response handler makes an unsuccessful terminal Unknown
 /// exactly once without scheduling a Working continuation.
 #[test]
@@ -1543,6 +1755,7 @@ fn unsuccessful_working_terminal_bypasses_reminders() {
         error: Some("provider failed".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,

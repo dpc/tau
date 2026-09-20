@@ -5214,7 +5214,7 @@ fn standalone_finished_with_usage(
 ) -> (
     tau_proto::AgentPromptCreated,
     tau_proto::ProviderBackend,
-    ProviderResponseFinished,
+    ProviderResponseFinishedReport,
 ) {
     let mut prompt = minimal_prompt();
     prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;

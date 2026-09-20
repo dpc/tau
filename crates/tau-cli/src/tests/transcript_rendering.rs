@@ -4411,6 +4411,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: tau_proto::ExtensionName::parse("__harness__")

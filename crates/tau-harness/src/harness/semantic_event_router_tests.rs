@@ -2,10 +2,9 @@ use tau_proto::{
     AgentStarted, CborValue, Event, PromptOriginator, ProviderCacheMissDiagnostic,
     ProviderModelsDeclared, ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted,
     ProviderQuotaClear, ProviderQuotaEpoch, ProviderQuotaPatch, ProviderQuotaReplace,
-    ProviderResponseFinished, ProviderResponseUpdated, ProviderRetryPromptResult,
-    ProviderStopReason, RetryPromptRequestId, RetryPromptStatus, SessionAgentLoaded,
-    SessionAgentUnloaded, ToolCancelled, ToolError, ToolName, ToolProgress, ToolResult,
-    ToolResultKind, ToolType,
+    ProviderResponseUpdated, ProviderRetryPromptResult, ProviderStopReason, RetryPromptRequestId,
+    RetryPromptStatus, SessionAgentLoaded, SessionAgentUnloaded, ToolCancelled, ToolError,
+    ToolName, ToolProgress, ToolResult, ToolResultKind, ToolType,
 };
 
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
@@ -297,7 +296,7 @@ fn provider_execution_reports_never_enter_semantic_history() {
             response_stats: None,
             originator: PromptOriginator::User,
         }),
-        Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+        Event::ProviderResponseFinishedReported(tau_proto::ProviderResponseFinishedReport {
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,

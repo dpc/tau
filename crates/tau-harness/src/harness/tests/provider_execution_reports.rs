@@ -94,7 +94,7 @@ fn publish_terminal_accounting_report(
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(report),
+            Event::ProviderResponseFinishedReported(report.into()),
         )
         .expect("accepted terminal report");
 
@@ -434,6 +434,7 @@ fn canceled_terminal_skips_terminal_output_projection() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             usage: None,
@@ -1079,13 +1080,14 @@ fn response_report_canonical_handoff_moves_large_payload_allocations() {
         panic!("text response must contain ordinary text");
     };
     *text = terminal_text;
-    let expected_raw_finished =
-        serde_json::to_vec(&Event::ProviderResponseFinishedReported(terminal.clone()))
-            .expect("encode expected raw terminal");
+    let expected_raw_finished = serde_json::to_vec(&Event::ProviderResponseFinishedReported(
+        terminal.clone().into(),
+    ))
+    .expect("encode expected raw terminal");
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(terminal),
+            Event::ProviderResponseFinishedReported(terminal.into()),
         )
         .expect("finished report");
 
@@ -1331,13 +1333,16 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &"prompt-1"
-                    .parse::<tau_proto::AgentPromptId>()
-                    .expect("known-safe AgentPromptId must be valid"),
-                crate::parse_agent_id("spoofed"),
-                "done",
-            )),
+            Event::ProviderResponseFinishedReported(
+                super::dispatch::provider_text_response(
+                    &"prompt-1"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe AgentPromptId must be valid"),
+                    crate::parse_agent_id("spoofed"),
+                    "done",
+                )
+                .into(),
+            ),
         )
         .expect("finished report");
     assert!(
@@ -1460,6 +1465,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -1475,7 +1481,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(response),
+            Event::ProviderResponseFinishedReported(response.into()),
         )
         .expect("finished report");
 
@@ -1596,13 +1602,16 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &"prompt-1"
-                    .parse::<tau_proto::AgentPromptId>()
-                    .expect("known-safe AgentPromptId must be valid"),
-                crate::parse_agent_id("spoofed"),
-                "done",
-            )),
+            Event::ProviderResponseFinishedReported(
+                super::dispatch::provider_text_response(
+                    &"prompt-1"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe AgentPromptId must be valid"),
+                    crate::parse_agent_id("spoofed"),
+                    "done",
+                )
+                .into(),
+            ),
         )
         .expect("finished report");
 
@@ -1685,11 +1694,14 @@ fn provider_terminal_timing_records_ordinary_terminal_source_order() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &prompt_id,
-                crate::parse_agent_id("spoofed"),
-                "done",
-            )),
+            Event::ProviderResponseFinishedReported(
+                super::dispatch::provider_text_response(
+                    &prompt_id,
+                    crate::parse_agent_id("spoofed"),
+                    "done",
+                )
+                .into(),
+            ),
         )
         .expect("finished report");
 
@@ -1778,11 +1790,14 @@ fn disabled_provider_terminal_timing_skips_diagnostic_payload_traversal() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &prompt_id,
-                crate::parse_agent_id("spoofed"),
-                "never inspected by disabled diagnostics",
-            )),
+            Event::ProviderResponseFinishedReported(
+                super::dispatch::provider_text_response(
+                    &prompt_id,
+                    crate::parse_agent_id("spoofed"),
+                    "never inspected by disabled diagnostics",
+                )
+                .into(),
+            ),
         )
         .expect("finished report");
     assert_eq!(
@@ -1866,6 +1881,7 @@ fn provider_terminal_benchmark_response(
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
             usage: None,
@@ -1924,11 +1940,9 @@ fn run_provider_terminal_benchmark_sample(
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(provider_terminal_benchmark_response(
-                &prompt_id,
-                shape,
-                payload_bytes,
-            )),
+            Event::ProviderResponseFinishedReported(
+                provider_terminal_benchmark_response(&prompt_id, shape, payload_bytes).into(),
+            ),
         )
         .expect("finished report");
     let mut timings = harness
@@ -1999,11 +2013,14 @@ fn assert_parked_provider_terminal_benchmark_lane() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(provider_terminal_benchmark_response(
-                &prompt_id,
-                ProviderTerminalBenchmarkShape::Text,
-                22,
-            )),
+            Event::ProviderResponseFinishedReported(
+                provider_terminal_benchmark_response(
+                    &prompt_id,
+                    ProviderTerminalBenchmarkShape::Text,
+                    22,
+                )
+                .into(),
+            ),
         )
         .expect("finished report");
     let mut timings = harness
@@ -2177,6 +2194,7 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -2190,7 +2208,7 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(response),
+            Event::ProviderResponseFinishedReported(response.into()),
         )
         .expect("finished report");
 
@@ -2259,13 +2277,16 @@ fn stale_finished_report_termination_uses_harness_source() {
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
-            Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &"prompt-1"
-                    .parse::<tau_proto::AgentPromptId>()
-                    .expect("known-safe AgentPromptId must be valid"),
-                crate::parse_agent_id("spoofed"),
-                "stale",
-            )),
+            Event::ProviderResponseFinishedReported(
+                super::dispatch::provider_text_response(
+                    &"prompt-1"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe AgentPromptId must be valid"),
+                    crate::parse_agent_id("spoofed"),
+                    "stale",
+                )
+                .into(),
+            ),
         )
         .expect("stale finished report");
 

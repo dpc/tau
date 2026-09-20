@@ -3465,6 +3465,8 @@ impl Harness {
                 }
                 Event::ProviderResponseFinished(finished)
                     if finished.originator == *historical_originator
+                        && finished.final_status_disposition
+                            == tau_proto::FinalStatusDisposition::Accepted
                         && finished.recovery_disposition
                             == tau_proto::ContextRecoveryDisposition::None
                         && !finished

@@ -426,15 +426,21 @@ fn model_routing_and_event_compatibility_snapshot() {
     );
 }
 
-/// Provider-finished payloads from before transport metadata retain their
-/// defaults, while pre-observation durable envelopes fail the intentional
-/// in-place journal schema break.
+/// Historical canonical responses fail the deliberate final-status schema
+/// break. Their provider observation payloads still preserve transport
+/// defaults; neither that report decoding nor older envelope decoding supplies
+/// missing authority.
 #[test]
-fn legacy_provider_session_fixtures_decode() {
+fn legacy_provider_session_fixtures_are_rejected() {
     let load = |stem: &str| {
-        let expected: Event =
+        let mut value: serde_json::Value =
             serde_json::from_str(&read_compat_fixture(&format!("sessions/{stem}.json")))
-                .expect("decode readable event fixture");
+                .expect("decode historical fixture JSON");
+        let error = serde_json::from_value::<Event>(value.clone())
+            .expect_err("reject old canonical response");
+        assert!(error.to_string().contains("final_status_disposition"));
+        value["event"] = serde_json::json!("provider.response_finished_reported");
+        let expected: Event = serde_json::from_value(value).expect("decode observation payload");
         let temporary = tempfile::tempdir().expect("temporary agent store");
         let agent_dir = temporary.path().join("legacy-agent");
         std::fs::create_dir(&agent_dir).expect("create fixture agent directory");
@@ -448,12 +454,14 @@ fn legacy_provider_session_fixtures_decode() {
             Err(error) => error,
         };
         assert!(
-            error.to_string().contains("missing field `observation_id`"),
+            error.to_string().contains("missing field `observation_id`")
+                || error.to_string().contains("final_status_disposition"),
             "unexpected legacy journal rejection: {error}"
         );
         expected
     };
-    let Event::ProviderResponseFinished(pre_transport) = load("legacy-responses-pre-transport")
+    let Event::ProviderResponseFinishedReported(pre_transport) =
+        load("legacy-responses-pre-transport")
     else {
         panic!("pre-transport fixture must be a provider-finished event")
     };
@@ -463,7 +471,8 @@ fn legacy_provider_session_fixtures_decode() {
     assert!(!backend.stale_chain_fallback);
     assert_eq!(pre_transport.originator, tau_proto::PromptOriginator::User);
 
-    let Event::ProviderResponseFinished(stale) = load("legacy-websocket-stale-chain") else {
+    let Event::ProviderResponseFinishedReported(stale) = load("legacy-websocket-stale-chain")
+    else {
         panic!("stale-chain fixture must be a provider-finished event")
     };
     let backend = stale.backend.expect("stale-chain backend");

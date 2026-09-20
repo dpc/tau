@@ -1912,6 +1912,7 @@ fn representative_events() -> Vec<Event> {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            final_status_disposition: FinalStatusDisposition::Accepted,
             recovery_disposition: ContextRecoveryDisposition::None,
             output_length_disposition: OutputLengthDisposition::None,
             usage: None,
@@ -2465,7 +2466,7 @@ fn representative_events() -> Vec<Event> {
                 Some(Event::ProviderResponseUpdatedReported(value))
             }
             Event::ProviderResponseFinished(value) => {
-                Some(Event::ProviderResponseFinishedReported(value))
+                Some(Event::ProviderResponseFinishedReported(value.into()))
             }
             Event::ProviderCacheMissDiagnostic(value) => {
                 Some(Event::ProviderCacheMissDiagnosticReported(value))
@@ -4476,7 +4477,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 7, "minor": 5})
+        serde_json::json!({"major": 8, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4568,7 +4569,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 7, "minor": 5})
+        serde_json::json!({"major": 8, "minor": 0})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -5000,6 +5001,7 @@ fn execution_events_use_provider_wire_family() {
                 error: None,
                 failure_kind: None,
                 context_limit_telemetry: None,
+                final_status_disposition: FinalStatusDisposition::Accepted,
                 recovery_disposition: ContextRecoveryDisposition::None,
                 output_length_disposition: OutputLengthDisposition::None,
                 originator: PromptOriginator::User,
@@ -5050,7 +5052,7 @@ fn provider_execution_reports_use_distinct_transient_wires() {
             EventName::PROVIDER_RESPONSE_UPDATED_REPORTED,
         ),
         (
-            Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+            Event::ProviderResponseFinishedReported(ProviderResponseFinishedReport {
                 automatic_compaction_decision: None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -7169,6 +7171,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         error: Some("bounded detail".to_owned()),
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
         originator: PromptOriginator::User,
@@ -7200,6 +7203,73 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         none_value.get("failure_kind").is_none(),
         "None must preserve the legacy omitted wire shape"
     );
+}
+
+/// Canonical completion authority must survive both codecs, while historical
+/// records without it fail decoding and raw reports cannot carry that
+/// authority.
+#[test]
+fn canonical_final_status_is_required_and_not_provider_report_authority() {
+    let mut response = representative_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ProviderResponseFinished(response) => Some(response),
+            _ => None,
+        })
+        .expect("representative canonical response");
+    for disposition in [
+        FinalStatusDisposition::Accepted,
+        FinalStatusDisposition::Challenged,
+    ] {
+        response.final_status_disposition = disposition;
+        let event = Event::ProviderResponseFinished(response.clone());
+        let value = serde_json::to_value(&event).expect("encode canonical JSON");
+        assert_eq!(
+            serde_json::from_value::<Event>(value.clone()).expect("decode canonical JSON"),
+            event
+        );
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&event, &mut cbor).expect("encode canonical CBOR");
+        assert_eq!(
+            ciborium::from_reader::<Event, _>(cbor.as_slice()).expect("decode canonical CBOR"),
+            event
+        );
+
+        let mut legacy = value;
+        legacy["payload"]
+            .as_object_mut()
+            .expect("canonical payload object")
+            .remove("final_status_disposition");
+        let error = serde_json::from_value::<Event>(legacy.clone()).expect_err("reject old JSON");
+        assert!(error.to_string().contains("final_status_disposition"));
+        cbor.clear();
+        ciborium::into_writer(&legacy, &mut cbor).expect("encode old CBOR shape");
+        let error =
+            ciborium::from_reader::<Event, _>(cbor.as_slice()).expect_err("reject old CBOR");
+        assert!(error.to_string().contains("final_status_disposition"));
+
+        legacy["event"] = serde_json::json!("provider.response_finished_reported");
+        // A provider-supplied spelling is ignored rather than promoted to
+        // harness authority; reserialization drops it.
+        legacy["payload"]["final_status_disposition"] = serde_json::json!("challenged");
+        let Event::ProviderResponseFinishedReported(report) =
+            serde_json::from_value::<Event>(legacy).expect("decode provider report")
+        else {
+            panic!("expected report");
+        };
+        assert!(
+            serde_json::to_value(&report)
+                .expect("encode provider report")
+                .get("final_status_disposition")
+                .is_none()
+        );
+        assert_eq!(
+            report
+                .into_canonical(FinalStatusDisposition::Accepted)
+                .final_status_disposition,
+            FinalStatusDisposition::Accepted
+        );
+    }
 }
 
 /// Provider-watch wire states must round-trip with one tagged phase shape and
@@ -7606,6 +7676,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         error: Some("safe error".to_owned()),
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
         originator: PromptOriginator::User,
@@ -7696,6 +7767,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     );
     let none_event = Event::ProviderResponseFinished(ProviderResponseFinished {
         automatic_compaction_decision: None,
+        final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
         ..response

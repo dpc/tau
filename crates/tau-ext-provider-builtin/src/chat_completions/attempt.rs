@@ -453,11 +453,11 @@ fn validate_narrative_output(
 /// Extension-owned interpretation of one backend attempt.
 pub enum PromptAttemptOutcome {
     /// The prompt completed successfully.
-    Finished(Box<tau_proto::ProviderResponseFinished>),
+    Finished(Box<tau_proto::ProviderResponseFinishedReport>),
     /// A deterministic terminal failure ended an attempt.
     Terminal {
         /// Final protocol event for the failed attempt.
-        finished: Box<tau_proto::ProviderResponseFinished>,
+        finished: Box<tau_proto::ProviderResponseFinishedReport>,
         /// Semantic output parsed before the terminal failure.
         progress: tau_provider_chat_completions::SemanticProgress,
     },
@@ -491,8 +491,8 @@ fn finished(
     usage: Option<tau_proto::ProviderTokenUsage>,
     backend_reached: bool,
     provider_attempt: tau_proto::ProviderAttempt,
-) -> tau_proto::ProviderResponseFinished {
-    tau_proto::ProviderResponseFinished {
+) -> tau_proto::ProviderResponseFinishedReport {
+    tau_proto::ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

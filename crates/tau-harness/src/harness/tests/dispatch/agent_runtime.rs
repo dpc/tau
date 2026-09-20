@@ -435,6 +435,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {

@@ -316,6 +316,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             error: error.map(str::to_owned),
             failure_kind,
             context_limit_telemetry: None,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: (label != "provider error").then_some(tau_proto::ProviderTokenUsage {
                 model: None,

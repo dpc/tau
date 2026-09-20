@@ -5563,6 +5563,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             usage: None,

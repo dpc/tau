@@ -8,6 +8,17 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 8.0 separates provider terminal observations from canonical terminal
+facts. Canonical responses require harness-authored accepted/challenged
+final-status authority; historical records without it fail decoding, with no
+migration or default. Provider reports retain their prior payload shape and do
+not carry this decision. The major boundary was explicitly chosen for this
+compatibility break despite that report-shape separation: configured 7.x
+extensions must update with the harness and are rejected before Configure/Ready.
+UI and dedicated cross-harness message connections retain the best-effort skew
+exceptions below. This does not change journal physical-format versions.
+See [SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
+
 Protocol 7.5 carries provider-hosted tool definitions in the shared directed
 prewarm/cache-refresh prefix. Omission means no hosted tools; older peers can
 omit or ignore the additive field and continue degraded operation without hosted

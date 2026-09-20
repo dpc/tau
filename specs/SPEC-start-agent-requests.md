@@ -101,6 +101,13 @@ user turn is ordinary agent work: its terminal response neither emits another
 `agent.start_result` nor unloads the worker. The immutable `agent.started`
 parent supplies the restored delegated navigation default.
 
+Only an eligible accepted canonical response proves response-based completion;
+a status-challenged candidate cannot do so, even if its reminder or continuation
+checkpoint also survived. This acceptance fact is required in the response frame
+itself, so an accepted response alone still suffices before warm detachment.
+Historical response records lacking it are rejected, not migrated or classified
+using the previous ambiguous heuristic.
+
 A parentless non-tool typed start remains a one-shot side query and unloads
 after its terminal result. Peer auto-start entrypoints retain their separate
 ordinary loaded-agent lifecycle and never enter side-query completion.

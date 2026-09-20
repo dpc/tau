@@ -1524,6 +1524,7 @@ impl Harness {
                 self.process_provider_response_updated_report(source_id, updated);
             }
             Event::ProviderResponseFinishedReported(response) => {
+                let response = response.into_canonical(tau_proto::FinalStatusDisposition::Accepted);
                 #[cfg(test)]
                 provider_report_ownership::observe_owned_finished(&response);
                 self.process_provider_response_finished_report(

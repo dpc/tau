@@ -362,6 +362,7 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         error: Some("display metadata".to_owned()),
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,

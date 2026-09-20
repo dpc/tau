@@ -711,11 +711,14 @@ fn parked_provider_terminal_report_wins_before_human_ui_supersession() {
     assert!(h.runtime_io.publication.pending_intercept.is_some());
     h.handle_extension_event_inner(
         &provider,
-        Event::ProviderResponseFinishedReported(provider_text_response(
-            &old_prompt_id,
-            durable_agent_id.clone(),
-            "winning parked report",
-        )),
+        Event::ProviderResponseFinishedReported(
+            provider_text_response(
+                &old_prompt_id,
+                durable_agent_id.clone(),
+                "winning parked report",
+            )
+            .into(),
+        ),
     )
     .expect("defer provider terminal report");
     h.handle_disconnect(&provider);
@@ -809,11 +812,10 @@ fn nonowning_deferred_provider_report_does_not_wedge_human_ui_supersession() {
     h.emit_info("park nonowner report behind this observation");
     h.handle_extension_event_inner(
         &nonowner,
-        Event::ProviderResponseFinishedReported(provider_text_response(
-            &old_prompt_id,
-            durable_agent_id.clone(),
-            "spoofed terminal",
-        )),
+        Event::ProviderResponseFinishedReported(
+            provider_text_response(&old_prompt_id, durable_agent_id.clone(), "spoofed terminal")
+                .into(),
+        ),
     )
     .expect("defer nonowning report");
     h.handle_disconnect(&owning_provider);
@@ -949,11 +951,14 @@ fn assert_retired_exact_provider_report_redrives_cancel(replace: bool) {
         .insert(old_prompt_id.clone(), late_provider.clone());
     h.handle_extension_event_inner(
         &late_provider,
-        Event::ProviderResponseFinishedReported(provider_text_response(
-            &old_prompt_id,
-            durable_agent_id.clone(),
-            "terminal dropped by policy",
-        )),
+        Event::ProviderResponseFinishedReported(
+            provider_text_response(
+                &old_prompt_id,
+                durable_agent_id.clone(),
+                "terminal dropped by policy",
+            )
+            .into(),
+        ),
     )
     .expect("park exact provider terminal report");
     assert!(matches!(
@@ -984,7 +989,8 @@ fn assert_retired_exact_provider_report_redrives_cancel(replace: bool) {
                         &test_agent_prompt_id("replacement-report-prompt"),
                         durable_agent_id.clone(),
                         "replacement loses captured route authority",
-                    ),
+                    )
+                    .into(),
                 ))))
             } else {
                 InterceptAction::Drop
@@ -3419,6 +3425,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
@@ -3469,6 +3476,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
@@ -3581,6 +3589,7 @@ fn finish_materialized_turn(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,

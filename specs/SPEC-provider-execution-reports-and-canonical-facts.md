@@ -10,7 +10,8 @@ commit-before-semantics contract or the terminal alternatives coherently.
 Configured Provider extensions submit
 `provider.prompt_submitted_reported`, `provider.response_updated_reported`,
 `provider.response_finished_reported`, `provider.retry_prompt_result_reported`, and
-`provider.cache_miss_diagnostic_reported`. Each reuses the corresponding provider
+`provider.cache_miss_diagnostic_reported`. The terminal report has a separate DTO
+from the canonical response; other reports reuse their corresponding provider
 payload DTO. Reports use ordinary generic Emit admission, interception, commit, and
 broadcast before the harness performs prompt or retry correlation.
 
@@ -60,6 +61,23 @@ disconnect, and final shutdown cleanup does. There is no canonical
 `provider.retry_prompt_result` event.
 
 ## Terminal response behavior
+
+The canonical response carries a required harness-authored final-status
+disposition, fixed before its semantic publication. `challenged` means the
+status guard withheld this durable candidate; it cannot prove delegated
+completion. `accepted` means only that the guard did not withhold the response,
+not that startup, recovery, tool, or outstanding-input checks may be skipped.
+A later eligible accepted response proves completion even when only its response
+frame survives before result delivery or detachment.
+The provider report DTO has no such field and cannot supply this authority.
+Neither current status nor challenge budgets, requester routes, or results are
+restored from the distinction.
+
+Historical canonical responses without this field fail decoding. There is no
+migration, missing-field default, or historical completion heuristic. Provider
+observations retain their prior wire shape, but the explicitly chosen protocol
+8.0 boundary requires configured extensions to update together; see
+[SPEC-extension-protocol-versioning](SPEC-extension-protocol-versioning.md).
 
 A finished report with current prompt ownership, or the exact admitted ordinary-inference
 terminal authority above, enters the existing response terminal pipeline. The

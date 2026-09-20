@@ -124,7 +124,7 @@ use tau_proto::PeerOutputWriter;
 use tau_proto::{
     ClientKind, ContextItem, Event, EventName, HarnessInputMessage, ModelId, ModelName,
     ProviderBackend, ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
-    ProviderModelsDeclared, ProviderName, ProviderPromptSubmitted, ProviderResponseFinished,
+    ProviderModelsDeclared, ProviderName, ProviderPromptSubmitted, ProviderResponseFinishedReport,
     ProviderResponseStats, ProviderResponseStatusUpdate, ProviderResponseUpdated,
     ProviderStopReason, SecretValue, ServerOffsetMillis, UnixMillis,
 };
@@ -7848,8 +7848,8 @@ fn simple_finished(
     agent_id: tau_proto::AgentId,
     originator: tau_proto::PromptOriginator,
     text: impl Into<String>,
-) -> ProviderResponseFinished {
-    ProviderResponseFinished {
+) -> ProviderResponseFinishedReport {
+    ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -8865,7 +8865,7 @@ fn finish_backend_attempt<R, S: ProviderReportSink>(
     prompt: &tau_proto::AgentPromptCreated,
     writer: &mut S,
     retry_ctx: &mut R,
-    finished: ProviderResponseFinished,
+    finished: ProviderResponseFinishedReport,
     has_partial_output: bool,
     cancellation: CancellationFinishPolicy,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
@@ -8903,7 +8903,7 @@ fn finish_terminal_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     writer: &mut S,
-    finished: ProviderResponseFinished,
+    finished: ProviderResponseFinishedReport,
     has_partial_output: bool,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
     clear_partial_backend_response(
@@ -8998,7 +8998,7 @@ fn clear_partial_backend_response<S: ProviderReportSink>(
 /// Submits one terminal provider response report.
 fn emit_finished_backend_response<S: ProviderReportSink>(
     writer: &mut S,
-    finished: ProviderResponseFinished,
+    finished: ProviderResponseFinishedReport,
 ) -> Result<(), Box<dyn Error>> {
     writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseFinishedReported(finished),
@@ -9194,8 +9194,8 @@ fn compact_finished_response(
     output_items: Vec<tau_proto::ContextItem>,
     usage: Option<tau_proto::ProviderTokenUsage>,
     provider_attempt: tau_proto::ProviderAttempt,
-) -> ProviderResponseFinished {
-    ProviderResponseFinished {
+) -> ProviderResponseFinishedReport {
+    ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -9700,7 +9700,7 @@ fn emit_chatgpt_stream_update<S: ProviderReportSink>(
 
 fn maybe_debug_submit_provider_response(
     session_id: &tau_proto::SessionId,
-    response: &ProviderResponseFinished,
+    response: &ProviderResponseFinishedReport,
     debug_provider_requests: bool,
     capture: Option<&tau_provider_codex::CodexDebugCapture>,
 ) {
@@ -9741,7 +9741,7 @@ fn finish_stream<S: ProviderReportSink>(
     let usage = state.usage();
     let provider_response_id = state.response_id().map(str::to_owned);
     let output_items = state.into_output_items();
-    let finished = ProviderResponseFinished {
+    let finished = ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -9785,7 +9785,7 @@ fn finish_stream<S: ProviderReportSink>(
 fn cache_miss_diagnostic(
     prompt: &tau_proto::AgentPromptCreated,
     request: &CodexPrompt<'_>,
-    response: &ProviderResponseFinished,
+    response: &ProviderResponseFinishedReport,
 ) -> Option<ProviderCacheMissDiagnostic> {
     let previous_input_tokens = request.context.blocks.iter().rev().find_map(|block| {
         let tau_proto::ContextBlock::AssistantResponse(block) = block else {
@@ -9831,7 +9831,7 @@ fn finish_error<S: ProviderReportSink>(
     provider_attempt: tau_proto::ProviderAttempt,
     writer: &mut S,
 ) -> Result<(), Box<dyn Error>> {
-    let finished = ProviderResponseFinished {
+    let finished = ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

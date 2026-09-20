@@ -717,12 +717,14 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), retry_result.clone())
         .expect("commit ephemeral retry report");
-    let finished =
-        Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
+    let finished = Event::ProviderResponseFinishedReported(
+        super::dispatch::provider_text_response(
             &provider_prompt_id,
             tau_proto::AgentId::parse("forged-durable-agent").expect("agent id"),
             "ephemeral-provider-finished-secret",
-        ));
+        )
+        .into(),
+    );
     h.remove_agent(&cid);
     assert!(!h.agent_runtime.agent_registry.agents.contains_key(&cid));
     h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(

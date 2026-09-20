@@ -232,7 +232,7 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
         writer.write_frame(&TestProtocolItem::Message(TestMessage::Emit(
             tau_proto::Emit {
                 event: Box::new(Event::ProviderResponseFinishedReported(
-                    ProviderResponseFinished {
+                    tau_proto::ProviderResponseFinishedReport {
                         automatic_compaction_decision: None,
                         estimated_api_cost_rates: None,
                         estimated_api_cost_increment: None,

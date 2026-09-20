@@ -575,7 +575,7 @@ fn take_forwarded_debug_capture_policy() -> Vec<bool> {
 /// Extension-owned outcome for the generic Responses finite attempt.
 pub enum PromptAttemptOutcome {
     /// Completion produced a terminal provider response.
-    Finished(Box<tau_proto::ProviderResponseFinished>),
+    Finished(Box<tau_proto::ProviderResponseFinishedReport>),
     /// Scheduler may retry from the full local transcript.
     Retry {
         decision: tau_provider::retry_policy::RetryDecision,
@@ -591,7 +591,7 @@ pub enum PromptAttemptOutcome {
     },
     /// A permanent failure ended the prompt.
     Terminal {
-        finished: Box<tau_proto::ProviderResponseFinished>,
+        finished: Box<tau_proto::ProviderResponseFinishedReport>,
         progress: tau_provider_responses::AttemptProgress,
     },
 }
@@ -609,8 +609,8 @@ fn finished(
     provider_response_id: Option<String>,
     backend_reached: bool,
     provider_attempt: tau_proto::ProviderAttempt,
-) -> tau_proto::ProviderResponseFinished {
-    tau_proto::ProviderResponseFinished {
+) -> tau_proto::ProviderResponseFinishedReport {
+    tau_proto::ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

@@ -753,6 +753,7 @@ impl Harness {
             error: Some(message),
             failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
             context_limit_telemetry: None,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
                 outer_turn_id: continuation.plan.owner.outer_turn_id.clone(),
@@ -915,6 +916,7 @@ impl Harness {
                     )),
                     failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                     context_limit_telemetry: None,
+                    final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                     recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                     output_length_disposition,
                     originator,
@@ -1012,6 +1014,7 @@ impl Harness {
                     error: Some(message),
                     failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                     context_limit_telemetry: None,
+                    final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                     recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                     output_length_disposition: tau_proto::OutputLengthDisposition::None,
                     originator,

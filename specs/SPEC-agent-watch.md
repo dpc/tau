@@ -138,6 +138,11 @@ dispatched prompt tool surface exposes model-visible `status`, are durable
 candidate responses. Watch, delegated result, and detach projections for each
 challenged candidate remain permanently withheld after its semantic append;
 post-commit handling only queues guidance and continues the same outer turn.
+The canonical response's required harness-authored final-status disposition
+preserves this distinction at response-only cold-recovery cuts; historical
+responses lacking it are rejected rather than guessed. Provider reports have no
+final-status authority. See
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
 Each unresolved phase has its own two-challenge budget; entering Working resets
 the budget even when Unreported challenges already occurred in the same outer
 turn. An accepted Waiting, Done, or Blocked transition, or the third successful final

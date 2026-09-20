@@ -6450,11 +6450,155 @@ pub struct ProviderStandaloneExecutionAccountingCorrected {
     pub output: StandaloneExecutionOutput,
 }
 
-/// Terminal provider-response payload shared by a Provider-authored
-/// `provider.response_finished_reported` observation and the harness-canonical
-/// `provider.response_finished` fact.
+/// Provider-authored terminal observation, before harness correlation and
+/// policy.
+///
+/// This retains the existing report wire shape, including untrusted legacy
+/// policy fields which the harness clears and rederives. It deliberately has no
+/// final-status decision: only the canonical response can carry that authority.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponseFinishedReport {
+    /// Prompt whose provider execution ended.
+    pub agent_prompt_id: AgentPromptId,
+    /// Reported agent, validated against the live prompt owner.
+    pub agent_id: AgentId,
+    /// Provider output to normalize before canonical publication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_items: Vec<ContextItem>,
+    /// Provider's reason for ending this inference.
+    pub stop_reason: ProviderStopReason,
+    /// Display-only error detail, never assistant prompt content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Typed provider failure category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<ProviderFailureKind>,
+    /// Untrusted telemetry claim, cleared and rederived by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit_telemetry: Option<ContextLimitTelemetry>,
+    /// Untrusted recovery claim, cleared and rederived by the harness.
+    #[serde(default, skip_serializing_if = "ContextRecoveryDisposition::is_none")]
+    pub recovery_disposition: ContextRecoveryDisposition,
+    /// Untrusted continuation claim, cleared and rederived by the harness.
+    #[serde(default, skip_serializing_if = "OutputLengthDisposition::is_none")]
+    pub output_length_disposition: OutputLengthDisposition,
+    /// Untrusted transport-attempt claim, rederived by the harness.
+    #[serde(default, skip_serializing_if = "ProviderAttempt::is_one")]
+    pub provider_attempt: ProviderAttempt,
+    /// Untrusted compaction claim, cleared and rederived by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_compaction_decision: Option<AutomaticCompactionDecision>,
+    /// Echo of the submitted prompt's originator.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+    /// Response-local provider usage, when observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ProviderTokenUsage>,
+    /// Untrusted price claim, cleared and rederived by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_api_cost_rates: Option<crate::EstimatedApiCostRates>,
+    /// Untrusted cost claim, cleared and rederived by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_api_cost_increment: Option<crate::EstimatedApiCost>,
+    /// Observed compact-request input count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_original_input_tokens: Option<u64>,
+    /// Observed compact-request output count, not scheduling authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_output_tokens: Option<u64>,
+    /// Backend and transport which handled the inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<ProviderBackend>,
+    /// Backend response identifier, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id: Option<String>,
+    /// Response-local WebSocket pool counters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_pool_delta: Option<WsPoolDelta>,
+}
+
+impl ProviderResponseFinishedReport {
+    /// Move an observation into the harness terminal pipeline without cloning
+    /// provider output. The caller supplies policy authority, never the report.
+    #[must_use]
+    pub fn into_canonical(
+        self,
+        final_status_disposition: FinalStatusDisposition,
+    ) -> ProviderResponseFinished {
+        ProviderResponseFinished {
+            final_status_disposition,
+            agent_prompt_id: self.agent_prompt_id,
+            agent_id: self.agent_id,
+            output_items: self.output_items,
+            stop_reason: self.stop_reason,
+            error: self.error,
+            failure_kind: self.failure_kind,
+            context_limit_telemetry: self.context_limit_telemetry,
+            recovery_disposition: self.recovery_disposition,
+            output_length_disposition: self.output_length_disposition,
+            provider_attempt: self.provider_attempt,
+            automatic_compaction_decision: self.automatic_compaction_decision,
+            originator: self.originator,
+            usage: self.usage,
+            estimated_api_cost_rates: self.estimated_api_cost_rates,
+            estimated_api_cost_increment: self.estimated_api_cost_increment,
+            compaction_original_input_tokens: self.compaction_original_input_tokens,
+            compaction_output_tokens: self.compaction_output_tokens,
+            backend: self.backend,
+            provider_response_id: self.provider_response_id,
+            ws_pool_delta: self.ws_pool_delta,
+        }
+    }
+}
+
+impl From<ProviderResponseFinished> for ProviderResponseFinishedReport {
+    fn from(response: ProviderResponseFinished) -> Self {
+        Self {
+            agent_prompt_id: response.agent_prompt_id,
+            agent_id: response.agent_id,
+            output_items: response.output_items,
+            stop_reason: response.stop_reason,
+            error: response.error,
+            failure_kind: response.failure_kind,
+            context_limit_telemetry: response.context_limit_telemetry,
+            recovery_disposition: response.recovery_disposition,
+            output_length_disposition: response.output_length_disposition,
+            provider_attempt: response.provider_attempt,
+            automatic_compaction_decision: response.automatic_compaction_decision,
+            originator: response.originator,
+            usage: response.usage,
+            estimated_api_cost_rates: response.estimated_api_cost_rates,
+            estimated_api_cost_increment: response.estimated_api_cost_increment,
+            compaction_original_input_tokens: response.compaction_original_input_tokens,
+            compaction_output_tokens: response.compaction_output_tokens,
+            backend: response.backend,
+            provider_response_id: response.provider_response_id,
+            ws_pool_delta: response.ws_pool_delta,
+        }
+    }
+}
+
+/// Harness decision whether the final-status guard withheld this response.
+///
+/// Acceptance only excludes a status challenge; startup, tools, recovery, and
+/// outstanding-input checks still determine whether delegated work completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalStatusDisposition {
+    /// The status guard did not withhold this response.
+    Accepted,
+    /// This durable candidate must not prove delegated completion.
+    Challenged,
+}
+
+/// Harness-canonical `provider.response_finished` fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
+    /// Harness-authored status-guard decision fixed before canonical
+    /// publication. Required even on historical records: missing authority
+    /// is not recoverable from status reports, current tools, or later
+    /// continuation events.
+    pub final_status_disposition: FinalStatusDisposition,
     /// Prompt id the provider finished.
     pub agent_prompt_id: AgentPromptId,
     /// Agent transcript this response belongs to.
@@ -7191,7 +7335,7 @@ pub enum Event {
     ProviderResponseUpdated(ProviderResponseUpdated),
     /// Provider-authored terminal observation awaiting harness validation.
     #[serde(rename = "provider.response_finished_reported")]
-    ProviderResponseFinishedReported(ProviderResponseFinished),
+    ProviderResponseFinishedReported(ProviderResponseFinishedReport),
     #[serde(rename = "provider.response_finished")]
     ProviderResponseFinished(ProviderResponseFinished),
     /// Harness-canonical durable standalone execution accounting.

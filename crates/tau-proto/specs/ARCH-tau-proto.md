@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 8.0 gives provider terminal reports a distinct DTO from canonical
+responses. Only the canonical DTO carries required harness-authored final-status
+authority; old canonical records without it are rejected, not defaulted or
+migrated. The explicitly chosen major boundary requires configured extensions to
+update together, while provider observations retain their prior wire shape.
+See [SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
+
 Protocol 7.5 includes provider-hosted definitions in the shared prewarm/refresh
 request. Missing definitions mean an empty list; exact hosted-prefix maintenance
 requires peers that preserve this field through lowering. See

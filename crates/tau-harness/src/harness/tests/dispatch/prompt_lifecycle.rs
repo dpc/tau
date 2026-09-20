@@ -69,6 +69,7 @@ fn seed_sensitive_tool_context(h: &mut Harness, cid: &AgentId) {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: tau_proto::PromptOriginator::User,
@@ -601,7 +602,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
     });
     h.handle_extension_event(
         "provider-owner",
-        TestProtocolItem::Event(Event::ProviderResponseFinishedReported(response)),
+        TestProtocolItem::Event(Event::ProviderResponseFinishedReported(response.into())),
     )
     .expect("serving provider terminal");
     assert_eq!(
@@ -820,7 +821,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     h.handle_extension_event(
         "provider-other",
         TestProtocolItem::Event(Event::ProviderResponseFinishedReported(
-            provider_text_response(&spid, crate::parse_agent_id(&watched_id), "spoofed final"),
+            provider_text_response(&spid, crate::parse_agent_id(&watched_id), "spoofed final")
+                .into(),
         )),
     )
     .expect("forged final response");
@@ -895,7 +897,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     h.handle_extension_event(
         "provider-owner",
         TestProtocolItem::Event(Event::ProviderResponseFinishedReported(
-            provider_text_response(&spid, crate::parse_agent_id(&watched_id), "real final"),
+            provider_text_response(&spid, crate::parse_agent_id(&watched_id), "real final").into(),
         )),
     )
     .expect("owner final response");
@@ -1176,6 +1178,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -1253,6 +1256,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -1359,6 +1363,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -1881,6 +1886,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -1947,6 +1953,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -4338,6 +4345,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,

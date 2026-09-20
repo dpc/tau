@@ -139,6 +139,7 @@ impl Harness {
         // Recovery authorization belongs exclusively to the harness. Provider
         // extensions share this wire type for transport, so discard any value
         // supplied across that trust boundary before evaluating eligibility.
+        response.final_status_disposition = tau_proto::FinalStatusDisposition::Accepted;
         response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
         response.output_length_disposition = tau_proto::OutputLengthDisposition::None;
         response.provider_attempt = tau_proto::ProviderAttempt::ONE;

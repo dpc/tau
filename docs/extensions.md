@@ -1,5 +1,12 @@
 # Configuring extensions
 
+This checkout uses protocol **8.0**. Configured providers, tools, and core
+extensions built for protocol 7 are rejected before configuration and must be
+updated together with the harness. The separately maintained extension pins
+described below still target protocol 7; this change does not update or publish
+those projects. Rebuilding an external project against its unchanged exact old
+SDK pin is not sufficient.
+
 ## Tau-state access
 
 Persistent supervised extensions receive the real Tau-state tree recursively

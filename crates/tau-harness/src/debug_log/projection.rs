@@ -265,8 +265,10 @@ pub(super) fn provider_event_value(
 pub(super) enum ProviderEvent<'a> {
     /// A raw or canonical streaming update.
     Updated(&'a tau_proto::ProviderResponseUpdated),
-    /// A raw or canonical terminal response.
+    /// A canonical terminal response.
     Finished(&'a ProviderResponseFinished),
+    /// A provider observation without final-status authority.
+    FinishedReported(&'a tau_proto::ProviderResponseFinishedReport),
 }
 
 /// The established tagged Provider event shape.
@@ -286,21 +288,39 @@ impl Serialize for ProviderEvent<'_> {
         match self {
             Self::Updated(updated) => updated.serialize(serializer),
             Self::Finished(finished) => {
-                ProviderResponseFinishedProjection(finished).serialize(serializer)
+                ProviderResponseFinishedProjection::Canonical(finished).serialize(serializer)
+            }
+            Self::FinishedReported(finished) => {
+                ProviderResponseFinishedProjection::Reported(finished).serialize(serializer)
             }
         }
     }
 }
 
 /// A borrowed terminal response that substitutes redacted context items.
-struct ProviderResponseFinishedProjection<'a>(&'a ProviderResponseFinished);
+enum ProviderResponseFinishedProjection<'a> {
+    /// Canonical payload, including its required final-status authority.
+    Canonical(&'a ProviderResponseFinished),
+    /// Raw report payload, which cannot carry final-status authority.
+    Reported(&'a tau_proto::ProviderResponseFinishedReport),
+}
 
 impl Serialize for ProviderResponseFinishedProjection<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let ProviderResponseFinished {
+        // Borrow the shared fields without cloning provider output or
+        // conflating the two DTOs' final-status authority.
+        macro_rules! fields {
+            ($($field:ident),* $(,)?) => {
+                $(let $field = match self {
+                    Self::Canonical(value) => &value.$field,
+                    Self::Reported(value) => &value.$field,
+                };)*
+            };
+        }
+        fields! {
             agent_prompt_id,
             agent_id,
             output_items,
@@ -321,8 +341,14 @@ impl Serialize for ProviderResponseFinishedProjection<'_> {
             backend,
             provider_response_id,
             ws_pool_delta,
-        } = self.0;
-        let mut state = serializer.serialize_struct("ProviderResponseFinished", 20)?;
+        }
+        let mut state = serializer.serialize_struct("ProviderResponseFinished", 21)?;
+        if let Self::Canonical(response) = self {
+            state.serialize_field(
+                "final_status_disposition",
+                &response.final_status_disposition,
+            )?;
+        }
         state.serialize_field("agent_prompt_id", agent_prompt_id)?;
         state.serialize_field("agent_id", agent_id)?;
         if !output_items.is_empty() {

@@ -544,6 +544,7 @@ fn tool_turn_dispatches_provider_emitted_siblings_without_global_locking() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -693,6 +694,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -842,6 +844,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -1093,6 +1096,7 @@ fn watch_notification_folded_by_tool_terminal_starts_continuation() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1314,6 +1318,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1395,6 +1400,7 @@ fn tools_drift_invalidates_chain_anchor() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -1532,6 +1538,7 @@ fn peer_auto_start_handover_dispatches_tool_without_human_ui_prompt() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: initial_originator,
@@ -1779,6 +1786,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
                 error: None,
                 failure_kind: None,
                 context_limit_telemetry: None,
+                final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -1824,6 +1832,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2005,6 +2014,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
                 error: None,
                 failure_kind: None,
                 context_limit_telemetry: None,
+                final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -2061,6 +2071,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         error: Some("standalone context rejection with semantic output".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: Some(tau_proto::ProviderTokenUsage {
             model: None,
@@ -2489,6 +2500,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2614,6 +2626,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2739,6 +2752,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2843,6 +2857,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -2877,6 +2892,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -3238,6 +3254,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -3310,6 +3327,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -3390,6 +3408,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -3557,6 +3576,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -3623,6 +3643,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -3761,6 +3782,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -3832,6 +3854,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -3958,6 +3981,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -4149,6 +4173,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -4252,6 +4277,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -4541,6 +4567,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -4695,6 +4722,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -4874,6 +4902,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -5010,6 +5039,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -5253,6 +5283,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -5324,6 +5355,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -5955,6 +5987,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -6094,6 +6127,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -6203,6 +6237,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -6540,6 +6575,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -6691,6 +6727,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -6798,6 +6835,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,

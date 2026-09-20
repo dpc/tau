@@ -2074,34 +2074,36 @@ where
                     })
                     .unwrap_or_default();
                 writer.write_message(&HarnessInputMessage::emit_transient(
-                    Event::ProviderResponseFinishedReported(ProviderResponseFinished {
-                        automatic_compaction_decision: None,
-                        estimated_api_cost_rates: None,
-                        estimated_api_cost_increment: None,
+                    Event::ProviderResponseFinishedReported(
+                        tau_proto::ProviderResponseFinishedReport {
+                            automatic_compaction_decision: None,
+                            estimated_api_cost_rates: None,
+                            estimated_api_cost_increment: None,
 
-                        agent_prompt_id: spid,
-                        agent_id: prompt.agent_id.clone(),
-                        output_items: vec![ContextItem::Message(MessageItem {
-                            role: ContextRole::Assistant,
-                            content: vec![ContentPart::Text { text }],
-                            phase: None,
-                            responses_raw_json: None,
-                        })],
-                        stop_reason: ProviderStopReason::EndTurn,
-                        error: None,
-                        failure_kind: None,
-                        context_limit_telemetry: None,
-                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-                        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-                        originator: prompt.originator.clone(),
-                        usage: None,
-                        compaction_original_input_tokens: None,
-                        compaction_output_tokens: None,
-                        backend: None,
-                        provider_attempt: Default::default(),
-                        provider_response_id: None,
-                        ws_pool_delta: None,
-                    }),
+                            agent_prompt_id: spid,
+                            agent_id: prompt.agent_id.clone(),
+                            output_items: vec![ContextItem::Message(MessageItem {
+                                role: ContextRole::Assistant,
+                                content: vec![ContentPart::Text { text }],
+                                phase: None,
+                                responses_raw_json: None,
+                            })],
+                            stop_reason: ProviderStopReason::EndTurn,
+                            error: None,
+                            failure_kind: None,
+                            context_limit_telemetry: None,
+                            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+                            originator: prompt.originator.clone(),
+                            usage: None,
+                            compaction_original_input_tokens: None,
+                            compaction_output_tokens: None,
+                            backend: None,
+                            provider_attempt: Default::default(),
+                            provider_response_id: None,
+                            ws_pool_delta: None,
+                        },
+                    ),
                 ))?;
             } else {
                 let user_text = context_items
@@ -2161,29 +2163,31 @@ where
                 };
 
                 writer.write_message(&HarnessInputMessage::emit_transient(
-                    Event::ProviderResponseFinishedReported(ProviderResponseFinished {
-                        automatic_compaction_decision: None,
-                        estimated_api_cost_rates: None,
-                        estimated_api_cost_increment: None,
+                    Event::ProviderResponseFinishedReported(
+                        tau_proto::ProviderResponseFinishedReport {
+                            automatic_compaction_decision: None,
+                            estimated_api_cost_rates: None,
+                            estimated_api_cost_increment: None,
 
-                        agent_prompt_id: spid,
-                        agent_id: prompt.agent_id.clone(),
-                        output_items: vec![ContextItem::ToolCall(tool_call)],
-                        stop_reason: ProviderStopReason::ToolCalls,
-                        error: None,
-                        failure_kind: None,
-                        context_limit_telemetry: None,
-                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-                        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-                        originator: prompt.originator.clone(),
-                        usage: None,
-                        compaction_original_input_tokens: None,
-                        compaction_output_tokens: None,
-                        backend: None,
-                        provider_attempt: Default::default(),
-                        provider_response_id: None,
-                        ws_pool_delta: None,
-                    }),
+                            agent_prompt_id: spid,
+                            agent_id: prompt.agent_id.clone(),
+                            output_items: vec![ContextItem::ToolCall(tool_call)],
+                            stop_reason: ProviderStopReason::ToolCalls,
+                            error: None,
+                            failure_kind: None,
+                            context_limit_telemetry: None,
+                            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+                            originator: prompt.originator.clone(),
+                            usage: None,
+                            compaction_original_input_tokens: None,
+                            compaction_output_tokens: None,
+                            backend: None,
+                            provider_attempt: Default::default(),
+                            provider_response_id: None,
+                            ws_pool_delta: None,
+                        },
+                    ),
                 ))?;
             }
             writer.flush()?;
@@ -2978,8 +2982,10 @@ fn event_without_provider_image_bytes(event: &Event) -> Event {
         Event::AgentCompacted(compacted) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
         }
-        Event::ProviderResponseFinishedReported(finished)
-        | Event::ProviderResponseFinished(finished) => {
+        Event::ProviderResponseFinishedReported(finished) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
+        }
+        Event::ProviderResponseFinished(finished) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
         }
         _ => {}

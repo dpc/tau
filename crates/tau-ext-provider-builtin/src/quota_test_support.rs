@@ -10,8 +10,8 @@ use std::{collections as path_std_collections, thread};
 
 use tau_proto::{
     CborValue, ContextItem, Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
-    HarnessOutputWriter, ProviderResponseFinished, ProviderStopReason, ToolCallItem, ToolName,
-    ToolType, UiRetryPrompt,
+    HarnessOutputWriter, ProviderResponseFinishedReport, ProviderStopReason, ToolCallItem,
+    ToolName, ToolType, UiRetryPrompt,
 };
 use tau_provider::retry_policy::RetryClass;
 
@@ -81,7 +81,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
                 responses_envelope: None,
             })]
         };
-        let finished = ProviderResponseFinished {
+        let finished = ProviderResponseFinishedReport {
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,

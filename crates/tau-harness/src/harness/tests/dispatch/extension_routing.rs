@@ -90,6 +90,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -158,6 +159,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -553,6 +555,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -940,6 +943,7 @@ fn exact_text_edit_alias_preserves_canonical_and_extension_lifecycle_names() {
                 error: None,
                 failure_kind: None,
                 context_limit_telemetry: None,
+                final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,

@@ -97,6 +97,7 @@ fn debug_provider_finished(output_items: Vec<tau_proto::ContextItem>) -> Provide
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
@@ -171,7 +172,7 @@ fn debug_binary_events(data: Vec<u8>) -> Vec<Event> {
         Event::ToolResult(debug_image_tool_result(data.clone())),
         Event::ProviderToolResult(debug_image_tool_result(data.clone())),
         Event::AgentCompacted(compacted),
-        Event::ProviderResponseFinishedReported(finished.clone()),
+        Event::ProviderResponseFinishedReported(finished.clone().into()),
         Event::ProviderResponseFinished(finished),
     ]
 }
@@ -460,6 +461,7 @@ fn published_line_preserves_enriched_token_usage() {
             action: tau_proto::ContextLimitAction::Terminal,
             observation: tau_proto::ContextLimitObservation::RejectedBelowAdvertisedLimit,
         }),
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
@@ -1350,47 +1352,48 @@ fn provider_debug_captures_are_not_logged() {
 /// bytes into debug JSONL.
 #[test]
 fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
-    let event = Event::ProviderResponseFinishedReported(ProviderResponseFinished {
-        automatic_compaction_decision: None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
+    let event =
+        Event::ProviderResponseFinishedReported(tau_proto::ProviderResponseFinishedReport {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
 
-        agent_prompt_id: AgentPromptId::parse("sp-image")
-            .expect("known-safe AgentPromptId must be valid"),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: vec![tau_proto::ContextItem::ToolResult(
-            tau_proto::ToolResultItem {
-                presentation: Default::default(),
-                call_id: "call-image".into(),
-                tool_type: tau_proto::ToolType::Function,
-                status: tau_proto::ToolResultStatus::Success,
-                output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("image".into())),
-                provider_content: vec![tau_proto::ToolResultContentPart::Image(
-                    tau_proto::ImageContent {
-                        media_type: tau_proto::ImageMediaType::Png,
-                        data: vec![1, 2, 3].into(),
-                        width: 1,
-                        height: 1,
-                        detail: tau_proto::ImageDetail::High,
-                    },
-                )],
-            },
-        )],
-        stop_reason: tau_proto::ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        originator: PromptOriginator::User,
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    });
+            agent_prompt_id: AgentPromptId::parse("sp-image")
+                .expect("known-safe AgentPromptId must be valid"),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            output_items: vec![tau_proto::ContextItem::ToolResult(
+                tau_proto::ToolResultItem {
+                    presentation: Default::default(),
+                    call_id: "call-image".into(),
+                    tool_type: tau_proto::ToolType::Function,
+                    status: tau_proto::ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("image".into())),
+                    provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                        tau_proto::ImageContent {
+                            media_type: tau_proto::ImageMediaType::Png,
+                            data: vec![1, 2, 3].into(),
+                            width: 1,
+                            height: 1,
+                            detail: tau_proto::ImageDetail::High,
+                        },
+                    )],
+                },
+            )],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            originator: PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        });
 
     let message = HarnessInputMessage::emit(event.clone());
     assert!(matches!(

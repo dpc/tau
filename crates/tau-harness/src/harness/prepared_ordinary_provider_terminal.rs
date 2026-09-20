@@ -104,6 +104,11 @@ impl Harness {
             final_status_plan,
             ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Challenge { .. })
         );
+        response.final_status_disposition = if final_status_challenged {
+            tau_proto::FinalStatusDisposition::Challenged
+        } else {
+            tau_proto::FinalStatusDisposition::Accepted
+        };
         if final_status_challenged
             && let tau_proto::OutputLengthDisposition::ContinuationTerminal {
                 outer_turn_finish_owed,

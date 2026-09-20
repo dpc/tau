@@ -130,14 +130,14 @@ impl StagedEndpoint {
 
     fn provider_tool_call(
         record: &PersistedAgentEvent,
-        finished: &tau_proto::ProviderResponseFinished,
+        agent_prompt_id: &AgentPromptId,
         call: &tau_proto::ToolCallItem,
     ) -> Self {
         Self::ProviderToolCall {
             seq: record.seq,
             parent: record.parent,
             recorded_at: record.recorded_at,
-            agent_prompt_id: finished.agent_prompt_id.clone(),
+            agent_prompt_id: agent_prompt_id.clone(),
             call: Box::new(call.clone()),
         }
     }
@@ -394,15 +394,25 @@ fn correlate_record(
     endpoints: &mut EndpointStore,
     record: &PersistedAgentEvent,
 ) -> Result<(), InspectError> {
-    if let Event::ProviderResponseFinished(finished)
-    | Event::ProviderResponseFinishedReported(finished) = &record.event
-    {
-        for item in &finished.output_items {
+    let terminal_output = match &record.event {
+        Event::ProviderResponseFinished(finished) => {
+            Some((&finished.agent_prompt_id, &finished.output_items))
+        }
+        Event::ProviderResponseFinishedReported(finished) => {
+            Some((&finished.agent_prompt_id, &finished.output_items))
+        }
+        _ => None,
+    };
+    if let Some((agent_prompt_id, output_items)) = terminal_output {
+        for item in output_items {
             let tau_proto::ContextItem::ToolCall(call) = item else {
                 continue;
             };
-            let endpoint =
-                endpoints.append(&StagedEndpoint::provider_tool_call(record, finished, call))?;
+            let endpoint = endpoints.append(&StagedEndpoint::provider_tool_call(
+                record,
+                agent_prompt_id,
+                call,
+            ))?;
             apply_occurrence(
                 operations,
                 OperationKey::Tool(call.call_id.clone()),
@@ -489,12 +499,14 @@ fn operation_occurrences(event: &Event) -> Vec<(OperationKey, Phase)> {
             OperationKey::Prompt(value.agent_prompt_id.clone()),
             Phase::Auxiliary,
         ),
-        Event::ProviderResponseFinished(value) | Event::ProviderResponseFinishedReported(value) => {
-            (
-                OperationKey::Prompt(value.agent_prompt_id.clone()),
-                Phase::Terminal,
-            )
-        }
+        Event::ProviderResponseFinished(value) => (
+            OperationKey::Prompt(value.agent_prompt_id.clone()),
+            Phase::Terminal,
+        ),
+        Event::ProviderResponseFinishedReported(value) => (
+            OperationKey::Prompt(value.agent_prompt_id.clone()),
+            Phase::Terminal,
+        ),
         Event::ProviderCacheMissDiagnostic(value)
         | Event::ProviderCacheMissDiagnosticReported(value) => (
             OperationKey::Prompt(value.agent_prompt_id.clone()),
@@ -664,12 +676,20 @@ fn extend_prompt_attributes(attributes: &mut Vec<KeyValue>, start: &Event, termi
             attributes.push(string_attr("llm.invocation_parameters", &params));
         }
     }
-    let (Event::ProviderResponseFinished(finished)
-    | Event::ProviderResponseFinishedReported(finished)) = terminal
-    else {
-        return;
+    let (usage, cost, rates) = match terminal {
+        Event::ProviderResponseFinished(finished) => (
+            &finished.usage,
+            &finished.estimated_api_cost_increment,
+            &finished.estimated_api_cost_rates,
+        ),
+        Event::ProviderResponseFinishedReported(finished) => (
+            &finished.usage,
+            &finished.estimated_api_cost_increment,
+            &finished.estimated_api_cost_rates,
+        ),
+        _ => return,
     };
-    if let Some(usage) = &finished.usage {
+    if let Some(usage) = usage {
         attributes.push(int_attr("llm.token_count.prompt", usage.prompt_sent_tokens));
         attributes.push(int_attr(
             "llm.token_count.completion",
@@ -686,10 +706,10 @@ fn extend_prompt_attributes(attributes: &mut Vec<KeyValue>, start: &Event, termi
             usage.prompt_cached_tokens,
         ));
     }
-    if let Ok(cost) = serde_json::to_string(&finished.estimated_api_cost_increment) {
+    if let Ok(cost) = serde_json::to_string(cost) {
         attributes.push(string_attr("tau.estimated_api_cost_increment", &cost));
     }
-    if let Ok(rates) = serde_json::to_string(&finished.estimated_api_cost_rates) {
+    if let Ok(rates) = serde_json::to_string(rates) {
         attributes.push(string_attr("tau.estimated_api_cost_rates", &rates));
     }
 }

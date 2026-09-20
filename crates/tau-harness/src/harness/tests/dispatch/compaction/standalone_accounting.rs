@@ -100,6 +100,7 @@ fn standalone_failure_terminalizes_warm_provider_watch_status() {
             error: Some("private provider failure".to_owned()),
             failure_kind: None,
             context_limit_telemetry: None,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: prompt.originator,
             usage: None,
@@ -452,6 +453,7 @@ fn manual_standalone_compact_installs_one_boundary() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: Some(tau_proto::ProviderTokenUsage {

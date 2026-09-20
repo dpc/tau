@@ -1554,7 +1554,7 @@ impl CodexRuntime {
 pub fn submit_response_debug(
     session_id: &tau_proto::SessionId,
     enabled: bool,
-    response: &tau_proto::ProviderResponseFinished,
+    response: &tau_proto::ProviderResponseFinishedReport,
     capture: Option<&CodexDebugCapture>,
 ) {
     submit_response_debug_with(
@@ -1569,7 +1569,7 @@ pub fn submit_response_debug(
 fn submit_response_debug_with(
     session_id: &tau_proto::SessionId,
     enabled: bool,
-    response: &tau_proto::ProviderResponseFinished,
+    response: &tau_proto::ProviderResponseFinishedReport,
     capture: Option<&CodexDebugCapture>,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {

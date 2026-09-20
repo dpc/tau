@@ -433,10 +433,18 @@ their selected models.
 
 - **`provider.response_finished_reported`** — Transient Provider-authored terminal
   observation. The committed report enters prompt correlation and the existing
-  response terminal pipeline; it never enters semantic replay.
+  response terminal pipeline; it never enters semantic replay. Its separate DTO
+  has no final-status acceptance authority.
 - **`provider.response_finished`** — Harness-sourced durable final assistant output in original
   item order via `output_items`, plus optional response-local usage, provider
-  response id, backend metadata, and echoed originator. Terminal request
+  response id, backend metadata, and echoed originator. The required
+  `final_status_disposition` is harness-authored before publication: `challenged`
+  is a durable candidate, not delegated completion; `accepted` excludes that
+  challenge but does not override other completion checks. An eligible accepted
+  response proves worker completion even before result delivery or detachment.
+  Historical canonical responses missing the field are rejected without migration
+  or defaults. Protocol 8.0 deliberately requires configured peers to update
+  together; provider report payloads retain their prior shape. Terminal request
   rejection may carry a machine-readable `failure_kind`; notably,
   `context_window_exceeded` is independent of bounded display `error` prose.
   Such a rejection may also carry harness-authored `context_limit_telemetry`:

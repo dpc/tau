@@ -19,9 +19,9 @@ use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension, TauE
 use tau_proto::{
     AgentMessageReceived, CborValue, ClientKind, ContentPart, ContextItem,
     ContextRecoveryDisposition, ContextRole, Event, EventName, InputModality, MessageItem,
-    ProviderModelInfo, ProviderModelsDeclared, ProviderPromptSubmitted, ProviderResponseFinished,
-    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ThinkingSummary,
-    ToolCallId, ToolCallItem, ToolName, ToolType, Verbosity,
+    ProviderModelInfo, ProviderModelsDeclared, ProviderPromptSubmitted,
+    ProviderResponseFinishedReport, ProviderResponseTextDelta, ProviderResponseUpdated,
+    ProviderStopReason, ThinkingSummary, ToolCallId, ToolCallItem, ToolName, ToolType, Verbosity,
 };
 use validation::{validate_v1, validate_v2};
 
@@ -4007,8 +4007,8 @@ fn finished(
     prompt: &tau_proto::AgentPromptCreated,
     output_items: Vec<ContextItem>,
     stop_reason: ProviderStopReason,
-) -> ProviderResponseFinished {
-    ProviderResponseFinished {
+) -> ProviderResponseFinishedReport {
+    ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
