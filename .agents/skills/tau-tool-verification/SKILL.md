@@ -33,9 +33,11 @@ tool-specific checks that cannot be run because the corresponding tool is not
 available.
 
 When `export` and `import` are exposed, verify a small original round trip:
-export a local regular file, import the returned `blake3:` key, compare the
-imported local file byte-for-byte, and confirm its private non-executable
-permissions. For an image original, pass the artifact key directly to
+export a local regular file, confirm its `artifact` and `size` output headers,
+import the returned `<tau-artifact:FULL_KEY>` reference, confirm the import's
+`path` and `size` output headers, compare the imported local file byte-for-byte,
+and confirm its private non-executable permissions. For an image original, pass
+the complete artifact reference directly to
 `read_image`; import is needed only for filesystem tools.
 Do not inspect harness State paths or treat the digest as provenance or safety.
 

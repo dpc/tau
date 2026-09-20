@@ -1774,8 +1774,9 @@ fn read_image_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Read one stored artifact image for visual inspection. The artifact must already exist \
-             in configured persistent storage."
+            "Read one stored artifact image for visual inspection from a canonical \
+             <tau-artifact:FULL_KEY> reference. A bare internal key is also accepted. The artifact \
+             must already exist in configured persistent storage."
                 .to_owned(),
         ),
         tool_type: ToolType::Function,
@@ -1784,7 +1785,8 @@ fn read_image_tool_spec() -> ToolSpec {
             "properties": {
                 "key": {
                     "type": "string",
-                    "description": "Canonical BLAKE3 artifact key for one PNG, JPEG, or WebP image"
+                    "pattern": "^(?:blake3:[0-9a-f]{64}|<tau-artifact:blake3:[0-9a-f]{64}>)$",
+                    "description": "Canonical <tau-artifact:FULL_KEY> reference for one PNG, JPEG, or WebP image; a bare key is also accepted"
                 },
                 "mode": {
                     "type": "string",

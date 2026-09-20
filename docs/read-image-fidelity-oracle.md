@@ -36,7 +36,7 @@ it because replay is not new live-fidelity evidence. Preserve each unique trial
 directory with its dated trial id and record the command, candidate change id,
 model route, and three isolated outcomes. Each profile uses an independent
 provider turn that exports the fixture to Artifact storage before passing its
-returned key to `read_image`. The test checks byte-free terminal transform
+returned `<tau-artifact:FULL_KEY>` reference to `read_image`. The test checks byte-free terminal transform
 metadata so a wrong mode or crop cannot borrow answers from a retained high
 image.
 

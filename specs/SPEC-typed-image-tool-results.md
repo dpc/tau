@@ -19,7 +19,9 @@ dimensions, and high provider detail. Provider adapters lower that semantic
 content only on explicitly audited routes.
 
 The provider-independent surface is `tau-ext-utils`'s one-image
-`read_image(key)` tool. It verifies immutable original bytes through the
+`read_image(key)` tool. The argument accepts the canonical
+`<tau-artifact:FULL_KEY>` model-facing reference (and a bare internal key for
+simple callers). It verifies immutable original bytes through the
 existing directed Artifact RPC without granting shell, workdir, import, or
 provider-account authority. It accepts PNG, JPEG, and WebP and enforces
 source, decoded-allocation, dimension, pixel, output, record, and provider

@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use tau_client::{ArtifactClient, ArtifactDownload, ArtifactUpload};
 use tau_proto::{
-    ARTIFACT_MAX_BYTES, ArtifactError, ArtifactKey, ArtifactRequestId, ArtifactResult, CborValue,
-    Event, HarnessOutputMessage, ToolCancelled, ToolError, ToolResult, ToolResultKind, ToolStarted,
+    ARTIFACT_MAX_BYTES, ArtifactError, ArtifactRequestId, ArtifactResult, CborValue, Event,
+    HarnessOutputMessage, ToolCancelled, ToolError, ToolResult, ToolResultKind, ToolStarted,
+    artifact_reference, parse_artifact_reference,
 };
 
 use crate::Output;
@@ -344,7 +345,7 @@ impl ArtifactTransferManager {
             } if upload.descriptor().is_some() => {
                 let descriptor = upload.descriptor().expect("checked descriptor");
                 let mut entries = vec![
-                    text_entry("key", descriptor.key.to_string()),
+                    text_entry("artifact", artifact_reference(&descriptor.key)),
                     int_entry("size", descriptor.size.get()),
                 ];
                 if let Some(filename) = filename {
@@ -687,11 +688,11 @@ fn prepare_import(
     let Some(key) = tau_proto::cbor_text_field(&invoke.arguments, "key") else {
         return Err((invoke, lifecycle, "key must be a string".to_owned()));
     };
-    let key = ArtifactKey::parse(key).map_err(|_| {
+    let key = parse_artifact_reference(&key).map_err(|_| {
         (
             invoke.clone(),
             lifecycle.clone(),
-            "invalid artifact key".to_owned(),
+            "invalid artifact reference".to_owned(),
         )
     })?;
     Ok(Command::StartImport {

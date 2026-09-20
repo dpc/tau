@@ -1497,7 +1497,7 @@ fn papercut_runtime_startup_defaults_on_and_honors_false_override() {
 /// Locks the artifact-key schema, independent policy tag, and foreground-only
 /// typed-image declaration at the utility ownership boundary.
 #[test]
-fn read_image_registration_uses_artifact_key_and_image_route_gating() {
+fn read_image_registration_uses_artifact_reference_and_image_route_gating() {
     let tool = read_image_tool_spec();
     assert_eq!(tool.provider_scope, None);
     assert_eq!(
@@ -1515,6 +1515,10 @@ fn read_image_registration_uses_artifact_key_and_image_route_gating() {
     let parameters = tool.parameters.expect("parameters");
     assert_eq!(parameters["required"], serde_json::json!(["key"]));
     assert!(parameters["properties"].get("path").is_none());
+    assert_eq!(
+        parameters["properties"]["key"]["pattern"],
+        "^(?:blake3:[0-9a-f]{64}|<tau-artifact:blake3:[0-9a-f]{64}>)$"
+    );
     assert_eq!(
         parameters["properties"]["mode"]["enum"],
         serde_json::json!(["high", "overview"])

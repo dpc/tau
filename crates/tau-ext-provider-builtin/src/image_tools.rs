@@ -87,7 +87,7 @@ pub(super) fn declarations(
                 name: ToolName::new(format!("codex_image_{index}")),
                 provider_scope: Some(provider.clone()),
                 model_visible_name: Some(ToolName::new("generate_image")),
-                description: Some("Generate one original PNG from a prompt using the selected ChatGPT account. Returns an artifact key, size and MIME type; use import(key) to obtain a local path. Original bytes persist independently of this session, including ephemeral sessions. No edits or batches.".to_owned()),
+                description: Some("Generate one original PNG from a prompt using the selected ChatGPT account. Returns a canonical <tau-artifact:FULL_KEY> reference, size and MIME type as output headers; pass the reference directly to import or read_image. Original bytes persist independently of this session, including ephemeral sessions. No edits or batches.".to_owned()),
                 tool_type: tau_proto::ToolType::Function,
                 parameters: Some(serde_json::json!({
                     "type": "object",
@@ -226,8 +226,8 @@ impl ImageTools {
                 tool_type: tau_proto::ToolType::Function,
                 result: CborValue::Map(vec![
                     (
-                        CborValue::Text("key".into()),
-                        CborValue::Text(descriptor.key.to_string()),
+                        CborValue::Text("artifact".into()),
+                        CborValue::Text(tau_proto::artifact_reference(&descriptor.key)),
                     ),
                     (
                         CborValue::Text("size".into()),

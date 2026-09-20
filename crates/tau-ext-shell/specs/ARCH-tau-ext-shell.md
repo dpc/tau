@@ -14,7 +14,7 @@ Verified originals waiting for or executing temp-file writes share a separate
 so an unreported retained temp file is removed.
 
 Image inspection is not shell-owned. `std-utils` consumes stored originals by
-artifact key, so no-shell roles can inspect an already-permitted artifact
+canonical artifact reference, so no-shell roles can inspect an already-permitted artifact
 without inheriting workdir, import, or local filesystem authority.
 
 ## Per-agent instance workdir metadata

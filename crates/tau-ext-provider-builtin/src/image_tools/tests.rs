@@ -259,10 +259,10 @@ fn image_availability_failure_does_not_generate() {
     assert_eq!(frames.iter().filter(|frame| matches!(frame, HarnessInputMessage::Emit(emit) if matches!(*emit.event, tau_proto::Event::ToolErrorReported(_)))).count(), 1);
 }
 
-/// Upload copies every original byte and reports only a verified hash
-/// descriptor.
+/// Upload copies every original byte and reports only a canonical artifact
+/// reference plus verified descriptor metadata.
 #[test]
-fn image_original_upload_returns_key_without_path_or_inline_bytes() {
+fn image_original_upload_returns_reference_without_path_or_inline_bytes() {
     let original = vec![0x9b; tau_proto::ARTIFACT_CHUNK_BYTES + 7];
     let descriptor = ArtifactDescriptor::new(
         format!("blake3:{}", blake3::hash(&original).to_hex())
@@ -346,8 +346,8 @@ fn image_original_upload_returns_key_without_path_or_inline_bytes() {
     };
     assert_eq!(fields.len(), 3);
     assert!(fields.contains(&(
-        CborValue::Text("key".into()),
-        CborValue::Text(descriptor.key.to_string())
+        CborValue::Text("artifact".into()),
+        CborValue::Text(tau_proto::artifact_reference(&descriptor.key))
     )));
     assert!(
         !fields

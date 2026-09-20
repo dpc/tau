@@ -1,11 +1,19 @@
 # Artifact transfers
 
 Tau's Artifact RPC stores **immutable original bytes under their content hash**.
+Model-facing text refers to an artifact with the canonical Markdown autolink
+`<tau-artifact:FULL_KEY>`, for example
+`<tau-artifact:blake3:0123…cdef>`. `FULL_KEY` is the complete internal
+content-address key; the abbreviated example is not usable. Consumers share one
+formatter/parser for this spelling, and `import` and `read_image` also accept a
+bare key for simple existing integrations.
+
 The shell extension registers `export(path)` and `import(key)` under ordinary
 tool-role policy. Export reads one local regular file under the shell instance's
 remembered workdir authority, uploads at most 16 MiB of original bytes, and
-returns the descriptor plus a bounded filename hint. Import validates the key,
-downloads and verifies the complete original, and writes it to a private
+returns `artifact` and `size` output headers plus a bounded `filename` hint.
+Import validates the reference, downloads and verifies the complete original,
+and returns `path` and `size` output headers after writing it to a private
 unpredictable mode-0600 temporary file on the shell execution host; that local
 path can be passed to filesystem tools. The provider-independent
 `read_image(key)` tool instead consumes a verified original directly from
@@ -63,7 +71,9 @@ publication. If tool cancellation wins while Finalize succeeds, its original
 may remain without a recorded tool result. Never retry a paid producer effect
 as artifact-write recovery.
 
-`ArtifactDescriptor` contains only canonical `key` and `size`. Attach bounded
+`ArtifactDescriptor` contains only the internal canonical `key` and `size`.
+Format that key as `<tau-artifact:FULL_KEY>` whenever it enters model-facing
+text. Attach bounded
 filename/media hints to the consumer's own per-use arguments/results, not the
 shared object. Validate media independently. A digest detects corruption but
 does not authenticate a producer or make content safe to execute.

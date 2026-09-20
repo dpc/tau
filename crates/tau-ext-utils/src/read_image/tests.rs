@@ -12,9 +12,10 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
         .write_to(&mut bytes, ImageFormat::Png)
         .expect("encode fixture");
     let key = ArtifactKey::parse(format!("blake3:{}", "0".repeat(64))).expect("artifact key");
+    let reference = tau_proto::artifact_reference(&key);
     let request = ReadImageRequest::from_arguments(&CborValue::Map(vec![(
         CborValue::Text("key".to_owned()),
-        CborValue::Text(key.to_string()),
+        CborValue::Text(reference.clone()),
     )]))
     .expect("request");
     let output = request
@@ -26,8 +27,8 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
         [ToolResultContentPart::Image(_)]
     ));
     assert_eq!(
-        tau_proto::cbor_text_field(&output.result, "key"),
-        Some(key.to_string())
+        tau_proto::cbor_text_field(&output.result, "artifact"),
+        Some(reference)
     );
     assert_eq!(
         tau_proto::cbor_int_field(&output.result, "original_bytes"),
@@ -35,8 +36,8 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
     );
 }
 
-/// Ensures the new public boundary accepts only canonical artifact keys and
-/// does not retain the retired filesystem path union.
+/// Ensures the public boundary accepts canonical artifact references and bare
+/// keys, but does not retain the retired filesystem path union.
 #[test]
 fn artifact_request_rejects_path_and_noncanonical_key() {
     let path_only = CborValue::Map(vec![(
@@ -49,6 +50,12 @@ fn artifact_request_rejects_path_and_noncanonical_key() {
         CborValue::Text("not-a-key".to_owned()),
     )]);
     assert!(ReadImageRequest::from_arguments(&invalid).is_err());
+    let key = ArtifactKey::parse(format!("blake3:{}", "1".repeat(64))).expect("artifact key");
+    let bare = CborValue::Map(vec![(
+        CborValue::Text("key".to_owned()),
+        CborValue::Text(key.to_string()),
+    )]);
+    assert!(ReadImageRequest::from_arguments(&bare).is_ok());
 }
 
 /// Ensures every v1 format is decoded and deterministically re-encoded as

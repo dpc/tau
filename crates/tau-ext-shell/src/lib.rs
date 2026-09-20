@@ -523,9 +523,10 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         model_visible_name: None,
         description: Some(
             "Export one local regular file to the shared content-addressed artifact store. \
-             Originals are limited to 16 MiB. A successful export returns the BLAKE3 key and \
-             size and renews shared artifact age, including for duplicate bytes. Original bytes \
-             persist independently of ephemeral session transcripts."
+             Originals are limited to 16 MiB. A successful export returns a canonical \
+             <tau-artifact:FULL_KEY> reference and byte size as output headers and renews shared \
+             artifact age, including for duplicate bytes. Original bytes persist independently \
+             of ephemeral session transcripts."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -549,7 +550,9 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             id: "export-artifact".to_owned(),
             title: Some("Export an original".to_owned()),
             arguments: CborValue::Map(vec![example_field("path", example_text("output.png"))]),
-            note: Some("The returned key can be imported by another session.".to_owned()),
+            note: Some(
+                "Pass the returned artifact reference directly to import or read_image.".to_owned(),
+            ),
             subcommand: None,
         }],
     };
@@ -558,9 +561,11 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(IMPORT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Import one artifact key to a private, unpredictable, non-executable temporary file \
-             on this shell host. Size and digest are verified before success. Import does not \
-             renew retention age; pass the returned local path to filesystem tools."
+            "Import one <tau-artifact:FULL_KEY> reference to a private, unpredictable, \
+             non-executable temporary file on this shell host. A bare internal key is also \
+             accepted. Size and digest are verified before success. The local path and byte size \
+             are returned as output headers. Import does not renew retention age; pass the \
+             returned local path to filesystem tools."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -569,8 +574,8 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "properties": {
                 "key": {
                     "type": "string",
-                    "pattern": "^blake3:[0-9a-f]{64}$",
-                    "description": "Canonical artifact key returned by export"
+                    "pattern": "^(?:blake3:[0-9a-f]{64}|<tau-artifact:blake3:[0-9a-f]{64}>)$",
+                    "description": "Canonical <tau-artifact:FULL_KEY> reference returned by export; a bare key is also accepted"
                 }
             },
             "required": ["key"],

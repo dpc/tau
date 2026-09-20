@@ -635,7 +635,8 @@ fn correlated_download_error_closes_known_read_once() {
     let manager = runtime.state_mut();
     manager.bind_session("artifact-session".parse().expect("session id"));
     let (invoke, lifecycle, output, rx) = active_invocation("download-error", IMPORT_TOOL_NAME);
-    let key = ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"x").to_hex())).expect("key");
+    let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"x").to_hex()))
+        .expect("key");
     let descriptor = tau_proto::ArtifactDescriptor::new(key.clone(), 1).expect("descriptor");
     let mut download = ArtifactDownload::new(key);
     download

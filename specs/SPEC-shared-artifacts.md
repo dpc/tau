@@ -12,6 +12,9 @@ digest. The selected persistent state root defines a shared cross-session
 namespace. Identical bytes share one original and age; filenames and media
 claims are per-use hints, not canonical identity or first-writer metadata.
 There is no list, overwrite, delete, reference-pin, or implicit remote-fetch API.
+Model-facing text names an artifact with the canonical Markdown autolink
+`<tau-artifact:FULL_KEY>`. Shared formatting and parsing preserve the raw digest
+key as the internal content address; consumers may also accept that bare key.
 Knowing a digest permits lookup through configured Artifact RPC peers; it does
 not grant model-role, tool, or remote-recipient authority. Configured local
 extensions and cooperative peers remain the existing trust boundary, not
@@ -72,8 +75,10 @@ cleaner may apply its own configured policy.
 
 The shell `export` consumer reads one bounded local regular file using its
 ordinary remembered-workdir filesystem authority and performs a new explicit
-upload. Shell `import` validates a canonical key, verifies the complete download,
-and publishes only a private non-executable temporary path on the shell execution
+upload. Its model-facing result exposes the canonical artifact reference and
+byte size as output headers. Shell `import` validates a canonical reference or
+bare key, verifies the complete download, and publishes only private
+non-executable temporary-path and byte-size output headers on the shell execution
 host. These tools never expose harness store paths or original bytes through
 model text; import and inspection do not renew age.
 

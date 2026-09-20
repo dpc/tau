@@ -45,7 +45,7 @@ fn read_image_live_fidelity_oracle() -> Result<(), Box<dyn std::error::Error>> {
     let overview = run_case(
         "read_image_fidelity_overview",
         &png,
-        "Export fidelity.png exactly once, then pass its returned key to read_image exactly once \
+        "Export fidelity.png exactly once, then pass its returned artifact reference to read_image exactly once \
          with mode overview and no region. Report the \
          two large panel colors from left to right as exactly OVERVIEW=<LEFT>-<RIGHT>, replacing \
          the placeholders with uppercase color names and adding no other text.",
@@ -65,7 +65,7 @@ fn read_image_live_fidelity_oracle() -> Result<(), Box<dyn std::error::Error>> {
     let high = run_case(
         "read_image_fidelity_high",
         &png,
-        "Export fidelity.png exactly once, then pass its returned key to read_image exactly once \
+        "Export fidelity.png exactly once, then pass its returned artifact reference to read_image exactly once \
          with mode high and no region. Count the \
          narrow black vertical bars inside the white target card near the lower right. Answer \
          exactly HIGH=<COUNT>, replacing the placeholder with the integer and adding no other text.",
@@ -85,7 +85,7 @@ fn read_image_live_fidelity_oracle() -> Result<(), Box<dyn std::error::Error>> {
     let crop = run_case(
         "read_image_fidelity_crop",
         &png,
-        "Export fidelity.png exactly once, then pass its returned key to read_image exactly once \
+        "Export fidelity.png exactly once, then pass its returned artifact reference to read_image exactly once \
          with mode high and region \
          x=1450,y=750,width=200,height=120. Count the narrow black vertical bars in that crop. \
          Answer exactly CROP=<COUNT>, replacing the placeholder with the integer and adding no \

@@ -1569,11 +1569,13 @@ does not refresh and replay a failed generation, switch accounts, or use an
 API key.
 
 Before generation, the provider checks that shared artifact storage is
-available. Success returns `{"key":"blake3:...","size":123,"mime_type":"image/png"}`.
+available. Success returns `artifact`, `size`, and `mime_type` output headers;
+`artifact` contains the canonical `<tau-artifact:FULL_KEY>` reference.
 The complete original PNG (up to 16 MiB, preserving alpha and metadata) lives
 in the harness-wide [artifact store](artifacts.md), independently of session
-lifetime. Pass the returned key directly to `read_image` if the model supports
-image tool results. Use shell `import(key)` only when another filesystem tool
+lifetime. Pass the returned `<tau-artifact:FULL_KEY>` reference directly to
+`read_image` if the model supports image tool results. Use shell `import(key)`
+only when another filesystem tool
 needs a private local copy. No inline image or host storage path is returned by
 generation.
 

@@ -1461,7 +1461,7 @@ fn built_in_prompts_place_payload_envelope_provenance_notice_between_tools_and_s
             BUILT_IN_SYSTEM_TEMPLATE_NAME,
             "## Tool calling",
             "## Skills and skill system",
-            "c6ab05f4c7b7fddcac37b7bae0622c09ab6d254485140abe00b03807ab464763",
+            "94458a41d0b481928c9e10ebe43b3bec9c3abc49a135748cf0933228e77e0eac",
         ),
         (
             BIG_SYSTEM_TEMPLATE_NAME,
@@ -1805,6 +1805,11 @@ fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
         .find("ROLE EXTRA")
         .expect("role extra prompt should be rendered");
     let harness = prompt.find("# Tau harness").expect("Tau harness section");
+    let artifacts = prompt
+        .find("## Artifact references")
+        .expect("artifact reference section");
+    assert!(prompt.contains("<tau-artifact:FULL_KEY>"));
+    assert!(harness < artifacts);
     let tool_calling = prompt
         .find("## Tool calling")
         .expect("tool calling section");

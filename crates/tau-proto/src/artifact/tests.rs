@@ -69,6 +69,32 @@ fn keys_and_operation_bounds_are_canonical() {
     assert!(ArtifactRequestId::parse("x".repeat(129)).is_err());
 }
 
+/// Model-visible references round-trip through one shared formatter/parser,
+/// while consumers may continue accepting a bare internal content key.
+#[test]
+fn artifact_references_round_trip_and_accept_bare_keys() {
+    let key =
+        ArtifactKey::parse(format!("blake3:{}", "a".repeat(64))).expect("canonical artifact key");
+    let reference = artifact_reference(&key);
+    assert_eq!(reference, format!("<tau-artifact:{key}>"));
+    assert_eq!(
+        parse_artifact_reference(&reference).expect("canonical reference"),
+        key
+    );
+    assert_eq!(
+        parse_artifact_reference(key.as_str()).expect("bare compatibility key"),
+        key
+    );
+    for invalid in [
+        format!("tau-artifact:{key}"),
+        format!("<tau-data:{key}>"),
+        format!("<tau-artifact:{key}"),
+        format!("<tau-artifact:{key}>>"),
+    ] {
+        assert!(parse_artifact_reference(&invalid).is_err(), "{invalid}");
+    }
+}
+
 /// The complete CBOR frame limit is inclusive and independent of raw chunk
 /// limits, so neither direction can accidentally consume the client's cap.
 #[test]

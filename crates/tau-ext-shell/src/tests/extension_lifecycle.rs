@@ -98,13 +98,24 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
     let Event::ToolResult(export) = export else {
         panic!("expected export result");
     };
-    assert_eq!(cbor_map_text(&export.result, "key"), Some(key.as_str()));
+    let reference = tau_proto::artifact_reference(&key);
+    assert_eq!(
+        cbor_map_text(&export.result, "artifact"),
+        Some(reference.as_str())
+    );
+    assert_eq!(
+        tau_proto::cbor_int_field(&export.result, "size"),
+        Some(original.len() as i128)
+    );
+    let rendered_export = tau_proto::ToolResponse::from_cbor(&export.result).render();
+    assert!(rendered_export.contains(&format!("artifact: {reference}\n")));
+    assert!(rendered_export.contains(&format!("size: {}\n", original.len())));
 
     writer
         .write_event(&tool_started(
             "import-call",
             IMPORT_TOOL_NAME,
-            cbor_text_map(vec![("key", key.as_str())]),
+            cbor_text_map(vec![("key", reference.as_str())]),
             "agent-artifact",
         ))
         .expect("import");
@@ -140,6 +151,13 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
     let Event::ToolResult(imported) = imported else {
         panic!("expected import result");
     };
+    assert_eq!(
+        tau_proto::cbor_int_field(&imported.result, "size"),
+        Some(original.len() as i128)
+    );
+    let rendered_import = tau_proto::ToolResponse::from_cbor(&imported.result).render();
+    assert!(rendered_import.contains(&format!("size: {}\n", original.len())));
+    assert!(rendered_import.contains("path: "));
     let path = PathBuf::from(cbor_map_text(&imported.result, "path").expect("import path"));
     assert_eq!(fs::read(&path).expect("imported bytes"), original);
     #[cfg(unix)]

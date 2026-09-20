@@ -43,9 +43,11 @@ canonical mapping, exact generation/route authority, activation ordering, and
 post-completion-commit transcript injection.
 Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
 Artifact coverage drives fake correlated export and import RPC responses, proves
-original-byte equality and private imported-file permissions, and passes the
-returned path as an ordinary filesystem artifact; image inspection consumes
-the stored key directly through `std-utils`.
+original-byte equality and private imported-file permissions, asserts
+`artifact`/`size` and `path`/`size` provider header projections, passes the
+canonical `<tau-artifact:FULL_KEY>` reference directly into import, and passes
+the returned path as an ordinary filesystem artifact; image inspection consumes
+the same reference directly through `std-utils`.
 the removed GPT `cwd` spelling appears only in an explicitly named legacy
 compatibility test.
 Allowlist coverage distinguishes absent from empty configuration, validates

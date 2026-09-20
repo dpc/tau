@@ -26,10 +26,10 @@ uses fixed `gpt-image-2` and the selected subscription account; it does not
 probe entitlement, switch accounts, or fall back to an API key.
 
 Artifact availability is checked before generation. Success returns
-`{"key":"blake3:...","size":123,"mime_type":"image/png"}` for the original PNG,
-up to 16 MiB with alpha/metadata intact. Use `import(key)` for a private path on
-the shell host for filesystem use, or pass its key directly to `read_image`
-where supported. Shared originals outlive
+`artifact`, `size`, and `mime_type` output headers for the original PNG, up to
+16 MiB with alpha/metadata intact. The artifact value is the canonical
+`<tau-artifact:FULL_KEY>` reference; pass it directly to `import` for a private
+path on the shell host or to `read_image` where supported. Shared originals outlive
 sessions, including ephemeral transcripts. No inline image or store path is
 returned. Ordinary background/wait/cancel applies; failed or uncertain
 generation is never retried. Cancellation during publication may orphan the

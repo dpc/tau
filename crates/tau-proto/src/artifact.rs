@@ -31,6 +31,8 @@ pub const ARTIFACT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub const ARTIFACT_CHUNK_BYTES: usize = 1024 * 1024;
 /// Maximum complete encoded Artifact request or response frame.
 pub const ARTIFACT_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// URI scheme used by canonical model-visible artifact references.
+pub const ARTIFACT_REFERENCE_SCHEME: &str = "tau-artifact";
 
 /// One correlated, exact-session request from a configured extension.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +166,23 @@ pub fn artifact_digest(key: &str) -> Option<&str> {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
     .then_some(hex)
+}
+
+/// Formats one internal content-address key as the canonical Markdown autolink
+/// used in prompts, tool results, and documentation.
+#[must_use]
+pub fn artifact_reference(key: &ArtifactKey) -> String {
+    format!("<{ARTIFACT_REFERENCE_SCHEME}:{key}>")
+}
+
+/// Parses either a canonical model-visible artifact reference or a bare
+/// internal key retained for simple callers and existing integrations.
+pub fn parse_artifact_reference(text: &str) -> Result<ArtifactKey, ArtifactError> {
+    let key = text
+        .strip_prefix(&format!("<{ARTIFACT_REFERENCE_SCHEME}:"))
+        .and_then(|text| text.strip_suffix('>'))
+        .unwrap_or(text);
+    ArtifactKey::parse(key)
 }
 
 /// Checks bounded RPC and operation identifiers before path construction.

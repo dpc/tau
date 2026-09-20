@@ -9,7 +9,7 @@ use image::{
 };
 use tau_proto::{
     ArtifactKey, CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart,
-    ToolUseState, ToolUseStats, ToolUseStatus,
+    ToolUseState, ToolUseStats, ToolUseStatus, artifact_reference, parse_artifact_reference,
 };
 
 pub(crate) const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
@@ -258,9 +258,9 @@ pub(crate) struct ReadImageRequest {
 impl ReadImageRequest {
     /// Parse the strict model-visible read-image arguments.
     pub(crate) fn from_arguments(arguments: &CborValue) -> Result<Self, String> {
-        let key = argument_text(arguments, "key")?
-            .parse()
-            .map_err(|_| "argument `key` must be a canonical artifact key".to_owned())?;
+        let key = parse_artifact_reference(&argument_text(arguments, "key")?).map_err(|_| {
+            "argument `key` must be a canonical artifact reference or bare key".to_owned()
+        })?;
         Ok(Self {
             key,
             mode: ImageMode::from_arguments(arguments)?,
@@ -280,12 +280,12 @@ impl ReadImageRequest {
                 MAX_SOURCE_BYTES
             ));
         }
-        let display_key = self.key.to_string();
+        let display_reference = artifact_reference(&self.key);
         let mode = self.mode;
         let requested_region = self.requested_region;
         let _permit = DecodePermit::acquire();
         let prepared = prepare_image(bytes, mode, requested_region)
-            .map_err(|message| format!("{display_key}: {message}"))?;
+            .map_err(|message| format!("{display_reference}: {message}"))?;
         let image = prepared.content;
         let format = image.media_type.mime_type();
         let byte_count = image.data.len();
@@ -298,8 +298,8 @@ impl ReadImageRequest {
         );
         let result = CborValue::Map(vec![
             (
-                CborValue::Text("key".to_owned()),
-                CborValue::Text(display_key.clone()),
+                CborValue::Text("artifact".to_owned()),
+                CborValue::Text(display_reference.clone()),
             ),
             (
                 CborValue::Text("original_bytes".to_owned()),
@@ -359,7 +359,7 @@ impl ReadImageRequest {
             ),
         ]);
         let display_args = format!(
-            "{display_key}  {format}  mode={}  source={}x{}  oriented={}x{}  \
+            "{display_reference}  {format}  mode={}  source={}x{}  oriented={}x{}  \
          region={},{} {}x{}  output={}x{}  {patches} patches  {byte_count} bytes",
             mode.as_str(),
             prepared.source_width,

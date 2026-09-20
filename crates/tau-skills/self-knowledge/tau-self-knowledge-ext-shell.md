@@ -15,15 +15,17 @@ Model-visible tools:
 
 - `read` — reads UTF-8 and non-UTF-8 files with line numbers, line-ending markers, Unicode replacement for invalid bytes plus `invalid-utf8` flags, range/ranges support, line/byte truncation metadata, a 10 MiB input safety cap, a rendered-range expansion cap that can reject large overlapping multi-range requests before rendering, and a bounded nearby-sibling suggestion for simple missing-path typos.
 - `export` — uploads one local regular file of at most 16 MiB to the persistent
-  shared content-addressed artifact store and returns its BLAKE3 key and size.
+  shared content-addressed artifact store and returns canonical
+  `<tau-artifact:FULL_KEY>` and `size` output headers.
   Relative paths use the invoking agent's remembered workdir. A successful new
   export, including duplicate bytes, renews artifact age; originals persist
   independently of ephemeral transcripts.
-- `import` — downloads one canonical artifact key without renewing retention,
-  verifies exact size and digest, and returns a private unpredictable mode-0600
-  temporary path on the shell execution host for filesystem tools. Image
-  inspection instead passes the artifact key directly to `std-utils`'
-  `read_image`. Import never executes or extracts content.
+- `import` — accepts one canonical `<tau-artifact:FULL_KEY>` reference (or a bare
+  internal key), downloads it without renewing retention, verifies exact size
+  and digest, and returns private unpredictable mode-0600 `path` and `size`
+  output headers for filesystem tools. Image inspection instead passes the
+  reference directly to `std-utils`' `read_image`. Import never executes or
+  extracts content.
 - `edit` with explicit `shell:tool-style:edit` — exposes the legacy internal
   `edit` implementation, which applies context-checked line-oriented
   replacements. `newText` fully replaces the 1-based half-open
