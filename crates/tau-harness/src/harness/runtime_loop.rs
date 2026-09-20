@@ -1,4 +1,4 @@
-//! Owns runtime waits, deadlines, event dispatch, and client writer draining.
+//! Owns runtime waits, deadlines, event dispatch, and client writer closure.
 //!
 //! Extension lifecycle and cache owners supply deadlines; this loop only
 //! invokes them in order.
@@ -952,7 +952,7 @@ impl Harness {
                                 ),
                             }),
                         );
-                        self.drain_client_writer(&connection_id);
+                        self.close_rejected_client_writer(&connection_id);
                         self.handle_disconnect(&connection_id);
                         *served_clients += 1;
                         return Ok(());
@@ -966,7 +966,7 @@ impl Harness {
                         self.publish_ui_quit_dispositions();
                     } else {
                         if matches!(disposition, ClientMessageDisposition::CloseAfterReply) {
-                            self.drain_client_writer(&connection_id);
+                            self.close_rejected_client_writer(&connection_id);
                         }
                         self.handle_disconnect(&connection_id);
                         *served_clients += 1;
@@ -988,7 +988,7 @@ impl Harness {
                     ClientMessageDisposition::Continue => false,
                     ClientMessageDisposition::Close => true,
                     ClientMessageDisposition::CloseAfterReply => {
-                        self.drain_client_writer(&connection_id);
+                        self.close_rejected_client_writer(&connection_id);
                         true
                     }
                 };
@@ -1265,15 +1265,15 @@ impl Harness {
         writer.close_after_current_for_startup(STARTUP_DISCONNECT_GRACE);
     }
 
-    /// Waits until the connection writer processes every previously queued
-    /// frame or exits after an I/O failure.
+    /// Transfers a rejected writer to terminal-delivery ownership.
     ///
-    /// An absent or already-closed writer has no remaining queue to drain.
-    pub(super) fn drain_client_writer(&self, client_id: &ConnectionId) {
-        let Some(writer) = self.ui_runtime.client_writers.get(client_id) else {
+    /// Actual Unix sockets close asynchronously after a bounded grace. Generic
+    /// stdio keeps the pre-existing synchronous drain contract.
+    pub(super) fn close_rejected_client_writer(&mut self, client_id: &ConnectionId) {
+        let Some(writer) = self.ui_runtime.client_writers.remove(client_id) else {
             return;
         };
-        writer.flush();
+        writer.close_after_current_for_rejection(REJECTED_SOCKET_DISCONNECT_GRACE);
     }
 
     // -----------------------------------------------------------------------

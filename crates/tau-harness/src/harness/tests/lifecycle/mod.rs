@@ -739,6 +739,32 @@ struct StalledWriter {
     release: Receiver<()>,
 }
 
+/// Socket writer that reports a large transport write before forwarding it.
+struct NotifyingSocketWriter {
+    /// Socket descriptor used by the writer thread.
+    stream: UnixStream,
+    /// One-shot notification that a large transport write began.
+    started: Option<SyncSender<()>>,
+    /// Bytes offered before the current write.
+    offered_bytes: usize,
+}
+
+impl path_std_io::Write for NotifyingSocketWriter {
+    fn write(&mut self, buf: &[u8]) -> path_std_io::Result<usize> {
+        if self.offered_bytes.saturating_add(buf.len()) > 1024 * 1024
+            && let Some(started) = self.started.take()
+        {
+            started.send(()).expect("report large socket write");
+        }
+        self.offered_bytes = self.offered_bytes.saturating_add(buf.len());
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        self.stream.flush()
+    }
+}
+
 impl path_std_io::Write for StalledWriter {
     fn write(&mut self, buf: &[u8]) -> path_std_io::Result<usize> {
         if let Some(started) = self.started.take() {

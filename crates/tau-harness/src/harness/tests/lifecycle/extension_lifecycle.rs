@@ -1868,6 +1868,110 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
     assert!(reason.contains(h.session_runtime.current_session_id.as_str()));
 }
 
+/// A rejected admitted Unix socket must release the runtime loop before a
+/// previously stalled outbound tail resumes, then cancel the transport after
+/// the bounded terminal-delivery grace.
+#[test]
+fn rejected_runtime_socket_closes_asynchronously_when_writer_is_stalled() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let (server, mut client) = UnixStream::pair().expect("socket pair");
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set client read timeout");
+    let writer_stream = server.try_clone().expect("writer clone");
+    let shutdown_stream = server.try_clone().expect("shutdown clone");
+    let (write_started_tx, write_started_rx) = mpsc::sync_channel(0);
+    let client_id = h
+        .accept_client_io(
+            server,
+            NotifyingSocketWriter {
+                stream: writer_stream,
+                started: Some(write_started_tx),
+                offered_bytes: 0,
+            },
+            Some(shutdown_stream),
+            ConnectionOrigin::Socket,
+            ClientWriterFailure::Report,
+        )
+        .expect("accept runtime socket");
+    let session_id = h.session_runtime.current_session_id.clone();
+    let hello = HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: crate::test_extension_name("attach-ui"),
+        client_kind: tau_proto::ClientKind::Ui,
+        expected_session_id: Some(session_id),
+        capabilities: Default::default(),
+    });
+    let mut served_clients = 0;
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(hello.clone()),
+        lifecycle_input_frame_bytes(&hello),
+        &mut served_clients,
+    )
+    .expect("admit runtime socket");
+    assert_eq!(served_clients, 0);
+
+    h.runtime_io
+        .bus
+        .send_to(
+            &client_id,
+            None,
+            HarnessOutputMessage::Disconnect(Disconnect {
+                reason: Some("x".repeat(4 * 1024 * 1024)),
+            }),
+        )
+        .expect("queue oversized tail");
+    write_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer reached socket transport");
+
+    let requested = tau_proto::SessionId::parse("different-session").expect("valid session id");
+    let rejection = HarnessInputMessage::Hello(tau_proto::Hello {
+        declaration_inspection: false,
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: crate::test_extension_name("attach-ui"),
+        client_kind: tau_proto::ClientKind::Ui,
+        expected_session_id: Some(requested),
+        capabilities: Default::default(),
+    });
+    let (handled_tx, handled_rx) = mpsc::channel();
+    let peer_guard = thread::spawn(move || {
+        let handled_before_release = handled_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        if handled_before_release {
+            thread::sleep(Duration::from_millis(250));
+        }
+        let mut output = Vec::new();
+        client
+            .read_to_end(&mut output)
+            .expect("bounded socket close reaches EOF");
+        (handled_before_release, output)
+    });
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(rejection.clone()),
+        lifecycle_input_frame_bytes(&rejection),
+        &mut served_clients,
+    )
+    .expect("reject admitted runtime socket");
+    let _ = handled_tx.send(());
+    let (handled_before_release, output) = peer_guard.join().expect("join socket peer guard");
+
+    assert!(
+        handled_before_release,
+        "runtime rejection waited for stalled socket output"
+    );
+    assert_eq!(served_clients, 1);
+    assert!(h.runtime_io.bus.connection(&client_id).is_none());
+    assert!(!h.ui_runtime.client_writers.contains_key(&client_id));
+    assert!(
+        output.len() < 4 * 1024 * 1024,
+        "watchdog did not truncate the stalled oversized tail"
+    );
+}
+
 /// A raw socket has no UI or shutdown authority until exact Hello admission
 /// succeeds, even though its transport is already registered for output.
 #[test]

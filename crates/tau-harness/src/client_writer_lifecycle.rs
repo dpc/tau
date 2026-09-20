@@ -10,6 +10,8 @@ use crate::event::LiveConsumerHandle;
 
 /// Grace allowed for a responsive socket to consume a fatal-startup Disconnect.
 pub(crate) const STARTUP_DISCONNECT_GRACE: Duration = Duration::from_millis(100);
+/// Grace allowed for a rejected socket to consume its terminal response.
+pub(crate) const REJECTED_SOCKET_DISCONNECT_GRACE: Duration = Duration::from_millis(100);
 /// Grace allowed for attached UIs to consume their final shutdown terminal.
 pub(crate) const FINAL_UI_DISCONNECT_GRACE: Duration = Duration::from_millis(100);
 
@@ -37,12 +39,6 @@ impl ClientWriterLifecycle {
             consumer,
             socket_shutdown: None,
         }
-    }
-
-    /// Waits until the writer processes every frame admitted through the
-    /// current tail.
-    pub(crate) fn flush(&self) {
-        self.consumer.flush();
     }
 
     /// Starts bounded best-effort delivery through the current tail.
@@ -102,6 +98,20 @@ impl ClientWriterLifecycle {
     /// writers have no equivalent cancellation primitive, so they retain
     /// their synchronous drain behavior.
     pub(crate) fn close_after_current_for_startup(self, grace: Duration) {
+        self.close_after_current_with_socket_watchdog(grace, "tau-client-startup-close");
+    }
+
+    /// Delivers a rejected client's terminal tail without blocking the caller.
+    ///
+    /// Unix sockets get a bounded best-effort delivery window followed by
+    /// `shutdown`. Generic writers retain synchronous drain behavior because
+    /// they have no independently owned transport cancellation handle.
+    pub(crate) fn close_after_current_for_rejection(self, grace: Duration) {
+        self.close_after_current_with_socket_watchdog(grace, "tau-client-rejection-close");
+    }
+
+    /// Closes at the current tail with bounded socket-specific cancellation.
+    fn close_after_current_with_socket_watchdog(self, grace: Duration, worker_name: &'static str) {
         self.consumer.close_after_current();
         let Some(socket_shutdown) = self.socket_shutdown else {
             self.consumer.flush();
@@ -112,7 +122,7 @@ impl ClientWriterLifecycle {
         let worker_stream = Arc::clone(&socket_shutdown);
         let consumer = self.consumer;
         if thread::Builder::new()
-            .name("tau-client-startup-close".to_owned())
+            .name(worker_name.to_owned())
             .spawn(move || {
                 let _ = consumer.wait_for_retirement(grace);
                 let _ = worker_stream.shutdown(Shutdown::Both);

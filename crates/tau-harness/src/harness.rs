@@ -82,7 +82,8 @@ use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
 use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
 use crate::client_writer_lifecycle::{
-    ClientWriterLifecycle, FINAL_UI_DISCONNECT_GRACE, STARTUP_DISCONNECT_GRACE,
+    ClientWriterLifecycle, FINAL_UI_DISCONNECT_GRACE, REJECTED_SOCKET_DISCONNECT_GRACE,
+    STARTUP_DISCONNECT_GRACE,
 };
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;

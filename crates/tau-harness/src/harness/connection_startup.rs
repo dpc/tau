@@ -360,7 +360,7 @@ impl Harness {
                     ClientMessageDisposition::Continue => false,
                     ClientMessageDisposition::Close => true,
                     ClientMessageDisposition::CloseAfterReply => {
-                        self.drain_client_writer(connection_id);
+                        self.close_rejected_client_writer(connection_id);
                         true
                     }
                 };

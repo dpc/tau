@@ -78,6 +78,10 @@ frames remain readable before EOF; a slow client may instead observe EOF, reset,
 a partial frame, or no terminal reason. Generic stdio and pipe writers do not
 inherit this socket-specific cancellation guarantee and retain synchronous
 drain behavior where the harness requests a terminal drain.
+The same 100-ms asynchronous best-effort close applies after the harness has
+already rejected a Unix-socket client during startup or runtime protocol
+handling. This cutoff follows rejection only: ordinary connected consumers
+remain eligible while stalled and are not expired for lag.
 Initial UI authentication must complete within the fixed startup deadline. An
 authenticated initial `Subscribe` decoded at or before the deadline succeeds
 even when ingress handling runs later; late, silent, and unauthenticated clients
