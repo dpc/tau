@@ -14,7 +14,7 @@ Release tooling reads `crates/tau/Cargo.toml`, not the workspace default, for
 the application release version.
 
 Subsequent workspace development advances the SDK to **0.6.0** and protocol
-7.4. Tagged release verification for current Tau sources therefore requires
+8.1. Tagged release verification for current Tau sources therefore requires
 `dpc-tau-proto` and `dpc-tau-client` 0.6.0 in the core binary lock metadata.
 The separately maintained extension inputs remain on their independently
 pinned SDK versions until those projects publish updates.
