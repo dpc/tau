@@ -2,7 +2,9 @@
 
 Shared original-byte artifacts form a separate persistent domain, not extension
 data or semantic journal persistence. Configured-extension admission captures
-instance/session authority, then a bounded worker owns all storage I/O and returns
+instance/session authority; authenticated UI admission separately allows only
+uploads with its exact Hello session/generation and existing connection owner.
+A bounded worker owns all storage I/O and returns
 directed non-event completions. Immutable digest objects and explicit last-new-put
 metadata survive session deletion; independent startup retention skips active
 cross-process-coordinated reads. Memory-only admission and cleanup never access

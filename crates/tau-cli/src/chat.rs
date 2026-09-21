@@ -16,6 +16,7 @@ mod configuration_tests;
 mod delivery_memory;
 #[cfg(test)]
 mod event_message_tests;
+mod paste_upload;
 #[cfg(test)]
 mod recorded_line_routing_tests;
 mod renderer_scheduler;
@@ -1408,6 +1409,7 @@ fn run_chat_session(
         tracing::enabled!(target: "tau_cli::delivery_memory", tracing::Level::TRACE)
             .then(|| Arc::new(DeliveryMemoryTracker::new()));
     let socket_delivery_memory = delivery_memory.clone();
+    let (paste_upload, paste_worker) = paste_upload::PasteUpload::spawn(writer.clone());
     let socket_reader = spawn_socket_reader(
         socket_reader_input,
         attach,
@@ -1423,6 +1425,7 @@ fn run_chat_session(
         socket_local_disconnect_started,
         socket_delivery_memory,
         quit_result_tx,
+        paste_upload.clone(),
     );
 
     // Terminal setup.
@@ -1641,6 +1644,7 @@ fn run_chat_session(
             &writer,
             &mut active_session_id,
             TerminalInputLoopCtx {
+                paste_upload: paste_upload.clone(),
                 quit_results: quit_result_rx.clone(),
                 fast_service_tier_state,
                 current_role_state,
@@ -1715,6 +1719,8 @@ fn run_chat_session(
         exit,
         local_disconnect_started,
     );
+    paste_upload.stop();
+    let _ = paste_worker.join();
     drop(session_completion);
     // HighTerm owns raw mode and performs its final repaint on Drop. Joining
     // renderer workers alone does not restore the terminal.
@@ -2041,6 +2047,7 @@ fn spawn_socket_reader(
     socket_local_disconnect_started: Arc<AtomicBool>,
     socket_delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
     quit_result_tx: mpsc::Sender<tau_proto::UiQuitResult>,
+    paste_upload: paste_upload::PasteUpload,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut cold_attach_stager = if attach {
@@ -2173,6 +2180,15 @@ fn spawn_socket_reader(
                     );
                     socket_ui_io_meter.record_downlink_frame_bytes(&message, frame_bytes);
                     let deliveries = match message {
+                        HarnessOutputMessage::ArtifactResult(result) => {
+                            if queue_bytes <= tau_proto::ARTIFACT_FRAME_BYTES {
+                                paste_upload.deliver(*result);
+                            }
+                            if let Some(memory) = &socket_delivery_memory {
+                                memory.release(delivery_id);
+                            }
+                            continue;
+                        }
                         HarnessOutputMessage::Deliver(delivery) => {
                             let Some(delivery) =
                                 renderer_event_from_delivery(delivery, queue_bytes, delivery_id)
@@ -2584,6 +2600,8 @@ struct RendererQueueFrame {
 }
 
 struct TerminalInputLoopCtx {
+    /// Upload control on this attachment's existing bidirectional transport.
+    paste_upload: paste_upload::PasteUpload,
     /// Directed quit acknowledgments, consumed before explicit detach exits.
     quit_results: Arc<Mutex<mpsc::Receiver<tau_proto::UiQuitResult>>>,
     fast_service_tier_state: Arc<path_std_sync::atomic::AtomicBool>,
@@ -3330,6 +3348,30 @@ impl<'a> TerminalInputSession<'a> {
         use tau_cli_term::Event as TermEvent;
 
         match event {
+            TermEvent::PasteUpload { id, text } => {
+                if !paste_upload::supported(self.ctx.harness_protocol_version) {
+                    self.term.handle().finish_paste_upload(
+                        id,
+                        Err(
+                            "harness does not support UI uploads (requires protocol 8.1)"
+                                .to_owned(),
+                        ),
+                    );
+                } else {
+                    self.output.command_feedback("Uploading paste as a shared artifact (retained independently of session history); Ctrl-C cancels.");
+                    self.ctx.paste_upload.start(
+                        self.session_id.clone(),
+                        id,
+                        text,
+                        self.term.handle().clone(),
+                    );
+                }
+                Ok(None)
+            }
+            TermEvent::PasteCancelled { id } => {
+                self.ctx.paste_upload.cancel(id);
+                Ok(None)
+            }
             TermEvent::Line(line) => self.handle_line(&line),
             TermEvent::Eof => Ok(self.handle_eof()),
             TermEvent::CancelPrompt => {
@@ -3358,7 +3400,11 @@ impl<'a> TerminalInputSession<'a> {
             TermEvent::Action(action) => self.handle_binding_action(&action)?,
             TermEvent::BackTab => self.cycle_role_group(),
             TermEvent::Escape => self.recall_queued_prompt(),
-            TermEvent::Line(_) | TermEvent::Eof | TermEvent::CancelPrompt => {}
+            TermEvent::Line(_)
+            | TermEvent::Eof
+            | TermEvent::CancelPrompt
+            | TermEvent::PasteUpload { .. }
+            | TermEvent::PasteCancelled { .. } => {}
         }
         Ok(())
     }
@@ -4959,6 +5005,7 @@ fn terminal_input_loop(
     // thread without borrowing `term` while the loop also holds
     // `&mut term` for `get_next_event`.
     let output = LocalTerminalOutput::new(term.handle().clone(), ctx.theme.clone());
+    term.handle().enable_paste_uploads(8192);
     TerminalInputSession {
         term,
         writer,

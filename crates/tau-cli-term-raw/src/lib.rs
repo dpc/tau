@@ -14,6 +14,7 @@
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
 mod block_layout_state;
+mod pending_paste;
 mod presentation_mutation_generation;
 mod presentation_observation_state;
 mod prompt_editor_state;
@@ -1006,6 +1007,18 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
 }
 /// High-level events surfaced to the downstream event loop.
 pub enum Event {
+    /// Upload normalized text without exposing it to the editable draft.
+    PasteUpload {
+        /// Exact local attempt identity, never a wire or session authority.
+        id: u64,
+        /// Normalized source retained outside prompt/history presentation.
+        text: Arc<str>,
+    },
+    /// Discard the pending paste; the original draft remains unchanged.
+    PasteCancelled {
+        /// Attempt whose late completion must no longer edit the draft.
+        id: u64,
+    },
     /// The user submitted a line with Ctrl-Enter or `submit-prompt`
     /// outside the completion menu, or with no candidate selected.
     Line(String),
@@ -2128,6 +2141,25 @@ impl TermHandle {
         self.lock().editor.buffer.clone()
     }
 
+    /// Enables large-paste interception for an application that handles
+    /// uploads.
+    pub fn enable_paste_uploads(&self, threshold: usize) {
+        self.lock().editor.paste_upload_threshold = Some(threshold);
+    }
+
+    /// Delivers a content-free upload outcome to the sole editor input owner.
+    ///
+    /// Success contains only the reference to insert, never original bytes.
+    /// Late outcomes after cancellation or a later retry are ignored.
+    pub fn finish_paste_upload(&self, id: u64, result: Result<String, String>) {
+        let _ = self
+            .input_tx
+            .send(InputMessage::Raw(RawEvent::PasteUploadFinished {
+                id,
+                result,
+            }));
+    }
+
     /// Returns the current cursor position in bytes.
     pub fn get_cursor(&self) -> usize {
         self.lock().editor.cursor
@@ -2150,6 +2182,9 @@ impl TermHandle {
     /// point.
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
+        if st.editor.pending_paste.is_some() {
+            return;
+        }
         st.editor.revision = st.editor.revision.wrapping_add(1);
         st.advance_completion_generation();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
@@ -2173,7 +2208,7 @@ impl TermHandle {
         cursor: usize,
     ) -> bool {
         let mut st = self.lock();
-        if st.editor.revision != expected_revision {
+        if st.editor.pending_paste.is_some() || st.editor.revision != expected_revision {
             return false;
         }
         st.editor.revision = st.editor.revision.wrapping_add(1);
@@ -2196,6 +2231,9 @@ impl TermHandle {
     /// was present at recall time.
     pub fn recall_prompt_before_current(&self, text: String) {
         let mut st = self.lock();
+        if st.editor.pending_paste.is_some() {
+            return;
+        }
         st.editor.revision = st.editor.revision.wrapping_add(1);
         st.advance_completion_generation();
         st.recall_prompt_before_current(text);
@@ -2210,6 +2248,9 @@ impl TermHandle {
     /// the replacement becomes the new editable draft.
     pub fn set_buffer_preserving_undo(&self, text: String, cursor: usize) {
         let mut st = self.lock();
+        if st.editor.pending_paste.is_some() {
+            return;
+        }
         st.editor.revision = st.editor.revision.wrapping_add(1);
         st.advance_completion_generation();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
@@ -2320,6 +2361,13 @@ fn validate_osc1337_name(name: &str) -> Result<(), &'static str> {
 
 /// Raw terminal events from crossterm or a virtual test input channel.
 pub enum RawEvent {
+    /// Directed local upload completion; contains reference or diagnostic only.
+    PasteUploadFinished {
+        /// Exact attempt identity.
+        id: u64,
+        /// Reference to insert, or failure retaining the source for retry.
+        result: Result<String, String>,
+    },
     /// A decoded key press from crossterm.
     Key(KeyEvent),
     /// Terminal resize event with width and height in cells.
@@ -2702,6 +2750,30 @@ impl Term {
                 RawEvent::Key(key) => {
                     {
                         let mut st = self.handle.lock();
+                        if let Some(paste) = &st.editor.pending_paste {
+                            if key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                let id = paste.id;
+                                st.editor.pending_paste = None;
+                                return Ok(Event::PasteCancelled { id });
+                            }
+                            if key.code == KeyCode::Enter && paste.failed {
+                                let text = paste.text.clone();
+                                st.editor.next_paste_id += 1;
+                                let id = st.editor.next_paste_id;
+                                st.editor.pending_paste = Some(pending_paste::PendingPaste {
+                                    id,
+                                    text: text.clone(),
+                                    failed: false,
+                                });
+                                return Ok(Event::PasteUpload { id, text });
+                            }
+                            // Upload ownership freezes edits, bindings,
+                            // history,
+                            // external editors, and submission alike.
+                            continue;
+                        }
                         st.editor.revision = st.editor.revision.wrapping_add(1);
                         st.advance_completion_generation();
                     }
@@ -2743,6 +2815,26 @@ impl Term {
                     let text = normalize_paste_text(text);
                     {
                         let mut st = self.handle.lock();
+                        if st.editor.pending_paste.is_some() {
+                            return Ok(Event::Notice(
+                                "Paste busy; wait or press Ctrl-C to discard it before pasting again.".to_owned(),
+                            ));
+                        }
+                        if st
+                            .editor
+                            .paste_upload_threshold
+                            .is_some_and(|limit| text.len() >= limit)
+                        {
+                            st.editor.next_paste_id += 1;
+                            let id = st.editor.next_paste_id;
+                            let text: Arc<str> = text.into();
+                            st.editor.pending_paste = Some(pending_paste::PendingPaste {
+                                id,
+                                text: text.clone(),
+                                failed: false,
+                            });
+                            return Ok(Event::PasteUpload { id, text });
+                        }
                         st.editor.revision = st.editor.revision.wrapping_add(1);
                         st.advance_completion_generation();
                         st.record_undo();
@@ -2755,7 +2847,43 @@ impl Term {
                     self.handle.redraw();
                     return Ok(Event::BufferChanged);
                 }
+                RawEvent::PasteUploadFinished { id, result } => {
+                    let mut st = self.handle.lock();
+                    let Some(paste) = st
+                        .editor
+                        .pending_paste
+                        .as_mut()
+                        .filter(|paste| paste.id == id)
+                    else {
+                        continue;
+                    };
+                    match result {
+                        Err(error) => {
+                            paste.failed = true;
+                            return Ok(Event::Notice(format!(
+                                "Paste upload failed: {error}. Enter retries; Ctrl-C discards. Draft unchanged."
+                            )));
+                        }
+                        Ok(reference) => {
+                            st.editor.pending_paste = None;
+                            st.editor.revision = st.editor.revision.wrapping_add(1);
+                            st.advance_completion_generation();
+                            st.record_undo();
+                            let cursor = st.editor.cursor;
+                            st.editor.buffer.insert_str(cursor, &reference);
+                            st.write_cursor(cursor + reference.len());
+                            st.sync_buffer_to_history_nav();
+                        }
+                    }
+                    drop(st);
+                    self.refresh_completion();
+                    self.handle.redraw();
+                    return Ok(Event::BufferChanged);
+                }
                 RawEvent::CompletionRefresh => {
+                    if self.handle.lock().editor.pending_paste.is_some() {
+                        continue;
+                    }
                     self.refresh_completion();
                     self.handle.redraw();
                     return Ok(Event::CompletionRefresh);
@@ -2763,7 +2891,8 @@ impl Term {
                 RawEvent::CompletionRefreshIfGeneration(generation) => {
                     let eligible = {
                         let st = self.handle.lock();
-                        st.editor.completion_generation == generation
+                        st.editor.pending_paste.is_none()
+                            && st.editor.completion_generation == generation
                             && st
                                 .editor
                                 .completion
@@ -3781,7 +3910,11 @@ fn read_real_raw_event(
 ) -> io::Result<RawEvent> {
     loop {
         let raw = read()?;
-        tracing::trace!(target: "tau_cli_term_raw::input", ?raw, "terminal raw input event");
+        tracing::trace!(
+            target: "tau_cli_term_raw::input",
+            kind = ?std::mem::discriminant(&raw),
+            "terminal raw input event"
+        );
         match raw {
             CtEvent::Key(key) => {
                 // The kitty protocol surfaces Press/Repeat/Release events; drop

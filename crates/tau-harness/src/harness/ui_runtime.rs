@@ -18,6 +18,9 @@ use super::*;
 /// explicitly close a socket writer; the lifecycle owns no join handle or drop
 /// side effect. This state does not own the generic event bus.
 pub(crate) struct UiRuntimeState {
+    /// Existing UI Hello's exact session/generation for upload-only RPC.
+    pub(super) artifact_admissions:
+        HashMap<tau_proto::ConnectionId, super::artifact_requests::UiArtifactAdmission>,
     /// Monotonic explicit navigation writes; delayed implicit writes cannot
     /// override them.
     pub(super) explicit_navigation_epoch: u64,
@@ -79,6 +82,7 @@ pub(crate) struct UiRuntimeState {
 impl Default for UiRuntimeState {
     fn default() -> Self {
         Self {
+            artifact_admissions: HashMap::new(),
             explicit_navigation_epoch: 0,
             pending_bootstrap_creates: HashMap::new(),
             shutdown_cause: None,

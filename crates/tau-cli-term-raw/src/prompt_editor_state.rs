@@ -4,6 +4,12 @@ use crate::{CompletionMenu, HistoryNav, PromptDraft, PromptSnapshot, StyledText}
 
 /// Prompt contents, editing history, and prompt-local viewport state.
 pub(super) struct PromptEditorState {
+    /// Opt-in per-paste UTF-8 threshold for the application upload handler.
+    pub(super) paste_upload_threshold: Option<usize>,
+    /// Paste transaction holding the editor unchanged.
+    pub(super) pending_paste: Option<crate::pending_paste::PendingPaste>,
+    /// Monotonically increasing attempt identity for late-result rejection.
+    pub(super) next_paste_id: u64,
     /// Prompt rendered to the left of the editable input.
     pub(super) left_prompt: StyledText,
     /// Prompt rendered at the right edge of the terminal.
@@ -60,6 +66,9 @@ impl PromptEditorState {
     /// Creates an empty editor with the supplied left prompt.
     pub(super) fn new(left_prompt: StyledText) -> Self {
         Self {
+            paste_upload_threshold: None,
+            pending_paste: None,
+            next_paste_id: 0,
             left_prompt,
             right_prompt: StyledText::new(),
             input_placeholder: StyledText::new(),

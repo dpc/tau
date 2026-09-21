@@ -49,6 +49,12 @@ directed and omitted from semantic journals and debug JSONL. Cancellation or a
 lost result may leave a committed shared original. See
 [SPEC-shared-artifacts](specs/SPEC-shared-artifacts.md).
 
+Authenticated UIs can upload shared originals, but cannot read them through
+their upload-only RPC authority. Requests use the UI's existing exact-session
+connection and captured session generation, including the initial owned stdio
+UI's ordinary socket-class admission. Paste originals remain outside prompt
+drafts, histories, semantic journals, raw-input tracing, and event broadcasts.
+
 Provider-hosted web search runs inside the selected inference provider and does
 not cross Tau's registered-tool dispatch boundary. Search queries, actions,
 returned content, URLs, titles, and citation metadata are untrusted external

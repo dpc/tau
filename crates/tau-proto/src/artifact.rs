@@ -34,7 +34,8 @@ pub const ARTIFACT_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// URI scheme used by canonical model-visible artifact references.
 pub const ARTIFACT_REFERENCE_SCHEME: &str = "tau-artifact";
 
-/// One correlated, exact-session request from a configured extension.
+/// One correlated, exact-session request from a configured extension or an
+/// authenticated socket UI (which can use only upload operations).
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactRequest {
     /// Caller-selected correlation, bounded to 128 ASCII identifier bytes.

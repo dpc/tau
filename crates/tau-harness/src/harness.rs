@@ -3148,6 +3148,15 @@ impl Harness {
                         );
                         return Ok(ClientMessageDisposition::CloseAfterReply);
                     }
+                    if socket_connection && hello.client_kind == ClientKind::Ui {
+                        self.ui_runtime.artifact_admissions.insert(
+                            client_id.clone(),
+                            artifact_requests::UiArtifactAdmission {
+                                session_id: expected_session_id,
+                                generation: self.session_runtime.current_session_generation,
+                            },
+                        );
+                    }
                     self.runtime_io.bus.send_to(
                         client_id,
                         None,
@@ -3256,6 +3265,10 @@ impl Harness {
                 }
                 Ok(ClientMessageDisposition::Continue)
             }
+            HarnessInputMessage::ArtifactRequest(request) => {
+                self.handle_ui_artifact_request(client_id, request);
+                Ok(ClientMessageDisposition::Continue)
+            }
             HarnessInputMessage::UiDebugEventStatsRequest(request) => {
                 self.handle_ui_debug_event_stats_request(client_id, request);
                 Ok(ClientMessageDisposition::Continue)
@@ -3348,7 +3361,6 @@ impl Harness {
             | HarnessInputMessage::InterceptReply(_)
             | HarnessInputMessage::Ready(_)
             | HarnessInputMessage::ProviderDebugCapture(_)
-            | HarnessInputMessage::ArtifactRequest(_)
             | HarnessInputMessage::ExtensionDataRequest(_) => {
                 Ok(ClientMessageDisposition::Continue)
             }

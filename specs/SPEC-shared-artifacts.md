@@ -34,6 +34,18 @@ image previews remain inline and independently replayable under
 [SPEC-typed-image-tool-results](SPEC-typed-image-tool-results.md); an original
 artifact never replaces preview or context replay authority.
 
+Authenticated UIs may use only availability and upload operations on their
+existing connection. Exact-session Hello admission captures the session binding
+generation; both that authority and transfer connection ownership remain current
+for each request. Initial owned stdio and attached socket UIs use the same
+admission route; unrelated external peers, probes, and in-memory/non-admitted
+clients gain no upload authority. Read/list/mutation authority is not added.
+Large terminal pastes upload normalized editor-equivalent UTF-8 and insert only
+the canonical editable artifact reference. The pending source never enters
+prompt drafts, history, or event presentation. Failure retains it for explicit
+retry/discard without submitting the original text. Cancellation leaves the
+original draft unchanged and may leave a committed shared original.
+
 Objects are bounded to 16 MiB and raw chunks to 1 MiB, with the complete encoded
 frame bounded separately in both directions. A bounded off-loop worker owns
 filesystem I/O. Artifact response retention remains bounded through writer acknowledgement or

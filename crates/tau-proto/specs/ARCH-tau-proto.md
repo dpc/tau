@@ -1,5 +1,10 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 8.1 extends existing directed Artifact RPC admission to upload-only
+authenticated UIs, gated by the existing SessionAccepted revision. Initial
+stdio and attached socket UI transports keep their existing handshake and
+lifecycle; no new event or journal payload is introduced.
+
 Protocol 8.0 gives provider terminal reports a distinct DTO from canonical
 responses. Only the canonical DTO carries required harness-authored final-status
 authority; old canonical records without it are rejected, not defaulted or

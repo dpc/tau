@@ -1176,9 +1176,23 @@ impl Harness {
     }
 
     pub(crate) fn accept_stdio_client(&mut self) -> Result<ConnectionId, HarnessError> {
+        self.accept_initial_ui_io(io::stdin(), io::stdout())
+    }
+
+    /// Admits the owned initial UI through the same authenticated UI route as
+    /// an attached socket, while retaining its original writer-failure policy.
+    pub(super) fn accept_initial_ui_io<R, W>(
+        &mut self,
+        read: R,
+        write: W,
+    ) -> Result<ConnectionId, HarnessError>
+    where
+        R: io::Read + Send + 'static,
+        W: io::Write + Send + 'static,
+    {
         self.accept_client_io(
-            io::stdin(),
-            io::stdout(),
+            read,
+            write,
             None,
             ConnectionOrigin::Socket,
             ClientWriterFailure::AwaitIngress,

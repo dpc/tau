@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 8.1 admits upload-only Artifact RPC on the existing authenticated UI
+connection, including the owned initial stdio UI, which uses the same UI
+admission route as attached sockets. A UI sends these operations only after
+`SessionAccepted` advertises 8.1 or newer. Older/missing revision knowledge
+preserves ordinary text interaction and produces a local unsupported-upload
+failure, never an inline large-text fallback. There is no new connection,
+handshake purpose, lifecycle participant, or journal schema.
+
 Protocol 8.0 separates provider terminal observations from canonical terminal
 facts. Canonical responses require harness-authored accepted/challenged
 final-status authority; historical records without it fail decoding, with no

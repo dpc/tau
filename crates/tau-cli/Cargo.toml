@@ -54,6 +54,7 @@ unicode-width.workspace = true
 built.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 crossterm.workspace = true
 proptest.workspace = true
 tau-cli-term-raw = { workspace = true, features = ["redraw-test-counter"] }

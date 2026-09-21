@@ -7,6 +7,8 @@ use crate::event::ChannelSink;
 use crate::event_log::EventLog;
 use crate::harness::{ExtensionActivationStage, ExtensionFrameAdmission};
 
+mod ui;
+
 /// A stalled configured recipient is disconnected on artifact egress overflow;
 /// other connections remain live and late completions cannot revive the peer.
 #[test]

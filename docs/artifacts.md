@@ -125,3 +125,30 @@ storage-dependent operation on an incompatible or unavailable route.
 
 The governing non-local contract is
 [SPEC-shared-artifacts](../specs/SPEC-shared-artifacts.md).
+## Large terminal text pastes
+
+A single paste of at least 8 KiB of normalized UTF-8 becomes an artifact.
+CRLF and bare CR become LF before measuring and uploading; no other trimming
+occurs. Smaller pastes, including pasted file paths, remain ordinary text.
+The maximum artifact is 16 MiB. Tau does not read paths or fetch pasted URLs.
+
+While uploading, the original draft and cursor stay unchanged and editing,
+submission, history navigation, and draft-switch bindings are paused. Ctrl-C
+discards the paste without canceling an agent prompt. A second paste is rejected
+with a busy notice. A successful upload inserts only an editable
+`<tau-artifact:FULL_KEY>` reference. It does not submit the prompt.
+
+On failure the source remains in memory outside the draft: Enter explicitly
+retries, Ctrl-C discards. Tau never falls back to submitting the wall of text.
+Retries preserve acknowledged upload identity/offset where available; an expired
+transfer may require discarding and pasting again. A paste above 16 MiB cannot
+upload, but remains retained until discarded. Closing the UI discards local
+pending source. Cancellation or a lost result may leave a shared original.
+Artifacts persist independently of session transcripts, including ephemeral
+ones, and references do not pin retention.
+
+Uploads reuse the existing interactive UI transport; there is no extra UI
+connection or lifecycle participant. They require harness protocol 8.1 or newer
+and a persistent artifact store. A memory-only/older harness reports failure
+without inserting the original text. Terminal input remains crossterm bracketed
+text paste; native Kitty clipboard/image transport is not implemented.

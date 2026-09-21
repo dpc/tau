@@ -192,6 +192,18 @@ fn preserve_pause_on_unconfirmed_foreground<T, F: FnMut() -> io::Result<()>>(
 
 /// High-level events surfaced to the caller.
 pub enum Event {
+    /// Upload one normalized paste while its original draft stays frozen.
+    PasteUpload {
+        /// Exact local attempt identity.
+        id: u64,
+        /// Normalized source kept outside editable prompt and histories.
+        text: std::sync::Arc<str>,
+    },
+    /// Cancel one paste upload without canceling an agent prompt.
+    PasteCancelled {
+        /// Attempt canceled without changing the original draft.
+        id: u64,
+    },
     /// The user submitted a line (pressed Enter by default, Ctrl-Enter,
     /// or ran `submit-prompt` with no completion preview).
     Line(String),
@@ -760,6 +772,10 @@ impl HighTerm {
 
     fn handle_next_raw_event(&mut self, raw: RawEvent) -> NextEventStep {
         match raw {
+            RawEvent::PasteUpload { id, text } => {
+                NextEventStep::Return(Event::PasteUpload { id, text })
+            }
+            RawEvent::PasteCancelled { id } => NextEventStep::Return(Event::PasteCancelled { id }),
             RawEvent::BufferChanged => self.handle_buffer_changed_event(),
             RawEvent::CompletionRefresh => {
                 self.sync_menu_block();
@@ -987,6 +1003,12 @@ impl HighTerm {
 
     fn apply_raw_prompt_event(&mut self, raw: RawEvent) -> PromptActionOutcome {
         match raw {
+            RawEvent::PasteUpload { id, text } => {
+                PromptActionOutcome::Return(Event::PasteUpload { id, text })
+            }
+            RawEvent::PasteCancelled { id } => {
+                PromptActionOutcome::Return(Event::PasteCancelled { id })
+            }
             RawEvent::BufferChanged => {
                 self.sync_menu_block();
                 PromptActionOutcome::BufferChanged

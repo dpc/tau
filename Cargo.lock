@@ -758,6 +758,7 @@ dependencies = [
 name = "dpc-tau-cli"
 version = "0.1.1"
 dependencies = [
+ "blake3",
  "built",
  "ciborium",
  "clap",
