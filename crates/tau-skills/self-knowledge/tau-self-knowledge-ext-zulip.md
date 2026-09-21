@@ -13,10 +13,10 @@ starts it through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd)
 owns its source and detailed operational documentation. The bridge uses bot
 email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
-`GET /api/v1/events`; it does not use webhooks. The sender-trust-capable
-extension revision requires Tau protocol 7.0 and registry SDK 0.4.0; configured
-6.x bridges are rejected before Configure/Ready. Its snake_case keys, secret
-bindings, and catch-up checkpoint format otherwise remain unchanged.
+`GET /api/v1/events`; it does not use webhooks. The pinned extension revision
+requires Tau protocol 8.1 and registry SDK 0.6.0; protocol-7 bridges are
+rejected before Configure/Ready. Its snake_case keys, secret bindings, and
+catch-up checkpoint format otherwise remain unchanged.
 
 An immediate reply for an already queued event, or a non-blocking poll reply,
 may omit the queue-ID echo. The bridge accepts that omission only for its

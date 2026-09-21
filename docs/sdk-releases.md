@@ -82,7 +82,7 @@ for admission behavior and the protocol boundary.
 This mapping does not describe or promise journal physical-format
 compatibility.
 
-## Release checkpoint
+## Protocol 8.1 release acceptance
 
 The package readiness check verifies the complete SDK archive set:
 
@@ -95,21 +95,16 @@ manifests, and builds a small consumer outside the workspace against the exact
 archives. Its consumer uses temporary Cargo patches unless `--registry` is
 selected.
 
-For the protocol `8.1` release, the leaf versions are already published.
-First dry-run and upload `dpc-tau-proto` `0.6.0`. Cargo cannot package the
-dependent client against an unpublished registry proto without bypassing
-verification, so wait for proto `0.6.0` to resolve. Then run the package
-readiness check, dry-run and upload `dpc-tau-client` `0.6.0`. Each
-`cargo publish --dry-run` must immediately precede its upload; do not upload a
-package whose current dry-run fails.
+The protocol `8.1` SDK release is published and accepted. Registry
+`dpc-tau-proto` and `dpc-tau-client` `0.6.0` both come from source revision
+`24def4156c132074912e86ad94f53b82ce871933`; the client requires exact proto
+`=0.6.0`. The registry-only SDK consumer check passes under the supported Rust
+1.91 environment and verifies protocol 8.1 without local patches. The
+`dpc-tau-proto-v0.6.0` and `dpc-tau-client-v0.6.0` Radicle tags both resolve to
+that source revision.
 
-After the complete set is available, run
-`./.config/selfci/check-sdk-packages.sh --registry` to repeat the exact-version
-consumer check without patches.
-
-Only after both registry releases and the registry-only consumer check succeed,
-create `dpc-tau-proto-v0.6.0` and `dpc-tau-client-v0.6.0` at the exact
-published source revision. Push both tags and verify their remote targets.
-Never create either tag for a failed or partial registry release. Registry
-upload and tag publication require separate explicit authorization; package
-readiness does not authorize either operation.
+The accepted registry archive SHA-256 values are
+`5f4bf56b5e0990944f4dd05228aa20122ce996d22f74c247ab83e6cb7cf596c7`
+for proto and
+`b373bc6b4d94d70fb60c568325c098daf7886dd2627d1fd1287a9031dcfa5ccf`
+for client.

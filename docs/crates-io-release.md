@@ -16,8 +16,8 @@ the application release version.
 Subsequent workspace development advances the SDK to **0.6.0** and protocol
 8.1. Tagged release verification for current Tau sources therefore requires
 `dpc-tau-proto` and `dpc-tau-client` 0.6.0 in the core binary lock metadata.
-The separately maintained extension inputs remain on their independently
-pinned SDK versions until those projects publish updates.
+The separately maintained extension inputs now pin independently published
+revisions built against those exact SDK versions and protocol 8.1.
 
 The complete 0.1.0 application closure was published and the isolated registry
 install passed. The 0.1.1 release required seven new uploads, in order:
@@ -30,9 +30,11 @@ and is needed to verify the CLI package's dev-dependencies. This is the exact
 reverse dependency closure, not a workspace-wide version bump. Do not republish
 or replace any existing version.
 
-The updated external pins selected SDK 0.4.0 / protocol 7.0 sources; they did
-not change the extensions' upstream 0.1.0 Cargo versions or the released
-harness protocol 7.2.
+At the time of the 0.1.1 application release, the external pins selected SDK
+0.4.0 / protocol 7.0 sources; they did not change the extensions' upstream
+0.1.0 Cargo versions or the released harness protocol 7.2. The later protocol
+8.1 rollout updates all seven external inputs to independently published SDK
+0.6.0 / protocol 8.1 revisions without changing that historical release.
 
 ## Complete dependency closure
 
@@ -110,12 +112,12 @@ Those source-breaking additions require proto `0.5.0`; client `0.5.0` pins and
 published that new protocol line even though its own Rust source was otherwise
 unchanged.
 
-Separately maintained extensions pinned to registry SDK `0.4.0` continue to
-advertise protocol 7.0. Newer protocol-7 harnesses admit that same-major minor
-skew best-effort with a warning, but those binaries do not gain later protocol
-features. Exact `=0.4.0` Cargo pins also prevent their source from resolving a
-newer SDK until each external project deliberately updates. Updating those
-repositories remains outside the application release procedure.
+The separately maintained extensions used exact registry SDK `=0.4.0` pins and
+advertised protocol 7.0 for the 0.1.1 release. Their current independently
+published revisions deliberately use exact SDK `=0.6.0` dependencies and
+advertise protocol 8.1. Updating those repositories remains outside the
+application release procedure; this checkout consumes their published
+revisions through its flake lock.
 
 ## Upload-time procedure
 

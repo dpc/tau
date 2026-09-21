@@ -1,11 +1,10 @@
 # Configuring extensions
 
-This checkout uses protocol **8.0**. Configured providers, tools, and core
+This checkout uses protocol **8.1**. Configured providers, tools, and core
 extensions built for protocol 7 are rejected before configuration and must be
-updated together with the harness. The separately maintained extension pins
-described below still target protocol 7; this change does not update or publish
-those projects. Rebuilding an external project against its unchanged exact old
-SDK pin is not sufficient.
+updated together with the harness. All separately maintained extension inputs
+exported by this flake are pinned to revisions built against registry SDK
+**0.6.0** and protocol **8.1**.
 
 ## Tau-state access
 
@@ -186,7 +185,8 @@ package, ensure the executable is available through `PATH`, and then enable the
 instance. The
 [`tau-ext-xmpp` project](https://radicle.network/nodes/radicle.dpc.pw/rad%3AzpN6uwkd6ok9qRAX5yZaF7w8xzDd)
 owns the authoritative XMPP configuration, security, lifecycle, and testing
-documentation. The pinned executable speaks Tau protocol 7.0. The removed
+documentation. The pinned executable speaks Tau protocol 8.1 using registry
+SDK 0.6.0. The removed
 `muc.room_prefix` key is an error; `muc.room_template` controls the complete
 room localpart.
 
@@ -204,7 +204,7 @@ optional (`require: false`). Tau does not bundle its source or executable.
 Install `tau-ext-swarm`, ensure it is available through `PATH`, and then enable
 the instance. Its standalone project owns the authoritative configuration,
 bounds, retry, process-memory semantics, and implementation tests. The
-extension speaks Tau protocol 7.0 and registers the agent-scoped
+extension speaks Tau protocol 8.1 using registry SDK 0.6.0 and registers the agent-scoped
 `task_info`, `task_blocker`, and
 `task_update` tools, but none is model-visible by default even after the
 extension starts. Opt in deliberately for selected roles:
@@ -292,7 +292,7 @@ prefixing, network policy, and stdio supervision semantics. Running a separate
 executable does not widen its ingress, reply, reaction, proactive-send, or
 dynamic-DM authority. The standalone project owns the detailed setup,
 migration, security, routing, testing, and troubleshooting documentation.
-The pinned executable speaks Tau protocol 7.0. The removed
+The pinned executable speaks Tau protocol 8.1 using registry SDK 0.6.0. The removed
 `prefix_agent_id` option is rejected; replies and proactive sends use the
 agent-supplied message unchanged.
 
@@ -314,7 +314,7 @@ supervision semantics. Running a separate executable does not widen Telegram
 sender, chat, registration, reply, gateway endpoint, or gateway-client access
 authority. The standalone project owns detailed setup, migration, security,
 gateway, testing, and troubleshooting documentation.
-The pinned executable speaks Tau protocol 7.0. Its
+The pinned executable speaks Tau protocol 8.1 using registry SDK 0.6.0. Its
 `gateway_fixed_chat_send` mode uses an already-declared gateway client secret
 and the gateway's fixed chat to provide send-only access to an exact agent
 allowlist without receiving or polling.
