@@ -152,7 +152,6 @@ pub const LOG_TARGET: &str = "provider-builtin";
 
 const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
-const DEFAULT_RESPONSES_LITE_COMPATIBILITY: bool = false;
 const PROMPT_CREDENTIAL_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounded control mailbox for the single prompt-credential deadline actor.
 const PROMPT_CREDENTIAL_DEADLINE_MAILBOX_CAPACITY: usize = 256;
@@ -1207,18 +1206,11 @@ fn cmd_add_chatgpt_in(
         return Ok(());
     }
     let auth = run_openai_codex_login(network)?;
-    let responses_lite_compatibility = Confirm::new()
-        .with_prompt("Use Responses Lite compatibility for GPT-5.6?")
-        .default(DEFAULT_RESPONSES_LITE_COMPATIBILITY)
-        .interact()?;
     save_profile(
         extension_instance,
         &name,
         &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
             auth,
-            responses: tau_config::chatgpt_responses_settings::ChatgptResponsesSettings {
-                responses_lite_compatibility,
-            },
             ..Default::default()
         }),
         ProviderSetupInput::ProfileOAuth,

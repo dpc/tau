@@ -879,8 +879,8 @@ fn provider_settings_accept_only_explicit_supported_keyless_profiles() {
     }
 }
 
-/// Proves ChatGPT's explicit OAuth setup input publishes acquired credentials
-/// and can never serialize the API-profile keyless marker.
+/// Proves ChatGPT OAuth setup publishes acquired credentials and standard
+/// Responses settings without the removed Lite compatibility selection.
 #[test]
 fn chatgpt_setup_keeps_oauth_credential_publication() {
     let provider = ProviderName::new("chatgpt");
@@ -907,6 +907,7 @@ fn chatgpt_setup_keeps_oauth_credential_publication() {
     let settings: serde_json::Value =
         serde_json::from_slice(&payload.settings).expect("ChatGPT settings");
     assert_eq!(settings["credential"]["kind"], "oauth");
+    assert!(settings.get("responses_lite_compatibility").is_none());
 }
 
 /// Proves keyless setup emits the explicit portable marker and never plans a
@@ -2849,13 +2850,6 @@ fn chatgpt_profile_image_generation_defaults_on_with_explicit_opt_out() {
         serde_json::to_value(off).expect("opt-out profile serialization")["image_generation"],
         false
     );
-}
-
-/// Interactive ChatGPT setup must remain standard-by-default unless the user
-/// explicitly confirms the compatibility prompt.
-#[test]
-fn chatgpt_setup_defaults_responses_lite_compatibility_to_no() {
-    assert!(!std::hint::black_box(DEFAULT_RESPONSES_LITE_COMPATIBILITY));
 }
 
 /// Metadata selection is a closed default-on profile field, frozen separately

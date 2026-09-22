@@ -1382,9 +1382,8 @@ contract is available only as an explicit profile compatibility setting:
 ```
 
 Add the top-level flag to an existing ChatGPT profile without changing its
-current `auth` fields. `tau provider add` also asks for this setting and defaults
-to No. The selected mode
-is captured at startup, so edits require a Tau restart. OAuth refresh preserves
+current `auth` fields. The selected mode is captured at startup, so edits require
+a Tau restart. OAuth refresh preserves
 the setting. Tau never changes modes during retry, reconnect, replay, chaining,
 or compaction and never falls back to Lite after a standard-route rejection.
 Existing profiles without the field use standard mode. Upgrading intentionally
