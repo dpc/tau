@@ -9262,7 +9262,7 @@ fn introduction_notice_is_enabled_directed_and_process_local() {
     assert_eq!(notice.kind, tau_proto::notice_kind::HARNESS_INTRODUCTION);
     assert_eq!(
         notice.message,
-        "Welcome to Tau! Ask your model to introduce you to Tau."
+        "Welcome to Tau! Ask your model to introduce you to Tau, or ask it to hide this message."
     );
     assert_eq!(notice.level, tau_proto::NoticeLevel::Info);
     assert_eq!(notice.purpose, tau_proto::NoticePurpose::Diagnostic);

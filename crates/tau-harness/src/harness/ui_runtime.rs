@@ -1852,7 +1852,7 @@ impl Harness {
         let message = if self.provider_runtime.model_info.is_empty() {
             "Welcome to Tau! No usable LLM provider is available. Run `tau provider add`, then restart Tau."
         } else {
-            "Welcome to Tau! Ask your model to introduce you to Tau."
+            "Welcome to Tau! Ask your model to introduce you to Tau, or ask it to hide this message."
         };
         self.send_direct_harness_notice(
             client_id,
