@@ -1,6 +1,6 @@
 //! Tests for agent messaging behavior.
 
-use tau_config::settings::AgentWatchRetryNotificationPolicy;
+use tau_config::settings::{AgentWatchRetryNotificationPolicy, HarnessSettings};
 
 use super::*;
 
@@ -1856,6 +1856,34 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
     resumed.shutdown().expect("shutdown resumed");
 }
 
+/// Ordinary agent messages use the built-in five-second wait-any deadline while
+/// retaining their immediate idle and two-minute exact-wait deadlines.
+#[test]
+fn ordinary_agent_message_default_delivery_deadlines_are_exact() {
+    let admission_cut = Instant::now()
+        .checked_add(Duration::from_secs(60 * 60))
+        .expect("synthetic admission fits clock range");
+    let policy = HarnessSettings::built_in()
+        .notification_delivery
+        .agent_message;
+    let schedule =
+        DeliverySchedule::new(admission_cut, policy).expect("ordinary message schedule is valid");
+    assert_eq!(
+        schedule.deadline(DeliveryDeadlineKind::Idle),
+        Some(admission_cut)
+    );
+    assert_eq!(
+        schedule.deadline(DeliveryDeadlineKind::WaitAny),
+        admission_cut.checked_add(Duration::from_secs(5)),
+        "ordinary messages must wait five seconds for an any-input wait"
+    );
+    assert_eq!(
+        schedule.deadline(DeliveryDeadlineKind::WaitTool),
+        admission_cut.checked_add(Duration::from_secs(120)),
+        "ordinary messages must retain the two-minute exact-wait delay"
+    );
+}
+
 /// A sender's real inline `message` completion may wake a recipient's sole
 /// activating-input `wait` while the sender projection remains parked in a
 /// non-idle publication batch. Both durable terminals must schedule exactly one
@@ -1938,7 +1966,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
         })),
     )
     .expect("commit nested publication batch");
-    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(60_000));
+    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(5_000));
     drop(interceptor);
 
     assert!(!h.input_wait_pending_for(&recipient_cid));

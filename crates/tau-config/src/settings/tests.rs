@@ -1280,7 +1280,7 @@ fn notification_delivery_defaults_match_runtime_contract() {
     assert_eq!(policies.agent_message.idle(), Duration::ZERO);
     assert_eq!(
         policies.agent_message.wait_any(),
-        Duration::from_millis(60_000)
+        Duration::from_millis(5_000)
     );
     assert_eq!(
         policies.agent_message.wait_tool(),
