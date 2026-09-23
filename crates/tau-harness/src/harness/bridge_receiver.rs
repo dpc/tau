@@ -40,8 +40,9 @@ impl Harness {
         &mut self,
         source: &tau_proto::ConnectionId,
         request: BridgeReceiverRequest,
+        admission: ExtensionFrameAdmission,
     ) {
-        let outcome = self.resolve_bridge_receiver(source, &request);
+        let outcome = self.resolve_bridge_receiver(source, &request, &admission);
         let _ = self.runtime_io.bus.send_to(
             source,
             None,
@@ -58,6 +59,7 @@ impl Harness {
         &mut self,
         source: &tau_proto::ConnectionId,
         request: &BridgeReceiverRequest,
+        admission: &ExtensionFrameAdmission,
     ) -> Outcome {
         if !self.extensions.entries.get(source).is_some_and(|entry| {
             entry
@@ -78,7 +80,13 @@ impl Harness {
                 "invalid correlation or current session",
             );
         }
-        if self.session_runtime.shutdown_published {
+        // Shutdown can release activation-deferred RPCs while settling a
+        // declaration, before its terminal SessionShutdown fact is published.
+        // Those frames retain their old admission and cannot provision
+        // receivers.
+        if !self.extension_frame_admission_is_current(admission)
+            || self.session_runtime.shutdown_published
+        {
             return unavailable(Unavailable::NoEligibleAgent);
         }
         // Operational requests already wait behind activation. Session

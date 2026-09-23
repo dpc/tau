@@ -21,6 +21,7 @@ fn resolve(h: &mut Harness, role: Option<&str>, mode: Mode) -> Outcome {
             role: role.map(str::to_owned),
             mode,
         },
+        &h.current_extension_frame_admission(),
     )
 }
 
@@ -328,7 +329,8 @@ fn bridge_receiver_authority_readiness_and_ephemeral_lifecycle() {
                 mode: Mode::Ensure {
                     preferred_agent_id: None
                 }
-            }
+            },
+            &h.current_extension_frame_admission(),
         ),
         Outcome::Error {
             kind: ErrorKind::InvalidRequest,
@@ -513,17 +515,18 @@ fn bridge_receiver_directed_fixture_retains_endpoint_after_response() {
         .expect("bridge")
         .peer_capabilities
         .insert(tau_proto::PeerCapability::MessageBridge);
-    h.handle_bridge_receiver_request(
+    h.handle_extension_message(
         &crate::test_connection_id("bridge"),
-        BridgeReceiverRequest {
+        HarnessInputMessage::BridgeReceiverRequest(BridgeReceiverRequest {
             request_id: "directed".to_owned(),
             session_id: test_session_id("s1"),
             role: Some("engineer".to_owned()),
             mode: Mode::Ensure {
                 preferred_agent_id: None,
             },
-        },
-    );
+        }),
+    )
+    .expect("receiver RPC through configured ingress");
     let id = frames
         .lock()
         .expect("frames")
@@ -577,5 +580,217 @@ fn bridge_receiver_directed_fixture_retains_endpoint_after_response() {
             .iter()
             .all(|event| !matches!(event, Event::StartAgentResult(_)))
     );
+    h.shutdown().expect("shutdown");
+}
+
+/// Build the same explicit-role request for live and activation-deferred
+/// ingress.
+fn ingress_ensure() -> HarnessInputMessage {
+    HarnessInputMessage::BridgeReceiverRequest(BridgeReceiverRequest {
+        request_id: "ingress".to_owned(),
+        session_id: test_session_id("s1"),
+        role: Some("engineer".to_owned()),
+        mode: Mode::Ensure {
+            preferred_agent_id: None,
+        },
+    })
+}
+
+/// Hold post-Ready operational traffic behind an actual intercepted
+/// declaration.
+fn park_bridge_activation(h: &mut Harness) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    let frames = super::lifecycle::connect_handshaking_tool(h, "bridge");
+    h.extensions
+        .entries
+        .get_mut("bridge")
+        .expect("bridge")
+        .peer_capabilities
+        .insert(tau_proto::PeerCapability::MessageBridge);
+    connect_test_tool(h, "activation-interceptor");
+    h.handle_extension_message(
+        &crate::test_connection_id("activation-interceptor"),
+        HarnessInputMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
+            )],
+            priority: InterceptionPriority::new(0),
+        }),
+    )
+    .expect("intercept declaration");
+    h.handle_extension_message(
+        &crate::test_connection_id("bridge"),
+        HarnessInputMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::ExtPromptFragmentPublish(
+                tau_proto::ExtPromptFragmentPublish {
+                    fragment: tau_proto::PromptFragment::new(
+                        "bridge.activation",
+                        tau_proto::PromptPriority::new(10),
+                        "bridge instructions",
+                    ),
+                },
+            )),
+            persist: true,
+        }),
+    )
+    .expect("park declaration");
+    h.handle_extension_message(
+        &crate::test_connection_id("bridge"),
+        HarnessInputMessage::Ready(tau_proto::Ready { message: None }),
+    )
+    .expect("Ready");
+    assert!(h.extensions.ready_received.contains("bridge"));
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+    h.handle_extension_message(&crate::test_connection_id("bridge"), ingress_ensure())
+        .expect("defer receiver RPC");
+    assert_eq!(
+        h.extensions.activation_staging["bridge"]
+            .deferred_messages
+            .len(),
+        1,
+        "RPC must really wait behind activation"
+    );
+    assert!(h.agent_runtime.agent_registry.agents.is_empty());
+    frames
+}
+
+/// Read only this RPC's private outcomes, excluding replay and lifecycle
+/// traffic.
+fn ingress_outcomes(frames: &Arc<Mutex<Vec<RoutedFrame>>>) -> Vec<Outcome> {
+    frames
+        .lock()
+        .expect("frames")
+        .iter()
+        .filter_map(|frame| match &frame.frame {
+            HarnessOutputMessage::BridgeReceiverResult(result)
+                if result.request_id == "ingress" =>
+            {
+                Some(result.outcome.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Ready-but-not-activated requests must replay through legal ingress exactly
+/// once.
+#[test]
+fn bridge_receiver_ingress_replays_after_activation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let frames = park_bridge_activation(&mut h);
+    h.handle_extension_message(
+        &crate::test_connection_id("activation-interceptor"),
+        HarnessInputMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        }),
+    )
+    .expect("release activation");
+    let outcomes = ingress_outcomes(&frames);
+    assert_eq!(outcomes.len(), 1);
+    let id = selected(outcomes[0].clone());
+    assert!(h.agent_runtime.agent_registry.agents.contains_key(&id));
+    assert_eq!(h.agent_runtime.agent_registry.agents.len(), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Shutdown may release activation while quiescing declarations, but that
+/// release must not turn an old-generation queued Ensure into a newly created
+/// receiver.
+#[test]
+fn bridge_receiver_ingress_shutdown_rejects_deferred_ensure() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let frames = park_bridge_activation(&mut h);
+    h.shutdown().expect("shutdown");
+    assert!(
+        !h.extensions.activation_staging.contains_key("bridge"),
+        "shutdown must actually release the parked activation"
+    );
+    assert_eq!(
+        ingress_outcomes(&frames),
+        vec![Outcome::Unavailable {
+            reason: Unavailable::NoEligibleAgent,
+        }],
+        "the deferred RPC must reach its stale-admission rejection"
+    );
+    assert!(h.agent_runtime.agent_registry.agents.is_empty());
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentStarted(_) | Event::SessionAgentLoaded(_)))
+    );
+}
+
+/// An operational receiver request before Ready cannot bypass phase validation.
+#[test]
+fn bridge_receiver_ingress_before_ready_cannot_create() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let frames = super::lifecycle::connect_handshaking_tool(&mut h, "bridge");
+    h.extensions
+        .entries
+        .get_mut("bridge")
+        .expect("bridge")
+        .peer_capabilities
+        .insert(tau_proto::PeerCapability::MessageBridge);
+    let _ = h.handle_extension_message(&crate::test_connection_id("bridge"), ingress_ensure());
+    assert!(ingress_outcomes(&frames).is_empty());
+    assert!(h.agent_runtime.agent_registry.agents.is_empty());
+    assert!(!h.extensions.activation_staging.contains_key("bridge"));
+    h.shutdown().expect("shutdown");
+}
+
+/// Terminal shutdown rejects even a newly captured request without changing the
+/// existing malformed-request and wrong-session error classification.
+#[test]
+fn bridge_receiver_ingress_after_shutdown_cannot_create() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let frames = connect_ready_configured_extension(
+        &mut h,
+        "bridge",
+        "test-bridge",
+        tau_proto::ClientKind::Tool,
+    );
+    h.extensions
+        .entries
+        .get_mut("bridge")
+        .expect("bridge")
+        .peer_capabilities
+        .insert(tau_proto::PeerCapability::MessageBridge);
+    assert!(h.publish_current_session_shutdown());
+    h.handle_extension_message(&crate::test_connection_id("bridge"), ingress_ensure())
+        .expect("terminal request");
+    assert_eq!(
+        ingress_outcomes(&frames),
+        vec![Outcome::Unavailable {
+            reason: Unavailable::NoEligibleAgent,
+        }]
+    );
+    for (request_id, session_id) in [
+        ("", test_session_id("s1")),
+        ("wrong-session", test_session_id("other")),
+    ] {
+        h.handle_extension_message(
+            &crate::test_connection_id("bridge"),
+            HarnessInputMessage::BridgeReceiverRequest(BridgeReceiverRequest {
+                request_id: request_id.to_owned(),
+                session_id,
+                role: Some("engineer".to_owned()),
+                mode: Mode::Ensure {
+                    preferred_agent_id: None,
+                },
+            }),
+        )
+        .expect("invalid request");
+        assert!(frames.lock().expect("frames").iter().any(|frame| {
+            matches!(&frame.frame, HarnessOutputMessage::BridgeReceiverResult(result)
+            if result.request_id == request_id
+                && matches!(result.outcome, Outcome::Error {
+                    kind: ErrorKind::InvalidRequest, ..
+                }))
+        }));
+    }
+    assert!(h.agent_runtime.agent_registry.agents.is_empty());
     h.shutdown().expect("shutdown");
 }
