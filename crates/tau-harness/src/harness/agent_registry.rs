@@ -3,6 +3,7 @@
 //!
 //! Watch fanout remains a separate authority from registry membership.
 
+use super::bridge_receiver::ReceivingPurpose;
 use super::operator_agent_unload::PendingOperatorUnload;
 use super::start_coordinator::{
     MAX_START_QUERY_ID_BYTES, StartCoordinator, StartPhase, StartPhaseOwner,
@@ -518,6 +519,7 @@ impl Harness {
         if matches!(
             key.as_str(),
             path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY
+                | super::bridge_receiver::BRIDGE_RECEIVER_AGENT_METADATA_KEY
                 | path_crate_harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY
         ) {
             return Err("agent metadata key is reserved for harness lifecycle state".to_owned());
@@ -895,14 +897,14 @@ impl Harness {
         &mut self,
         pending: PendingStartAgentRequest,
     ) -> Result<(), HarnessError> {
-        self.start_agent_request_inner(pending, false, true, false, None)
+        self.start_agent_request_inner(pending, false, Some(ReceivingPurpose::Peer), false, None)
     }
 
     pub(super) fn start_agent_request_inner(
         &mut self,
         pending: PendingStartAgentRequest,
         publish_initial_instruction: bool,
-        peer_entrypoint_endpoint: bool,
+        receiving_purpose: Option<ReceivingPurpose>,
         creation_already_committed: bool,
         start_operation_id: Option<tau_proto::StartOperationId>,
     ) -> Result<(), HarnessError> {
@@ -991,11 +993,9 @@ impl Harness {
                 .pending_builtin_delegates
                 .insert(query.query_id.clone(), agent_id_proto.clone());
         }
-        let initial_metadata: Vec<_> = peer_entrypoint_endpoint
-            .then(|| tau_proto::AgentInitialMetadata {
-                key: tau_proto::AgentMetadataKey::new(
-                    path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
-                ),
+        let initial_metadata: Vec<_> = receiving_purpose
+            .map(|purpose| tau_proto::AgentInitialMetadata {
+                key: tau_proto::AgentMetadataKey::new(purpose.metadata_key()),
                 value: CborValue::Bool(true),
                 inheritable: false,
             })
@@ -1045,7 +1045,9 @@ impl Harness {
         conv.identity.agent_id = Some(agent_id_proto.clone());
         conv.identity.persistence = persistence;
         conv.identity.start_operation_id = start_operation_id;
-        conv.identity.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
+        conv.identity.peer_entrypoint_endpoint = receiving_purpose == Some(ReceivingPurpose::Peer);
+        conv.identity.bridge_receiver_endpoint =
+            receiving_purpose == Some(ReceivingPurpose::Bridge);
         conv.dispatch.pending_message_wakes = pending_agent_message_wakes;
         if let Some(last_node_id) = conv
             .dispatch
@@ -1152,14 +1154,14 @@ impl Harness {
                 }),
             );
         }
-        if peer_entrypoint_endpoint {
+        if receiving_purpose.is_some() {
             self.write_loaded_agent_navigation_mode(
                 &agent_id_proto,
                 tau_proto::AgentNavigationMode::Active,
             )
             .map_err(|_| {
                 HarnessError::Participant(format!(
-                    "peer entrypoint agent `{agent_id}` lost its loaded navigation state"
+                    "receiving agent `{agent_id}` lost its loaded navigation state"
                 ))
             })?;
         } else {

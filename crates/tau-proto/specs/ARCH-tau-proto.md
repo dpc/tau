@@ -1,5 +1,10 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 9.0 adds private configured-message-bridge receiver resolution.
+It is a directed request/result, not a roster grant, input delivery or journal
+event. Older harnesses cannot answer it; configured peers require compatible
+rebuilds. See [SPEC-bridge-receiver-designation](../../../specs/SPEC-bridge-receiver-designation.md).
+
 Protocol 8.1 extends existing directed Artifact RPC admission to upload-only
 authenticated UIs, gated by the existing SessionAccepted revision. Initial
 stdio and attached socket UI transports keep their existing handshake and

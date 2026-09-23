@@ -86,6 +86,7 @@ enum TestMessage {
     SessionAgentListResult(Box<tau_proto::SessionAgentListResult>),
     UnloadSessionAgentResult(tau_proto::UnloadSessionAgentResult),
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
+    BridgeReceiverResult(tau_proto::BridgeReceiverResult),
     ArtifactResult(Box<tau_proto::ArtifactResult>),
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
@@ -152,6 +153,9 @@ impl TestProtocolItem {
             }
             HarnessOutputMessage::ExtensionDataResult(message) => {
                 Self::Message(TestMessage::ExtensionDataResult(message))
+            }
+            HarnessOutputMessage::BridgeReceiverResult(message) => {
+                Self::Message(TestMessage::BridgeReceiverResult(message))
             }
             HarnessOutputMessage::ArtifactResult(message) => {
                 Self::Message(TestMessage::ArtifactResult(message))
@@ -228,6 +232,7 @@ impl TestMessage {
             | Self::SessionAgentListResult(_)
             | Self::UnloadSessionAgentResult(_)
             | Self::ExtensionDataResult(_)
+            | Self::BridgeReceiverResult(_)
             | Self::ArtifactResult(_)
             | Self::ExternalAgentMessageResult(_)
             | Self::ExternalAgentMessageAuthResult(_)
@@ -2713,6 +2718,7 @@ mod agent_list;
 mod agent_unload;
 mod agent_watch_wait;
 mod artifacts;
+mod bridge_receiver;
 mod config_error;
 mod dedup;
 mod dispatch;

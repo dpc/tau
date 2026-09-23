@@ -554,13 +554,9 @@ impl Harness {
                     pending.pending_agent_message_wakes = buffered_wakes;
                     pending
                 };
-                if let Err(error) = self.start_agent_request_inner(
-                    pending,
-                    false,
-                    false,
-                    true,
-                    Some(owner.start_id),
-                ) {
+                if let Err(error) =
+                    self.start_agent_request_inner(pending, false, None, true, Some(owner.start_id))
+                {
                     self.emit_harness_failure(&format!(
                         "failed to install committed side agent: {error}"
                     ));

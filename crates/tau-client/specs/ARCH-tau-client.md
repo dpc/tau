@@ -1,5 +1,11 @@
 # ARCH-tau-client: tau-client architecture
 
+`BridgeReceiverClient` shares the bounded detached writer and leaves correlated
+results in the manual receive loop. Shared opt-in config and versioned snapshot
+types do not own storage, retries or designation changes. Each bridge serializes
+snapshot updates and fences stale automatic resolutions against manual handoffs.
+See [SPEC-bridge-receiver-designation](../../../specs/SPEC-bridge-receiver-designation.md).
+
 `ArtifactClient` uses existing bounded detached output and leaves correlation to
 the ordinary receive loop. `ArtifactUpload` and `ArtifactDownload` keep retryable
 transfer state separate from transport and tool lifecycle; downloads verify exact

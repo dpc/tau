@@ -1012,6 +1012,33 @@ impl AgentStore {
         }
     }
 
+    /// Returns the first retained creation record without filesystem access.
+    ///
+    /// Live routing must not fall back to reading an unloaded journal. Managed
+    /// durable projections and ephemeral histories share this immutable view.
+    #[must_use]
+    pub fn loaded_agent_creation(
+        &self,
+        agent_id: &AgentId,
+    ) -> Option<(&tau_proto::AgentStarted, Option<UnixMicros>)> {
+        let record = self
+            .managed_projections
+            .get(agent_id)
+            .and_then(|projection| projection.events.first())
+            .or_else(|| {
+                self.ephemeral_events
+                    .get(agent_id)
+                    .and_then(|events| events.first())
+            })?;
+        let Event::AgentStarted(started) = &record.event else {
+            return None;
+        };
+        (&started.agent_id == agent_id).then_some((
+            started,
+            (record.recorded_at != UnixMicros::new(0)).then_some(record.recorded_at),
+        ))
+    }
+
     /// Reads one bounded creation fact and current display-name projection.
     ///
     /// This method never scans beyond the first journal record, repairs a

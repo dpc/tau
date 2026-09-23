@@ -8,6 +8,12 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 9.0 adds directed receiver resolution for configured message bridges.
+An older harness cannot answer the operation and there is no silent-ignore
+fallback. Configured extensions must rebuild together; unchanged bridges gain no
+automatic reception merely by rebuilding. See
+[SPEC-bridge-receiver-designation](SPEC-bridge-receiver-designation.md).
+
 Protocol 8.1 admits upload-only Artifact RPC on the existing authenticated UI
 connection, including the owned initial stdio UI, which uses the same UI
 admission route as attached sockets. A UI sends these operations only after

@@ -1,5 +1,11 @@
 # ARCH-tau-harness: tau-harness architecture
 
+Configured message bridges resolve ordinary receiving agents through a private
+current-session operation, separate from UI roster access and cooperative peer
+pool selection. Immutable retained creation facts supply role and age; receiving
+purpose is durable creation metadata, while designation remains extension-owned.
+See [SPEC-bridge-receiver-designation](../../../specs/SPEC-bridge-receiver-designation.md).
+
 Shared original-byte artifacts form a separate persistent domain, not extension
 data or semantic journal persistence. Configured-extension admission captures
 instance/session authority; authenticated UI admission separately allows only

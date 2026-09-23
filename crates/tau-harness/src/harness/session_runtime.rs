@@ -2344,6 +2344,16 @@ impl Harness {
                 .session_runtime
                 .agent_store
                 .agent_persistence(agent_id.as_str());
+            let bridge_receiver_endpoint = self
+                .session_runtime
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(|tree| {
+                    tree.metadata().get(&tau_proto::AgentMetadataKey::new(
+                        super::bridge_receiver::BRIDGE_RECEIVER_AGENT_METADATA_KEY,
+                    ))
+                })
+                .is_some_and(|entry| entry.value == CborValue::Bool(true));
             let restored_compaction = self
                 .session_runtime
                 .agent_store
@@ -2408,6 +2418,7 @@ impl Harness {
                 conv.identity.display_name = display_name.clone();
                 conv.identity.persistence = persistence;
                 conv.identity.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
+                conv.identity.bridge_receiver_endpoint = bridge_receiver_endpoint;
             } else {
                 let runtime_incarnation = self.mint_agent_runtime_incarnation();
                 let mut conv = Agent::new(
@@ -2423,6 +2434,7 @@ impl Harness {
                 conv.identity.display_name = display_name.clone();
                 conv.identity.persistence = persistence;
                 conv.identity.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
+                conv.identity.bridge_receiver_endpoint = bridge_receiver_endpoint;
                 self.agent_runtime
                     .agent_registry
                     .agents
@@ -3327,9 +3339,11 @@ impl Harness {
         });
         let peer_entrypoint = creation.is_some_and(|started| {
             started.metadata.iter().any(|metadata| {
-                metadata.key.as_str()
-                    == path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY
-                    && metadata.value == CborValue::Bool(true)
+                matches!(
+                    metadata.key.as_str(),
+                    path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY
+                        | super::bridge_receiver::BRIDGE_RECEIVER_AGENT_METADATA_KEY
+                ) && metadata.value == CborValue::Bool(true)
             })
         });
         let extension_side_request = creation.is_some_and(|started| {

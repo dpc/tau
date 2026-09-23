@@ -1570,6 +1570,8 @@ pub enum HarnessInputMessage {
     UiRetryExtensionRequest(UiRetryExtensionRequest),
     ProviderDebugCapture(ProviderDebugCapture),
     ExtensionDataRequest(ExtensionDataRequest),
+    /// Private ordinary receiver selection for configured message bridges.
+    BridgeReceiverRequest(crate::BridgeReceiverRequest),
     /// Directed shared original-byte artifact transfer, never a journal event.
     ArtifactRequest(crate::ArtifactRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
@@ -1621,6 +1623,8 @@ pub enum HarnessOutputMessage {
     SessionAgentListResult(Box<SessionAgentListResult>),
     UnloadSessionAgentResult(UnloadSessionAgentResult),
     ExtensionDataResult(Box<ExtensionDataResult>),
+    /// Correlated receiver resolution without external-input assignment.
+    BridgeReceiverResult(crate::BridgeReceiverResult),
     /// Directed bounded original-byte transfer result.
     ArtifactResult(Box<crate::ArtifactResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),

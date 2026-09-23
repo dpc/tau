@@ -19,6 +19,7 @@ use std::{io as path_std_io, num as path_std_num};
 use serde::de as path_serde_de;
 
 mod artifact;
+mod bridge_receiver;
 mod byte_count;
 mod context;
 mod context_visibility;
@@ -62,6 +63,7 @@ use std::io::{BufReader, Cursor, Read, Write};
 use std::marker::PhantomData;
 
 pub use artifact::*;
+pub use bridge_receiver::*;
 pub use byte_count::ByteCount;
 pub use ciborium::value::Value as CborValue;
 pub use context::*;
@@ -107,7 +109,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(8, 1);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(9, 0);
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

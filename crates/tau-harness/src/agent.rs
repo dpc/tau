@@ -767,6 +767,7 @@ impl Agent {
                 agent_id: None,
                 persistence: AgentPersistenceMode::Durable,
                 peer_entrypoint_endpoint: false,
+                bridge_receiver_endpoint: false,
             },
             dispatch: AgentDispatchState {
                 provider_switch_warning: Default::default(),

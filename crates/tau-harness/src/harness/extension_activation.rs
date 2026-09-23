@@ -1834,6 +1834,9 @@ impl Harness {
             HarnessInputMessage::ExtensionDataRequest(request) => {
                 self.handle_extension_data_request(source_id, request, admission);
             }
+            HarnessInputMessage::BridgeReceiverRequest(request) => {
+                self.handle_bridge_receiver_request(source_id, request);
+            }
             HarnessInputMessage::ArtifactRequest(request) => {
                 self.handle_artifact_request(source_id, request, admission);
             }

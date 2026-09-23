@@ -75,4 +75,7 @@ pub(crate) struct AgentIdentityState {
     /// Durable semantic lifecycle marker for a peer-created entrypoint
     /// endpoint.
     pub(crate) peer_entrypoint_endpoint: bool,
+    /// Durable ordinary receiving purpose assigned by configured-bridge
+    /// creation.
+    pub(crate) bridge_receiver_endpoint: bool,
 }

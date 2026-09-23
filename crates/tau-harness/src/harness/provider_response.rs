@@ -3499,12 +3499,17 @@ impl Harness {
             tau_proto::PromptOriginator::Extension { .. }
         ) && agent.identity.parent_tool_call_id.is_none()
             && !agent.identity.restored_tool_backed_start
-            && !Self::is_peer_entrypoint_agent(agent)
+            && !Self::is_receiving_endpoint(agent)
     }
 
     /// Identify the durable lifecycle purpose assigned by peer auto-start.
     pub(super) fn is_peer_entrypoint_agent(agent: &Agent) -> bool {
         agent.identity.peer_entrypoint_endpoint
+    }
+
+    /// Ordinary receivers retain their lifecycle after each response.
+    pub(super) fn is_receiving_endpoint(agent: &Agent) -> bool {
+        Self::is_peer_entrypoint_agent(agent) || agent.identity.bridge_receiver_endpoint
     }
 
     #[cfg(test)]
@@ -3663,7 +3668,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .is_some_and(Self::is_peer_entrypoint_agent)
+            .is_some_and(Self::is_receiving_endpoint)
         {
             return ProviderTerminalPlan::Other;
         }
@@ -3761,7 +3766,7 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
-        !Self::is_peer_entrypoint_agent(agent)
+        !Self::is_receiving_endpoint(agent)
             && agent.identity.originator == response.originator
             && Self::finished_response_side_originator(
                 &agent.identity.originator,
@@ -3918,7 +3923,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .is_some_and(Self::is_peer_entrypoint_agent)
+            .is_some_and(Self::is_receiving_endpoint)
         {
             return false;
         }

@@ -20,6 +20,15 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+The **unpublished** protocol `9.0` candidate uses `dpc-tau-proto` and
+`dpc-tau-client` `0.7.0`; both leaf dependencies remain `0.1.0`. Directed bridge
+receiver resolution adds source-incompatible public enum variants. Older
+harnesses cannot answer this operation, so all configured extensions must be
+rebuilt for protocol 9 before rollout, even when their receive behavior is
+unchanged. Publish proto before client only after candidate review, full local
+CI and package/archive verification; record immutable source, registry archive
+digests and release tags after actual publication, not in advance.
+
 The protocol `8.1` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.6.0`, with their unchanged leaf dependencies remaining at
 `dpc-tau-actions` and `dpc-tau-blocking-notify-channel` `0.1.0`. Since the

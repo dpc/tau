@@ -1582,6 +1582,7 @@ mod agent_runtime_state;
 mod agent_watch;
 mod agent_watch_provider_deliveries;
 mod artifact_requests;
+mod bridge_receiver;
 mod compaction_runtime;
 mod compaction_runtime_state;
 #[cfg(test)]
@@ -3361,7 +3362,8 @@ impl Harness {
             | HarnessInputMessage::InterceptReply(_)
             | HarnessInputMessage::Ready(_)
             | HarnessInputMessage::ProviderDebugCapture(_)
-            | HarnessInputMessage::ExtensionDataRequest(_) => {
+            | HarnessInputMessage::ExtensionDataRequest(_)
+            | HarnessInputMessage::BridgeReceiverRequest(_) => {
                 Ok(ClientMessageDisposition::Continue)
             }
         }
