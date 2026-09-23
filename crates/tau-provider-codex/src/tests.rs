@@ -391,9 +391,12 @@ fn chatgpt_models_publish_basic_non_cache_prices() {
         .expect("mini model")
         .estimated_api_cost_rates();
 
-    assert_eq!(sol.uncached_input.as_micro_usd(), 5_000_000);
-    assert_eq!(sol.cached_input.as_micro_usd(), 500_000);
-    assert_eq!(sol.output.as_micro_usd(), 30_000_000);
+    assert_eq!(sol.uncached_input.as_micro_usd(), 4_000_000);
+    assert_eq!(
+        sol.cached_input,
+        tau_proto::ESTIMATED_API_COST_FALLBACK.cached_input
+    );
+    assert_eq!(sol.output.as_micro_usd(), 20_000_000);
     assert_eq!(terra.uncached_input.as_micro_usd(), 2_000_000);
     assert_eq!(
         terra.cached_input,
@@ -420,29 +423,44 @@ fn chatgpt_models_publish_basic_non_cache_prices() {
     assert_eq!(mini.output.as_micro_usd(), 4_500_000);
 }
 
-/// Astra aliases publish all standard short-context equivalent API rates, and
+/// GPT-6 aliases publish all standard short-context equivalent API rates, and
 /// those rates independently price ordinary input, cache reads, cache writes,
-/// and output.
+/// and output without representing long-context or service-tier prices.
 #[test]
-fn astra_aliases_publish_and_calculate_all_standard_prices() {
+fn gpt_6_aliases_publish_all_standard_short_context_prices() {
     for provider in ["chatgpt", "work-chatgpt"] {
-        let model = models_for_provider(&ProviderName::new(provider))
-            .into_iter()
+        let models = models_for_provider(&ProviderName::new(provider));
+        for (model_id, expected) in [
+            (
+                "gpt-6-astra",
+                (10_000_000, 1_000_000, 12_500_000, 50_000_000),
+            ),
+            ("gpt-6-sol", (2_000_000, 200_000, 2_500_000, 10_000_000)),
+            ("gpt-6-luna", (100_000, 10_000, 125_000, 500_000)),
+        ] {
+            let model = models
+                .iter()
+                .find(|model| model.id.model.as_str() == model_id)
+                .expect("GPT-6 model");
+            let rates = model.estimated_api_cost_rates();
+
+            assert_eq!(rates.uncached_input.as_micro_usd(), expected.0);
+            assert_eq!(rates.cached_input.as_micro_usd(), expected.1);
+            assert_eq!(
+                rates
+                    .cache_write_input
+                    .expect("published cache-write price")
+                    .as_micro_usd(),
+                expected.2
+            );
+            assert_eq!(rates.output.as_micro_usd(), expected.3);
+        }
+
+        let model = models
+            .iter()
             .find(|model| model.id.model.as_str() == "gpt-6-astra")
             .expect("Astra model");
         let rates = model.estimated_api_cost_rates();
-
-        assert_eq!(rates.uncached_input.as_micro_usd(), 10_000_000);
-        assert_eq!(rates.cached_input.as_micro_usd(), 1_000_000);
-        assert_eq!(
-            rates
-                .cache_write_input
-                .expect("published cache-write price")
-                .as_micro_usd(),
-            12_500_000
-        );
-        assert_eq!(rates.output.as_micro_usd(), 50_000_000);
-
         let usage = tau_proto::ProviderTokenUsage {
             prompt_sent_tokens: 3_000_000,
             prompt_cached_tokens: 1_000_000,
@@ -467,8 +485,8 @@ fn astra_aliases_publish_and_calculate_all_standard_prices() {
 fn chatgpt_models_publish_conservative_runtime_cache_contract() {
     let model = models_for_provider(&ProviderName::new("chatgpt"))
         .into_iter()
-        .next()
-        .expect("published ChatGPT model");
+        .find(|model| model.id.model.as_str() == "gpt-5.6-terra")
+        .expect("published private model without explicit cache prices");
     let policy = model.cache_policy.expect("private cache policy");
 
     assert_eq!(policy.kind, tau_proto::ProviderCacheKind::ResponseChain);
@@ -2278,6 +2296,8 @@ fn publishes_chatgpt_model_metadata() {
     assert_eq!(
         ids,
         vec![
+            "work-chatgpt/gpt-6-sol",
+            "work-chatgpt/gpt-6-luna",
             "work-chatgpt/gpt-5.6-sol",
             "work-chatgpt/gpt-5.6-terra",
             "work-chatgpt/gpt-5.6-luna",
@@ -2324,8 +2344,37 @@ fn publishes_chatgpt_model_metadata() {
             .id
             .model
             .as_str(),
-        "gpt-5.6-sol"
+        "gpt-6-sol"
     );
+    for model_id in ["gpt-6-sol", "gpt-6-luna"] {
+        let model = models
+            .iter()
+            .find(|model| model.id.model.as_str() == model_id)
+            .expect("GPT-6 Sol/Luna model");
+        assert_eq!(model.context_window, GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW);
+        assert_eq!(
+            model.max_input_tokens,
+            Some(effective_context_window_for_model(model_id))
+        );
+        assert_eq!(
+            model.max_output_tokens,
+            Some(GPT_6_SOL_LUNA_MAX_OUTPUT_TOKENS)
+        );
+        for level in [
+            NativeReasoningEffort::None,
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::Medium,
+            NativeReasoningEffort::High,
+            NativeReasoningEffort::XHigh,
+            NativeReasoningEffort::Max,
+        ] {
+            assert!(model.efforts.contains(level), "{model_id}: {level}");
+        }
+        assert!(!model.efforts.contains(NativeReasoningEffort::Minimal));
+        assert!(!model.supports_compaction);
+        assert!(model.supports_standalone_compaction);
+        assert!(model.standalone_compaction_threshold.is_none());
+    }
     assert!(
         models
             .iter()
@@ -2349,6 +2398,7 @@ fn publishes_chatgpt_model_metadata() {
             .filter(|model| {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
                     && model.id.model.as_str() != "gpt-6-astra"
+                    && !is_gpt_6_sol_or_luna(model.id.model.as_str())
             })
             .all(|model| model.supports_compaction)
     );
@@ -2407,6 +2457,7 @@ fn publishes_chatgpt_model_metadata() {
             .filter(|model| {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
                     && model.id.model.as_str() != "gpt-6-astra"
+                    && !is_gpt_6_sol_or_luna(model.id.model.as_str())
             })
             .all(|model| !model.efforts.contains(NativeReasoningEffort::Max))
     );
@@ -2501,20 +2552,24 @@ fn unaudited_gpt_5_6_suffix_does_not_gain_audited_route_capabilities() {
 /// independently of the effective window published to the harness.
 #[test]
 fn config_uses_model_specific_context_window() {
+    let gpt_6 = config_for_model(&ModelName::new("gpt-6-sol"), "token".to_owned(), None);
     let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
     let gpt_5_5 = config_for_model(&ModelName::new("gpt-5.5"), "token".to_owned(), None);
 
+    assert_eq!(gpt_6.raw_context_window, GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW);
     assert_eq!(gpt_5_6.raw_context_window, GPT_5_6_RAW_CONTEXT_WINDOW);
     assert_eq!(gpt_5_5.raw_context_window, DEFAULT_RAW_CONTEXT_WINDOW);
 }
 
-/// Ensures GPT-5.6 advertises standalone rather than inline compaction in every
-/// mode while older models retain inline compaction.
+/// Ensures audited GPT-5.6 and GPT-6 models omit provider-inline compaction
+/// while older models retain it.
 #[test]
-fn config_scopes_inline_compaction_away_from_gpt_5_6() {
+fn config_scopes_inline_compaction_away_from_newer_models() {
+    let gpt_6 = config_for_model(&ModelName::new("gpt-6-sol"), "token".to_owned(), None);
     let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
     let gpt_5_5 = config_for_model(&ModelName::new("gpt-5.5"), "token".to_owned(), None);
 
+    assert!(!gpt_6.supports_compaction);
     assert!(!gpt_5_6.supports_compaction);
     assert!(gpt_5_5.supports_compaction);
 }

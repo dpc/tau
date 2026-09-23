@@ -487,8 +487,16 @@ ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previo
 
 ChatGPT GPT-5.6 Sol, Terra, and Luna publish a 353,400-token effective context
 window and include `max` among their published reasoning choices. They use
-standard Responses and parallel direct tool calls by default. Responses
-Lite is available only by setting `responses_lite_compatibility: true` on that
+standard Responses and parallel direct tool calls by default.
+GPT-6 Sol and Luna are also built-in ChatGPT/Codex choices. They publish a
+1,050,000-token total window, a 997,500-token effective input ceiling, a
+128,000-token output capability, and the documented reasoning choices from
+`none` through `max` except `minimal`. Their comparison costs use OpenAI's
+standard short-context API rates and do not claim private subscription billing.
+They remain on standard Responses and use local-summary standalone compaction
+until the private native compaction contract is separately audited. They also
+omit unaudited provider-inline context management.
+Responses Lite is available only by setting `responses_lite_compatibility: true` on that
 ChatGPT profile (or answering Yes during `tau provider add`) and restarting.
 Tau never changes modes as a retry fallback. Both modes omit provider-inline
 context management. Astra also uses native standalone compaction, with a

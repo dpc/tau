@@ -25,6 +25,21 @@ and output rates while leaving private subscription billing unspecified. The
 September 5 mapping migration additionally records Astra's exact supported
 reasoning levels and changes the portable cut points published for affected
 models.
+The September 23, 2026 catalog refresh adds
+[`gpt-6-sol`](https://developers.openai.com/api/docs/models/gpt-6-sol) and
+[`gpt-6-luna`](https://developers.openai.com/api/docs/models/gpt-6-luna) to
+the built-in ChatGPT/Codex list. OpenAI's
+[Standard short-context pricing table](https://developers.openai.com/api/docs/pricing),
+checked that day, gives per-million-token input/cached-input/cache-write/output
+rates of `$2`/`$0.20`/`$2.50`/`$10` for Sol and
+`$0.10`/`$0.01`/`$0.125`/`$0.50` for Luna. It also changes GPT-5.6 Sol's
+comparison rates from `$5`/`$0.50`/`$6.25`/`$30` to the current
+`$4`/`$0.40`/`$5`/`$20`. The checked table leaves the existing Astra,
+GPT-5.6 Terra/Luna, GPT-5.5, GPT-5.4, GPT-5.4 Mini, and GPT-5.3 Codex
+ordinary-input, cached-input, and output rates unchanged. Tau records only the
+standard short-context tier: the current estimator cannot represent the separate
+long-context or processing-tier rates, and these API-equivalent comparisons do
+not claim private subscription billing.
 The zzd2 cache-control migration uses
 `options: { mode: implicit, ttl: "30m" }`; the retired legacy
 `prompt_cache_retention` contract is deliberately absent because its old `24h`

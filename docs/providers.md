@@ -591,7 +591,7 @@ still do not establish this contract for another route.
 
 The same exact GPT-5.6 route may publish OpenAI's explicit ordinary-input,
 cached-read, and cache-write prices. For example, the short-context
-`gpt-5.6-sol` comparison rates are `$5`, `$0.50`, and `$6.25` per million
+`gpt-5.6-sol` comparison rates are `$4`, `$0.40`, and `$5` per million
 tokens. The basic model fields do not represent OpenAI's long-context tier, so
 cost comparisons using them must exclude that tier; the central fallback is
 not a provider fact. Select `compat.cache_usage: open_ai` on Chat Completions
@@ -640,11 +640,11 @@ bounded random jitter. Failure never creates a prompt retry. Keys, evidence,
 jitter, and lifecycle state are process-only and never journaled or restored.
 
 Hardcoded ChatGPT/Codex comparison prices come from OpenAI's provider-owned
-[API pricing table](https://developers.openai.com/api/docs/pricing). Astra
-publishes its standard short-context ordinary-input, cached-read, cache-write,
-and output rates. These are API-equivalent estimates, not private subscription
-billing; they exclude Astra's long-context and service-tier variants. Other
-private ChatGPT models continue to omit cache rates. Configured compatible
+[API pricing table](https://developers.openai.com/api/docs/pricing). GPT-6
+models publish their standard short-context ordinary-input, cached-read,
+cache-write, and output rates. These are API-equivalent estimates, not private
+subscription billing; they exclude long-context and service-tier variants.
+Other private ChatGPT models continue to omit cache rates. Configured compatible
 providers own their explicit values; refresh those profile fields from that
 provider's basic public pricing table. The built-in Chat Completions
 provider ships default prices for known compatible model ids without explicit
@@ -1478,6 +1478,11 @@ exact prefix; a changed fingerprint, divergent prefix, stale generation, or
 invalidation discards the anchor and sends full context.
 The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices.
+GPT-6 Sol and Luna publish a 1,050,000-token total window, a 997,500-token
+effective input ceiling, a 128,000-token output capability, and the documented
+`none` through `max` reasoning choices except `minimal`.
+They omit unaudited provider-inline context management and use local-summary
+standalone compaction.
 Standard mode publishes and requests parallel direct tool calls; Lite
 compatibility publishes its one-call limit. Neither mode emits provider-inline
 context management. Astra also uses native standalone compaction, with a

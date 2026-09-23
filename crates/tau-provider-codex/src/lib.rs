@@ -38,9 +38,14 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 const DEFAULT_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(272_000);
 const GPT_5_6_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(372_000);
+const GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW: tau_proto::TokenCount =
+    tau_proto::TokenCount::new(1_050_000);
+const GPT_6_SOL_LUNA_MAX_OUTPUT_TOKENS: tau_proto::TokenCount = tau_proto::TokenCount::new(128_000);
 const STANDALONE_COMPACTION_CONTEXT_WINDOW_PERCENT: u64 = 90;
 const EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const CHATGPT_MODELS: &[&str] = &[
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -1742,7 +1747,7 @@ pub fn resolved_config_for_provider_model(
             supports_verbosity: model_id.starts_with("gpt-5"),
             supports_phase: is_known_phase_capable_model_id(model_id),
             supports_encrypted_reasoning: true,
-            supports_compaction: !supports_native_standalone_compaction(model_id),
+            supports_compaction: supports_inline_compaction(model_id),
             supports_prompt_cache_key: true,
         },
     }
@@ -1754,7 +1759,7 @@ fn model_info(
     mode: responses::ResponsesMode,
 ) -> ProviderModelInfo {
     let prices = estimated_api_prices(model);
-    let publishes_explicit_cache_prices = model == "gpt-6-astra";
+    let publishes_explicit_cache_prices = is_gpt_6(model);
     ProviderModelInfo {
         id: ModelId::new(provider.clone(), ModelName::new(model)),
         display_name: None,
@@ -1794,7 +1799,7 @@ fn model_info(
         default_affinity: default_affinity_for_model(model),
         context_window: raw_context_window_for_model(model),
         max_input_tokens: Some(effective_context_window_for_model(model)),
-        max_output_tokens: None,
+        max_output_tokens: is_gpt_6_sol_or_luna(model).then_some(GPT_6_SOL_LUNA_MAX_OUTPUT_TOKENS),
         efforts: tau_proto::ReasoningEffortCapability::mapped(efforts_for_model(model)),
         verbosities: verbosities_for_model(model),
         thinking_summaries: vec![
@@ -1803,7 +1808,7 @@ fn model_info(
             ThinkingSummary::Concise,
             ThinkingSummary::Detailed,
         ],
-        supports_compaction: !supports_native_standalone_compaction(model),
+        supports_compaction: supports_inline_compaction(model),
         supports_standalone_compaction: true,
         standalone_compaction_generation_negative: false,
         standalone_compaction_threshold: supports_native_standalone_compaction(model).then(|| {
@@ -1861,7 +1866,10 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
 
     let (uncached, cached, output) = match model {
         "gpt-6-astra" => (10_000_000, 1_000_000, 50_000_000),
-        "gpt-5.6-sol" | "gpt-5.5" => (5_000_000, 500_000, 30_000_000),
+        "gpt-6-sol" => (2_000_000, 200_000, 10_000_000),
+        "gpt-6-luna" => (100_000, 10_000, 500_000),
+        "gpt-5.6-sol" => (4_000_000, 400_000, 20_000_000),
+        "gpt-5.5" => (5_000_000, 500_000, 30_000_000),
         "gpt-5.6-terra" => (2_000_000, 200_000, 12_000_000),
         "gpt-5.6-luna" => (200_000, 20_000, 1_200_000),
         "gpt-5.4" => (2_500_000, 250_000, 15_000_000),
@@ -1872,8 +1880,8 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
     EstimatedApiCostRates {
         uncached_input: Price::from_micro_usd(uncached),
         cached_input: Price::from_micro_usd(cached),
-        cache_write_input: if model == "gpt-6-astra" {
-            Some(Price::from_micro_usd(12_500_000))
+        cache_write_input: if is_gpt_6(model) {
+            Some(Price::from_micro_usd(uncached.saturating_mul(5) / 4))
         } else {
             model
                 .starts_with("gpt-5.6")
@@ -1886,6 +1894,8 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
 
 fn default_affinity_for_model(model: &str) -> i32 {
     match model {
+        "gpt-6-sol" => 900,
+        "gpt-6-luna" => 800,
         "gpt-5.6-sol" => 700,
         "gpt-5.6-terra" => 600,
         "gpt-5.6-luna" => 500,
@@ -1898,7 +1908,9 @@ fn default_affinity_for_model(model: &str) -> i32 {
 }
 
 fn raw_context_window_for_model(model: &str) -> tau_proto::TokenCount {
-    if is_gpt_5_6(model) {
+    if is_gpt_6_sol_or_luna(model) {
+        GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW
+    } else if is_gpt_5_6(model) {
         GPT_5_6_RAW_CONTEXT_WINDOW
     } else {
         DEFAULT_RAW_CONTEXT_WINDOW
@@ -1927,6 +1939,14 @@ fn is_gpt_5_6(model: &str) -> bool {
     matches!(model, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
 }
 
+fn is_gpt_6_sol_or_luna(model: &str) -> bool {
+    matches!(model, "gpt-6-sol" | "gpt-6-luna")
+}
+
+fn is_gpt_6(model: &str) -> bool {
+    model == "gpt-6-astra" || is_gpt_6_sol_or_luna(model)
+}
+
 /// Exact audited models using the native Responses `compaction_trigger`
 /// contract. Keep this separate from GPT-5.6 image and Lite compatibility
 /// capabilities.
@@ -1934,9 +1954,23 @@ fn supports_native_standalone_compaction(model: &str) -> bool {
     is_gpt_5_6(model) || model == "gpt-6-astra"
 }
 
+fn supports_inline_compaction(model: &str) -> bool {
+    !is_gpt_5_6(model) && !is_gpt_6(model)
+}
+
 fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {
     if model == "gpt-6-astra" {
         return vec![
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::Medium,
+            NativeReasoningEffort::High,
+            NativeReasoningEffort::XHigh,
+            NativeReasoningEffort::Max,
+        ];
+    }
+    if is_gpt_6_sol_or_luna(model) {
+        return vec![
+            NativeReasoningEffort::None,
             NativeReasoningEffort::Low,
             NativeReasoningEffort::Medium,
             NativeReasoningEffort::High,

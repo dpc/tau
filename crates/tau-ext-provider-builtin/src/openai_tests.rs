@@ -3080,12 +3080,12 @@ fn canceled_oversized_worker_report_reaches_real_client_boundary_as_small_termin
 fn chatgpt_profile_publishes_models_even_without_auth_tokens() {
     let models = models_for_auth(&OpenAiAuth::default());
 
-    assert!(model_ids(&models).starts_with(&["chatgpt/gpt-5.6-sol".to_owned()]));
+    assert!(model_ids(&models).starts_with(&["chatgpt/gpt-6-sol".to_owned()]));
 }
 
 /// Ensures ChatGPT publication exposes the owned model set and mirrors the
-/// backend capability split: GPT-5.6 and Astra use standalone rather than
-/// inline compaction in its default standard mode, while older models retain
+/// backend capability split: GPT-5.6 and GPT-6 use standalone rather than
+/// inline compaction in the default standard mode, while older models retain
 /// inline compaction.
 #[test]
 fn chatgpt_oauth_publishes_chatgpt_models() {
@@ -3096,6 +3096,8 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
     assert_eq!(
         model_ids(&models),
         vec![
+            "chatgpt/gpt-6-sol",
+            "chatgpt/gpt-6-luna",
             "chatgpt/gpt-5.6-sol",
             "chatgpt/gpt-5.6-terra",
             "chatgpt/gpt-5.6-luna",
@@ -3111,7 +3113,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             .iter()
             .filter(|model| {
                 model.id.model.as_str().starts_with("gpt-5.6-")
-                    || model.id.model.as_str() == "gpt-6-astra"
+                    || model.id.model.as_str().starts_with("gpt-6-")
             })
             .all(|model| !model.supports_compaction)
     );
@@ -3120,7 +3122,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             .iter()
             .filter(|model| {
                 model.id.model.as_str().starts_with("gpt-5.6-")
-                    || model.id.model.as_str() == "gpt-6-astra"
+                    || model.id.model.as_str().starts_with("gpt-6-")
             })
             .all(|model| model.supports_standalone_compaction)
     );
@@ -3129,7 +3131,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             .iter()
             .filter(|model| {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
-                    && model.id.model.as_str() != "gpt-6-astra"
+                    && !model.id.model.as_str().starts_with("gpt-6-")
             })
             .all(|model| model.supports_compaction)
     );
@@ -3204,6 +3206,8 @@ fn xhigh_metadata_is_model_specific() {
     assert_eq!(
         ids_with_xhigh,
         vec![
+            "chatgpt/gpt-6-sol",
+            "chatgpt/gpt-6-luna",
             "chatgpt/gpt-5.6-sol",
             "chatgpt/gpt-5.6-terra",
             "chatgpt/gpt-5.6-luna",
@@ -7339,11 +7343,11 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
                 HarnessInputMessage::Emit(emit)
                     if !emit.persist
                         && matches!(
-                            emit.event.as_ref(),
-                            Event::ProviderModelsDeclared(updated)
-                                if model_ids(&updated.models)
-                                    .starts_with(&["chatgpt/gpt-5.6-sol".to_owned()])
-                        )
+                             emit.event.as_ref(),
+                             Event::ProviderModelsDeclared(updated)
+                                 if model_ids(&updated.models)
+                                    .starts_with(&["chatgpt/gpt-6-sol".to_owned()])
+                         )
             )
         })
         .unwrap_or_else(|| panic!("startup frames should announce provider models: {frames:?}"));
