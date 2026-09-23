@@ -20,14 +20,12 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-The **unpublished** protocol `9.0` candidate uses `dpc-tau-proto` and
-`dpc-tau-client` `0.7.0`; both leaf dependencies remain `0.1.0`. Directed bridge
+The protocol `9.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
+`0.7.0`; both leaf dependencies remain `0.1.0`. Directed bridge
 receiver resolution adds source-incompatible public enum variants. Older
 harnesses cannot answer this operation, so all configured extensions must be
 rebuilt for protocol 9 before rollout, even when their receive behavior is
-unchanged. Publish proto before client only after candidate review, full local
-CI and package/archive verification; record immutable source, registry archive
-digests and release tags after actual publication, not in advance.
+unchanged.
 
 The protocol `8.1` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.6.0`, with their unchanged leaf dependencies remaining at
@@ -90,6 +88,33 @@ for admission behavior and the protocol boundary.
 
 This mapping does not describe or promise journal physical-format
 compatibility.
+
+## Protocol 9.0 release acceptance
+
+The package readiness check verifies the complete SDK archive set:
+
+```console
+./.config/selfci/check-sdk-packages.sh
+```
+
+The check creates all four package archives, inspects their normalized
+manifests, and builds a small consumer outside the workspace against the exact
+archives. Its consumer uses temporary Cargo patches unless `--registry` is
+selected.
+
+The protocol `9.0` SDK release is published and accepted. Registry
+`dpc-tau-proto` and `dpc-tau-client` `0.7.0` both come from source revision
+`51bee43399254519e1c86164aa9301713b9f8cd3`; the client requires exact proto
+`=0.7.0`. The registry-only SDK consumer check passes under the supported Rust
+1.91 environment and verifies protocol 9.0 without local patches. The
+`dpc-tau-proto-v0.7.0` and `dpc-tau-client-v0.7.0` Radicle tags both resolve to
+that source revision.
+
+The accepted registry archive SHA-256 values are
+`7211c62006283b33aa230bd95df8d29dc0f696727474cab029c800cc016bfc0a`
+for proto and
+`c004113aa616b701588e3b004dbb74d7781ab51f5c240780e43b05e59cf42fad`
+for client.
 
 ## Protocol 8.1 release acceptance
 
