@@ -30,7 +30,7 @@ model-facing payload families:
 
 | Family | Carrier | Opening schema |
 | --- | --- | --- |
-| `user` | Generic user-role text | Fieldless; authenticated interactive UI prompt |
+| `user` | Generic user-role text | Fixed `source="ui"`; direct Tau user-channel input |
 | `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher` and optional `sender_trust` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
@@ -74,6 +74,10 @@ or instruction authority and does not strengthen or weaken the source's existing
 request and trust semantics. `content_trust="external"` remains a closed marker for
 external network content; its absence never means trusted.
 
+The `user` family's `source="ui"` attribute names the accepted Tau user-channel
+submission class. It retains normal user-request semantics but does not attest
+personal authorship or a particular CLI executable.
+
 The built-in XML-shaped skill catalog is presentation metadata, not an exact-close
 payload envelope. Its `xml_escape_lax` formatter replaces every literal `</` prefix
 with `&lt;/` and preserves every other byte.
@@ -97,6 +101,9 @@ Canonical message facts retain raw typed data and render through the shared
 synthesize, remove, or reinterpret a family. Historical raw/default projections,
 provider replacement windows, and payload-local wrappers retain their existing
 replay behavior until a separately approved migration.
+Historical fieldless `<user>...</user>` replacement bytes remain recognizable
+for provenance-notice delivery only; recognition does not infer or reproject a
+typed source.
 Cross-session agent messages remain inside authenticated `tau_internal` framing
 with payload-local `tau_peer_message` structure. When either persisted
 configured notice exists, the renderer exact-close-frames sender- and

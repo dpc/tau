@@ -130,11 +130,11 @@ impl fmt::Display for PayloadEnvelopeRenderError {
     }
 }
 
-/// Registered fieldless envelope for authenticated interactive user prompts.
+/// Registered attributed envelope for direct Tau user-channel input.
 pub const USER_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
     name: "user",
-    opening: PayloadEnvelopeOpening::Fixed("<user>"),
-    ordered_attributes: &[],
+    opening: PayloadEnvelopeOpening::Attributed("<user "),
+    ordered_attributes: &["source"],
     exact_close: "</user>",
     visible_close: "&lt;/user&gt;",
     carrier: PayloadEnvelopeCarrier::GenericUserText,

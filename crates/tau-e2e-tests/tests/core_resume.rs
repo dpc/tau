@@ -90,7 +90,7 @@ fn prompt_stdin_accepted_prompt_prints_correlated_completion()
         vec![ScenarioLaneV2 {
             ctx_id: "dynamic-ui-prompt".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: "<user>hello from prompt stdin\n</user>".to_owned(),
+                user_text: "<user source=\"ui\">hello from prompt stdin\n</user>".to_owned(),
                 response: "correlated completion".to_owned(),
             }],
         }],
@@ -125,7 +125,7 @@ fn prompt_stdin_piped_output_preserves_terminal_control_bytes()
         vec![ScenarioLaneV2 {
             ctx_id: "dynamic-ui-prompt".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: "<user>piped terminal controls\n</user>".to_owned(),
+                user_text: "<user source=\"ui\">piped terminal controls\n</user>".to_owned(),
                 response: HOSTILE_TERMINAL_TEXT.to_owned(),
             }],
         }],
@@ -163,7 +163,7 @@ fn prompt_stdin_pty_output_sanitizes_terminal_control_bytes()
         vec![ScenarioLaneV2 {
             ctx_id: "dynamic-ui-prompt".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: "<user>pty terminal controls\n</user>".to_owned(),
+                user_text: "<user source=\"ui\">pty terminal controls\n</user>".to_owned(),
                 response: HOSTILE_TERMINAL_TEXT.to_owned(),
             }],
         }],
@@ -197,7 +197,7 @@ fn prompt_stdin_forwards_colon_prefixed_input_literally() -> Result<(), Box<dyn 
         vec![ScenarioLaneV2 {
             ctx_id: "dynamic-ui-prompt".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: "<user>:skill\n</user>".to_owned(),
+                user_text: "<user source=\"ui\">:skill\n</user>".to_owned(),
                 response: "literal colon prompt".to_owned(),
             }],
         }],
@@ -232,7 +232,7 @@ fn prompt_stdin_accepted_provider_failure_exits_without_stdout()
         vec![ScenarioLaneV2 {
             ctx_id: "dynamic-ui-prompt".to_owned(),
             actions: vec![ScenarioActionV2::Error {
-                user_text: "<user>fail after admission\n</user>".to_owned(),
+                user_text: "<user source=\"ui\">fail after admission\n</user>".to_owned(),
                 failure_kind: tau_proto::ProviderFailureKind::Unknown,
                 error: "synthetic accepted failure".to_owned(),
             }],
@@ -273,7 +273,7 @@ fn late_attached_public_pty_publishes_history_before_announcement()
         vec![ScenarioLaneV2 {
             ctx_id: "dynamic-ui-prompt".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: format!("<user>{prompt}</user>"),
+                user_text: format!("<user source=\"ui\">{prompt}</user>"),
                 response: response.clone(),
             }],
         }],
@@ -399,7 +399,7 @@ fn fresh_session_first_prompt_creates_agent() -> Result<(), Box<dyn std::error::
         vec![ScenarioLaneV2 {
             ctx_id: "implicit-fresh-create".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: "<user>first create prompt</user>".to_owned(),
+                user_text: "<user source=\"ui\">first create prompt</user>".to_owned(),
                 response: "first create complete".to_owned(),
             }],
         }],
@@ -448,7 +448,7 @@ fn attached_quit_is_local_and_quit_session_is_global() -> Result<(), Box<dyn std
         vec![ScenarioLaneV2 {
             ctx_id: "unused-lifetime-lane".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: "<user>unused lifetime prompt</user>".to_owned(),
+                user_text: "<user source=\"ui\">unused lifetime prompt</user>".to_owned(),
                 response: "unused lifetime response".to_owned(),
             }],
         }],
@@ -519,7 +519,7 @@ fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
         vec![ScenarioLaneV2 {
             ctx_id: "dynamic-ui-prompt".to_owned(),
             actions: vec![ScenarioActionV2::HoldUntilCancel {
-                user_text: format!("<user>{prompt_text}</user>"),
+                user_text: format!("<user source=\"ui\">{prompt_text}</user>"),
                 timeout_ms: 10_000,
             }],
         }],

@@ -551,7 +551,7 @@ fn assert_qwen_round_two(
     assert_eq!(initial_messages.len(), 2);
     let expected = serde_json::json!([
         initial_messages[0].clone(),
-        {"role": "user", "content": "<user>exercise qwen tools</user>"},
+        {"role": "user", "content": "<user source=\"ui\">exercise qwen tools</user>"},
         {
             "role": "assistant",
             "content": "calling one\n",
@@ -587,7 +587,7 @@ fn assert_qwen_round_three(
     assert_eq!(initial_messages.len(), 2);
     let expected = serde_json::json!([
         initial_messages[0].clone(),
-        {"role": "user", "content": "<user>exercise qwen tools</user>"},
+        {"role": "user", "content": "<user source=\"ui\">exercise qwen tools</user>"},
         {
             "role": "assistant",
             "content": "calling one\n",
@@ -1169,7 +1169,7 @@ fn assert_one_user_turn(
         .iter()
         .filter(|message| message["role"] == "user")
         .collect::<Vec<_>>();
-    let expected_content = format!("<user>{expected_prompt}</user>");
+    let expected_content = format!("<user source=\"ui\">{expected_prompt}</user>");
     if users.len() != 1 || users[0]["content"] != expected_content {
         return Err(format!("unexpected upstream user messages: {users:?}").into());
     }
@@ -1190,9 +1190,9 @@ fn assert_completed_p1_context(
         .collect::<Option<Vec<_>>>()
         .ok_or("Chat Completions conversational message was not text")?;
     let expected = [
-        ("user", "<user>first retry prompt</user>"),
+        ("user", "<user source=\"ui\">first retry prompt</user>"),
         ("assistant", "P1 complete"),
-        ("user", "<user>later prompt</user>"),
+        ("user", "<user source=\"ui\">later prompt</user>"),
     ];
     if conversational != expected {
         return Err(
@@ -1206,8 +1206,8 @@ fn assert_completed_p1_context(
         .collect::<Vec<_>>();
     if users
         != [
-            "<user>first retry prompt</user>",
-            "<user>later prompt</user>",
+            "<user source=\"ui\">first retry prompt</user>",
+            "<user source=\"ui\">later prompt</user>",
         ]
     {
         return Err(format!("duplicate upstream user context: {users:?}").into());

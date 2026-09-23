@@ -965,7 +965,9 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                     })
                     .collect();
                 assert!(
-                    user_texts.iter().any(|t| t == "<user>redirect</user>"),
+                    user_texts
+                        .iter()
+                        .any(|t| t == "<user source=\"ui\">redirect</user>"),
                     "next-round prompt should fold the steered message into messages; \
                      user texts were {user_texts:?}",
                 );
@@ -985,7 +987,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                         ContextItem::Message(MessageItem {
                             role: ContextRole::User,
                             ..
-                        }) if text_part(item) == Some("<user>redirect</user>")
+                        }) if text_part(item) == Some("<user source=\"ui\">redirect</user>")
                     )
                 });
                 assert!(

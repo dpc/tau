@@ -2822,7 +2822,11 @@ impl FakeState {
                 let texts = provider_user_texts(prompt);
                 let exact = match action {
                     ScenarioActionV2::MessageInboundAfterHeld { held_user_text, .. } => {
-                        texts == vec![format!("<user>{held_user_text}</user>"), expected.clone()]
+                        texts
+                            == vec![
+                                format!("<user source=\"ui\">{held_user_text}</user>"),
+                                expected.clone(),
+                            ]
                     }
                     ScenarioActionV2::MessageAndRawInboundAfterHeld {
                         held_user_text,
@@ -2842,7 +2846,7 @@ impl FakeState {
                         );
                         texts
                             == vec![
-                                format!("<user>{held_user_text}</user>"),
+                                format!("<user source=\"ui\">{held_user_text}</user>"),
                                 expected.clone(),
                                 raw,
                             ]
@@ -4368,8 +4372,9 @@ fn validate_wait_all_mixed_round(
 
 /// Return exact provider user text under the closed fixture convention.
 ///
-/// Exact canonical `<user>` syntax is reserved for fixture HumanUi projections;
-/// the fake does not infer or decode provenance from provider text.
+/// Exact canonical `<user source="ui">` syntax is reserved for fixture HumanUi
+/// projections; the fake does not infer or decode provenance from provider
+/// text.
 fn scenario_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
     provider_user_texts(prompt)
 }
@@ -4557,7 +4562,7 @@ fn context_has_text(
 /// Project fixture-authored typed HumanUi text without attempting inversion.
 fn project_fixture_human_ui_user_prompt(text: &str) -> String {
     let body = tau_proto::escape_exact_sentinel_close(text, "</user>", "&lt;/user&gt;");
-    format!("<user>{body}</user>")
+    format!("<user source=\"ui\">{body}</user>")
 }
 
 /// Match either raw non-HumanUi text or fixture-authored HumanUi projection.

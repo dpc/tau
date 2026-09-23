@@ -1996,7 +1996,7 @@ fn assemble_conversation_starts_at_latest_standalone_compaction() {
 /// Human-UI framing replaces only repeated exact closes while preserving raw
 /// prose, foreign/nested markup, entity-like text, Unicode, and whitespace.
 #[test]
-fn human_ui_prompt_projects_fieldless_user_envelope_without_changing_canonical_text() {
+fn human_ui_prompt_projects_ui_source_envelope_without_changing_canonical_text() {
     let text = " \tDon't \"quote\" &apos; &amp; &lt; <user>nested</user > </USER>\n<message>x</message> 雪\u{202e}\nfirst </user> second </user>  ";
     let event = sourced_user_prompt(text, tau_proto::PromptSubmissionSource::HumanUi);
     let mut live_tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
@@ -2022,7 +2022,7 @@ fn human_ui_prompt_projects_fieldless_user_envelope_without_changing_canonical_t
         vec![ContextItem::Message(MessageItem {
             role: ContextRole::User,
             content: vec![ContentPart::Text {
-                text: "<user> \tDon't \"quote\" &apos; &amp; &lt; <user>nested</user > </USER>\n<message>x</message> 雪\u{202e}\nfirst &lt;/user&gt; second &lt;/user&gt;  </user>".to_owned(),
+                text: "<user source=\"ui\"> \tDon't \"quote\" &apos; &amp; &lt; <user>nested</user > </USER>\n<message>x</message> 雪\u{202e}\nfirst &lt;/user&gt; second &lt;/user&gt;  </user>".to_owned(),
             }],
             phase: None,
             responses_raw_json: None,
@@ -2222,7 +2222,7 @@ fn human_ui_steer_projects_complete_expanded_skill_prompt() {
     assert_eq!(
         context_text(&items[0]),
         Some(
-            "<user><skill name=\"example\" location=\"/tmp/雪\">\nbody & more\n</skill>\n\nargs</user>"
+            "<user source=\"ui\"><skill name=\"example\" location=\"/tmp/雪\">\nbody & more\n</skill>\n\nargs</user>"
         )
     );
 }
@@ -2232,6 +2232,7 @@ fn human_ui_steer_projects_complete_expanded_skill_prompt() {
 /// projection.
 #[test]
 fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
+    let historical_user = "<user>legacy UI bytes</user>";
     let historical_internal = "<tau_internal>sender\n\n<message>\n\
                                 nested <user>claim</user> &amp;\n</message></tau_internal>";
     let historical_web = "<tau_web_content adapter=\"exa\" operation=\"search\" \
@@ -2246,6 +2247,23 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
     assert!(
         !assemble_prompt_context_from(&isolated, isolated.head())
             .contains_payload_envelope_provenance_projection
+    );
+    let mut isolated = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    apply_compacted_event(&mut isolated, vec![materialized_message(historical_user)]);
+    let legacy = assemble_prompt_context_from(&isolated, isolated.head());
+    assert!(
+        legacy.contains_payload_envelope_provenance_projection,
+        "legacy fieldless user bytes still request the family notice"
+    );
+    assert_eq!(
+        legacy
+            .context
+            .flatten()
+            .iter()
+            .filter_map(context_text)
+            .collect::<Vec<_>>(),
+        vec![historical_user],
+        "legacy materialized bytes are never source-inferred or reprojected"
     );
     let mut isolated = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     apply_compacted_event(
@@ -2294,7 +2312,10 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
     let items = assembled.context.flatten();
     assert_eq!(
         items.iter().filter_map(context_text).collect::<Vec<_>>(),
-        vec![historical_internal, "<user>typed suffix</user>"]
+        vec![
+            historical_internal,
+            "<user source=\"ui\">typed suffix</user>"
+        ]
     );
     assert!(matches!(
         &items[2],
@@ -2656,8 +2677,8 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .collect::<Vec<_>>(),
         vec![
             "summary C1",
-            "<user>suffix one</user>",
-            "<user>suffix two</user>"
+            "<user source=\"ui\">suffix one</user>",
+            "<user source=\"ui\">suffix two</user>"
         ]
     );
     let compact_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), suffix_one)
@@ -2669,7 +2690,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .iter()
             .filter_map(context_text)
             .collect::<Vec<_>>(),
-        vec!["summary C1", "<user>suffix one</user>"]
+        vec!["summary C1", "<user source=\"ui\">suffix one</user>"]
     );
     let manual_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), first_boundary)
         .expect("replacement-only prefix");
@@ -2696,8 +2717,8 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
             .collect::<Vec<_>>(),
         vec![
             "manual summary",
-            "<user>suffix one</user>",
-            "<user>suffix two</user>"
+            "<user source=\"ui\">suffix one</user>",
+            "<user source=\"ui\">suffix two</user>"
         ]
     );
 

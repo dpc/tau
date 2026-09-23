@@ -2855,13 +2855,9 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
             _ => None,
         })
         .expect("provider prompt");
-    assert!(
-        prompt
-            .context
-            .flatten()
-            .iter()
-            .any(|item| { text_part(item) == Some("<user>  hello <world> & 雪\nnext  </user>") })
-    );
+    assert!(prompt.context.flatten().iter().any(|item| {
+        text_part(item) == Some("<user source=\"ui\">  hello <world> & 雪\nnext  </user>")
+    }));
     let tree = h.tree_request_result(&test_session_id("s1"), Some(agent_id.as_str()));
     assert!(tree.contains("hello <world> & 雪"));
     assert!(
@@ -2921,13 +2917,9 @@ fn new_agent_initial_human_ui_prompt_is_wrapped_only_in_provider_context() {
             _ => None,
         })
         .expect("initial provider prompt");
-    assert!(
-        prompt
-            .context
-            .flatten()
-            .iter()
-            .any(|item| { text_part(item) == Some("<user>initial <prompt> & text</user>") })
-    );
+    assert!(prompt.context.flatten().iter().any(|item| {
+        text_part(item) == Some("<user source=\"ui\">initial <prompt> & text</user>")
+    }));
     assert!(
         prompt
             .context

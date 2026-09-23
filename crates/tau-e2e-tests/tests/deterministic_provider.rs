@@ -1682,7 +1682,7 @@ fn assert_restart_context(context: &tau_proto::PromptContext, h: &str, r: &str, 
     assert_exact_text_message(
         h_item,
         tau_proto::ContextRole::User,
-        &format!("<user>{h}</user>"),
+        &format!("<user source=\"ui\">{h}</user>"),
     );
     assert_exact_text_message(r_item, tau_proto::ContextRole::Assistant, r);
     assert_exact_text_message(
@@ -1693,7 +1693,7 @@ fn assert_restart_context(context: &tau_proto::PromptContext, h: &str, r: &str, 
     assert_exact_text_message(
         q_item,
         tau_proto::ContextRole::User,
-        &format!("<user>{q}</user>"),
+        &format!("<user source=\"ui\">{q}</user>"),
     );
 }
 

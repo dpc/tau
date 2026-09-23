@@ -66,7 +66,7 @@ See
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), agent-message delivery and projection by [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 Interactive UI prompt facts retain raw canonical text and typed harness-stamped
-provenance; provider assembly alone derives their fieldless `<user>` presentation
+provenance; provider assembly alone derives their `<user source="ui">` presentation
 under
 [SPEC-interactive-user-prompt-envelope](SPEC-interactive-user-prompt-envelope.md).
 

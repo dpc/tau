@@ -38,7 +38,7 @@ configuration, unexpected prompts, overlaps, first mismatches, and unconsumed
 actions fail closed with bounded synthetic diagnostics.
 
 Scenario `user_text` remains semantic accepted text. Closed fixtures reserve the
-exact canonical fieldless `<user>...</user>` syntax for HumanUi provider
+exact canonical `<user source="ui">...</user>` syntax for HumanUi provider
 projections; the fake cannot infer durable provenance from provider text alone.
 Under this closed fixture convention it projects fixture-authored expected
 HumanUi text and compares provider bytes without decoding; raw `</user>` and raw

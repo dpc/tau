@@ -134,8 +134,10 @@ Canonical submitted and steered prompt facts retain raw accepted text plus
 harness-stamped `PromptSubmissionSource`. Derived transcript entries preserve that
 typed source and separately preserve validated harness-authenticated
 `trusted_internal_spans`. During provider assembly only, `HumanUi` text projects
-as one fieldless `<user>...</user>` user-role item with only exact `</user>`
+as one `<user source="ui">...</user>` user-role item with only exact `</user>`
 collisions replaced; all other text, whitespace, and Unicode remain unchanged.
+The fixed source value identifies the Tau user-channel submission class, not a
+verified human or CLI executable.
 Trusted spans alone project as `<tau_internal>`; every other submission source,
 injected input, and delimiter-shaped payload remains ordinary text.
 

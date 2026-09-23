@@ -37,9 +37,9 @@ commands. Scenario counts, bytes, hold deadlines, barriers, and diagnostics are
 bounded; Nix additionally runs the exact lane in a network-denied build sandbox.
 Children still inherit the ordinary process environment, but the closed fake
 does not read provider credentials or use environment values as control.
-The closed fixture grammar reserves exact canonical fieldless
-`<user>...</user>` syntax for HumanUi provider projections because provider text
-does not itself carry durable provenance. Under its closed fixture convention,
+The closed fixture grammar reserves exact canonical
+`<user source="ui">...</user>` syntax for HumanUi provider projections because
+provider text does not itself carry durable provenance. Under its closed fixture convention,
 the fake projects fixture-authored expected HumanUi text and compares provider
 bytes without decoding. Raw `</user>` and raw `&lt;/user&gt;` intentionally
 collide in the one-way provider form; the fixture never invents one semantic

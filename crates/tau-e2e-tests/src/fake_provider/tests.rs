@@ -682,7 +682,7 @@ fn output_length_scenario_requires_one_correlated_closed_pair() {
 fn human_ui_fixture_projection_preserves_bytes_and_exposes_close_collision() {
     assert_eq!(
         project_fixture_human_ui_user_prompt(" \t<x> &amp; \"q\" 'a'\n雪\u{202e}  "),
-        "<user> \t<x> &amp; \"q\" 'a'\n雪\u{202e}  </user>"
+        "<user source=\"ui\"> \t<x> &amp; \"q\" 'a'\n雪\u{202e}  </user>"
     );
     assert_eq!(
         project_fixture_human_ui_user_prompt("</user>"),
@@ -690,7 +690,7 @@ fn human_ui_fixture_projection_preserves_bytes_and_exposes_close_collision() {
         "exact-close framing is one-way and the fixture must not decode it"
     );
     assert!(fixture_user_text_matches(
-        "<user>&lt;/user&gt;</user>",
+        "<user source=\"ui\">&lt;/user&gt;</user>",
         "</user>"
     ));
     assert!(fixture_user_text_matches("internal raw", "internal raw"));
@@ -1739,7 +1739,7 @@ fn v2_no_context_lane_binding_requires_the_unique_retained_child() {
 fn v2_dynamic_public_pty_lane_binding_is_explicitly_allowlisted() {
     let prompt = prompt_for(
         &tau_proto::AgentId::parse("main").expect("agent id"),
-        "<user>turn</user>",
+        "<user source=\"ui\">turn</user>",
         Some("ui-prompt-generated"),
     );
     for name in PUBLIC_PTY_DYNAMIC_LANE_SCENARIOS {
@@ -1749,7 +1749,7 @@ fn v2_dynamic_public_pty_lane_binding_is_explicitly_allowlisted() {
             vec![ScenarioLaneV2 {
                 ctx_id: "configured-placeholder".to_owned(),
                 actions: vec![ScenarioActionV2::Text {
-                    user_text: "<user>turn</user>".to_owned(),
+                    user_text: "<user source=\"ui\">turn</user>".to_owned(),
                     response: "done".to_owned(),
                 }],
             }],
@@ -1769,7 +1769,7 @@ fn v2_dynamic_public_pty_lane_binding_is_explicitly_allowlisted() {
         vec![ScenarioLaneV2 {
             ctx_id: "configured-placeholder".to_owned(),
             actions: vec![ScenarioActionV2::Text {
-                user_text: "<user>turn</user>".to_owned(),
+                user_text: "<user source=\"ui\">turn</user>".to_owned(),
                 response: "done".to_owned(),
             }],
         }],

@@ -366,8 +366,10 @@ The harness stamps `HumanUi` on accepted visible UI prompts for existing agents,
 new-agent initial prompts, and queued prompts later committed as steering facts.
 Submitted and steered facts keep the accepted effective text raw and carry that
 required typed provenance through the derived transcript. Prompt assembly alone
-projects each such entry as one fieldless `<user>...</user>` user-role text item,
-replacing only exact `</user>` collisions. Replay follows the same source-based path.
+projects each such entry as one `<user source="ui">...</user>` user-role text
+item, replacing only exact `</user>` collisions. The fixed source value names
+the Tau user-channel submission class rather than a verified human or CLI
+executable. Replay follows the same source-based path.
 
 Successful existing-agent skill commands expand against that agent's frozen
 initialization snapshot before acceptance. New-agent initial skill commands queue

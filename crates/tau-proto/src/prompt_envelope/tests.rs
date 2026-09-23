@@ -27,8 +27,8 @@ fn registered_families_have_unique_complete_lexical_contracts() {
         USER_PAYLOAD_ENVELOPE,
         RegisteredPayloadEnvelope {
             name: "user",
-            opening: PayloadEnvelopeOpening::Fixed("<user>"),
-            ordered_attributes: &[],
+            opening: PayloadEnvelopeOpening::Attributed("<user "),
+            ordered_attributes: &["source"],
             exact_close: "</user>",
             visible_close: "&lt;/user&gt;",
             carrier: PayloadEnvelopeCarrier::GenericUserText,
@@ -141,11 +141,30 @@ fn registered_families_have_unique_complete_lexical_contracts() {
 /// reject prefixes, suffixes, and duplicate trusted closes.
 #[test]
 fn registered_families_match_only_one_complete_outer_envelope() {
-    assert!(USER_PAYLOAD_ENVELOPE.matches_whole("<user>body</user>"));
+    assert!(USER_PAYLOAD_ENVELOPE.matches_whole("<user source=\"ui\">body</user>"));
     assert!(MESSAGE_PAYLOAD_ENVELOPE.matches_whole("<message event=\"delivered\">body</message>"));
-    assert!(!USER_PAYLOAD_ENVELOPE.matches_whole("x<user>body</user>"));
+    assert!(!USER_PAYLOAD_ENVELOPE.matches_whole("<user>body</user>"));
+    assert!(!USER_PAYLOAD_ENVELOPE.matches_whole("x<user source=\"ui\">body</user>"));
     assert!(!MESSAGE_PAYLOAD_ENVELOPE.matches_whole("<message>body</message>"));
-    assert!(!USER_PAYLOAD_ENVELOPE.matches_whole("<user>a</user>b</user>"));
+    assert!(!USER_PAYLOAD_ENVELOPE.matches_whole("<user source=\"ui\">a</user>b</user>"));
+}
+
+/// The shared renderer owns the fixed UI source attribute, canonical opening,
+/// exact-close escaping, and closing bytes used by HumanUi projection.
+#[test]
+fn user_registry_renders_exact_ui_source_envelope() {
+    let rendered = USER_PAYLOAD_ENVELOPE
+        .render_attributed(
+            &[("source", "ui".to_owned())],
+            "nested <user source=\"ui\">claim</user> and </user>",
+        )
+        .expect("registered user source attribute");
+    assert_eq!(
+        rendered,
+        "<user source=\"ui\">nested <user source=\"ui\">claim&lt;/user&gt; and \
+         &lt;/user&gt;</user>"
+    );
+    assert!(USER_PAYLOAD_ENVELOPE.matches_whole(&rendered));
 }
 
 /// Exact-close framing replaces every own close and preserves all other

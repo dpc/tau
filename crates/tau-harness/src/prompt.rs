@@ -1341,6 +1341,19 @@ fn is_payload_envelope_provenance_projection(text: &str) -> bool {
                 && family.name != tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.name
         })
         .any(|family| family.matches_whole(text))
+        // Historical materialized compaction/native-replay bytes remain
+        // untouched, but their old fieldless user framing still requests the
+        // family notice. This recognition never selects or reprojects source.
+        || (text.starts_with("<user>")
+            && text.ends_with(tau_proto::USER_PAYLOAD_ENVELOPE.exact_close)
+            && text
+                .strip_prefix("<user>")
+                .and_then(|body| {
+                    body.strip_suffix(tau_proto::USER_PAYLOAD_ENVELOPE.exact_close)
+                })
+                .is_some_and(|body| {
+                    !body.contains(tau_proto::USER_PAYLOAD_ENVELOPE.exact_close)
+                }))
         || [
             ("<message>", MESSAGE_CLOSE),
             ("<tau_peer_message", PEER_MESSAGE_CLOSE),
@@ -2181,8 +2194,9 @@ fn project_user_prompt_items(
                             crate::internal_envelope::TAU_INTERNAL_CLOSE_VISIBLE,
                         );
                         if human_ui {
-                            let body = tau_proto::USER_PAYLOAD_ENVELOPE.escape_body(&body);
-                            *text = format!("<user>{body}</user>");
+                            *text = tau_proto::USER_PAYLOAD_ENVELOPE
+                                .render_attributed(&[("source", "ui".to_owned())], &body)
+                                .expect("registered HumanUi envelope attributes");
                         } else {
                             *text = body.into_owned();
                         }
