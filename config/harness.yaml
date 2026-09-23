@@ -171,6 +171,8 @@
 #       api_key_secret: zulip_api_key
 #       identity_key_secret: zulip_identity_key
 #       offline_message_catch_up: false
+#       register_on_start: true # register extension automatically
+#       role: coordinator # role to deliver to; optional, constrains registration and automatic delivery
 #       allowed_user_ids: [42]
 #       direct_messages: { receive: all_messages }
 #       conversations:

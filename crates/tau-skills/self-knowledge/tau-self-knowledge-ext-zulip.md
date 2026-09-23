@@ -13,10 +13,12 @@ starts it through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az2LFTBWK7VpAwC3Bpxohkh91aqXd)
 owns its source and detailed operational documentation. The bridge uses bot
 email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
-`GET /api/v1/events`; it does not use webhooks. The pinned extension revision
-requires Tau protocol 8.1 and registry SDK 0.6.0; protocol-7 bridges are
-rejected before Configure/Ready. Its snake_case keys, secret bindings, and
-catch-up checkpoint format otherwise remain unchanged.
+`GET /api/v1/events`; it does not use webhooks. Its automatic-receive revision
+requires Tau protocol 9, registry SDK 0.7.0, and a harness containing the
+receiver-admission fix first published in Tau commit
+`30c8b43410a84294f31f74451f9f7f09a94df473`. Update the harness and all configured
+extension binaries compatibly before activating it. Its snake_case keys, secret
+bindings, and catch-up checkpoint format otherwise remain unchanged.
 
 An immediate reply for an already queued event, or a non-blocking poll reply,
 may omit the queue-ID echo. The bridge accepts that omission only for its
@@ -119,9 +121,9 @@ hard-filtered; they spend no live budget and trigger no queue flush, but retain
 the ordinary canonical-ACK checkpoint requirement. Existing duplicate
 suppression handles live/history overlap.
 
-For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all inbound fields, and configure exactly one `proactive_direct_messages` alias. This mode declares only scoped `zulip_send` without a tool group; sending uses `message` plus that sole alias and needs no registration. It never registers or polls a queue, publishes Zulip-originated events, installs reply/reaction authority, or activates an agent. Mode changes require extension restart.
+For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all inbound fields, and configure exactly one `proactive_direct_messages` alias. This mode declares only scoped `zulip_send` without a tool group; sending uses `message` plus that sole alias and needs no receive designation. It never registers or polls a queue, publishes Zulip-originated events, installs reply/reaction authority, or activates an agent. Mode changes require extension restart.
 
-In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the text tool group. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
+In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the text tool group. `zulip_register {}` means “make the authenticated caller this instance's receiving agent.” The legacy `{"enabled":true}` spelling remains accepted, while `{"enabled":false}` is rejected rather than pausing reception. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
 
 The approved attachment-capable extension revision adds
 `zulip_send_attachment`. An `std-zulip` instance exposes it only when its
@@ -129,8 +131,8 @@ installed `tau-ext-zulip` implements that revision's attachment contract. An
 ordinary-mode role can share one existing shared Artifact file or image only
 when it explicitly grants that exact scoped tool. `zulip_send_attachment` is
 disabled by default, tagged `zulip:attach`, and has no tool group, so text-send
-permission does not authorize uploads. Register first, then provide a canonical
-shared `blake3:<64 lowercase hex>` Artifact `key`, a safe ASCII basename
+permission does not authorize uploads. The designated receiver can provide a
+canonical shared `blake3:<64 lowercase hex>` Artifact `key`, a safe ASCII basename
 `filename`, optional Markdown `message` caption, and exactly one existing
 `destination` or `reply_to`. Filenames are 1–128 bytes, cannot start with `.`,
 and contain only letters, digits, `.`, `_`, and `-`. `topic` follows the same
@@ -209,36 +211,37 @@ recovery is at-least-once and can duplicate messages. Runtime reply/reaction
 references disappear on restart. Admitted Zulip Markdown remains exact through canonical facts, replay, and
 provider context, including a leading addressed bot mention.
 
-A successfully completed ordinary-mode `zulip_register {"enabled":true}`
-records explicit receive resume-intent. After complete successful session and
-agent replay, a runtime restart or agent reload can establish a fresh
-registration under the current configuration, routes, allowlists, admission
-rules, and loaded membership. Unloaded agents receive nothing. Explicit
-disable, or an enable attempt that actually retires registration and then
-fails, revokes intent; rejection before retirement leaves it unchanged. A live
-configuration change retires runtime authority and defeats pending restoration;
-a later reload may resume retained intent under that new configuration.
+Configure receive selection per ordinary-mode extension instance:
 
-An ordinary receive-enabled startup subscribes both historically and live to
-the seven durable facts that reconstruct this intent: `tool.started`,
-`provider.tool_result`, `provider.tool_error`, `tool.background_result`,
-`tool.background_error`, `tool.cancelled`, and `session.agent_loaded`.
-`agent.replay_complete` and `session.replay_complete` remain live-only
-boundaries, so restoration waits for current replay completion. Send-only
-startup remains live-only.
+```yaml
+register_on_start: true # register extension automatically
+role: coordinator # role to deliver to; optional, constrains registration and automatic delivery
+```
 
-Restoration resumes prior explicit intent rather than synthesizing a model tool
-call or deriving authority from historical roles or UI summaries. Only paired
-accepted starts and recognized versioned effective terminal metadata establish
-intent; old metadata-free results, unfinished or unrecognized outcomes,
-incomplete replay, and bounded correlation exhaustion do not. The bridge gives
-no fallback prompt or notification and does not retry failed restoration in the
-same load; an explicit enable remains available. It restores no old queue,
-native route, source reply reference, or reaction ownership. Catch-up remains
-independently opt-in and keeps its existing checkpoint; send-only mode never
-restores receive registration. Historical intent replay does not fetch old
-Zulip messages; only `offline_message_catch_up` can request bounded
-created-message history.
+`register_on_start` defaults to `false`. That default restores an eligible saved
+manual designation after restart, but never first-selects or creates a receiver.
+With `true`, an eligible saved designation remains sticky; otherwise the bridge
+selects the oldest eligible existing agent. `role` is optional, constrains both
+immutable creation-role eligibility and `zulip_register` callers, and is required
+for lazy creation. Creation can follow only actually admitted external input.
+Without a role, automatic mode selects existing agents only and never guesses a
+role. Unknown roles and unreadable designation snapshots fail closed. An unloaded
+saved ID is never force-loaded.
+
+The extension saves one versioned concrete receiving-agent designation per
+persistent session and configured instance; ephemeral sessions retain it only in
+memory. A same-agent registration is an inert success. A different eligible
+caller replaces the designation only after its snapshot saves. An actual handoff
+may send one best-effort fixed notice to the previous receiver only while it is
+loaded; there is no initial-selection or replay notice. An absent snapshot may
+use one unambiguous accepted historical registration as migration evidence, but a
+saved designation wins over that history.
+
+Already reported input and its ACK/checkpoint ownership remain with the original
+agent. Handoffs do not transfer old source, reply, attachment, reaction, queue,
+or write authority. Send-only mode and separately granted send, reaction, and
+attachment tools remain independent. `offline_message_catch_up` remains opt-in
+and is the only way to request bounded created-message history.
 
 ## Diagnose receive restoration and queue recovery
 
@@ -250,15 +253,12 @@ that starts the harness, then restart the harness or session so its new
 extension child inherits it, as described in
 `tau-self-knowledge-debugging-extensions`.
 
-Replay-boundary records include an `ok` or `error` outcome and bounded
-loaded/replay-complete/durable-intent/eligible flags or counts. Receive
-restoration records show candidate selection, attempt, success, or a stable
-failure category: `superseded`, `not_configured`, `send_only`, `resolve_stream`,
-`validate_routes`, `subscribe`, `register_queue`, `checkpoint_config`,
-`checkpoint_open`, `authority_changed`, `worker_start`, or
-`restore_worker_spawn`. Queue diagnostics likewise report invalidation, its
-recovery mode, setup-stage failures, and successful recovery. Existing malformed
-event-batch and long-poll warnings remain available.
+Each delivered replay boundary records an `ok` or `error` outcome with
+content-free gate flags or bounded counts. Receiver-resolution rejections expose
+only stable typed categories, never arbitrary downpath text. Receive-restoration
+warnings use the `receiver_resolution` or `restore_worker_spawn` category;
+queue-setup failures use `queue_setup`. Queue expiry, replacement success,
+malformed event batches, and long-poll failures remain separately visible.
 
 These records contain no message bodies, credentials, headers, queue or native
 IDs, routes, or raw remote error bodies. A positive record shows that the

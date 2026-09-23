@@ -160,6 +160,16 @@ explicit Zulip site, bot credentials, stable identity key, and route policy.
 Running a separate executable does not widen its ingress, reply, reaction,
 proactive-send, or catch-up authority.
 
+The automatic-receive revision requires a current Tau build with the
+receiver-admission fix plus compatible protocol-9/SDK-0.7 extension binaries. In
+receive mode, `register_on_start` defaults to `false`: a saved eligible manual
+designation resumes, but Tau does not select or create an initial receiver. Set it
+to `true` to select an existing eligible receiver automatically; optional `role`
+also constrains self-registration and is required for lazy creation after admitted
+input. The installed extension's README owns the exact schema and migration
+details. Send-only and separately granted send, reaction, and attachment authority
+remain independent.
+
 
 ## PIM
 

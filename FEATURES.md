@@ -244,10 +244,11 @@ explicit:
   enabling `std-telegram`.
 - **Zulip:** the separately maintained, disabled-by-default `tau-ext-zulip`
   bridge uses native event queues for allowlisted direct messages and configured
-  stream/topic routes, with source-bound replies and reactions. A separate
-  send-only mode can expose one fixed proactive DM without registering any
-  receive queue. Install the executable separately and make it available through
-  `PATH` before enabling `std-zulip`.
+  stream/topic routes, with a sticky receiving-agent designation and source-bound
+  replies and reactions. Its receive selection is opt-in; a separate send-only
+  mode can expose one fixed proactive DM without any receive designation. Install
+  the executable separately and make it available through `PATH` before enabling
+  `std-zulip`.
 - **XMPP:** the separately maintained, disabled-by-default `tau-ext-xmpp`
   bridge supports fixed recipients or per-agent MUC rooms with allowlisted
   senders and TLS transport. Install the executable separately and make it

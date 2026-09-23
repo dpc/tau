@@ -29,6 +29,8 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-ext-rostra` — `std-rostra` configuration, Rostra tool authority, durable local state, synchronization, and following notifications.
 - `tau-self-knowledge-ext-slack` — Slack Socket Mode setup, scopes, event subscriptions, routing, security modes, and troubleshooting.
 - `tau-self-knowledge-ext-telegram` — Telegram bot setup, route registration, send authority, gateway-client mode, and troubleshooting.
+- `tau-self-knowledge-ext-discord` — Discord bridge receiver designation, tool grants, routing, and migration behavior.
+- `tau-self-knowledge-ext-github` — GitHub bridge receiver designation, admission configuration, and migration behavior.
 - `tau-self-knowledge-ext-zulip` — Zulip extension configuration, message routing, and troubleshooting.
 - `tau-self-knowledge-ext-swarm` — separately installed Tau Swarm endpoint pinning, credentials, blockers, updates, reconnects, and process-memory lifetime.
 - `tau-self-knowledge-ext-provider-builtin` — extension details for built-in providers, model publication, ChatGPT/Codex, Chat Completions, and OpenRouter.

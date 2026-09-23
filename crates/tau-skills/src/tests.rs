@@ -859,6 +859,8 @@ const BUILT_IN_SKILL_NAMES: &[&str] = &[
     "tau-self-knowledge-ext-shell",
     "tau-self-knowledge-ext-slack",
     "tau-self-knowledge-ext-telegram",
+    "tau-self-knowledge-ext-discord",
+    "tau-self-knowledge-ext-github",
     "tau-self-knowledge-ext-zulip",
     "tau-self-knowledge-ext-swarm",
     "tau-self-knowledge-ext-std-notifications",
