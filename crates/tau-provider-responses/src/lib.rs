@@ -7,6 +7,7 @@ mod cache_diagnostic;
 mod deadlines;
 mod debug_capture;
 mod decoded_event;
+mod prepared_sse_request;
 mod websocket;
 
 use std::collections::BTreeMap;
@@ -14,6 +15,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub use prepared_sse_request::{PrepareSseRequestError, PreparedSseRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -807,6 +809,69 @@ pub fn run_attempt_with_diagnostics(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
+    run_selected_attempt(
+        prompt,
+        config,
+        model,
+        None,
+        debug_provider_requests,
+        cache_diagnostics,
+        provider_attempt,
+        on_update,
+        is_canceled,
+        network,
+    )
+}
+
+/// Run one already-lowered full-replay SSE request with the existing parser,
+/// cancellation, retry classification and diagnostics.
+///
+/// The request must name the supplied model, and the config must select SSE.
+/// Provider adapters own request policy; this function neither relowers the
+/// body nor changes generic Responses terminal semantics.
+/// The supplied prompt/config must describe the request's attribution, tools,
+/// tool choice and cache controls so owner-derived diagnostics remain accurate.
+#[allow(clippy::too_many_arguments)]
+pub fn run_prepared_sse_attempt_with_diagnostics(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    request: &PreparedSseRequest,
+    debug_provider_requests: bool,
+    cache_diagnostics: CacheDiagnostics,
+    provider_attempt: Option<tau_proto::ProviderAttempt>,
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
+    run_selected_attempt(
+        prompt,
+        config,
+        model,
+        Some(request),
+        debug_provider_requests,
+        cache_diagnostics,
+        provider_attempt,
+        on_update,
+        is_canceled,
+        network,
+    )
+}
+
+/// Select a request source without changing capture or finite-attempt policy.
+#[allow(clippy::too_many_arguments)]
+fn run_selected_attempt(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    request: Option<&PreparedSseRequest>,
+    debug_provider_requests: bool,
+    cache_diagnostics: CacheDiagnostics,
+    provider_attempt: Option<tau_proto::ProviderAttempt>,
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
     let mut capture = DebugCapture::new(debug_capture_enabled(prompt, debug_provider_requests));
     capture.cache = cache_diagnostic::CacheAttempt::new(
         prompt,
@@ -819,6 +884,7 @@ pub fn run_attempt_with_diagnostics(
         prompt,
         config,
         model,
+        request,
         capture.clone(),
         on_update,
         is_canceled,
@@ -854,6 +920,7 @@ fn run_attempt_with_capture(
         prompt,
         config,
         model,
+        None,
         debug_capture,
         &mut |update| {
             if let AttemptUpdate::Progress(progress) = update {
@@ -871,6 +938,7 @@ fn run_attempt_with_capture_and_updates(
     prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
     model: &AttemptModel,
+    request: Option<&PreparedSseRequest>,
     debug_capture: DebugCapture,
     on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
@@ -902,7 +970,7 @@ fn run_attempt_with_capture_and_updates(
         );
         return AttemptOutcome::Canceled { progress: initial };
     }
-    let body = match build_request(prompt, config, model) {
+    let body = match select_request(prompt, config, model, request) {
         Ok(body) => body,
         Err(error) => {
             debug_capture.submit_error(prompt, config, model, &error, &initial);
@@ -2186,7 +2254,7 @@ async fn stream(
     prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
     model: &AttemptModel,
-    body: &RequestBody,
+    body: &AttemptRequest<'_>,
     debug_capture: DebugCapture,
     on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
@@ -2209,6 +2277,9 @@ async fn stream(
             .await
         }
         Transport::Websocket => {
+            let AttemptRequest::Standard(body) = body else {
+                return Err((Error::InvalidRequest, State::default().progress()));
+            };
             websocket::stream(
                 prompt,
                 config,
@@ -2292,7 +2363,7 @@ async fn stream_sse(
     prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
     model: &AttemptModel,
-    body: &RequestBody,
+    body: &AttemptRequest<'_>,
     debug_capture: DebugCapture,
     on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
@@ -2336,7 +2407,15 @@ async fn stream_sse(
     }
     on_update(AttemptUpdate::Dispatched(Instant::now()));
     if let Some(cache) = &debug_capture.cache {
-        cache.dispatch(prompt, config, model, body, request_bytes);
+        let (input_items, reasoning_selector) = body.diagnostic_fields();
+        cache.dispatch(
+            prompt,
+            config,
+            model,
+            input_items,
+            reasoning_selector,
+            request_bytes,
+        );
     }
     let response = loop {
         tokio::select! {
@@ -2666,6 +2745,44 @@ fn parse_usage(value: Option<&Value>) -> Option<ProviderTokenUsage> {
         response_received_tokens: value["output_tokens"].as_u64()?,
         stats: Default::default(),
     })
+}
+
+/// Request source selected before the shared finite attempt starts.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum AttemptRequest<'a> {
+    /// Unchanged generic lowering for SSE and WebSocket.
+    Standard(RequestBody),
+    /// Provider-owned exact JSON, restricted to the SSE transport.
+    Prepared(&'a PreparedSseRequest),
+}
+
+impl AttemptRequest<'_> {
+    /// Read actual wire scalars without exposing arbitrary request content.
+    fn diagnostic_fields(&self) -> (usize, Option<&'static str>) {
+        match self {
+            Self::Standard(body) => (body.input.len(), body.reasoning.effort),
+            Self::Prepared(body) => (body.input_items, body.reasoning_selector),
+        }
+    }
+}
+
+/// Preserve ordinary lowering, or admit one matching pre-lowered SSE envelope.
+fn select_request<'a>(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    request: Option<&'a PreparedSseRequest>,
+) -> Result<AttemptRequest<'a>, Error> {
+    match request {
+        Some(request)
+            if config.transport == Transport::Sse && request.model == model.id.as_str() =>
+        {
+            Ok(AttemptRequest::Prepared(request))
+        }
+        Some(_) => Err(Error::InvalidRequest),
+        None => build_request(prompt, config, model).map(AttemptRequest::Standard),
+    }
 }
 
 /// Serializable public Responses request with raw replay-capable input items.

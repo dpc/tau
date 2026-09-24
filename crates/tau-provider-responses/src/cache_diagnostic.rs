@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tau_provider::cache_diagnostic::{CacheDiagnostics, DiagnosticId, Reservation};
 use tau_provider::debug_capture_writer::{ProviderDebugCapture, ProviderDebugCaptureClass};
 
-use crate::{AttemptConfig, AttemptModel, AttemptOutcome, RequestBody, Transport};
+use crate::{AttemptConfig, AttemptModel, AttemptOutcome, Transport};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -107,12 +107,14 @@ impl CacheAttempt {
 
     /// Record attempted send at the existing boundary, without local repair,
     /// connection reuse, or extra serialization for byte sizing.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn dispatch(
         &self,
         prompt: &tau_proto::AgentPromptCreated,
         config: &AttemptConfig,
         model: &AttemptModel,
-        body: &RequestBody,
+        input_items: usize,
+        reasoning_selector: Option<&'static str>,
         bytes: usize,
     ) {
         if self.dispatched.swap(true, Ordering::Relaxed) || !self.enabled {
@@ -132,9 +134,9 @@ impl CacheAttempt {
                 "omitted_identity_fields": if model.is_none() { vec!["configured_model", "effective_model"] } else { vec![] },
                 "wire_dispatch_index": 1, "request_bytes": bytes,
                 "context_item_count": prompt.context.flatten_iter().count(),
-                "input_item_count": body.input.len(), "tool_count": prompt.tools.len(),
+                "input_item_count": input_items, "tool_count": prompt.tools.len(),
                 "tool_choice": prompt.tool_choice,
-                "reasoning_selector": body.reasoning.effort,
+                "reasoning_selector": reasoning_selector,
                 "service_tier": null,
                 "cache_mode": config.prompt_cache.map(|p| p.mode.wire()),
             "cache_ttl_seconds": config.prompt_cache.map(|p| match p.ttl {

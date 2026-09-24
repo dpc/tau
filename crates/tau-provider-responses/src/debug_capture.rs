@@ -14,8 +14,7 @@ use tau_provider::{
 };
 
 use super::{
-    AttemptConfig, AttemptModel, AttemptProgress, Error, ProviderTokenUsage, RequestBody, State,
-    Transport,
+    AttemptConfig, AttemptModel, AttemptProgress, Error, ProviderTokenUsage, State, Transport,
 };
 
 /// Maximum raw provider-event JSON retained for one explicitly enabled response
@@ -196,7 +195,7 @@ impl DebugCapture {
         prompt: &tau_proto::AgentPromptCreated,
         config: &AttemptConfig,
         model: &AttemptModel,
-        body: &RequestBody,
+        body: &impl Serialize,
     ) {
         if !self.enabled {
             return;

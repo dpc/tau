@@ -10,6 +10,13 @@ the application receives a complete message; a postassembly event check remains
 as defense in depth. Response and SSE-line bounds apply before the parser admits
 only supported assistant text, completed reasoning, and Function calls.
 
+The pre-lowered SSE library seam accepts exact request JSON from another local
+provider adapter, not directly from operator configuration or provider output.
+That adapter owns request policy and prior destination-origin admission. Envelope
+validation enforces full replay, SSE and matching model identity; it does not
+authenticate arbitrary opaque input or validate provider-specific request fields.
+Exact captures keep their existing opt-in, size-bound and redaction policy.
+
 Explicit durable-session debug capture stores the finalized HTTP/SSE request at
 its send boundary or the exact WebSocket `response.create` envelope at frame
 send. It stores a bounded successful-response event snapshot after validation,

@@ -35,6 +35,15 @@ sends `previous_response_id` or provider-side compaction controls. The
 extension owns profile storage, model publication, retry scheduling,
 cancellation policy, and protocol-event sampling.
 
+Other provider adapters can supply an exact pre-lowered full-replay SSE request
+through `PreparedSseRequest` and the prepared-attempt entry point. They own route
+policy and retain responsibility for destination-origin admission; the seam
+confers no new replay authority. Generic lowering remains available as a baseline,
+and prepared bodies retain raw JSON rather than rebuilding opaque input items.
+The seam rejects model/transport mismatches and response-id chaining. It reuses
+the ordinary finite SSE transport, parser, terminal classification, capture and
+accounting without changing generic or private Codex defaults.
+
 Profiles select transport explicitly; omission retains the historical SSE
 default. A WebSocket attempt opens a fresh connection, sends one
 `response.create` envelope, and closes after the terminal event. Retry scheduling

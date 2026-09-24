@@ -16,6 +16,7 @@ use tungstenite::protocol::frame::coding::{Data as WebSocketData, OpCode};
 use super::*;
 
 mod cache_diagnostics;
+mod prepared_sse;
 
 /// In-memory trace writer for production transport assertions.
 #[derive(Clone, Default)]
@@ -3117,6 +3118,7 @@ fn sse_capture_cancellation_skips_final_dispatch_observation() {
         &AttemptModel {
             id: ModelName::new("test-model"),
         },
+        None,
         capture,
         &mut |update| {
             if matches!(update, AttemptUpdate::Dispatched(_)) {
@@ -3347,6 +3349,7 @@ fn websocket_capture_cancellation_skips_final_dispatch_observation() {
         &AttemptModel {
             id: ModelName::new("test-model"),
         },
+        None,
         capture,
         &mut |update| {
             if matches!(update, AttemptUpdate::Dispatched(_)) {

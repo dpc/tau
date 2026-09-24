@@ -488,7 +488,14 @@ fn cache_diagnostics_short_credentials_cannot_rewrite_correlation() {
             capture.cache = Some(cache.clone());
             let body = build_request(&prompt, &config, &model).expect("valid request");
             capture.submit_request(&prompt, &config, &model, &body);
-            cache.dispatch(&prompt, &config, &model, &body, 0);
+            cache.dispatch(
+                &prompt,
+                &config,
+                &model,
+                body.input.len(),
+                body.reasoning.effort,
+                0,
+            );
             let state = State::default();
             capture.submit_response(
                 &prompt,
@@ -544,7 +551,16 @@ fn cache_diagnostics_cache_ttl_uses_approved_seconds_schema() {
         let body = build_request(&prompt, &config, &model).expect("valid request");
         let cache = CacheAttempt::new(&prompt, true, CacheDiagnostics::Metadata, None)
             .expect("durable metadata");
-        let (_, rows) = collect(|| cache.dispatch(&prompt, &config, &model, &body, 0));
+        let (_, rows) = collect(|| {
+            cache.dispatch(
+                &prompt,
+                &config,
+                &model,
+                body.input.len(),
+                body.reasoning.effort,
+                0,
+            );
+        });
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0]["cache_ttl_seconds"],
