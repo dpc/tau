@@ -355,43 +355,51 @@ fn successful_public_sse_captures(
 /// owning scheduler can reload a mutable API-key credential.
 #[test]
 fn sse_auth_rejection_is_retryable() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind auth rejection server");
-    let address = listener
-        .local_addr()
-        .expect("auth rejection server address");
-    let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().expect("accept auth rejection request");
-        let _ = read_http_request(&mut socket);
-        let body = r#"{"error":{"type":"invalid_request_error","code":"invalid_api_key"}}"#;
-        write!(
+    for status in [401, 403] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind auth rejection server");
+        let address = listener
+            .local_addr()
+            .expect("auth rejection server address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept auth rejection request");
+            let _ = read_http_request(&mut socket);
+            let body = r#"{"error":{"type":"invalid_request_error","code":"invalid_api_key"}}"#;
+            write!(
             socket,
-            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} Rejected\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         )
         .expect("write auth rejection");
-    });
-    let outcome = run_attempt(
-        &minimal_prompt(),
-        &AttemptConfig {
-            base_url: format!("http://{address}"),
-            api_key: "stale-key".to_owned(),
-            max_output_tokens: 0,
-            transport: Transport::Sse,
-            prompt_cache: None,
-        },
-        &AttemptModel {
-            id: ModelName::new("test-model"),
-        },
-        &mut |_| {},
-        &mut || false,
-        &test_network(),
-    );
-    server.join().expect("join auth rejection server");
-    let AttemptOutcome::Retryable { decision, progress } = outcome else {
-        panic!("HTTP/SSE authentication rejection must reach credential reload");
-    };
-    assert_eq!(decision.class, RetryClass::Auth);
-    assert!(progress.output_items.is_empty());
+        });
+        let outcome = run_attempt(
+            &minimal_prompt(),
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: "stale-key".to_owned(),
+                max_output_tokens: 0,
+                transport: Transport::Sse,
+                prompt_cache: None,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            &mut |_| {},
+            &mut || false,
+            &test_network(),
+        );
+        server.join().expect("join auth rejection server");
+        let AttemptOutcome::Retryable {
+            decision,
+            progress,
+            canonical_unauthorized,
+        } = outcome
+        else {
+            panic!("HTTP/SSE authentication rejection must reach credential reload");
+        };
+        assert_eq!(decision.class, RetryClass::Auth);
+        assert!(progress.output_items.is_empty());
+        assert_eq!(canonical_unauthorized, status == 401);
+    }
 }
 
 /// A structured request-rejection identifier remains terminal even when an
@@ -3426,7 +3434,10 @@ fn websocket_auth_rejected_upgrade_is_retryable() {
         )
     });
     join_websocket_peer(server);
-    let AttemptOutcome::Retryable { decision, progress } = outcome else {
+    let AttemptOutcome::Retryable {
+        decision, progress, ..
+    } = outcome
+    else {
         panic!("authentication rejection must reach credential reload");
     };
     assert_eq!(decision.class, RetryClass::Auth);
@@ -3464,7 +3475,10 @@ fn websocket_rejects_invalid_and_oversized_frames() {
         Message::Text(r#"{"type":"error","status":401,"error":{"code":"invalid_api_key"}}"#.into()),
         &mut || false,
     );
-    let AttemptOutcome::Retryable { decision, progress } = outcome else {
+    let AttemptOutcome::Retryable {
+        decision, progress, ..
+    } = outcome
+    else {
         panic!("known WebSocket auth error must reach credential reload");
     };
     assert_eq!(decision.class, RetryClass::Auth);

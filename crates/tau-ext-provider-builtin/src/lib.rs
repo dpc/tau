@@ -16,6 +16,10 @@ mod chat_completions;
 mod chatgpt_profile;
 pub use chatgpt_profile::ChatGptProfile;
 mod credential_record;
+mod grok;
+mod grok_runtime;
+pub use grok::{GrokModel, GrokProfile};
+use tau_provider_grok::credential::Credential as GrokCredential;
 mod image_tools;
 mod oauth_refresh_rejection;
 mod openai_auth;
@@ -24,6 +28,7 @@ mod output_cost_observation;
 mod prewarm;
 mod prompt_oauth;
 mod provider_settings_validation;
+mod public_backends;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
 mod reasoning_effort_mapping;
@@ -64,10 +69,7 @@ pub use chat_completions::{
     OpenAiPromptCacheMode, OpenAiPromptCacheOptions, OpenAiPromptCacheTtl,
     OpenRouterDiscoveryError, OpenRouterProfile,
 };
-use chat_completions::{
-    PromptAttemptOutcome as ChatCompletionsAttemptOutcome, fetch_openrouter_models,
-    models_for_provider as chat_models_for_provider, run_prompt_attempt,
-};
+use chat_completions::{fetch_openrouter_models, models_for_provider as chat_models_for_provider};
 use dialoguer::{Confirm, Input, Password, Select};
 use oauth_refresh_rejection::{OAuthRefreshRejectionCache, RefreshCredentialsError};
 pub use openai_auth::OpenAiAuth;
@@ -83,11 +85,13 @@ use provider_settings_validation::{
     ProviderSettingsValidationError, ProviderSettingsValidationReason,
     reject_obsolete_local_summary_fields,
 };
+use public_backends::{handle_chat_completions_backend, handle_public_responses_backend};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
 pub use reasoning_effort_mapping::ReasoningEffortMapping;
 use receipt_observation::{ReceiptObservation, ReceiptOutcome};
 use report_sink::ProviderReportSink;
+use responses::models_for_provider as responses_models_for_provider;
 pub use responses::{
     OpenAiPromptCache as ResponsesOpenAiPromptCache,
     OpenAiPromptCacheBoundary as ResponsesOpenAiPromptCacheBoundary,
@@ -95,11 +99,6 @@ pub use responses::{
     OpenAiPromptCacheOptions as ResponsesOpenAiPromptCacheOptions,
     OpenAiPromptCacheTtl as ResponsesOpenAiPromptCacheTtl, ResponsesCompat, ResponsesModel,
     ResponsesProvider,
-};
-use responses::{
-    PromptAttemptOutcome as ResponsesAttemptOutcome,
-    models_for_provider as responses_models_for_provider,
-    run_prompt_attempt as run_responses_prompt_attempt,
 };
 use retry_status::emit_retry_status;
 #[cfg(test)]
@@ -168,6 +167,8 @@ fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BuiltinProviderProfile {
+    /// Native subscription OAuth using the public xAI Responses route.
+    Grok(GrokProfile),
     /// ChatGPT/Codex OAuth provider using the Responses backend.
     Chatgpt(ChatGptProfile),
     /// OpenAI-compatible Chat Completions provider.
@@ -184,6 +185,7 @@ impl BuiltinProviderProfile {
     /// fields.
     fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::Grok(profile) => profile.validate(),
             Self::ChatCompletions(provider) => provider.validate(),
             Self::OpenRouter(profile) => profile.validate(),
             Self::Responses(provider) => provider.validate_reasoning_effort(),
@@ -195,6 +197,7 @@ impl BuiltinProviderProfile {
     /// provider families.
     fn validate_local_summary_compaction(&self) -> Result<(), SummaryCompactionConfigError> {
         match self {
+            Self::Grok(profile) => profile.responses().validate_local_summary_compaction(),
             Self::ChatCompletions(provider) => provider
                 .models
                 .iter()
@@ -264,6 +267,7 @@ impl BuiltinProviderProfiles {
                     Some((provider.clone(), profile.responses_mode()))
                 }
                 BuiltinProviderProfile::ChatCompletions(_)
+                | BuiltinProviderProfile::Grok(_)
                 | BuiltinProviderProfile::OpenRouter(_)
                 | BuiltinProviderProfile::Responses(_) => None,
             })
@@ -736,6 +740,14 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<BackendProfileIde
             provider.base_url.hash(&mut hasher);
             provider.api_key.hash(&mut hasher);
         }
+        PromptBackend::Grok { profile, .. } => {
+            "grok".hash(&mut hasher);
+            profile.client_id.hash(&mut hasher);
+            if let Some(credential) = &profile.credential {
+                credential.access_token().hash(&mut hasher);
+                credential.subject().hash(&mut hasher);
+            }
+        }
     }
     Some(BackendProfileIdentity {
         hash: hasher.finish(),
@@ -878,6 +890,7 @@ pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
     match args.first().map(String::as_str).unwrap_or("help") {
         "add" => cmd_add(&args[1..], &network, &extension_instance)?,
         "login" => cmd_login(&args[1..], &network, &extension_instance)?,
+        "logout" => grok::logout(&args[1..], &extension_instance)?,
         "remove" | "delete" => cmd_remove(&args[1..], &extension_instance)?,
         "rename" => cmd_rename(&args[1..], &extension_instance)?,
         "list" | "status" => cmd_list(&args[1..], &extension_instance)?,
@@ -970,6 +983,7 @@ Subcommands:
   add [--state|--config [--output -]] [KIND]
                                  Add or replace a provider profile (default: state)
   login <name>                   Authenticate an existing provider profile
+  logout <name>                  Remove native Grok credentials locally
   remove [--state|--config] <name>
                                   Remove a provider profile
   rename <old> <new>             Rename a provider profile without changing credentials
@@ -978,6 +992,7 @@ Subcommands:
 
 Provider kinds:
   chatgpt           ChatGPT / Codex
+  grok              Native Grok device OAuth / public Responses
   chat-completions  OpenAI-compatible Chat Completions
   responses         OpenAI Responses API
   openrouter        OpenRouter";
@@ -994,10 +1009,14 @@ struct ProviderKindDescriptor {
 }
 
 /// The complete, canonical provider-kind catalog.
-const PROVIDER_KINDS: [ProviderKindDescriptor; 4] = [
+const PROVIDER_KINDS: [ProviderKindDescriptor; 5] = [
     ProviderKindDescriptor {
         token: "chatgpt",
         label: "ChatGPT / Codex",
+    },
+    ProviderKindDescriptor {
+        token: "grok",
+        label: "Grok subscription (native OAuth)",
     },
     ProviderKindDescriptor {
         token: "chat-completions",
@@ -1089,6 +1108,7 @@ fn cmd_add(
         _ => return Err("tau provider add accepts at most one KIND".into()),
     };
     match kind {
+        "grok" => grok::add(network, extension_instance, target)?,
         "chatgpt" => cmd_add_chatgpt(network, extension_instance, target, implicit_state_target)?,
         "chat-completions" => cmd_add_chat_completions(extension_instance, target)?,
         "responses" => cmd_add_responses(extension_instance, target)?,
@@ -1359,6 +1379,16 @@ fn login_profile(
         );
     };
     let (secret, named_source) = match parsed {
+        BuiltinProviderProfile::Grok(profile) => {
+            let credential = grok::login(&profile.client_id, network)?;
+            (
+                setup_store::SecretWrite {
+                    path: reference.path().clone(),
+                    contents: setup_store::SecretBytes::new(credential.encode()),
+                },
+                None,
+            )
+        }
         BuiltinProviderProfile::Chatgpt(_) => {
             let auth = run_openai_codex_login(network)?;
             (
@@ -1600,6 +1630,27 @@ fn cmd_list_from_store(
         let name = &profile.provider;
         let source = profile.source.label();
         match parsed {
+            BuiltinProviderProfile::Grok(parsed) => {
+                let ProviderCredential::Stored(reference) = &credential else {
+                    return Err("Grok profile has no stored credential".into());
+                };
+                let status = match credentials
+                    .get(&(
+                        reference.identity().clone(),
+                        ProviderCredentialSlot::GrokOAuth,
+                    ))
+                    .and_then(|bytes| GrokCredential::decode(bytes).ok())
+                {
+                    Some(record) if record.is_expired(now_ms()) => "expired",
+                    Some(_) => "logged-in",
+                    None => "not-configured",
+                };
+                writeln!(
+                    output,
+                    "{name}\tgrok\t{source}\t{status}\t{} models",
+                    parsed.models.len()
+                )?;
+            }
             BuiltinProviderProfile::Chatgpt(parsed) => {
                 let ProviderCredential::Stored(reference) = &credential else {
                     return Err("ChatGPT profile has no stored credential".into());
@@ -2046,6 +2097,10 @@ fn provider_setup_payload(
         .as_object_mut()
         .ok_or("provider settings must serialize as an object")?;
     let api_key_source = match (profile, credential_input) {
+        (BuiltinProviderProfile::Grok(_), ProviderSetupInput::ProfileOAuth) => None,
+        (BuiltinProviderProfile::Grok(_), ProviderSetupInput::ApiKey(_)) => {
+            return Err("Grok setup requires native OAuth credentials".into());
+        }
         (BuiltinProviderProfile::Chatgpt(_), ProviderSetupInput::ProfileOAuth) => None,
         (
             BuiltinProviderProfile::ChatCompletions(_)
@@ -2064,6 +2119,16 @@ fn provider_setup_payload(
         ) => return Err("API-key provider setup requires an API-key authority".into()),
     };
     let (slot, secret) = match profile {
+        BuiltinProviderProfile::Grok(profile) => (
+            ProviderCredentialSlot::GrokOAuth,
+            Some(
+                profile
+                    .credential
+                    .as_ref()
+                    .ok_or("Grok setup requires login")?
+                    .encode(),
+            ),
+        ),
         BuiltinProviderProfile::Chatgpt(profile) => {
             object.remove("auth");
             (
@@ -2249,6 +2314,8 @@ fn parse_settings_profile(
         .expect("validated reference must be present");
     match &credential {
         ProviderCredential::Stored(reference)
+            if reference.slot() == ProviderCredentialSlot::GrokOAuth => {}
+        ProviderCredential::Stored(reference)
             if reference.slot() == ProviderCredentialSlot::OAuth =>
         {
             object.insert("auth".to_owned(), serde_json::json!({}));
@@ -2273,6 +2340,9 @@ fn parse_settings_profile(
         .validate()
         .map_err(|_| ProviderSettingsValidationReason::InvalidProfile)?;
     let profile_matches_kind = match (&profile, &credential) {
+        (BuiltinProviderProfile::Grok(_), ProviderCredential::Stored(reference)) => {
+            reference.slot() == ProviderCredentialSlot::GrokOAuth
+        }
         (BuiltinProviderProfile::Chatgpt(_), ProviderCredential::Stored(reference)) => {
             reference.slot() == ProviderCredentialSlot::OAuth
         }
@@ -2287,7 +2357,9 @@ fn parse_settings_profile(
             ProviderCredential::Keyless,
         ) => true,
         (
-            BuiltinProviderProfile::Chatgpt(_) | BuiltinProviderProfile::OpenRouter(_),
+            BuiltinProviderProfile::Chatgpt(_)
+            | BuiltinProviderProfile::OpenRouter(_)
+            | BuiltinProviderProfile::Grok(_),
             ProviderCredential::Keyless,
         ) => false,
     };
@@ -2374,6 +2446,9 @@ fn hydrate_profile_credentials_with(
             CredentialObservation::Contents(blake3::hash(&contents)),
         );
         let valid = match profiles.providers.get_mut(&name) {
+            Some(BuiltinProviderProfile::Grok(profile)) => GrokCredential::decode(&contents)
+                .map_err(|_| ())
+                .map(|credential| profile.credential = Some(credential)),
             Some(BuiltinProviderProfile::Chatgpt(profile)) => {
                 serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(&contents)
                     .map_err(|_| ())
@@ -2440,19 +2515,24 @@ fn credential_error_means_logged_out(
     credential: &ProviderCredential,
     error: &tau_client::ExtensionDataRpcError,
 ) -> bool {
-    matches!(profile, Some(BuiltinProviderProfile::Chatgpt(_)))
-        && matches!(
-            credential,
-            ProviderCredential::Stored(reference)
-                if reference.slot() == ProviderCredentialSlot::OAuth
-        )
-        && matches!(
-            error,
-            tau_client::ExtensionDataRpcError::Harness {
-                kind: tau_proto::ExtensionDataErrorKind::NotFound,
-                ..
-            }
-        )
+    (matches!((profile, credential),
+        (Some(BuiltinProviderProfile::Chatgpt(_)), ProviderCredential::Stored(reference))
+            if reference.slot() == ProviderCredentialSlot::OAuth
+    ) || matches!((profile, credential),
+        (Some(BuiltinProviderProfile::Grok(_)), ProviderCredential::Stored(reference))
+            if reference.slot() == ProviderCredentialSlot::GrokOAuth
+    )) && oauth_record_is_missing(error)
+}
+
+/// Missing OAuth records alone authorize the local-login remediation.
+fn oauth_record_is_missing(error: &tau_client::ExtensionDataRpcError) -> bool {
+    matches!(
+        error,
+        tau_client::ExtensionDataRpcError::Harness {
+            kind: tau_proto::ExtensionDataErrorKind::NotFound,
+            ..
+        }
+    )
 }
 
 fn run_openai_codex_login(
@@ -3009,6 +3089,8 @@ where
 /// refreshes.
 #[derive(Default)]
 struct PromptCredentialAdmissionState {
+    /// Native Grok exact-generation refresh and Secret continuations.
+    grok: grok_runtime::State,
     /// Single bounded timer actor shared by every prompt credential RPC.
     deadlines: Option<PromptCredentialDeadlineScheduler>,
     /// Credential consumers retained in receipt order. Only real prompts share
@@ -3554,6 +3636,7 @@ where
             && self.prompt_queue.is_empty()
             && self.credential_admission.admissions.is_empty()
             && self.credential_admission.oauth_refreshes.is_empty()
+            && self.credential_admission.grok.is_idle()
             && self
                 .retry_scheduler
                 .as_ref()
@@ -3827,7 +3910,11 @@ where
             job.agent_prompt_id.clone(),
             job.prompt.agent_id.clone(),
             job.prompt.originator.clone(),
-            "ChatGPT identity changed; automatic retry refused",
+            if job.pinned_grok_identity.is_some() {
+                "Grok identity changed; automatic retry refused"
+            } else {
+                "ChatGPT identity changed; automatic retry refused"
+            },
         );
         finished.backend = job.observed_backend.clone();
         handle.send(HarnessInputMessage::emit_transient(
@@ -3940,6 +4027,7 @@ where
                 request_id: (!request_id.is_empty()).then_some(request_id),
                 observations: ready.then(BTreeMap::new),
                 oauth_refresh: None,
+                grok_refresh: None,
                 oauth_forced: false,
                 receipt_observation,
             });
@@ -3963,6 +4051,7 @@ where
             observation.quota_resolved(started_at.elapsed());
         }
         let profile_identity = backend_profile_identity(&backend);
+        let pinned_grok_identity = grok::RetryIdentity::from_backend(&backend);
         let pinned_chatgpt_identity = match &backend {
             PromptBackend::Responses(config) => Some(config.chatgpt_retry_identity()),
             _ => None,
@@ -3979,6 +4068,7 @@ where
             prompt,
             backend,
             pinned_chatgpt_identity,
+            pinned_grok_identity,
             profile_identity,
             retry_state: PromptRetryState::default(),
             observed_backend: None,
@@ -4075,6 +4165,7 @@ where
                 request_id,
                 observations: ready.then(BTreeMap::new),
                 oauth_refresh: None,
+                grok_refresh: None,
                 oauth_forced: false,
                 receipt_observation,
             });
@@ -4111,6 +4202,13 @@ where
         &mut self,
         result: tau_proto::ExtensionDataResult,
     ) -> ClientResult<()> {
+        if self
+            .credential_admission
+            .grok
+            .result(&result.request_id, &result.result)
+        {
+            return Ok(());
+        }
         if let Some(deadlines) = &self.credential_admission.deadlines {
             deadlines.cancel(result.request_id.clone());
         }
@@ -4147,6 +4245,7 @@ where
                 }
             });
         admission.observations = Some(observations);
+        self.stage_grok_refresh(&result.request_id);
         self.stage_prompt_oauth_refresh(&result.request_id);
         if let Some(admission) = self
             .credential_admission
@@ -4671,6 +4770,7 @@ where
                     eligible
                         && admission.observations.is_some()
                         && admission.oauth_refresh.is_none()
+                        && admission.grok_refresh.is_none()
                 });
             let Some(index) = index else { break };
             let mut admission = self
@@ -4748,8 +4848,7 @@ where
                     observation.quota_resolved(started_at.elapsed());
                 }
                 job.receipt_observation = admission.receipt_observation.take();
-                if !automatic_retry_identity_matches(job.pinned_chatgpt_identity.as_ref(), &backend)
-                {
+                if !job.automatic_retry_identity_matches(&backend) {
                     return self.finish_identity_changed_prompt(&job, handle);
                 }
                 job.backend = backend;
@@ -4901,6 +5000,7 @@ where
     }
 
     fn drain_worker_messages(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        self.cancel_unobserved_grok_refreshes();
         let mut drain_observation = WorkerDrainObservation::enabled();
         loop {
             self.expire_pending_cache_refreshes(Instant::now(), handle)?;
@@ -4909,6 +5009,29 @@ where
                 observation.message(matches!(message, WorkerMessage::Output { .. }));
             }
             match received {
+                Ok(WorkerMessage::GrokSecretRequest(rpc)) => {
+                    self.start_grok_secret_request(rpc);
+                }
+                Ok(WorkerMessage::GrokGenerationChanged {
+                    key,
+                    credential,
+                    generation,
+                }) => {
+                    self.finish_grok_generation_changed(key, credential, generation);
+                }
+                Ok(WorkerMessage::GrokRefreshFinished {
+                    key,
+                    observed_generation,
+                    authoritative_generation,
+                    result,
+                }) => {
+                    self.finish_grok_refresh(
+                        key,
+                        observed_generation,
+                        authoritative_generation,
+                        result,
+                    );
+                }
                 Ok(WorkerMessage::ImageGenerated { call_id, result }) => {
                     self.images.generated(call_id, result, handle)?;
                 }
@@ -5291,7 +5414,7 @@ where
         };
         let mut profiles = self.load_selected_profile(&job.prompt.model.provider, handle)?;
         let backend = self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
-        if !automatic_retry_identity_matches(job.pinned_chatgpt_identity.as_ref(), &backend) {
+        if !job.automatic_retry_identity_matches(&backend) {
             self.finish_identity_changed_prompt(&job, handle)?;
             return Ok(());
         }
@@ -5837,6 +5960,8 @@ struct PromptJob {
     backend: PromptBackend,
     /// Immutable account anchor for every automatic retry of this owned prompt.
     pinned_chatgpt_identity: Option<ChatGptRetryIdentity>,
+    /// Native Grok account pin, never changed by a rotated bearer.
+    pinned_grok_identity: Option<grok::RetryIdentity>,
     /// Inference profile identity used by the next finite attempt.
     profile_identity: Option<BackendProfileIdentity>,
     retry_state: PromptRetryState,
@@ -5852,6 +5977,18 @@ struct PromptJob {
     receipt_observation: Option<ReceiptObservation>,
 }
 
+impl PromptJob {
+    /// Both asynchronous and fallback automatic admission use the same frozen
+    /// account anchors; neither token rotation nor retries may replace them.
+    fn automatic_retry_identity_matches(&self, backend: &PromptBackend) -> bool {
+        automatic_retry_identity_matches(self.pinned_chatgpt_identity.as_ref(), backend)
+            && self
+                .pinned_grok_identity
+                .as_ref()
+                .is_none_or(|pinned| pinned.matches(backend))
+    }
+}
+
 /// One prompt held at the credential boundary before it is eligible for
 /// `ProviderPromptSubmitted`.
 ///
@@ -5859,6 +5996,8 @@ struct PromptJob {
 /// entry ready; [`ProviderRuntime::drain_prompt_admissions`] preserves FIFO
 /// submission when replies arrive out of order.
 struct PendingPromptAdmission {
+    /// Native Grok generation awaited by this admission.
+    grok_refresh: Option<grok_runtime::Key>,
     /// The logical prompt transition that owns this credential read.
     kind: PendingPromptAdmissionKind,
     /// The selected credential-free profile plus any hydrated credential.
@@ -7178,6 +7317,13 @@ fn send_scheduler_actions(
 
 #[derive(Clone)]
 enum PromptBackend {
+    /// Native OAuth credentials and fixed-origin Grok request policy.
+    Grok {
+        /// Immutable profile hydrated through Secret storage for this attempt.
+        profile: Arc<GrokProfile>,
+        /// Exact selected model or alias in the startup snapshot.
+        model_index: usize,
+    },
     /// Mutable provider profile/model state was unavailable at this attempt.
     Unavailable {
         /// Selected provider whose missing OAuth Secret requires a fresh login.
@@ -7236,6 +7382,31 @@ impl PromptExecution {
 }
 
 enum WorkerMessage {
+    /// Worker observed a different same-account generation before exchange.
+    GrokGenerationChanged {
+        /// Original exact process-local owner.
+        key: grok_runtime::Key,
+        /// Validated authoritative replacement, never logged.
+        credential: GrokCredential,
+        /// Hash of the exact authoritative bytes.
+        generation: blake3::Hash,
+    },
+    /// Existing Secret operation dispatched by the main loop, never a worker.
+    GrokSecretRequest(grok_runtime::Rpc),
+    /// Retained native worker completed validation and publication.
+    GrokRefreshFinished {
+        /// Exact process-local generation owner.
+        key: grok_runtime::Key,
+        /// Exact worker read used for exchange, distinct from
+        /// admission/readback.
+        observed_generation: Option<String>,
+        /// Exact final readback bytes, never substituted for the exchanged
+        /// hash.
+        authoritative_generation: Option<blake3::Hash>,
+        /// Closed outcome; successful credential is never logged.
+        result:
+            Result<tau_provider_grok::credential::Credential, tau_provider_grok::credential::Error>,
+    },
     /// Finite overall availability/generation/publication deadline.
     ImageTimedOut { call_id: tau_proto::ToolCallId },
     /// Private original bytes, never serialized into event output.
@@ -7916,6 +8087,7 @@ fn resolve_prompt_backend(
         return None;
     };
     match profile {
+        BuiltinProviderProfile::Grok(profile) => grok::resolve_backend(model, profile),
         BuiltinProviderProfile::Chatgpt(profile) => {
             let mode = profile.responses_mode();
             let credential_reference = credential_reference?;
@@ -7980,6 +8152,7 @@ fn resolve_prompt_backend_without_refresh(
         return None;
     };
     match profile {
+        BuiltinProviderProfile::Grok(profile) => grok::resolve_backend(model, profile),
         BuiltinProviderProfile::Chatgpt(profile) => {
             if profile.auth.access_token.trim().is_empty()
                 || oauth_token_is_expired(profile.auth.expires_at_ms)
@@ -8066,6 +8239,7 @@ fn resolve_responses_backend(
             )
         }
         BuiltinProviderProfile::ChatCompletions(_)
+        | BuiltinProviderProfile::Grok(_)
         | BuiltinProviderProfile::OpenRouter(_)
         | BuiltinProviderProfile::Responses(_) => {
             refresh_rejections.clear(&model.provider);
@@ -8621,6 +8795,22 @@ where
     R: TurnAbort,
 {
     match backend {
+        PromptBackend::Grok {
+            profile,
+            model_index,
+        } => {
+            let provider = profile.responses();
+            handle_public_responses_backend(
+                agent_prompt_id,
+                prompt,
+                &provider,
+                &provider.models[*model_index],
+                Some(&profile.models[*model_index]),
+                writer,
+                retry_ctx,
+                context,
+            )
+        }
         PromptBackend::Unavailable { .. } => Ok(Some(PromptAttemptRetry {
             decision: RetryDecision::new(RetryClass::Auth),
             live_detail: None,
@@ -8656,6 +8846,7 @@ where
             prompt,
             provider,
             &provider.models[*model_index],
+            None,
             writer,
             retry_ctx,
             context,
@@ -8663,186 +8854,6 @@ where
     }
 }
 
-/// Runs one Chat Completions attempt and reports its terminal or retry outcome.
-fn handle_chat_completions_backend<R, S: ProviderReportSink>(
-    agent_prompt_id: &tau_proto::AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    provider: &ChatCompletionsProvider,
-    model: &ChatCompletionsModel,
-    writer: &mut S,
-    retry_ctx: &mut R,
-    context: ChatGptPromptExecutionContext<'_>,
-) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
-where
-    R: TurnAbort,
-{
-    if TurnAbort::is_aborted(retry_ctx) {
-        return finish_canceled_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            false,
-            context.prior_backend.cloned(),
-            context.logical_attempt.provider_attempt(),
-        );
-    }
-    let outcome = run_prompt_attempt(
-        agent_prompt_id,
-        prompt,
-        provider,
-        model,
-        context.debug_provider_requests,
-        writer,
-        &mut || TurnAbort::is_aborted(retry_ctx),
-        context.runtime.network(),
-        context.logical_attempt.provider_attempt(),
-    );
-    match outcome {
-        ChatCompletionsAttemptOutcome::Finished(finished) => finish_backend_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            retry_ctx,
-            *finished,
-            true,
-            CancellationFinishPolicy {
-                detail: "request canceled; discarding tentative provider output",
-                retain_correlation: true,
-            },
-        ),
-        ChatCompletionsAttemptOutcome::Terminal {
-            mut finished,
-            progress,
-        } => {
-            finished.backend = observed_backend(finished.backend.take(), context.prior_backend);
-            finish_terminal_attempt(
-                agent_prompt_id,
-                prompt,
-                writer,
-                *finished,
-                progress == tau_provider_chat_completions::SemanticProgress::Parsed,
-            )
-        }
-        ChatCompletionsAttemptOutcome::Retry {
-            decision,
-            progress,
-            backend_reached,
-        } => finish_retry_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            decision,
-            progress == tau_provider_chat_completions::SemanticProgress::Parsed,
-            observed_backend(
-                backend_reached.then(|| chat_completions_backend(provider)),
-                context.prior_backend,
-            ),
-        ),
-        ChatCompletionsAttemptOutcome::Canceled { progress, facts } => finish_canceled_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            progress == tau_provider_chat_completions::SemanticProgress::Parsed,
-            observed_backend(
-                facts
-                    .backend_reached
-                    .then(|| chat_completions_backend(provider)),
-                context.prior_backend,
-            ),
-            facts.provider_attempt,
-        ),
-    }
-}
-/// Runs one public Responses attempt and reports its terminal or retry outcome.
-fn handle_public_responses_backend<R, S: ProviderReportSink>(
-    agent_prompt_id: &tau_proto::AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    provider: &ResponsesProvider,
-    model: &ResponsesModel,
-    writer: &mut S,
-    retry_ctx: &mut R,
-    context: ChatGptPromptExecutionContext<'_>,
-) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
-where
-    R: TurnAbort,
-{
-    if TurnAbort::is_aborted(retry_ctx) {
-        return finish_canceled_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            false,
-            context.prior_backend.cloned(),
-            context.logical_attempt.provider_attempt(),
-        );
-    }
-    match run_responses_prompt_attempt(
-        agent_prompt_id,
-        prompt,
-        provider,
-        model,
-        context.debug_provider_requests,
-        writer,
-        &mut || TurnAbort::is_aborted(retry_ctx),
-        context.runtime.network(),
-        context.logical_attempt.provider_attempt(),
-    ) {
-        ResponsesAttemptOutcome::Finished(finished) => finish_backend_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            retry_ctx,
-            *finished,
-            true,
-            CancellationFinishPolicy {
-                detail: "request canceled; discarding tentative provider output",
-                retain_correlation: true,
-            },
-        ),
-        ResponsesAttemptOutcome::Terminal {
-            mut finished,
-            progress,
-        } => {
-            finished.backend = observed_backend(finished.backend.take(), context.prior_backend);
-            finish_terminal_attempt(
-                agent_prompt_id,
-                prompt,
-                writer,
-                *finished,
-                progress.has_timed_semantic_output,
-            )
-        }
-        ResponsesAttemptOutcome::Retry {
-            decision,
-            progress,
-            backend_reached,
-        } => finish_retry_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            decision,
-            progress.has_timed_semantic_output,
-            observed_backend(
-                backend_reached.then(|| responses_backend(provider)),
-                context.prior_backend,
-            ),
-        ),
-        ResponsesAttemptOutcome::Canceled {
-            progress,
-            backend_reached,
-        } => finish_canceled_attempt(
-            agent_prompt_id,
-            prompt,
-            writer,
-            progress.has_timed_semantic_output,
-            observed_backend(
-                backend_reached.then(|| responses_backend(provider)),
-                context.prior_backend,
-            ),
-            context.logical_attempt.provider_attempt(),
-        ),
-    }
-}
 /// Emits a successful final response unless a concurrent cancellation won.
 struct CancellationFinishPolicy {
     /// Transient detail emitted when tentative output must be cleared.
@@ -9908,6 +9919,9 @@ fn models_for_profiles(profiles: &BuiltinProviderProfiles) -> Vec<ProviderModelI
     let mut models = Vec::new();
     for (provider_name, profile) in &profiles.providers {
         match profile {
+            BuiltinProviderProfile::Grok(profile) => {
+                models.extend(profile.models_for_provider(provider_name));
+            }
             BuiltinProviderProfile::Chatgpt(profile) => {
                 models.extend(tau_provider_codex::models_for_provider_mode(
                     provider_name,

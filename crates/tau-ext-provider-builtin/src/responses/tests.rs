@@ -292,6 +292,17 @@ fn run_loopback_attempt(
     model: &ResponsesModel,
     response: &str,
 ) -> PromptAttemptOutcome {
+    run_loopback_selected_attempt(prompt, model, None, response).0
+}
+
+/// Exercise the selected production native or generic adapter and capture its
+/// actual finite wire body without contacting an external provider.
+fn run_loopback_selected_attempt(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &ResponsesModel,
+    grok: Option<&crate::GrokModel>,
+    response: &str,
+) -> (PromptAttemptOutcome, serde_json::Value) {
     use path_std_io::Write as _;
 
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -305,10 +316,12 @@ fn run_loopback_attempt(
         stream
             .set_write_timeout(Some(LOOPBACK_SOCKET_TIMEOUT))
             .expect("bound loopback response write");
-        consume_loopback_request(&mut stream).expect("consume complete loopback request");
+        let body =
+            consume_loopback_request(&mut stream).expect("consume complete loopback request");
         stream
             .write_all(response.as_bytes())
             .expect("write response");
+        serde_json::from_slice(&body).expect("JSON request")
     });
     let provider = ResponsesProvider {
         base_url: format!("http://{address}/v1"),
@@ -317,24 +330,24 @@ fn run_loopback_attempt(
     let network = tau_provider::OutboundNetworkPolicy::from_environment(Default::default(), None);
     let mut bytes = Vec::new();
     let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
-    let outcome = run_prompt_attempt(
+    let outcome = run_selected_prompt_attempt(
         &prompt.agent_prompt_id,
         prompt,
         &provider,
         model,
+        grok,
         false,
         &mut writer,
         &mut || false,
         &network,
         tau_proto::ProviderAttempt::ONE,
     );
-    server.join().expect("loopback server");
-    outcome
+    (outcome, server.join().expect("loopback server"))
 }
 
 /// Consume the finite Content-Length request shape emitted by the loopback
 /// adapter without treating an individual read as an HTTP message boundary.
-fn consume_loopback_request(reader: &mut impl path_std_io::Read) -> path_std_io::Result<()> {
+fn consume_loopback_request(reader: &mut impl path_std_io::Read) -> path_std_io::Result<Vec<u8>> {
     let mut received = Vec::new();
     let header_end = loop {
         let mut chunk = [0_u8; 8192];
@@ -433,8 +446,95 @@ fn consume_loopback_request(reader: &mut impl path_std_io::Read) -> path_std_io:
             ));
         }
         remaining -= count;
+        received.extend_from_slice(&chunk[..count]);
     }
-    Ok(())
+    Ok(received.split_off(header_end))
+}
+
+/// Native local compaction uses ordinary Grok inference only on its private
+/// wire copy, preserving the prefix and the original standalone terminal
+/// ownership.
+#[test]
+fn grok_native_summary_dispatches_ordinary_prefix_and_returns_local_narrative() {
+    FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| observed.borrow_mut().clear());
+    let mut prompt = crate::openai_tests::prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            },
+        ));
+    let model: ResponsesModel = serde_json::from_value(serde_json::json!({
+        "id": "grok-4.7", "context_window": 500000
+    }))
+    .expect("model");
+    let native: crate::GrokModel = serde_json::from_value(serde_json::json!({
+        "id": "grok-4.7", "context_window": 500000, "function_tools": true
+    }))
+    .expect("native model");
+    let body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"native-summary\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checkpoint for continuation.\"}]}]}}\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let (outcome, wire) = run_loopback_selected_attempt(&prompt, &model, Some(&native), &response);
+    FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| {
+        assert_eq!(
+            *observed.borrow(),
+            [tau_proto::PromptOperation::StandaloneCompaction]
+        );
+        observed.borrow_mut().clear();
+    });
+    let PromptAttemptOutcome::Finished(finished) = outcome else {
+        panic!("native local summary must finish");
+    };
+    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+    assert!(matches!(
+        finished.output_items.as_slice(),
+        [tau_proto::ContextItem::LocalCompactionNarrative(_)]
+    ));
+    let mut ordinary = prompt.clone();
+    ordinary.operation = tau_proto::PromptOperation::Inference;
+    ordinary.context.blocks.pop();
+    let lowered = GrokRequest::lower(
+        &ordinary,
+        &tau_provider_responses::AttemptModel {
+            id: model.id.clone(),
+        },
+        0,
+        &[],
+        false,
+    )
+    .expect("ordinary prefix");
+    let prefix: serde_json::Value =
+        serde_json::from_str(lowered.prepared().json().get()).expect("prefix JSON");
+    let input = wire["input"].as_array().expect("input");
+    let original = prefix["input"].as_array().expect("ordinary input");
+    assert_eq!(&input[..original.len()], original);
+    assert_eq!(
+        input.last().expect("instruction")["content"][0]["text"],
+        tau_provider::local_summary_compaction::REQUEST.as_str()
+    );
+    assert_eq!(wire["model"], "grok-4.7");
+    assert_eq!(wire["store"], false);
+    assert!(wire.get("previous_response_id").is_none());
+    assert_eq!(
+        prompt.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    assert!(matches!(
+        run_loopback_attempt(&prompt, &model, &response),
+        PromptAttemptOutcome::Finished(_)
+    ));
+    FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| {
+        assert_eq!(
+            *observed.borrow(),
+            [tau_proto::PromptOperation::StandaloneCompaction]
+        );
+    });
 }
 
 /// Scripted reads make request fragmentation deterministic rather than relying
@@ -1185,6 +1285,8 @@ fn summary_prompt_appends_instruction_to_ordinary_prefix() {
     });
     let config = summary_config();
     let compact = materialize_summary_prompt(&prompt, config).expect("summary prompt");
+    assert_eq!(compact.operation, prompt.operation);
+    assert_eq!(compact.compaction, prompt.compaction);
     assert_eq!(compact.system_prompt, prompt.system_prompt);
     assert_eq!(compact.context.blocks.len(), 1);
     assert_eq!(compact.tools, prompt.tools);

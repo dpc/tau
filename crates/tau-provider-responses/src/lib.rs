@@ -446,6 +446,8 @@ pub enum AttemptOutcome {
     Retryable {
         decision: RetryDecision,
         progress: AttemptProgress,
+        /// The HTTP status was exactly 401, not 403 or a provider error string.
+        canonical_unauthorized: bool,
     },
     /// Cancellation won the attempt.
     Canceled { progress: AttemptProgress },
@@ -1099,7 +1101,11 @@ fn run_attempt_with_capture_and_updates(
         Err((error, progress)) => {
             debug_capture.submit_error(prompt, config, model, &error, &progress);
             match error.retry() {
-                Some(decision) => AttemptOutcome::Retryable { decision, progress },
+                Some(decision) => AttemptOutcome::Retryable {
+                    decision,
+                    progress,
+                    canonical_unauthorized: matches!(error, Error::Http(401, _)),
+                },
                 None => terminal(error, progress),
             }
         }

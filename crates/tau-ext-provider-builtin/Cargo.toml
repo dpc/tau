@@ -36,6 +36,7 @@ tau-proto.workspace = true
 tau-provider.workspace = true
 tau-provider-chat-completions.workspace = true
 tau-provider-codex.workspace = true
+tau-provider-grok.workspace = true
 tau-provider-responses.workspace = true
 tau-term-screen.workspace = true
 tempfile.workspace = true

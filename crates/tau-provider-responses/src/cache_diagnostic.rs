@@ -171,7 +171,9 @@ impl CacheAttempt {
             AttemptOutcome::Canceled { progress } => {
                 (false, true, progress.has_timed_semantic_output, None, None)
             }
-            AttemptOutcome::Retryable { decision, progress } => (
+            AttemptOutcome::Retryable {
+                decision, progress, ..
+            } => (
                 false,
                 false,
                 progress.has_timed_semantic_output,

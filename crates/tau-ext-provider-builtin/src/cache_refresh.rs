@@ -60,6 +60,7 @@ where
         self.credential_admission
             .admissions
             .push_back(PendingPromptAdmission {
+                grok_refresh: None,
                 kind: PendingPromptAdmissionKind::CacheRefresh {
                     refresh,
                     model,

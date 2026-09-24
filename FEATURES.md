@@ -178,7 +178,10 @@ and [external-message architecture](specs/ARCH-external-message-boundary.md).
 
 The bundled provider extension supports ChatGPT/Codex accounts,
 OpenAI-compatible Chat Completions endpoints, generic public Responses
-endpoints, and OpenRouter profiles. Provider
+endpoints, OpenRouter profiles, and native Grok device-OAuth profiles. Grok uses
+public xAI Responses with a setup-time model snapshot, process-local refresh and
+Secret CAS; live subscription entitlement, Fast and quota support remain
+unverified or unavailable. Provider
 metadata drives model selection and filters supported reasoning effort, response
 verbosity, reasoning summaries, input modalities, and compaction. Provider- and
 role-specific behavior also includes service tiers and prompt caching.

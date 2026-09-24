@@ -6,6 +6,30 @@ advertise: false
 
 # Tau provider-builtin extension self-knowledge
 
+## Native Grok
+
+Use `tau provider add grok` for native device OAuth and a setup-time catalog
+snapshot. `login NAME` replaces only the local credential; `logout NAME`
+currently supports native Grok and deletes only its `grok_oauth` Secret, never
+remote revocation. Rename keeps its stable identity. Missing credentials
+withdraw models until login. No ChatGPT auth, cookies, private Build headers or
+paid API-key fallback is used.
+
+Runtime refresh matches the Codex baseline: process-local generation
+single-flight, existing main-loop Secret CAS and authoritative reload. An exact
+401 can force one refresh; 403 cannot. Failed rotation generations need login.
+Cross-process exchanges and crash-before-save can lose a rotating token; there
+is no global lock or exactly-once claim.
+
+Discovery requires joined text-route metadata and known contexts; update
+settings and restart for model changes. Exact audited `grok-4.7` and discovered
+aliases default to function tools; other routes need explicit capability
+configuration. Native tool images are explicit opt-in and not live verified.
+Use shared local summary compaction, not native Grok compaction. No Fast/quota,
+subscription-entitlement, free/unlimited or extra-usage safety promise exists.
+See `docs/providers.md` for the public client-ID caveat, pricing and partial-limit
+behavior. Never initiate login, live inference or paid traffic without consent.
+
 Native Codex standalone compaction displays sampled N/? activity counts from
 validated notifications, not a percentage or the provider sequence number.
 Canonical transaction success alone seals an observed count as N/N; failure or

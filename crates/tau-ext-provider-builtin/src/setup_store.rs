@@ -470,6 +470,42 @@ impl SetupStore {
         }
     }
 
+    /// Deletes only one unchanged profile's host-local credential. Settings,
+    /// including config symlinks and stable identity, remain untouched.
+    pub(crate) fn logout_profile(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+        provider: &tau_proto::ProviderName,
+        expected_source: ProfileSource,
+        expected_settings: &[u8],
+        reference: &tau_config::provider_settings::ProviderCredentialReference,
+    ) -> path_std_io::Result<()> {
+        let _settings_lock = self
+            .acquire_instance_lock(extension_instance)?
+            .ok_or_else(|| {
+                path_std_io::Error::new(
+                    path_std_io::ErrorKind::NotFound,
+                    "provider settings directory is unavailable",
+                )
+            })?;
+        let matching = self
+            .settings_files_unlocked(extension_instance)?
+            .into_iter()
+            .filter(|profile| profile.provider == *provider)
+            .collect::<Vec<_>>();
+        let [profile] = matching.as_slice() else {
+            return Err(path_std_io::Error::other(
+                "provider profile is missing or duplicated",
+            ));
+        };
+        if profile.source != expected_source || profile.contents != expected_settings {
+            return Err(path_std_io::Error::other(
+                "provider profile changed before logout",
+            ));
+        }
+        self.remove_credential(extension_instance, reference)
+    }
+
     /// Publishes one credential for an unchanged existing profile without
     /// creating, replacing, or removing either profile source.
     pub(crate) fn publish_credential(

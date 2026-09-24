@@ -7,8 +7,97 @@ use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
+use tau_config::provider_settings::ProviderCredentialReference;
+
 use super::*;
 use crate::credential_record::ApiKeyCredential;
+
+/// Native logout removes only the stable Grok Secret; rename and a config
+/// symlink keep their bytes and identity, and later login can republish
+/// locally.
+#[cfg(unix)]
+#[test]
+fn grok_logout_preserves_renamed_config_symlink_and_relogin_identity() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let contents = br#"{"kind":"grok","models":[{"id":"grok-4.7","context_window":500000}],"credential":{"kind":"grok_oauth","identity":"0123456789abcdef0123456789abcdef"}}"#;
+    let deployed = temp.path().join("deployed.json");
+    std::fs::write(&deployed, contents).expect("deployment");
+    let config = temp
+        .path()
+        .join("config/providers/provider-work/chatgpt.json");
+    std::fs::create_dir_all(config.parent().expect("parent")).expect("config directory");
+    symlink(&deployed, &config).expect("symlink");
+    let reference =
+        ProviderCredentialReference::new(identity(), ProviderCredentialSlot::GrokOAuth, None)
+            .expect("native slot");
+    let secret = SecretWrite {
+        path: reference.path().clone(),
+        contents: SecretBytes::new(b"local-only".to_vec()),
+    };
+    store
+        .publish_credential(
+            &extension(),
+            &provider(),
+            ProfileSource::Config,
+            contents,
+            &secret,
+            None,
+        )
+        .expect("login");
+    let renamed = tau_proto::ProviderName::new("grok-renamed");
+    store
+        .rename_profile(&extension(), &provider(), &renamed)
+        .expect("rename");
+    let config = config.with_file_name("grok-renamed.json");
+    store
+        .logout_profile(
+            &extension(),
+            &renamed,
+            ProfileSource::Config,
+            contents,
+            &reference,
+        )
+        .expect("logout");
+    assert!(
+        std::fs::symlink_metadata(&config)
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(&deployed).expect("deployment unchanged"),
+        contents
+    );
+    let path = temp.path().join(
+        "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/grok-oauth.json",
+    );
+    assert!(!path.exists());
+    store
+        .publish_credential(
+            &extension(),
+            &renamed,
+            ProfileSource::Config,
+            contents,
+            &secret,
+            None,
+        )
+        .expect("relogin");
+    assert_eq!(std::fs::read(path).expect("republished"), b"local-only");
+    assert!(
+        store
+            .logout_profile(
+                &extension(),
+                &renamed,
+                ProfileSource::Config,
+                b"changed",
+                &reference
+            )
+            .is_err()
+    );
+}
 
 /// Proves config-targeted setup publishes credentials in state while keeping
 /// the profile source explicit and collision-free.

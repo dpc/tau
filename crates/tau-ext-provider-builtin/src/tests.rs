@@ -10,6 +10,7 @@ use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
 use crate::image_tools::ImageTools;
 
 mod compatibility;
+pub(crate) mod grok;
 
 use super::*;
 
@@ -1935,7 +1936,9 @@ fn local_summary_compaction_omission_and_empty_object_match_for_all_provider_kin
             BuiltinProviderProfile::Responses(provider) => {
                 responses::models_for_provider(&provider_name, &provider)
             }
-            BuiltinProviderProfile::Chatgpt(_) => panic!("unexpected profile kind"),
+            BuiltinProviderProfile::Chatgpt(_) | BuiltinProviderProfile::Grok(_) => {
+                panic!("unexpected profile kind")
+            }
         };
 
         assert_eq!(models.len(), 2);
@@ -2782,7 +2785,13 @@ fn provider_kind_catalog_has_exact_canonical_tokens() {
             .iter()
             .map(|descriptor| descriptor.token)
             .collect::<Vec<_>>(),
-        ["chatgpt", "chat-completions", "responses", "openrouter"]
+        [
+            "chatgpt",
+            "grok",
+            "chat-completions",
+            "responses",
+            "openrouter"
+        ]
     );
     assert!(
         !PROVIDER_KINDS
@@ -4108,6 +4117,7 @@ fn stage_prompt_oauth_test_flight(
         .credential_admission
         .admissions
         .push_back(PendingPromptAdmission {
+            grok_refresh: None,
             kind: PendingPromptAdmissionKind::Initial {
                 agent_prompt_id: prompt.agent_prompt_id.clone(),
                 prompt,
@@ -4473,6 +4483,7 @@ fn production_prompt_oauth_failure_closes_private_observation() {
         .credential_admission
         .admissions
         .push_back(PendingPromptAdmission {
+            grok_refresh: None,
             kind: PendingPromptAdmissionKind::Initial {
                 agent_prompt_id: prompt.agent_prompt_id.clone(),
                 prompt,
@@ -4528,6 +4539,7 @@ fn production_prompt_oauth_failure_closes_private_observation() {
             .credential_admission
             .admissions
             .push_back(PendingPromptAdmission {
+                grok_refresh: None,
                 kind: PendingPromptAdmissionKind::Initial {
                     agent_prompt_id: prompt.agent_prompt_id.clone(),
                     prompt,
@@ -4582,6 +4594,7 @@ fn production_prompt_oauth_failure_closes_private_observation() {
             .credential_admission
             .admissions
             .push_back(PendingPromptAdmission {
+                grok_refresh: None,
                 kind: PendingPromptAdmissionKind::Initial {
                     agent_prompt_id: late_prompt.agent_prompt_id.clone(),
                     prompt: late_prompt,
@@ -4785,6 +4798,7 @@ fn prompt_credential_read_and_cas_timeouts_ignore_late_reentry() {
     let mut prompt = minimal_prompt();
     prompt.agent_prompt_id = "timed-read".parse().expect("valid prompt id");
     let mut admissions = VecDeque::from([PendingPromptAdmission {
+        grok_refresh: None,
         kind: PendingPromptAdmissionKind::Initial {
             agent_prompt_id: prompt.agent_prompt_id.clone(),
             prompt,

@@ -48,9 +48,8 @@ needed. They remain ordinary workspace packages rather than being marked
 `publish = false`; that policy can be decided separately without obstructing
 the application release.
 
-`dpc-tau-provider-grok` is currently an unintegrated protocol foundation and is
-also excluded from the application publication closure. Integrating it into the
-built-in provider requires adding it to the checked dependency order.
+`dpc-tau-provider-grok` belongs to the application dependency closure after the
+shared Responses backend and before the built-in provider.
 
 Run the registry-independent metadata and file-selection check:
 
@@ -95,6 +94,7 @@ dpc-tau-cli-term-raw             0.1.0
 dpc-tau-provider-chat-completions 0.1.0
 dpc-tau-provider-codex           0.1.0
 dpc-tau-provider-responses       0.1.0
+dpc-tau-provider-grok            0.1.0
 dpc-tau-session-inspect          0.1.0
 dpc-tau-cli-term                 0.1.0
 dpc-tau-ext-provider-builtin     0.1.0

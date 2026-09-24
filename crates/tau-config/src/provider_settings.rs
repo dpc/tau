@@ -91,6 +91,8 @@ fn open_provider_profile(
 pub enum ProviderCredentialSlot {
     /// ChatGPT OAuth credential record.
     OAuth,
+    /// Native Grok OAuth credential record.
+    GrokOAuth,
     /// API-key credential record.
     ApiKey,
 }
@@ -98,8 +100,8 @@ pub enum ProviderCredentialSlot {
 impl ProviderCredentialSlot {
     /// Return every credential slot owned by the built-in provider schema.
     #[must_use]
-    pub fn all() -> [Self; 2] {
-        [Self::OAuth, Self::ApiKey]
+    pub fn all() -> [Self; 3] {
+        [Self::OAuth, Self::GrokOAuth, Self::ApiKey]
     }
 
     /// Returns the canonical Secret-scope path for this credential identity and
@@ -108,6 +110,7 @@ impl ProviderCredentialSlot {
     pub fn path(self, identity: &ProviderCredentialIdentity) -> ExtensionDataPath {
         let file = match self {
             Self::OAuth => "oauth.json",
+            Self::GrokOAuth => "grok-oauth.json",
             Self::ApiKey => "api-key.json",
         };
         ExtensionDataPath::new(format!("providers/{identity}/{file}"))
@@ -116,6 +119,7 @@ impl ProviderCredentialSlot {
     fn kind(self) -> &'static str {
         match self {
             Self::OAuth => "oauth",
+            Self::GrokOAuth => "grok_oauth",
             Self::ApiKey => "api_key",
         }
     }
@@ -124,7 +128,7 @@ impl ProviderCredentialSlot {
 /// Stable opaque identity of one provider profile's credential storage.
 ///
 /// The identity survives a provider namespace rename. Its closed lowercase
-/// hexadecimal representation can name only the corresponding two credential
+/// hexadecimal representation can name only the corresponding closed credential
 /// slots under the selected extension's Secret scope.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProviderCredentialIdentity {
@@ -222,7 +226,7 @@ impl ProviderCredentialReference {
         slot: ProviderCredentialSlot,
         named_source: Option<&str>,
     ) -> Result<Self, ProviderCredentialError> {
-        if slot == ProviderCredentialSlot::OAuth && named_source.is_some() {
+        if slot != ProviderCredentialSlot::ApiKey && named_source.is_some() {
             return Err(invalid("OAuth credentials cannot bind a named source"));
         }
         if let Some(name) = named_source {
@@ -344,6 +348,7 @@ pub fn parse_provider_credential(
     }
     let slot = match kind {
         "oauth" => ProviderCredentialSlot::OAuth,
+        "grok_oauth" => ProviderCredentialSlot::GrokOAuth,
         "api_key" => ProviderCredentialSlot::ApiKey,
         _ => {
             return Err(invalid(

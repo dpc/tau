@@ -34,6 +34,7 @@ PUBLICATION_ORDER = [
     "dpc-tau-provider-chat-completions",
     "dpc-tau-provider-codex",
     "dpc-tau-provider-responses",
+    "dpc-tau-provider-grok",
     "dpc-tau-session-inspect",
     "dpc-tau-cli-term",
     "dpc-tau-ext-provider-builtin",
@@ -45,8 +46,6 @@ PUBLICATION_ORDER = [
 ]
 EXCLUDED_PACKAGES = {
     "dpc-tau-e2e-tests",
-    # Protocol foundation is not yet part of the application's dependency closure.
-    "dpc-tau-provider-grok",
     "dpc-tau-summary-eval",
     "dpc-tau-supervisor",
 }

@@ -1,8 +1,8 @@
 # Grok protocol boundary
 
 This is a protocol and credential-policy library intended for Tau's provider
-extension, not an independent Secret-store owner. See [README.md](README.md) for implemented scope and remaining
-integration; the [root policy](../../SECURITY.md) owns the harness/extension
+extension, not an independent Secret-store owner. See [README.md](README.md) for implemented scope and
+unverified live-subscription limits; the [root policy](../../SECURITY.md) owns the harness/extension
 boundary.
 
 OAuth functions use the caller's Tokio runtime. Production requests go only to
@@ -52,9 +52,10 @@ loopback HTTP or controlled clocks. Authentication-origin changes, retry changes
 or credential-storage integration require revisiting these boundaries and their
 focused tests.
 
-Model discovery uses the fixed public `https://api.x.ai/v1/models` endpoint with
-one caller-supplied bearer generation, a 30-second deadline, no redirects or
-transparent retries, and a 1 MiB decoded body limit. It stores no credentials,
+Model discovery joins the fixed public `https://api.x.ai/v1/models` and
+`https://api.x.ai/v1/language-models` endpoints by exact canonical ID using one
+caller-supplied bearer generation. Each request has its own 30-second deadline,
+no redirects or transparent retries, and a 1 MiB decoded body limit. It stores no credentials,
 performs no refresh, and exposes only closed failure categories. A listed model
 does not establish subscription entitlement, free usage, native tool-image
 support or a text-inference route.

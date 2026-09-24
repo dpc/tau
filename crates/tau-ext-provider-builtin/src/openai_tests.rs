@@ -1580,6 +1580,7 @@ pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
             login_required: None,
         },
         pinned_chatgpt_identity: None,
+        pinned_grok_identity: None,
         profile_identity: None,
         retry_state: PromptRetryState::default(),
         observed_backend: None,
@@ -3636,6 +3637,7 @@ fn later_pre_egress_attempt_cancellation_retains_prior_backend() {
             &prompt,
             &provider,
             &model,
+            None,
             &mut writer,
             &mut retry_ctx,
             ChatGptPromptExecutionContext {

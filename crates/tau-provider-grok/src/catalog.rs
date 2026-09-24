@@ -5,6 +5,7 @@ mod model;
 #[cfg(test)]
 mod tests;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -73,12 +74,32 @@ impl Catalog {
     /// Dropping this future cancels local waiting. There is one 30-second total
     /// HTTP deadline, no automatic credential refresh and no paid-key fallback.
     pub async fn fetch(&self, access_token: &str) -> Result<Vec<Model>, Error> {
+        parse(&self.get("/v1/models", access_token).await?)
+    }
+
+    /// Discover only language routes with explicit text input/output metadata.
+    ///
+    /// The general catalog also contains image generation routes, including
+    /// routes with positive context lengths. Join by exact canonical
+    /// identifier; neither names nor prices establish a text route or image
+    /// capability.
+    pub async fn fetch_language_models(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<LanguageModel>, Error> {
+        let models = self.fetch(access_token).await?;
+        let body = self.get("/v1/language-models", access_token).await?;
+        join_language_models(models, &body)
+    }
+
+    /// One bounded, fixed-origin request without retained bearer material.
+    async fn get(&self, path: &str, access_token: &str) -> Result<Vec<u8>, Error> {
         if access_token.trim().is_empty() {
             return Err(Error::Unauthorized);
         }
         let mut response = self
             .http
-            .get(format!("{}/v1/models", self.origin))
+            .get(format!("{}{path}", self.origin))
             .bearer_auth(access_token)
             .header("accept", "application/json")
             .header("user-agent", concat!("tau/", env!("CARGO_PKG_VERSION")))
@@ -99,8 +120,63 @@ impl Catalog {
             }
             body.extend_from_slice(&chunk);
         }
-        parse(&body)
+        Ok(body)
     }
+}
+
+/// A text-inference route positively identified by the language catalog.
+#[derive(Clone, Debug)]
+pub struct LanguageModel {
+    /// Exact general-catalog metadata, including optional context and prices.
+    pub metadata: Model,
+    /// Explicit image input modality; not native tool-result image authority.
+    pub image_input: bool,
+}
+
+/// Language catalog envelope differs from the OpenAI-compatible general list.
+#[derive(Deserialize)]
+struct LanguageEnvelope {
+    /// Explicit language routes.
+    models: Vec<LanguageRow>,
+}
+
+/// Only modality facts are consumed from the language-specific catalog.
+#[derive(Deserialize)]
+struct LanguageRow {
+    /// Canonical identifier joined without alias rewriting.
+    id: String,
+    /// Explicit input modalities.
+    input_modalities: Vec<String>,
+    /// Explicit output modalities.
+    output_modalities: Vec<String>,
+}
+
+/// Intersect the two catalogs without guessing missing metadata.
+fn join_language_models(models: Vec<Model>, body: &[u8]) -> Result<Vec<LanguageModel>, Error> {
+    let language: LanguageEnvelope =
+        serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
+    let mut rows = BTreeMap::new();
+    for row in language.models {
+        if !valid_id(&row.id) || rows.contains_key(&row.id) {
+            return Err(Error::InvalidResponse);
+        }
+        rows.insert(row.id.clone(), row);
+    }
+    let mut result = Vec::new();
+    for metadata in models {
+        let Some(row) = rows.remove(&metadata.id) else {
+            continue;
+        };
+        if row.input_modalities.iter().any(|value| value == "text")
+            && row.output_modalities.iter().any(|value| value == "text")
+        {
+            result.push(LanguageModel {
+                metadata,
+                image_input: row.input_modalities.iter().any(|value| value == "image"),
+            });
+        }
+    }
+    Ok(result)
 }
 
 /// Typed list envelope; unknown upstream metadata does not invent capabilities.
@@ -115,11 +191,13 @@ struct Envelope {
 /// Validate identifiers before callers publish them into a model catalog.
 fn parse(body: &[u8]) -> Result<Vec<Model>, Error> {
     let envelope: Envelope = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
+    let mut identifiers = BTreeSet::new();
     if envelope.object != "list"
-        || envelope
-            .data
-            .iter()
-            .any(|model| !valid_id(&model.id) || model.aliases.iter().any(|alias| !valid_id(alias)))
+        || envelope.data.iter().any(|model| {
+            !valid_id(&model.id)
+                || !identifiers.insert(&model.id)
+                || model.aliases.iter().any(|alias| !valid_id(alias))
+        })
     {
         return Err(Error::InvalidResponse);
     }

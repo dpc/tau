@@ -5,6 +5,46 @@ use tokio::net::TcpListener;
 
 use super::*;
 
+/// A positive context or zero image price does not establish a text route.
+#[test]
+fn language_discovery_intersects_exact_ids_and_explicit_modalities() {
+    let general = parse(
+        br#"{"object":"list","data":[
+        {"id":"text","context_length":500000,"aliases":["alias"],"prompt_image_token_price":0},
+        {"id":"vision","aliases":[],"context_length":128000},
+        {"id":"image-generator","aliases":[],"context_length":1024},
+        {"id":"unmatched","aliases":[],"context_length":32000}
+    ]}"#,
+    )
+    .expect("general catalog");
+    let joined = join_language_models(
+        general,
+        br#"{"models":[
+        {"id":"text","input_modalities":["text"],"output_modalities":["text"]},
+        {"id":"vision","input_modalities":["text","image"],"output_modalities":["text"]},
+        {"id":"image-generator","input_modalities":["text"],"output_modalities":["image"]},
+        {"id":"alias","input_modalities":["text"],"output_modalities":["text"]}
+    ]}"#,
+    )
+    .expect("join");
+    assert_eq!(joined.len(), 2);
+    assert_eq!(joined[0].metadata.id, "text");
+    assert!(!joined[0].image_input);
+    assert_eq!(joined[1].metadata.id, "vision");
+    assert!(joined[1].image_input);
+    assert!(
+        join_language_models(
+            Vec::new(),
+            br#"{"models":[
+        {"id":"duplicate","input_modalities":["text"],"output_modalities":["text"]},
+        {"id":"duplicate","input_modalities":["text"],"output_modalities":["text"]}
+    ]}"#
+        )
+        .is_err()
+    );
+    assert!(parse(br#"{"object":"list","data":[{"id":"duplicate","aliases":[]},{"id":"duplicate","aliases":[]}]}"#).is_err());
+}
+
 /// Optional values stay unknown; zero prices and future selectors stay exact.
 #[test]
 fn catalog_preserves_exact_metadata_without_inventing_capabilities() {

@@ -1,5 +1,57 @@
 # Providers
 
+## Native Grok
+
+`tau provider add grok` runs device authorization with the public xAI issuer,
+validates the userinfo subject, and discovers a model snapshot. The default
+public CLI client ID is `b1a00492-073a-47ea-816f-4c329264a828`; setup accepts an
+override. General third-party reuse policy and subscription entitlement have
+not been independently verified. This implementation was tested offline, not
+with a live subscription or paid inference.
+
+The `grok` profile uses fixed public xAI Responses/SSE, not ChatGPT credentials,
+private CLI proxy headers, cookies, or an API-key fallback. Credentials live in
+the extension's separate `grok_oauth` Secret slot (`grok-oauth.json`).
+`tau provider login NAME` renews credentials without changing settings;
+`tau provider logout NAME` deletes only that native Grok Secret, without remote
+revocation. Rename retains the stable credential identity; remove deletes the
+profile and its selected credential.
+
+Setup intersects the general and language catalogs by exact canonical ID,
+requires explicit text input/output and a known positive context, and preserves
+aliases and advertised reasoning selectors. Unknown contexts are skipped.
+Model discovery runs only at setup: update the profile and restart for catalog
+changes. Catalog visibility is not entitlement. Published API prices are not
+subscription billing; tiered long-context prices remain unknown rather than
+being flattened. No free/unlimited usage, Fast route, quota or extra-usage
+protection is claimed.
+
+Function tools default on only for the audited exact `grok-4.7` route and its
+discovered aliases; configure other verified routes explicitly. Native
+tool-result images require explicit `native_tool_images: true` together with
+`image_input` and `function_tools`; public-route acceptance has not been
+credential-verified. Unsupported or over-budget tool images become explicit
+textual omissions. Hosted tools and provider-native compaction are unsupported;
+the shared cache-aligned local summary fallback is available instead.
+
+Expired credentials and one exact HTTP 401 enter process-local single-flight
+refresh with Secret CAS and authoritative reload. Omitted rotation metadata is
+preserved. Failed generations require fresh login; 403 and provider error text
+do not trigger forced refresh. Concurrent processes can still exchange the same
+refresh token, and a crash or lost response before saving can require login.
+There is no global lock, durable refresh claim or exactly-once exchange guarantee.
+Cancellation drops the inference waiter, not publication of a received rotation.
+Automatic retries retain the original validated subject and client registration;
+rotated bearers are accepted, but switching accounts requires explicit readmission.
+If preserved expiry leaves a saved replacement expired, Tau requires login rather
+than repeatedly exchanging that generation.
+
+Exact incomplete reasons `max_prompt_tokens` and `max_time_limit` terminate
+without retry or overflow recovery. Validated assistant prose, usage and response
+ID survive; tool calls, reasoning and opaque output do not.
+
+## Compaction
+
 Native Codex standalone compaction shows sampled N/? activity counts from
 validated compacting notifications, not percentages or upstream sequence numbers.
 Only canonical transaction success turns an observed count into N/N. Other

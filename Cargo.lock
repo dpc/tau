@@ -938,6 +938,7 @@ dependencies = [
  "dpc-tau-provider",
  "dpc-tau-provider-chat-completions",
  "dpc-tau-provider-codex",
+ "dpc-tau-provider-grok",
  "dpc-tau-provider-responses",
  "dpc-tau-term-screen",
  "fs2",

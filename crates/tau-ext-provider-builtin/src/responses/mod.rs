@@ -19,6 +19,7 @@ use tau_proto::{ModelName, NativeReasoningEffort, ProviderModelInfo, ProviderNam
 use tau_provider::local_summary_compaction::{
     Config as SummaryCompactionConfig, ConfigError as SummaryCompactionConfigError,
 };
+use tau_provider_grok::request::Request as GrokRequest;
 
 use self::sampling::ResponsesResponseSampler;
 use crate::OpenAiPromptCacheKey;
@@ -27,6 +28,9 @@ use crate::OpenAiPromptCacheKey;
 thread_local! {
     /// Values observed at the actual adapter call seam in the current test.
     static FORWARDED_DEBUG_CAPTURE_POLICY: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    /// Operation handed to shared transport diagnostics, not the private body
+    /// lowerer's operation.
+    static FORWARDED_DIAGNOSTIC_OPERATION: RefCell<Vec<tau_proto::PromptOperation>> = const { RefCell::new(Vec::new()) };
 }
 
 /// One serialized generic public Responses provider profile.
@@ -270,6 +274,63 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     network: &tau_provider::OutboundNetworkPolicy,
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
+    run_selected_prompt_attempt(
+        agent_prompt_id,
+        prompt,
+        provider,
+        model,
+        None,
+        debug_provider_requests,
+        writer,
+        is_canceled,
+        network,
+        provider_attempt,
+    )
+}
+
+/// Reuse sampling and summary validation with native Grok request policy.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_grok_prompt_attempt<S: ProviderReportSink>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ResponsesProvider,
+    model: &ResponsesModel,
+    grok: &crate::GrokModel,
+    debug_provider_requests: bool,
+    writer: &mut S,
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+    provider_attempt: tau_proto::ProviderAttempt,
+) -> PromptAttemptOutcome {
+    run_selected_prompt_attempt(
+        agent_prompt_id,
+        prompt,
+        provider,
+        model,
+        Some(grok),
+        debug_provider_requests,
+        writer,
+        is_canceled,
+        network,
+        provider_attempt,
+    )
+}
+
+/// Lower once for the selected owner while sharing finite transport and output
+/// validation.
+#[allow(clippy::too_many_arguments)]
+fn run_selected_prompt_attempt<S: ProviderReportSink>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ResponsesProvider,
+    model: &ResponsesModel,
+    grok: Option<&crate::GrokModel>,
+    debug_provider_requests: bool,
+    writer: &mut S,
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+    provider_attempt: tau_proto::ProviderAttempt,
+) -> PromptAttemptOutcome {
     let summary_config = resolved_summary_config(model);
     let compact_prompt = if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
         let Some(config) = summary_config else {
@@ -331,27 +392,88 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     };
     let mut sampler = ResponsesResponseSampler::new();
     let mut backend_reached = false;
+    let prepared = if let Some(grok) = grok {
+        if !grok.function_tools && !effective_prompt.tools.is_empty() {
+            return invalid_compaction(
+                agent_prompt_id,
+                prompt,
+                provider,
+                "Grok route has no configured function-tool capability",
+                false,
+                provider_attempt,
+            );
+        }
+        // Only native wire lowering needs an ordinary-inference copy. The
+        // shared transport still receives standalone operation metadata for
+        // diagnostics and debug attribution.
+        let mut native_prompt = effective_prompt.clone();
+        if compact_prompt.is_some() {
+            native_prompt.operation = tau_proto::PromptOperation::Inference;
+            native_prompt.compaction = None;
+        }
+        match GrokRequest::lower(
+            &native_prompt,
+            &model,
+            config.max_output_tokens,
+            &grok.reasoning_efforts,
+            grok.native_tool_images,
+        ) {
+            Ok(request) => Some(request),
+            Err(_) => {
+                return invalid_compaction(
+                    agent_prompt_id,
+                    prompt,
+                    provider,
+                    "Grok request uses unsupported capabilities",
+                    false,
+                    provider_attempt,
+                );
+            }
+        }
+    } else {
+        None
+    };
     let outcome =
         forward_debug_capture_policy(debug_provider_requests, |debug_provider_requests| {
-            tau_provider_responses::run_attempt_with_diagnostics(
-                effective_prompt,
-                &config,
-                &model,
-                debug_provider_requests,
-                provider.cache_diagnostics,
-                Some(provider_attempt),
-                &mut |update| match update {
-                    tau_provider_responses::AttemptUpdate::Dispatched(dispatched_at) => {
-                        backend_reached = true;
-                        sampler.mark_dispatched(dispatched_at);
-                    }
-                    tau_provider_responses::AttemptUpdate::Progress(progress) => {
-                        sampler.emit_if_due(agent_prompt_id, prompt, progress, writer);
-                    }
-                },
-                is_canceled,
-                network,
-            )
+            let mut on_update = |update: tau_provider_responses::AttemptUpdate<'_>| match update {
+                tau_provider_responses::AttemptUpdate::Dispatched(dispatched_at) => {
+                    backend_reached = true;
+                    sampler.mark_dispatched(dispatched_at);
+                }
+                tau_provider_responses::AttemptUpdate::Progress(progress) => {
+                    sampler.emit_if_due(agent_prompt_id, prompt, progress, writer);
+                }
+            };
+            #[cfg(test)]
+            FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| {
+                observed.borrow_mut().push(effective_prompt.operation);
+            });
+            if let Some(request) = &prepared {
+                tau_provider_responses::run_prepared_sse_attempt_with_diagnostics(
+                    effective_prompt,
+                    &config,
+                    &model,
+                    request.prepared(),
+                    debug_provider_requests,
+                    provider.cache_diagnostics,
+                    Some(provider_attempt),
+                    &mut on_update,
+                    is_canceled,
+                    network,
+                )
+            } else {
+                tau_provider_responses::run_attempt_with_diagnostics(
+                    effective_prompt,
+                    &config,
+                    &model,
+                    debug_provider_requests,
+                    provider.cache_diagnostics,
+                    Some(provider_attempt),
+                    &mut on_update,
+                    is_canceled,
+                    network,
+                )
+            }
         });
     match outcome {
         tau_provider_responses::AttemptOutcome::Completed(mut success) => {
@@ -406,7 +528,11 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 provider_attempt,
             )))
         }
-        tau_provider_responses::AttemptOutcome::Retryable { decision, progress } => {
+        tau_provider_responses::AttemptOutcome::Retryable {
+            decision,
+            progress,
+            canonical_unauthorized,
+        } => {
             if summary_retry_is_terminal(compact_prompt.is_some(), &progress) {
                 return invalid_compaction(
                     agent_prompt_id,
@@ -421,6 +547,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 decision,
                 progress,
                 backend_reached,
+                canonical_unauthorized,
             }
         }
         tau_provider_responses::AttemptOutcome::Canceled { progress } => {
@@ -596,6 +723,8 @@ pub enum PromptAttemptOutcome {
     Finished(Box<tau_proto::ProviderResponseFinishedReport>),
     /// Scheduler may retry from the full local transcript.
     Retry {
+        /// Exact HTTP unauthorized fact, consumed only by native OAuth routing.
+        canonical_unauthorized: bool,
         decision: tau_provider::retry_policy::RetryDecision,
         progress: tau_provider_responses::AttemptProgress,
         /// Whether this attempt crossed the backend dispatch boundary.
