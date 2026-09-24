@@ -465,6 +465,15 @@ pub struct AttemptFailure {
     pub stop_reason: ProviderStopReason,
     /// Progress parsed before the terminal failure.
     pub progress: AttemptProgress,
+    /// Validated partial assistant prose for an adapter-selected terminal
+    /// limit. Ordinary failures leave this empty; tool calls and opaque
+    /// items are never retained by this partial-failure path.
+    pub output_items: Vec<ContextItem>,
+    /// Terminal accounting retained even when an adapter-selected limit stops
+    /// inference without retry.
+    pub usage: Option<ProviderTokenUsage>,
+    /// Upstream terminal identity, never response-id chaining authority.
+    pub provider_response_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1023,6 +1032,7 @@ fn run_attempt_with_capture_and_updates(
         Ok(mut state) if state.terminal.is_some() => {
             let stop_reason = match state.terminal.expect("guarded terminal state") {
                 TerminalKind::MaxOutputTokens => ProviderStopReason::Length,
+                TerminalKind::NonRetryableIncomplete(_) => ProviderStopReason::Error,
                 TerminalKind::Completed
                     if state
                         .items
@@ -1033,7 +1043,23 @@ fn run_attempt_with_capture_and_updates(
                 }
                 TerminalKind::Completed => ProviderStopReason::EndTurn,
             };
-            if state.has_incomplete_reasoning() {
+            if let Some(TerminalKind::NonRetryableIncomplete(reason)) = state.terminal {
+                state
+                    .debug_capture
+                    .submit_response(prompt, config, model, &state, stop_reason);
+                let progress = state.progress();
+                let (mut output_items, _) = state.take_output_items();
+                output_items.retain(|item| matches!(item, ContextItem::Message(_)));
+                AttemptOutcome::Terminal(AttemptFailure {
+                    message: format!("provider stopped an incomplete response ({reason})"),
+                    failure_kind: None,
+                    stop_reason: ProviderStopReason::Error,
+                    progress,
+                    output_items,
+                    usage: state.usage,
+                    provider_response_id: state.response_id,
+                })
+            } else if state.has_incomplete_reasoning() {
                 let progress = state.progress();
                 debug_capture.submit_error(
                     prompt,
@@ -1086,6 +1112,7 @@ fn run_attempt_with_capture_and_updates(
     };
     let usage = match &outcome {
         AttemptOutcome::Completed(success) => success.usage.as_ref(),
+        AttemptOutcome::Terminal(failure) => failure.usage.as_ref(),
         _ => None,
     };
     finish_attempt_timing(
@@ -1170,6 +1197,9 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
             ProviderStopReason::EndTurn
         },
         progress,
+        output_items: Vec::new(),
+        usage: None,
+        provider_response_id: None,
     })
 }
 
@@ -1612,6 +1642,9 @@ fn slot_repetition_text(slot: &Slot) -> (StreamRepetitionKey, String) {
 
 #[derive(Debug, Default)]
 struct State {
+    /// Exact adapter-owned limit reasons with nonretryable partial-prose
+    /// policy.
+    non_retryable_incomplete_reasons: &'static [&'static str],
     /// Provider-indexed slots in ascending provider output order.
     ///
     /// Plain reasoning may populate display text before an opaque durable item
@@ -1640,6 +1673,8 @@ enum TerminalKind {
     Completed,
     /// Provider exhausted the configured output-token budget.
     MaxOutputTokens,
+    /// Exact adapter-selected limit; retain prose/accounting but never tools.
+    NonRetryableIncomplete(&'static str),
 }
 
 impl State {
@@ -2005,10 +2040,26 @@ impl State {
 
     fn apply_event(&mut self, data: &str) -> Result<bool, Error> {
         let decoded = decoded_event::DecodedEvent::decode(data).map_err(|_| Error::Json)?;
-        if let Some(error) = sse_provider_terminal_error(decoded.value()) {
+        if self
+            .non_retryable_incomplete_reason(decoded.value())
+            .is_none()
+            && let Some(error) = sse_provider_terminal_error(decoded.value())
+        {
             return Err(error);
         }
         self.apply_decoded_event(&decoded, data)
+    }
+
+    /// Match only exact response.incomplete reasons selected by the adapter.
+    fn non_retryable_incomplete_reason(&self, event: &Value) -> Option<&'static str> {
+        if event["type"].as_str() != Some("response.incomplete") {
+            return None;
+        }
+        let reason = incomplete_reason(event)?;
+        self.non_retryable_incomplete_reasons
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == reason)
     }
 
     /// Apply one event already decoded by its transport owner.
@@ -2111,9 +2162,12 @@ impl State {
             }
             "response.completed" | "response.done" | "response.incomplete"
                 if event["type"].as_str() != Some("response.incomplete")
-                    || incomplete_reason(event) == Some("max_output_tokens") =>
+                    || incomplete_reason(event) == Some("max_output_tokens")
+                    || self.non_retryable_incomplete_reason(event).is_some() =>
             {
-                let terminal = if event["type"].as_str() == Some("response.incomplete") {
+                let terminal = if let Some(reason) = self.non_retryable_incomplete_reason(event) {
+                    TerminalKind::NonRetryableIncomplete(reason)
+                } else if event["type"].as_str() == Some("response.incomplete") {
                     TerminalKind::MaxOutputTokens
                 } else {
                     TerminalKind::Completed
@@ -2140,7 +2194,7 @@ impl State {
                         let index =
                             u32::try_from(position).map_err(|_| Error::UnsupportedOutput)?;
                         let mut slot = Slot::new(index);
-                        let phase = if terminal == TerminalKind::MaxOutputTokens {
+                        let phase = if terminal != TerminalKind::Completed {
                             OutputItemPhase::IncompleteFallback
                         } else {
                             OutputItemPhase::TerminalFallback
@@ -2458,6 +2512,10 @@ async fn stream_sse(
     }
     let mut response = response;
     let mut state = State {
+        non_retryable_incomplete_reasons: match body {
+            AttemptRequest::Standard(_) => &[],
+            AttemptRequest::Prepared(request) => request.non_retryable_incomplete_reasons,
+        },
         debug_capture,
         ..Default::default()
     };

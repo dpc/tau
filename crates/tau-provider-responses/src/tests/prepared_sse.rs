@@ -5,6 +5,26 @@ use tokio::net::TcpListener as AsyncTcpListener;
 use super::*;
 use crate::cache_diagnostic::tests::collect;
 
+/// Grok's prepared-only limit policy never changes ordinary generic attempts.
+#[test]
+fn generic_incomplete_limits_keep_existing_retry_classification() {
+    for reason in ["max_prompt_tokens", "max_time_limit"] {
+        let mut state = State::default();
+        let event = serde_json::json!({
+            "type":"response.incomplete",
+            "response":{"incomplete_details":{"reason":reason},"output":[]}
+        });
+        assert!(matches!(
+            state.apply_event(&event.to_string()),
+            Err(Error::SseProvider {
+                retry_class: RetryClass::Unknown,
+                ..
+            })
+        ));
+        assert_eq!(state.terminal, None);
+    }
+}
+
 /// Minimal transport config without provider-specific cache controls.
 fn config() -> AttemptConfig {
     AttemptConfig {

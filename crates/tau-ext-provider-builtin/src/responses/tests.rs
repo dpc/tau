@@ -1475,3 +1475,63 @@ fn debug_capture_policy_is_forwarded_to_generic_responses() {
     }
     assert_eq!(super::take_forwarded_debug_capture_policy(), [true, false]);
 }
+/// A provider-owned partial limit retains prose/accounting in an ordinary Error
+/// report, not a retry, length continuation or context-overflow transaction.
+#[test]
+fn partial_terminal_report_preserves_prose_and_usage_without_recovery() {
+    let prompt = crate::openai_tests::prompt();
+    let provider = ResponsesProvider {
+        base_url: "https://api.x.ai/v1".into(),
+        ..Default::default()
+    };
+    let prose = tau_proto::ContextItem::Message(tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![tau_proto::ContentPart::Text {
+            text: "partial prose".into(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    });
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 11,
+        response_received_tokens: 7,
+        ..Default::default()
+    };
+    let failure = tau_provider_responses::AttemptFailure {
+        message: "provider stopped an incomplete response (max_prompt_tokens)".into(),
+        failure_kind: None,
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        progress: tau_provider_responses::AttemptProgress {
+            output_items: Vec::new(),
+            response_bytes_received: 100,
+            has_timed_semantic_output: true,
+        },
+        output_items: vec![prose.clone()],
+        usage: Some(usage.clone()),
+        provider_response_id: Some("partial-id".into()),
+    };
+    let outcome = terminal_failure(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &provider,
+        failure,
+        true,
+        Default::default(),
+    );
+    let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
+        panic!("terminal")
+    };
+    assert_eq!(finished.output_items, vec![prose]);
+    assert_eq!(finished.usage, Some(usage));
+    assert_eq!(finished.provider_response_id.as_deref(), Some("partial-id"));
+    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
+    assert_eq!(finished.failure_kind, None);
+    assert_eq!(
+        finished.recovery_disposition,
+        tau_proto::ContextRecoveryDisposition::None
+    );
+    assert_eq!(
+        finished.output_length_disposition,
+        tau_proto::OutputLengthDisposition::None
+    );
+}

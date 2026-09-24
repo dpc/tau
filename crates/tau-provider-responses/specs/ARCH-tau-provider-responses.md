@@ -44,6 +44,16 @@ The seam rejects model/transport mismatches and response-id chaining. It reuses
 the ordinary finite SSE transport, parser, terminal classification, capture and
 accounting without changing generic or private Codex defaults.
 
+A prepared-request adapter may additionally select exact nested incomplete
+reasons that terminate with `Error`, retaining only validated assistant prose,
+terminal usage and response identity. This policy never retains ToolCall,
+reasoning or opaque items, never retries, and grants neither Length continuation
+nor context-overflow recovery. Grok selects `max_prompt_tokens` and
+`max_time_limit`; ordinary generic requests select no such reasons. Reconciliation
+and structural validation still precede publication, including empty-prose
+terminals with usage. The existing extension report and canonical journal
+represent these outcomes without a new backend discriminator or core schema.
+
 Profiles select transport explicitly; omission retains the historical SSE
 default. A WebSocket attempt opens a fresh connection, sends one
 `response.create` envelope, and closes after the terminal event. Retry scheduling

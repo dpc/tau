@@ -1,6 +1,8 @@
 //! Synthetic documented xAI request fixtures, not captured subscription
 //! traffic.
 
+mod partial_terminals;
+
 use serde_json::{Value, json};
 use tau_proto::*;
 

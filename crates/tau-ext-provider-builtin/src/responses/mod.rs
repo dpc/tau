@@ -429,24 +429,42 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 backend_reached,
             }
         }
-        tau_provider_responses::AttemptOutcome::Terminal(failure) => {
-            PromptAttemptOutcome::Terminal {
-                finished: Box::new(finished(
-                    agent_prompt_id,
-                    prompt,
-                    provider,
-                    Vec::new(),
-                    failure.stop_reason,
-                    Some(failure.message),
-                    failure.failure_kind,
-                    None,
-                    None,
-                    backend_reached,
-                    provider_attempt,
-                )),
-                progress: failure.progress,
-            }
-        }
+        tau_provider_responses::AttemptOutcome::Terminal(failure) => terminal_failure(
+            agent_prompt_id,
+            prompt,
+            provider,
+            failure,
+            backend_reached,
+            provider_attempt,
+        ),
+    }
+}
+
+/// Preserve an adapter's validated partial failure without granting retry,
+/// output-length continuation or context-overflow recovery authority.
+fn terminal_failure(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ResponsesProvider,
+    failure: tau_provider_responses::AttemptFailure,
+    backend_reached: bool,
+    provider_attempt: tau_proto::ProviderAttempt,
+) -> PromptAttemptOutcome {
+    PromptAttemptOutcome::Terminal {
+        finished: Box::new(finished(
+            agent_prompt_id,
+            prompt,
+            provider,
+            failure.output_items,
+            failure.stop_reason,
+            Some(failure.message),
+            failure.failure_kind,
+            failure.usage,
+            failure.provider_response_id,
+            backend_reached,
+            provider_attempt,
+        )),
+        progress: failure.progress,
     }
 }
 

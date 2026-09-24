@@ -46,5 +46,8 @@ user-role payload. Canonical high detail follows
 Failed tool results do not forward images. Shared request
 bounds prevent repeated tool results from multiplying each image allowance.
 No request method sends inference traffic. Runtime integration must retain
-matching shared-attempt attribution and tool policy and must not expose the
-generic retry behavior for xAI partial-terminal reasons.
+matching shared-attempt attribution and tool policy. Grok prepared requests
+select exact `max_prompt_tokens` and `max_time_limit` incomplete reasons as
+nonretryable Error terminals retaining only validated assistant prose, terminal
+usage and response identity. They strip every tool call and opaque item and
+grant no output-length continuation or context-overflow recovery.

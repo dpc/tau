@@ -38,7 +38,7 @@ The device flow requires a renewable credential before returning success.
 | Provider registration, profile setup, Secret lifecycle | Not implemented |
 | Model discovery | Library implemented; not integrated into profile setup |
 | Images and local tools | Request lowering implemented; no runtime inference |
-| Grok inference | Not exposed; terminal-policy integration remains required |
+| Grok inference | Partial-limit policy implemented; runtime not registered |
 | Native compaction, hosted tools, quota display | Not implemented |
 | Default OAuth registration | Caller supplies client ID; product decision pending |
 | Subscription entitlement, Fast model route | Not credential-verified |
@@ -65,6 +65,9 @@ inspected September 24, 2026, and the public Grok Build request types at commit
 `crates/codegen/xai-grok-sampling-types/src/conversation/responses.rs`.
 No production inference, login, subscription entitlement, quota or Fast route was
 credential-verified. The request lowerer deliberately provides no inference
-entry point until xAI-specific incomplete terminals can be handled without
-silently retrying partially consumed work.
+entry point. Prepared requests select nonretryable Error handling for exact
+`max_prompt_tokens` and `max_time_limit` incomplete terminals, preserving validated
+partial assistant prose and terminal accounting while stripping all tools and
+opaque output. Neither limit permits automatic resend, output-length
+continuation or context-overflow recovery.
 They perform no login, live inference, paid requests, or account changes.

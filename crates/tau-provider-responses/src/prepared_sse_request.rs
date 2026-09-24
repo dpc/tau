@@ -30,6 +30,9 @@ pub struct PreparedSseRequest {
     /// Allowlisted actual reasoning selector for content-free diagnostics.
     #[serde(skip)]
     pub(super) reasoning_selector: Option<&'static str>,
+    /// Adapter-selected terminal limits that must never enter automatic retry.
+    #[serde(skip)]
+    pub(super) non_retryable_incomplete_reasons: &'static [&'static str],
 }
 
 /// Content-free failure to construct a supported full-replay SSE request.
@@ -75,6 +78,22 @@ impl PreparedSseRequest {
         &self.body
     }
 
+    /// Select exact provider-owned incomplete reasons that stop with an Error
+    /// while retaining validated partial assistant prose and terminal
+    /// accounting.
+    ///
+    /// These outcomes omit every tool call and opaque item and grant neither
+    /// output-length continuation nor context-overflow recovery. Ordinary
+    /// generic requests retain their existing terminal policy. This is trusted
+    /// adapter policy, never a field sent to the upstream API.
+    pub fn with_non_retryable_incomplete_reasons(
+        mut self,
+        reasons: &'static [&'static str],
+    ) -> Self {
+        self.non_retryable_incomplete_reasons = reasons;
+        self
+    }
+
     /// Extract only neutral, bounded diagnostic selectors from the envelope.
     fn parse(body: Box<RawValue>) -> Result<Self, Error> {
         let fields: BTreeMap<&str, &RawValue> =
@@ -110,6 +129,7 @@ impl PreparedSseRequest {
             model,
             input_items: input.len(),
             reasoning_selector,
+            non_retryable_incomplete_reasons: &[],
             body,
         })
     }

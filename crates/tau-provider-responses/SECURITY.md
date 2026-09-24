@@ -97,6 +97,15 @@ without retrying the unchanged request. The harness retains prose, never execute
 a Length-truncated tool call, and grants its one bounded continuation only to
 reasoning-only output with provider-native replay authority.
 
+The prepared SSE library seam also permits trusted adapters to select exact
+nested incomplete reasons as nonretryable Error terminals. Grok selects only
+`max_prompt_tokens` and `max_time_limit`. Those terminals retain validated
+assistant prose and accounting, but strip every tool call and all opaque output.
+No neighboring identifier grants this authority; generic requests retain the
+existing policy. Error status alone does not suppress core tool execution, so
+removing all ToolCall items is a required boundary, not an optional display
+choice. No Length or context-overflow recovery disposition is attached.
+
 Standalone local-summary compaction records public Responses Length output,
 usage, response id, attempt, and required backend identity in a durable
 non-context failure projection. It never validates or splices that partial

@@ -23,6 +23,14 @@ Provider adapters attach a machine-readable terminal failure category to the
 single final `ProviderResponseFinished`. Terminal request rejections bypass the
 logical-work retry scheduler and terminalize immediately.
 
+Grok's exact `response.incomplete` reasons `max_prompt_tokens` and
+`max_time_limit` are another explicit finite exception: they terminate with
+Error and retain validated partial assistant prose, terminal usage and response
+identity, but no tool calls or opaque output. They never enter the scheduler,
+Length continuation or context-overflow recovery. Unknown reasons retain their
+existing classification; generic Responses and private Codex defaults do not
+change.
+
 Workers execute one finite attempt. Retryable outcomes return the logical job to
 one process-lifetime delayed scheduler, releasing the bounded execution slot
 before any wait. Jittered Fibonacci cadence reaches about one minute for

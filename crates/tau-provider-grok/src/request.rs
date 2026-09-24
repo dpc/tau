@@ -84,7 +84,8 @@ impl Request {
         replace_tool_outputs(prompt, &mut input, native_images)?;
         fields.insert("input".into(), raw(&input)?);
         Ok(Self {
-            prepared: PreparedSseRequest::from_json(raw(&fields)?)?,
+            prepared: PreparedSseRequest::from_json(raw(&fields)?)?
+                .with_non_retryable_incomplete_reasons(&["max_prompt_tokens", "max_time_limit"]),
         })
     }
 

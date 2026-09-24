@@ -2,6 +2,8 @@ use std::io as path_std_io;
 
 use super::*;
 
+mod partial_provider_error;
+
 /// Typed citation semantics and opaque hosted-call replay remain identical
 /// across live fold, journal decode, and a restart cut. The hosted item never
 /// becomes a Tau tool call.
