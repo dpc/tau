@@ -126,16 +126,23 @@ pub(crate) fn render_turn_stats_projection_block(
     theme: &tau_themes::Theme,
     projection: &TurnStatsPresentationProjection,
 ) -> tau_cli_term::StyledBlock {
-    render_turn_stats_parts(
-        theme,
-        turn_stats_parts(
-            projection.usage,
-            projection.cumulative_usage,
-            projection.previous_usage,
-            projection.turn_latency,
-            projection.total_latency,
-        ),
-    )
+    let mut parts = turn_stats_parts(
+        projection.usage,
+        projection.cumulative_usage,
+        projection.previous_usage,
+        projection.turn_latency,
+        projection.total_latency,
+    );
+    if let Some((hour, minute)) = projection.finished_local_time {
+        parts.insert(
+            0,
+            TurnStatsPart::new(
+                format!("{hour:02}:{minute:02} "),
+                tau_themes::names::TOKEN_STATS,
+            ),
+        );
+    }
+    render_turn_stats_parts(theme, parts)
 }
 
 fn render_turn_stats_parts(

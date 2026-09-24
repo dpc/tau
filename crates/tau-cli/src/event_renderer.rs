@@ -1921,7 +1921,7 @@ impl EventRenderer {
                 Some(self.stage_standalone_finished_status_block(finished, terminal_tool_calls));
         } else {
             self.staged_finished_response =
-                Some(self.stage_finished_response(finished, terminal_tool_calls));
+                Some(self.stage_finished_response(finished, terminal_tool_calls, recorded_at));
         }
         let handle = self.resources.handle.terminal_handle();
         self.final_publication_in_progress = true;
@@ -4799,8 +4799,8 @@ impl EventRenderer {
                     self.staged_finished_status =
                         Some(self.stage_standalone_finished_status_block(finished, calls));
                 }
-                self.staged_finished_response =
-                    (!is_standalone).then(|| self.stage_finished_response(finished, calls));
+                self.staged_finished_response = (!is_standalone)
+                    .then(|| self.stage_finished_response(finished, calls, recorded_at));
                 let handle = self.resources.handle.terminal_handle();
                 self.final_publication_in_progress = true;
                 handle.with_redraw_suppressed(|| {
@@ -6051,7 +6051,7 @@ impl EventRenderer {
 
         if self.handle_session_events(event)
             || self.handle_prompt_events(event)
-            || self.handle_provider_response_events(prepared)
+            || self.handle_provider_response_events(prepared, recorded_at)
             || self.handle_tool_events(event, recorded_at)
             || self.handle_shell_events(event)
             || self.handle_action_events(event)
@@ -7464,7 +7464,11 @@ impl EventRenderer {
         }
     }
 
-    fn handle_provider_response_events(&mut self, prepared: &PreparedRendererEvent<'_>) -> bool {
+    fn handle_provider_response_events(
+        &mut self,
+        prepared: &PreparedRendererEvent<'_>,
+        recorded_at: UnixMicros,
+    ) -> bool {
         let event = prepared.event();
         match event {
             Event::ProviderPromptSubmitted(submitted) => {
@@ -7479,6 +7483,7 @@ impl EventRenderer {
                 self.finish_compaction_continuation_measurement(finished);
                 self.handle_provider_response_finished(
                     finished,
+                    recorded_at,
                     prepared
                         .finished()
                         .expect("provider terminal preserves projection")

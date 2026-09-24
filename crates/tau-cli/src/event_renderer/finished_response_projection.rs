@@ -92,6 +92,7 @@ impl EventRenderer {
     pub(super) fn handle_provider_response_finished(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
+        recorded_at: UnixMicros,
         terminal_tool_calls: &TerminalToolCalls,
     ) {
         let is_standalone = self
@@ -108,10 +109,9 @@ impl EventRenderer {
             self.staged_finished_status = None;
             return;
         }
-        let projection = self
-            .staged_finished_response
-            .take()
-            .unwrap_or_else(|| self.stage_finished_response(finished, terminal_tool_calls));
+        let projection = self.staged_finished_response.take().unwrap_or_else(|| {
+            self.stage_finished_response(finished, terminal_tool_calls, recorded_at)
+        });
         self.commit_finished_response(finished, projection);
     }
 
@@ -121,6 +121,7 @@ impl EventRenderer {
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
         terminal_tool_calls: &TerminalToolCalls,
+        recorded_at: UnixMicros,
     ) -> FinishedResponseProjection {
         use tau_themes::names;
 
@@ -222,6 +223,7 @@ impl EventRenderer {
             Self::add_finished_token_usage(&mut cumulative, usage);
             let previous = self.transcript.history.turn_stats_predecessor;
             let projection = TurnStatsPresentationProjection {
+                finished_local_time: local_turn_time(recorded_at),
                 usage: TurnStatsUsageProjection::from(usage)
                     .with_estimate_context(cache_estimate_context),
                 cumulative_usage: cumulative.into(),
@@ -806,6 +808,20 @@ impl EventRenderer {
             },
         );
     }
+}
+
+/// Resolves the event's durable recording time in the viewer's local timezone.
+fn local_turn_time(recorded_at: UnixMicros) -> Option<(u8, u8)> {
+    use jiff::tz::TimeZone;
+
+    let micros = i64::try_from(recorded_at.get()).ok()?;
+    let timestamp = jiff::Timestamp::from_microsecond(micros).ok()?;
+    // Sandboxed installations may have no readable timezone database.
+    let local = timestamp.to_zoned(TimeZone::try_system().unwrap_or(TimeZone::UTC));
+    Some((
+        local.hour().try_into().ok()?,
+        local.minute().try_into().ok()?,
+    ))
 }
 
 /// Classifies one private route/model/control scope eligible for passive cache

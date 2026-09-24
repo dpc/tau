@@ -291,6 +291,8 @@ impl From<tau_proto::TokenUsageCounts> for CumulativeTurnUsageProjection {
 /// Complete allocation-free projection retained for one turn-stat block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TurnStatsPresentationProjection {
+    /// Local wall-clock hour and minute when the terminal was recorded.
+    pub(crate) finished_local_time: Option<(u8, u8)>,
     /// Current response usage displayed by the block.
     pub(crate) usage: TurnStatsUsageProjection,
     /// Owning agent's cumulative usage after the response.

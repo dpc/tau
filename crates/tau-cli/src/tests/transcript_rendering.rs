@@ -1855,32 +1855,59 @@ fn turn_stats_retain_only_scalar_projection_with_exact_legacy_rendering() {
     );
     renderer.switch_agent(agent_id("projection-agent"));
     renderer.apply_setting("show-turn-stats", "true");
-    for (prompt, usage) in [
+    for (index, (prompt, usage)) in [
         ("projection-first", first_usage.clone()),
         ("projection-second", second_usage.clone()),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let mut finished = finished_response(prompt, Vec::new());
         finished.agent_id = agent_id("projection-agent");
         finished.usage = Some(usage);
-        renderer.handle(&Event::ProviderResponseFinished(finished));
+        renderer.handle_recorded_at(
+            &Event::ProviderResponseFinished(finished),
+            tau_proto::UnixMicros::new(1_700_000_000_000_000 + index as u64 * 3_600_000_000),
+        );
     }
     let retained = renderer.retained_turn_stats_blocks_for_test();
-    assert_eq!(retained[0].content.spans(), expected_first.content.spans());
-    assert_eq!(retained[1].content.spans(), expected_second.content.spans());
+    assert_eq!(
+        &retained[0].content.spans()[1..],
+        expected_first.content.spans()
+    );
+    assert_eq!(
+        &retained[1].content.spans()[1..],
+        expected_second.content.spans()
+    );
+    assert!(retained[0].content.spans()[0].text.ends_with(' '));
+    assert_eq!(retained[0].content.spans()[0].text.len(), 6);
+    use jiff::tz::TimeZone;
+    let zone = TimeZone::try_system().unwrap_or(TimeZone::UTC);
+    for (index, block) in retained.iter().enumerate() {
+        let instant =
+            jiff::Timestamp::from_microsecond(1_700_000_000_000_000 + index as i64 * 3_600_000_000)
+                .expect("recorded instant");
+        let local = instant.to_zoned(zone.clone());
+        assert_eq!(
+            block.content.spans()[0].text,
+            format!("{:02}:{:02} ", local.hour(), local.minute()),
+            "turn completion uses the recorded instant in local time"
+        );
+    }
     let (entries, retained_bytes, entry_needs_drop, projection_bytes, projection_needs_drop) =
         renderer.turn_stats_retention_evidence_for_test();
     assert_eq!(entries, 2);
     assert!(
-        retained_bytes <= 2 * 128,
-        "two complete retained entries must stay within 256 inline bytes, got {retained_bytes}"
+        retained_bytes <= 2 * 144,
+        "two complete retained entries must stay within 288 inline bytes, got {retained_bytes}"
     );
     assert!(
         !entry_needs_drop,
         "complete retained entries must own no heap values"
     );
     assert!(
-        projection_bytes <= 120,
-        "the scalar projection must stay within 120 inline bytes, got {projection_bytes}"
+        projection_bytes <= 128,
+        "the scalar projection must stay within 128 inline bytes, got {projection_bytes}"
     );
     assert!(
         !projection_needs_drop,
@@ -1899,17 +1926,17 @@ fn turn_stats_retain_only_scalar_projection_with_exact_legacy_rendering() {
     );
     renderer.apply_theme(themed);
     assert_eq!(
-        renderer.retained_turn_stats_blocks_for_test()[1]
+        &renderer.retained_turn_stats_blocks_for_test()[1]
             .content
-            .spans(),
+            .spans()[1..],
         themed_expected.content.spans()
     );
     renderer.switch_agent(agent_id("snapshot-other"));
     renderer.switch_agent(agent_id("projection-agent"));
     assert_eq!(
-        renderer.retained_turn_stats_blocks_for_test()[1]
+        &renderer.retained_turn_stats_blocks_for_test()[1]
             .content
-            .spans(),
+            .spans()[1..],
         themed_expected.content.spans(),
         "agent transcript snapshots must retain the same scalar projection"
     );
@@ -1928,23 +1955,36 @@ fn turn_stats_retain_only_scalar_projection_with_exact_legacy_rendering() {
         cli_test_theme(),
     );
     cold.switch_agent(agent_id("visible-agent"));
-    for (prompt, usage) in [
+    for (index, (prompt, usage)) in [
         ("projection-first", first_usage),
         ("projection-second", second_usage),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let mut finished = finished_response(prompt, Vec::new());
         finished.agent_id = agent_id("projection-agent");
         finished.usage = Some(usage);
-        cold.handle(&Event::ProviderResponseFinished(finished));
+        cold.handle_recorded_at(
+            &Event::ProviderResponseFinished(finished),
+            tau_proto::UnixMicros::new(1_700_000_000_000_000 + index as u64 * 3_600_000_000),
+        );
     }
     cold.switch_agent(agent_id("projection-agent"));
     cold.apply_setting("show-turn-stats", "true");
     sync(&cold_handle);
     assert_eq!(
+        &cold.retained_turn_stats_blocks_for_test()[1]
+            .content
+            .spans()[1..],
+        expected_second.content.spans()
+    );
+    assert_eq!(
         cold.retained_turn_stats_blocks_for_test()[1]
             .content
-            .spans(),
-        expected_second.content.spans()
+            .spans()[0],
+        retained[1].content.spans()[0],
+        "cold replay preserves the original completion time"
     );
     assert!(cold_vt.screen_contains(100, "Δ! 1k/?"));
 }
@@ -2035,28 +2075,28 @@ fn cache_turn_stats_calibrate_after_exact_ceiling_observation() {
         .iter()
         .map(|span| span.text.as_str())
         .collect::<String>();
-    assert!(candidate_line.starts_with("Δ98%? 23.6k/24.1k? ↑0"));
+    assert!(candidate_line.contains(" Δ98%? 23.6k/24.1k? ↑0"));
     let line = retained[3]
         .content
         .spans()
         .iter()
         .map(|span| span.text.as_str())
         .collect::<String>();
-    assert!(line.starts_with("Δ100%? 23.8k/23.8k? ↑492"));
+    assert!(line.contains(" Δ100%? 23.8k/23.8k? ↑492"));
     let reconnect_line = retained[4]
         .content
         .spans()
         .iter()
         .map(|span| span.text.as_str())
         .collect::<String>();
-    assert!(reconnect_line.starts_with("Δ99%? 24k/24.3k? ↑200"));
+    assert!(reconnect_line.contains(" Δ99%? 24k/24.3k? ↑200"));
     let after_reconnect_line = retained[5]
         .content
         .spans()
         .iter()
         .map(|span| span.text.as_str())
         .collect::<String>();
-    assert!(after_reconnect_line.starts_with("Δ98%? 24.1k/24.6k? ↑100"));
+    assert!(after_reconnect_line.contains(" Δ98%? 24.1k/24.6k? ↑100"));
 }
 
 /// Ensures an intervening usage-less ordinary or standalone terminal breaks
@@ -2126,7 +2166,7 @@ fn calibrated_turn_stats_do_not_reach_past_usage_less_terminal() {
             .map(|span| span.text.as_str())
             .collect::<String>();
         assert!(
-            line.starts_with("Δ! 1.7k/? ↑2.3k"),
+            line.contains(" Δ! 1.7k/? ↑2.3k"),
             "standalone={standalone}: {line}"
         );
     }

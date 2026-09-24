@@ -782,6 +782,7 @@ dependencies = [
  "dpc-tau-test-support",
  "dpc-tau-themes",
  "fs2",
+ "jiff",
  "libc",
  "proptest",
  "rand 0.8.6",
