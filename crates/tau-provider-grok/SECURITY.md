@@ -1,7 +1,7 @@
 # Grok protocol boundary
 
-This is an async library intended for Tau's provider extension, not an independent
-credential owner. See [README.md](README.md) for implemented scope and remaining
+This is a protocol and credential-policy library intended for Tau's provider
+extension, not an independent Secret-store owner. See [README.md](README.md) for implemented scope and remaining
 integration; the [root policy](../../SECURITY.md) owns the harness/extension
 boundary.
 
@@ -16,14 +16,37 @@ Device polling is required by the external RFC 8628 protocol. Local cancellation
 is notification-driven through a caller-supplied future; poll waits and active
 exchanges both respect cancellation and the grant deadline.
 
-The caller must serialize refreshes and save rotated credentials atomically
-before publishing a replacement generation. An ambiguous refresh transport
+The credential module supplies no filesystem or cross-process ownership mechanism.
+It follows authoritative read, one refresh, exact-byte CAS, and authoritative
+reload through caller-supplied Secret callbacks. Runtime coalesces the same
+generation within one process, following the existing Codex baseline; CAS
+arbitrates saved generations, not remote token exchanges. Implementations comply with
+[`GATE-extension-filesystem-mediation`](../../specs/GATE-extension-filesystem-mediation.md);
+a writable extension state mount is not authority for direct operational I/O.
+
+Integrations must bound/coalesce workers and check sticky cancellation before
+refreshing. Once exchange begins the worker must stay alive through publication,
+even if its waiter cancels. No rotated credential is published to inference
+before an acknowledged durable CAS and authoritative reload. CAS conflict,
+missing records, and account replacement never authorize recreating deleted
+credentials. Storage errors are closed categories; timed-out submitted writes
+may still commit. A post-CAS read must not race that mutation through another
+connection. Even visible replacement bytes after a failed/lost acknowledgement
+do not prove durability: the current admission fails conservatively.
+
+An ambiguous refresh transport
 failure can mean the old token was consumed; this library makes no automatic
 retry and provides no reuse/grace guarantee. Remote `userinfo` supplies subject
-identity; account pinning is the caller's responsibility. Dropping a future
+identity at login; refresh retains the OAuth grant's account binding and rejects
+adoption from another stored subject. Caller generation rejection must prevent
+automatic reuse after a failed/ambiguous exchange or publication. Concurrent
+processes can still exchange the same refresh token, and a crash before saving
+can lose a rotated credential; either may require logging in again. This is not
+an exactly-once or crash-recovery guarantee, and there is no durable refresh claim.
+Dropping a future
 cancels local waiting, not a server-side grant or charge.
 
-No function accesses Secret storage, another application's credentials, cookies,
+No function directly accesses Secret storage, another application's credentials, cookies,
 billing settings, or remote revocation. Tests use only synthetic credentials and
 loopback HTTP or controlled clocks. Authentication-origin changes, retry changes,
 or credential-storage integration require revisiting these boundaries and their
