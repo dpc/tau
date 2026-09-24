@@ -40,7 +40,7 @@ const AUTH_REQUEST_ID: &str = "auth-peer-navigation-request";
 const CALLBACK_CLIENT_NAME: &str = "tau-external-agent-message";
 
 /// Proves an authenticated external message can auto-start the first agent in
-/// an otherwise empty session and Ctrl-J can select it while its turn is live.
+/// an otherwise empty session and Ctrl-L can select it while its turn is live.
 #[test]
 fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn std::error::Error>>
 {

@@ -269,7 +269,7 @@ The peer-navigation PTY cases start with no agent and expose only the synthetic
 record and callback socket live only under the private runtime root, authorize
 one exact typed request, and add no general network or credential authority. A
 bounded fake-provider hold preserves one receiver's live interval long enough to
-exercise the real Ctrl-J binding, then an exact prompt cancellation reaps it. A
+exercise the real Ctrl-L binding, then an exact prompt cancellation reaps it. A
 separate closed scenario proves a peer-auto-started endpoint retains extension
 provenance, receives `ToolChoice::Auto`, and dispatches that dummy tool without a
 target UI prompt. These cases prove navigation eligibility and the configured

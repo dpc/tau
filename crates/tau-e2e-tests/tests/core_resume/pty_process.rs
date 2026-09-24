@@ -258,13 +258,13 @@ impl PtyProcess {
         writer.flush()
     }
 
-    /// Sends the ordinary Ctrl-J next-agent navigation key.
+    /// Sends the ordinary Ctrl-L next-agent navigation key.
     pub(super) fn send_next_agent_key(&mut self) -> Result<(), std::io::Error> {
         let writer = self
             .writer
             .as_mut()
             .ok_or_else(|| path_std_io::Error::other("PTY writer closed"))?;
-        writer.write_all(b"\n")?;
+        writer.write_all(b"\x0c")?;
         writer.flush()
     }
 

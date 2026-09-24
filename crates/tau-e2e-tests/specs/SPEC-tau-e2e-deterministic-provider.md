@@ -460,7 +460,7 @@ consumption. This companion does not alter S8's five-action restore contract.
 The peer-navigation case requires the authenticated bare delivery to report one
 auto-started recipient, observes its complete stats snapshot as
 `active/running`, and waits for the correlated hold-ready notice broadcast
-later to render on the target PTY. It sends the real Ctrl-J binding exactly once while the
+later to render on the target PTY. It sends the real Ctrl-L binding exactly once while the
 correlated hold remains live. The selected prompt must name that recipient;
 exact cancellation then reaps the hold without a timeout. This covers
 first-agent navigation only; it does not expand peer trust, delivery, or crash

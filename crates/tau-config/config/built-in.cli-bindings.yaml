@@ -46,10 +46,14 @@ C-f:
   trim: true
 C-b:
   action: agent-pick
-C-k:
+C-h:
   action: agent-previous
-C-j:
+C-l:
   action: agent-next
+C-k:
+  action: prompt-previous
+C-j:
+  action: prompt-next
 Tab:
   action: cycle-role
 BackTab:

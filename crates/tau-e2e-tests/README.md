@@ -153,7 +153,7 @@ store prefixes/suffixes, and bounded process/socket cleanup.
 An independent PTY case keeps a fresh target session agentless until one
 authenticated bare inter-session message auto-starts the configured receiver role. It
 requires the new recipient's live `active/running` snapshot and the correlated hold-ready
-notice rendered later by the target PTY, uses the ordinary Ctrl-J binding once
+notice rendered later by the target PTY, uses the ordinary Ctrl-L binding once
 to select the exact recipient, then explicitly cancels the provider hold.
 The separate headless `core_shell_resume` gate runs that universal binary as the
 bundled `component ext-shell`, exposes only `workdir` and `edit`, and proves a

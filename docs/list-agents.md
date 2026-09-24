@@ -6,7 +6,7 @@ directories.
 
 By default it prints live agents whose harness-owned navigation mode is not
 `suspended`. Idle `active_auto` agents are included: this command's visibility
-rule is intentionally broader than C-j/C-k automatic navigation.
+rule is intentionally broader than C-h/C-l automatic navigation.
 
 Options are additive:
 

@@ -203,7 +203,7 @@ authorize an exact bare external message, which auto-starts the first agent.
 Socket stats are authoritative for the newly created recipient's `active/running`
 state; the
 correlated hold-ready notice is broadcast afterward, so its target-PTY
-projection proves that UI consumed the update before one real Ctrl-J selects
+projection proves that UI consumed the update before one real Ctrl-L selects
 the exact recipient. The provider hold is explicitly canceled and reaped after
 selection. This topology does not broaden peer trust, delivery, provider,
 crash, or terminal-rendering claims.

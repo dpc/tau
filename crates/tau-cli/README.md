@@ -58,7 +58,7 @@ the harness publishes the resulting complete stats before queue or dispatch.
 
 The public `tau agent list <session-id>` command reads a directed harness roster
 and emits stable headerless TSV; it does not infer membership or navigation from
-renderer state. The C-b picker, `:pick-agent`, and C-j/C-k navigation ring use
+renderer state. The C-b picker, `:pick-agent`, and C-h/C-l navigation ring use
 the effective-active rule: `active` agents remain eligible while idle, and
 `active-auto` agents are eligible only while running. `:pick-agent-all` instead
 lists every current live agent, including idle `active-auto` and explicitly

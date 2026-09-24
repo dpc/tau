@@ -1664,6 +1664,25 @@ fn built_in_bindings_distinguish_ctrl_o_and_ctrl_shift_o() {
     );
 }
 
+/// The default navigation chords separate agent switching from prompt history
+/// so an attachment without user CLI config retains both controls.
+#[test]
+fn built_in_bindings_use_ctrl_h_l_for_agents_and_ctrl_j_k_for_history() {
+    let bindings = super::default_cli_bindings();
+    for (key, action) in [
+        ("C-h", "agent-previous"),
+        ("C-l", "agent-next"),
+        ("C-j", "prompt-next"),
+        ("C-k", "prompt-previous"),
+    ] {
+        assert_eq!(
+            bindings.get(key).map(|binding| binding.action.as_str()),
+            Some(action),
+            "{key}"
+        );
+    }
+}
+
 /// Ensures a user Meta binding survives YAML parsing even though Tau does not
 /// ship a built-in Meta chord.
 #[test]

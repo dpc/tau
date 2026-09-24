@@ -27,8 +27,10 @@ sample `config/cli.yaml`.
 | `Esc` | `escape` | Dismiss the completion menu if open, otherwise surface Escape. |
 | `C-b` | `agent-pick` | Pick a currently active agent with optional `fzf`. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf`, preview the highlighted file, and insert it at the cursor. |
-| `C-k` | `agent-previous` | Cycle to the previous active agent or overview. |
-| `C-j` | `agent-next` | Cycle to the next active agent or overview. |
+| `C-h` | `agent-previous` | Cycle to the previous active agent or overview. |
+| `C-l` | `agent-next` | Cycle to the next active agent or overview. |
+| `C-k` | `prompt-previous` | Move to the previous prompt/history entry. |
+| `C-j` | `prompt-next` | Move to the next prompt/history entry. |
 | `C-r` | `prompt-history-search` | Search past prompts with `fzf`, preview the highlighted prompt, and replace the current prompt with the selected prompt. |
 | `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
 | `C-v` | `verbose-mode-toggle` | Toggle between the compact conversation view and the verbose activity and performance transcript. |
@@ -40,6 +42,11 @@ sample `config/cli.yaml`.
 | `C-y` | `shell-prompt-insert` | Pick a jj change or git commit with `fzf` and insert its id at the cursor. |
 | `C-o`, `C-g` | `shell-prompt-edit` | Edit the current prompt with `$TAU_EDITOR`, falling back through `$EDITOR`, `$VISUAL`, `hx`, `vim`, `vi`, then `nano`. |
 | `C-O` | `shell-prompt-edit-chat` | Edit the prompt with the complete durable Markdown conversation below the trailer marker. Terminals that report bare `^O` without Shift keep ordinary `C-o`; use `:edit-prompt-chat` when the distinction is unavailable. |
+
+Terminals that send byte `0x08` for Backspace may report it as `C-h`, switching
+agents instead of deleting text. Configure Backspace to send DEL (`0x7f`), or
+override the `C-h` binding on such terminals.
+
 ## Built-in prompt completion triggers
 
 Typing any of the following word-leading prefixes at the prompt triggers inline
