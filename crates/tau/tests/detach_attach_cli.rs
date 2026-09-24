@@ -561,26 +561,50 @@ fn fixed_session_stderr_mirror_attributes_real_respawn_overlap() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let second_pid = std::fs::read_to_string(&second_started).expect("read second child PID");
+    let mut mirrored_lines = Vec::new();
+    let mut wait_for_mirrored_record = |expected: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for mirrored {expected:?}; captured lines: {mirrored_lines:?}"
+            );
+            let line = stderr_line_rx.recv_timeout(remaining).unwrap_or_else(|error| {
+                panic!(
+                    "waiting for mirrored {expected:?} failed ({error}); captured lines: {mirrored_lines:?}"
+                )
+            });
+            let line = String::from_utf8(line).expect("mirror line is UTF-8");
+            let found = line.contains(expected);
+            mirrored_lines.push(line);
+            if found {
+                break;
+            }
+        }
+    };
+    let new_record = format!(
+        "extension=std-notifications generation=1 pid={} boundary=line message=\"new-start\"",
+        second_pid.trim()
+    );
+    // The PID marker only orders the wrapper's writes, not the independent
+    // stderr drains. Observe the new mirror record before releasing the old
+    // pipe.
+    wait_for_mirrored_record(&new_record);
     std::fs::write(&release_old, b"release").expect("release old inherited stderr");
+    let old_written_deadline = Instant::now() + Duration::from_secs(10);
     while !old_written.exists() {
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < old_written_deadline,
             "old stderr writer did not finish"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let mut saw_new = false;
-    loop {
-        let line = stderr_line_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("wait for mirrored overlap record");
-        let line = String::from_utf8(line).expect("mirror line is UTF-8");
-        saw_new |= line.contains("generation=1") && line.contains("message=\"new-start\"");
-        if line.contains("generation=0") && line.contains("message=\"old-late\"") {
-            break;
-        }
-    }
-    assert!(saw_new, "replacement record must precede late old stderr");
+    let old_record = format!(
+        "extension=std-notifications generation=0 pid={} boundary=line message=\"old-late\"",
+        first_pid.trim()
+    );
+    wait_for_mirrored_record(&old_record);
     let status = server.terminate().expect("clean up overlap process group");
     assert!(status.success());
     let stderr =
