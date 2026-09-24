@@ -45,6 +45,8 @@ PUBLICATION_ORDER = [
 ]
 EXCLUDED_PACKAGES = {
     "dpc-tau-e2e-tests",
+    # Protocol foundation is not yet part of the application's dependency closure.
+    "dpc-tau-provider-grok",
     "dpc-tau-summary-eval",
     "dpc-tau-supervisor",
 }

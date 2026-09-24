@@ -48,6 +48,10 @@ needed. They remain ordinary workspace packages rather than being marked
 `publish = false`; that policy can be decided separately without obstructing
 the application release.
 
+`dpc-tau-provider-grok` is currently an unintegrated protocol foundation and is
+also excluded from the application publication closure. Integrating it into the
+built-in provider requires adding it to the checked dependency order.
+
 Run the registry-independent metadata and file-selection check:
 
 ```console

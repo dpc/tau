@@ -1,0 +1,29 @@
+[package]
+name = "dpc-tau-provider-grok"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "tau_provider_grok"
+
+[lints]
+workspace = true
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tau-provider.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
