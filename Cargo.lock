@@ -1193,7 +1193,10 @@ dependencies = [
 name = "dpc-tau-provider-grok"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "dpc-tau-proto",
  "dpc-tau-provider",
+ "dpc-tau-provider-responses",
  "reqwest",
  "serde",
  "serde_json",

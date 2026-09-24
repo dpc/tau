@@ -18,10 +18,13 @@ name = "tau_provider_grok"
 workspace = true
 
 [dependencies]
+base64.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tau-proto.workspace = true
 tau-provider.workspace = true
+tau-provider-responses.workspace = true
 tokio.workspace = true
 url.workspace = true
 

@@ -28,3 +28,23 @@ billing settings, or remote revocation. Tests use only synthetic credentials and
 loopback HTTP or controlled clocks. Authentication-origin changes, retry changes,
 or credential-storage integration require revisiting these boundaries and their
 focused tests.
+
+Model discovery uses the fixed public `https://api.x.ai/v1/models` endpoint with
+one caller-supplied bearer generation, a 30-second deadline, no redirects or
+transparent retries, and a 1 MiB decoded body limit. It stores no credentials,
+performs no refresh, and exposes only closed failure categories. A listed model
+does not establish subscription entitlement, free usage, native tool-image
+support or a text-inference route.
+
+Request lowering consumes an already destination-projected prompt under
+[`REQ-best-effort-provider-switching`](../../specs/REQ-best-effort-provider-switching.md).
+It grants no new origin admission and preserves admitted raw JSON rather than
+repairing foreign reasoning. Owned tool outputs use the canonical rendered
+text and typed validated image bytes; images remain tool content, never a new
+user-role payload. Canonical high detail follows
+[`SPEC-typed-image-tool-results`](../../specs/SPEC-typed-image-tool-results.md).
+Failed tool results do not forward images. Shared request
+bounds prevent repeated tool results from multiplying each image allowance.
+No request method sends inference traffic. Runtime integration must retain
+matching shared-attempt attribution and tool policy and must not expose the
+generic retry behavior for xAI partial-terminal reasons.
