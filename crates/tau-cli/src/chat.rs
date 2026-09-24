@@ -1557,6 +1557,7 @@ fn run_chat_session(
     let current_agent_state = renderer.current_agent_state();
     let known_agents = renderer.known_agents();
     let agent_display_names = renderer.agent_display_names();
+    let agent_completion_statuses = renderer.agent_completion_statuses();
     let agent_navigation = renderer.agent_navigation();
     let ephemeral_agents = renderer.ephemeral_agents();
     let agent_estimated_api_costs = renderer.agent_estimated_api_costs();
@@ -1568,7 +1569,11 @@ fn run_chat_session(
     );
     completion_data.set_arg_completer(
         tau_cli_term::CommandName::new(":agent"),
-        build_agent_arg_completer(input_routing.clone(), agent_display_names.clone()),
+        build_agent_arg_completer(
+            input_routing.clone(),
+            agent_display_names.clone(),
+            agent_completion_statuses,
+        ),
     );
     completion_data
         .set_agent_mention_completer(build_agent_mention_completer(input_routing.clone()));
@@ -5060,6 +5065,7 @@ const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
 fn build_agent_arg_completer(
     routing: InputRoutingState,
     agent_display_names: Arc<Mutex<HashMap<tau_proto::AgentId, String>>>,
+    agent_completion_statuses: Arc<Mutex<HashMap<tau_proto::AgentId, String>>>,
 ) -> tau_cli_term::ArgCompleter {
     use tau_cli_term::CompletionItem;
 
@@ -5078,6 +5084,10 @@ fn build_agent_arg_completer(
                 .lock()
                 .map(|names| names.clone())
                 .unwrap_or_default();
+            let statuses = agent_completion_statuses
+                .lock()
+                .map(|statuses| statuses.clone())
+                .unwrap_or_default();
             let active = routing.active_agents();
             let live = routing.live_agents();
             let raw_needle = args[1].to_lowercase();
@@ -5090,10 +5100,19 @@ fn build_agent_arg_completer(
                 .filter(|agent| !prefixed || agent != "none")
                 .filter(|agent| completion_matches(agent, needle))
                 .map(|agent| {
-                    let description = display_names
+                    let name = display_names
                         .get(agent.as_str())
                         .cloned()
                         .unwrap_or_else(|| agent.clone());
+                    let description = if agent == "none" {
+                        name
+                    } else {
+                        let status = statuses
+                            .get(agent.as_str())
+                            .map(String::as_str)
+                            .unwrap_or("❓💤");
+                        format!("{status} {name}")
+                    };
                     CompletionItem::new(agent, description)
                 })
                 .collect()

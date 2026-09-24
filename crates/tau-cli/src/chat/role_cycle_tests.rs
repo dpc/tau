@@ -46,6 +46,7 @@ fn agent_completer_offers_subcommands_first() {
             Arc::new(Mutex::new(Default::default())),
         ),
         Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(HashMap::new())),
     );
 
     let completions = completer(&[""]);
@@ -79,6 +80,7 @@ fn agent_new_takes_no_agent_id_completion() {
             ]))),
             Arc::new(Mutex::new(Default::default())),
         ),
+        Arc::new(Mutex::new(HashMap::new())),
         Arc::new(Mutex::new(HashMap::new())),
     );
 
@@ -179,7 +181,11 @@ fn active_auto_completion_follows_runtime_state() {
         Arc::new(Mutex::new(Default::default())),
     );
     let mentions = build_agent_mention_completer(routing.clone());
-    let agents = build_agent_arg_completer(routing.clone(), Arc::new(Mutex::new(HashMap::new())));
+    let agents = build_agent_arg_completer(
+        routing.clone(),
+        Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(HashMap::new())),
+    );
 
     assert!(mentions(&[""]).is_empty());
     assert_eq!(agents(&["resume", ""])[0].value, "helper");
@@ -218,6 +224,7 @@ fn agent_completer_filters_active_and_suspended_agents() {
     ])));
     let completer = build_agent_arg_completer(
         routing_state(known, live, suspended),
+        Arc::new(Mutex::new(HashMap::new())),
         Arc::new(Mutex::new(HashMap::new())),
     );
 
@@ -530,25 +537,53 @@ fn staged_create_revision_reaches_both_recovery_paths() {
     drop(term);
 }
 
+/// Agent-list commands show the current status-bar phase/activity and task
+/// title alongside the display name, but still insert the canonical bare agent
+/// id.
 #[test]
-fn agent_completer_uses_display_names_as_descriptions() {
-    // `:agent ... <agent_id>` keeps ids as values but shows the durable
-    // display name in the completion description so long names remain visible.
-    let known = Arc::new(Mutex::new(vec!["worker".to_owned()]));
+fn agent_completer_shows_live_status_without_changing_insertion() {
+    let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
     let names = Arc::new(Mutex::new(HashMap::from([(
         agent_id("worker"),
         "Investigate worker".to_owned(),
     )])));
     let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
-        "worker".to_owned()
+        "helper".to_owned(),
+        "worker".to_owned(),
     ])));
-    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
-    let completer = build_agent_arg_completer(routing_state(known, live, suspended), names);
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::from([
+        "helper".to_owned()
+    ])));
+    let statuses = Arc::new(Mutex::new(HashMap::from([
+        (agent_id("worker"), "🚀✨ Read logs".to_owned()),
+        (agent_id("helper"), "⏳💤 Awaiting review".to_owned()),
+    ])));
+    let completer = build_agent_arg_completer(
+        routing_state(known, live, suspended),
+        names,
+        statuses.clone(),
+    );
 
-    let completions = completer(&["switch", "worker"]);
-
-    assert_eq!(completions[0].value, "worker");
-    assert_eq!(completions[0].description, "Investigate worker");
+    for command in ["switch", "suspend", "auto", "name"] {
+        let completions = completer(&[command, "@worker"]);
+        assert_eq!(completions[0].value, "worker");
+        assert_eq!(
+            completions[0].description,
+            "🚀✨ Read logs Investigate worker"
+        );
+    }
+    let resume = completer(&["resume", "@helper"]);
+    assert_eq!(resume[0].value, "helper");
+    assert_eq!(resume[0].description, "⏳💤 Awaiting review helper");
+    assert_eq!(completer(&["switch", "none"])[0].description, "none");
+    statuses
+        .lock()
+        .expect("statuses")
+        .insert(agent_id("worker"), "✅💤 Done".to_owned());
+    assert_eq!(
+        completer(&["switch", "worker"])[0].description,
+        "✅💤 Done Investigate worker",
+    );
 }
 
 /// Typing an optional `@` filters the same agent set and completes back to the
@@ -562,6 +597,7 @@ fn agent_completer_accepts_prefixed_needles_and_returns_canonical_ids() {
     ])));
     let completer = build_agent_arg_completer(
         routing_state(known, live, Arc::new(Mutex::new(Default::default()))),
+        Arc::new(Mutex::new(HashMap::new())),
         Arc::new(Mutex::new(HashMap::new())),
     );
 

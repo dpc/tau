@@ -1446,6 +1446,7 @@ impl EventRenderer {
                 pending_initial_discovery: HashMap::new(),
                 known_agents: Arc::new(Mutex::new(Vec::new())),
                 agent_display_names: Arc::new(Mutex::new(HashMap::new())),
+                agent_completion_statuses: Arc::new(Mutex::new(HashMap::new())),
                 agent_navigation: Arc::new(Mutex::new(AgentNavigation::default())),
                 ephemeral_agents: Arc::new(Mutex::new(HashSet::new())),
             },
@@ -1650,6 +1651,13 @@ impl EventRenderer {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<HashMap<tau_proto::AgentId, String>>> {
         self.discovery.agent_display_names.clone()
+    }
+
+    /// Returns the shared live status projection for agent argument completion.
+    pub(crate) fn agent_completion_statuses(
+        &self,
+    ) -> Arc<Mutex<HashMap<tau_proto::AgentId, String>>> {
+        self.discovery.agent_completion_statuses.clone()
     }
 
     /// Returns the canonical cumulative per-agent costs shared with input
@@ -2049,6 +2057,12 @@ impl EventRenderer {
                 &updated.agent_id,
                 updated.navigation_mode,
                 updated.runtime_state,
+            );
+        }
+        if let Ok(mut statuses) = self.discovery.agent_completion_statuses.lock() {
+            statuses.insert(
+                updated.agent_id.clone(),
+                crate::list_agents::agent_completion_status(updated),
             );
         }
         self.watches
@@ -3862,25 +3876,6 @@ impl EventRenderer {
         )
     }
 
-    /// Returns the selected-agent work phase and escaped task title.
-    fn selected_agent_work_status(
-        &self,
-        agent_id: &tau_proto::AgentId,
-    ) -> (&'static str, Option<String>) {
-        let Some(status) = self
-            .watches
-            .agent_stats
-            .get(agent_id)
-            .map(|stats| &stats.work_status)
-        else {
-            return (crate::list_agents::work_status_symbol(None), None);
-        };
-        (
-            crate::list_agents::work_status_symbol(Some(status.phase())),
-            status.title().map(tau_proto::visible_escape_metadata),
-        )
-    }
-
     fn role_default_effort(&self) -> Option<tau_proto::ReasoningSelection> {
         let role = self.role.current_role.as_deref()?;
         self.role
@@ -5517,6 +5512,9 @@ impl EventRenderer {
                 if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
                     navigation.unload(&failed.agent_id);
                 }
+                if let Ok(mut statuses) = self.discovery.agent_completion_statuses.lock() {
+                    statuses.remove(&failed.agent_id);
+                }
                 if let Ok(mut agents) = self.discovery.known_agents.lock() {
                     agents.retain(|agent_id| agent_id != failed.agent_id.as_str());
                 }
@@ -5547,6 +5545,9 @@ impl EventRenderer {
             Event::SessionAgentUnloaded(unloaded) => {
                 if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
                     navigation.unload(&unloaded.agent_id);
+                }
+                if let Ok(mut statuses) = self.discovery.agent_completion_statuses.lock() {
+                    statuses.remove(&unloaded.agent_id);
                 }
                 self.remove_agent_watch_endpoint(&unloaded.agent_id);
                 self.watches.agent_models.remove(&unloaded.agent_id);
@@ -6548,6 +6549,9 @@ impl EventRenderer {
         // snapshots instead of carrying presentation metadata across a daemon
         // generation, even when the session id is unchanged.
         self.watches.watched_agent_work_statuses.clear();
+        if let Ok(mut statuses) = self.discovery.agent_completion_statuses.lock() {
+            statuses.clear();
+        }
         // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(self.session.current_session_id.is_none());
         self.watches.agent_estimated_api_costs.clear();
@@ -9958,6 +9962,7 @@ impl EventRenderer {
     }
 }
 
+mod agent_status;
 mod attach_presentation;
 mod compaction_presentation;
 mod completed_prompt_ids;

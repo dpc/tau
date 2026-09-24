@@ -276,6 +276,21 @@ pub(crate) fn work_status_symbol(phase: Option<tau_proto::AgentWorkStatusPhase>)
     }
 }
 
+/// Formats the same work phase, turn activity, and task title as the agent
+/// status bar.
+pub(crate) fn agent_completion_status(stats: &tau_proto::AgentStatsUpdated) -> String {
+    let mut status = format!(
+        "{}{}",
+        work_status_symbol(Some(stats.work_status.phase())),
+        turn_activity_symbol(stats.turn_activity),
+    );
+    if let Some(title) = stats.work_status.title() {
+        status.push(' ');
+        status.push_str(&tau_proto::visible_escape_metadata(title));
+    }
+    status
+}
+
 /// Returns the compact human-facing symbol for detailed turn activity.
 pub(crate) fn turn_activity_symbol(activity: tau_proto::AgentTurnActivity) -> &'static str {
     match activity {

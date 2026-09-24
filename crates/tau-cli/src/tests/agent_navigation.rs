@@ -1217,6 +1217,79 @@ fn agent_stats_does_not_overwrite_display_name() {
     );
 }
 
+/// Completion reads fresh authoritative work status from the renderer, while
+/// unloading removes stale status without deleting the known agent transcript.
+#[test]
+fn agent_completion_status_tracks_stats_and_unload() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let statuses = renderer.agent_completion_statuses();
+    let agent_id = agent_id("worker");
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+        parent_agent: None,
+        agent_id: agent_id.clone(),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    let stats = |phase, activity| {
+        Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id.clone(),
+            work_status: tau_proto::SessionAgentWorkStatus::new(
+                phase,
+                Some("Read logs".to_owned()),
+            )
+            .expect("valid work status"),
+            navigation_mode: tau_proto::AgentNavigationMode::Active,
+            runtime_state: tau_proto::AgentRuntimeState::Running,
+            turn_activity: activity,
+            tools: Default::default(),
+            context: Default::default(),
+            inner_turns_total: None,
+            estimated_api_cost: Default::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
+        })
+    };
+    renderer.handle(&stats(
+        tau_proto::AgentWorkStatusPhase::Working,
+        tau_proto::AgentTurnActivity::Responding,
+    ));
+    assert_eq!(
+        statuses
+            .lock()
+            .expect("statuses")
+            .get(&agent_id)
+            .map(String::as_str),
+        Some("🚀✨ Read logs"),
+    );
+    renderer.handle(&stats(
+        tau_proto::AgentWorkStatusPhase::Done,
+        tau_proto::AgentTurnActivity::Idle,
+    ));
+    assert_eq!(
+        statuses
+            .lock()
+            .expect("statuses")
+            .get(&agent_id)
+            .map(String::as_str),
+        Some("✅💤 Read logs"),
+    );
+    renderer.handle(&Event::SessionAgentUnloaded(
+        tau_proto::SessionAgentUnloaded {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id.clone(),
+        },
+    ));
+    assert!(!statuses.lock().expect("statuses").contains_key(&agent_id));
+}
+
 /// Ensures requester acknowledgements and diagnostics never become cache
 /// authority; only a subsequent complete stats snapshot changes navigation.
 #[test]

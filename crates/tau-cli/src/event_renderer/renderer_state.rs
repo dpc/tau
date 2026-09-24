@@ -85,6 +85,8 @@ pub(super) struct AgentDiscoveryState {
     pub(super) known_agents: Arc<Mutex<Vec<String>>>,
     /// Authoritative local display names.
     pub(super) agent_display_names: Arc<Mutex<HashMap<tau_proto::AgentId, String>>>,
+    /// Latest status-bar-style agent status text for command completion.
+    pub(super) agent_completion_statuses: Arc<Mutex<HashMap<tau_proto::AgentId, String>>>,
     /// Atomic navigation modes and membership.
     pub(super) agent_navigation: Arc<Mutex<AgentNavigation>>,
     /// Memory-only transcript owners.
