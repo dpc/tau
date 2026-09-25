@@ -20,12 +20,13 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-The protocol `10.0` SDK candidate uses `dpc-tau-proto` and `dpc-tau-client`
+The protocol `10.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.8.0`; both leaf dependencies remain `0.1.0`. Workdir-driven discovery
 refresh adds public DTO fields and events. A setter now waits for the harness's
 installed acknowledgement, which older harnesses cannot produce. Configured
 extensions must rebuild together for protocol 10; UI and cooperative peer
-best-effort skew exceptions are unchanged. This candidate is not published.
+best-effort skew exceptions are unchanged. This SDK release is published and
+accepted.
 
 The protocol `9.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.7.0`; both leaf dependencies remain `0.1.0`. Directed bridge
@@ -95,6 +96,29 @@ for admission behavior and the protocol boundary.
 
 This mapping does not describe or promise journal physical-format
 compatibility.
+
+## Protocol 10.0 release acceptance
+
+The package readiness check verifies the complete SDK archive set:
+
+```console
+./.config/selfci/check-sdk-packages.sh --registry
+```
+
+The protocol `10.0` SDK release is published and accepted. Registry
+`dpc-tau-proto` and `dpc-tau-client` `0.8.0` both come from source revision
+`cd852ff26dcdad8027aea0bc2fd396c1ca61f9fb`; the client requires exact proto
+`=0.8.0`. The registry-only SDK consumer check passes under the supported Rust
+1.91 environment and verifies protocol 10.0 without local patches. The
+`dpc-tau-proto-v0.8.0` and `dpc-tau-client-v0.8.0` Radicle tags both resolve to
+that source revision.
+
+The accepted registry archive SHA-256 values are
+`1c01022ecd4ec9f8f117d346f5a60fd4c46747671a64bbfaf5781b8177f11bdd`
+for proto and
+`2788dd292eb94c457cc672494df79d46515a92a464cae7f9d5c86634f41bdf6c`
+for client. Both registry archives' Cargo VCS metadata identifies the same
+source revision and the expected package subdirectory.
 
 ## Protocol 9.0 release acceptance
 
