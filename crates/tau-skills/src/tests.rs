@@ -625,6 +625,116 @@ fn set_skill_mtime(path: &Path, seconds_since_epoch: u64) {
         .expect("set modified time");
 }
 
+/// Retaining all user candidates, rather than just the user winner, preserves
+/// conditional precedence when a project participates in the same collision.
+#[test]
+fn captured_scopes_preserve_nontransitive_collision_order() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut dirs = Vec::new();
+    for (root, precedence, modified) in [
+        ("project", None, 1_700_000_200),
+        ("xdg-user", Some(0), 1_700_000_100),
+        ("legacy-user", Some(1), 1_700_000_300),
+    ] {
+        let path = tmp.path().join(root);
+        fs::create_dir(&path).expect("skill root");
+        let file = path.join("shared.md");
+        fs::write(
+            &file,
+            format!("---\nname: shared\ndescription: {root}\n---\n"),
+        )
+        .expect("skill");
+        set_skill_mtime(&file, modified);
+        dirs.push(SkillDir {
+            path,
+            source_precedence: precedence,
+            add_to_prompt_by_default: precedence.is_none(),
+        });
+    }
+    let project = SkillDiscovery::scan(&dirs[..1]);
+    let user = SkillDiscovery::scan(&dirs[1..]);
+    let combined = SkillDiscovery::resolve([&project, &user]);
+    assert_eq!(combined.skills[0].description, "legacy-user");
+    let monolithic = load_skills_from_skill_dirs(&dirs);
+    assert_eq!(combined.skills, monolithic.skills);
+    assert_eq!(combined.diagnostics, monolithic.diagnostics);
+
+    // Removing the project restores the XDG user candidate, not the last
+    // combined winner. Replacing the project must reuse this complete scan.
+    let user_only = SkillDiscovery::resolve([&user]);
+    assert_eq!(user_only.skills[0].description, "xdg-user");
+    assert!(!user_only.skills[0].add_to_prompt);
+
+    // A different project with the same name gets a new scan; the user scope
+    // remains sampled, even if its files have since been edited or removed.
+    fs::write(
+        dirs[0].path.join("shared.md"),
+        "---\nname: shared\ndescription: next-project\n---\n",
+    )
+    .expect("replace project");
+    set_skill_mtime(&dirs[0].path.join("shared.md"), 1_700_000_400);
+    fs::remove_dir_all(&dirs[1].path).expect("remove user root");
+    fs::write(dirs[2].path.join("shared.md"), "invalidated user metadata").expect("edit user root");
+    let next_project = SkillDiscovery::scan(&dirs[..1]);
+    let replaced = SkillDiscovery::resolve([&next_project, &user]);
+    assert_eq!(replaced.skills[0].description, "next-project");
+    assert!(replaced.skills[0].add_to_prompt);
+    assert_eq!(
+        SkillDiscovery::resolve([&user]).skills,
+        user_only.skills,
+        "resolution must not resample user files or mtime"
+    );
+    assert_eq!(
+        SkillDiscovery::resolve([&project, &user]).diagnostics,
+        combined.diagnostics,
+        "repeat resolution retains sampled collision diagnostics"
+    );
+}
+
+/// Equal-time candidates and malformed-file diagnostics retain their original
+/// traversal positions when separately captured roots are combined.
+#[test]
+fn captured_scopes_preserve_ties_and_diagnostic_order() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut dirs = Vec::new();
+    for root in ["first", "second"] {
+        let path = tmp.path().join(root);
+        fs::create_dir(&path).expect("root");
+        let file = path.join("shared.md");
+        fs::write(
+            &file,
+            format!("---\nname: shared\ndescription: {root}\nonly-roles: 123\n---\n"),
+        )
+        .expect("malformed policy skill");
+        set_skill_mtime(&file, 1_700_000_000);
+        dirs.push(SkillDir {
+            path,
+            source_precedence: None,
+            add_to_prompt_by_default: false,
+        });
+    }
+    let first = SkillDiscovery::scan(&dirs[..1]);
+    let second = SkillDiscovery::scan(&dirs[1..]);
+    let result = SkillDiscovery::resolve([&first, &second]);
+    assert_eq!(result.skills[0].description, "first");
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.kind)
+            .collect::<Vec<_>>(),
+        [
+            DiagnosticKind::Frontmatter,
+            DiagnosticKind::Frontmatter,
+            DiagnosticKind::Collision
+        ],
+    );
+    assert_eq!(
+        result.diagnostics,
+        load_skills_from_skill_dirs(&dirs).diagnostics
+    );
+}
+
 /// Ensures duplicate skills across configured roots select the newest file, so
 /// root order does not hide a fresher local skill.
 #[test]

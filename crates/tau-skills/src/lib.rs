@@ -20,6 +20,9 @@ use std::time::SystemTime;
 use serde_yaml_ng::Value as YamlValue;
 use tau_proto::{ContextVisibility, SkillName};
 
+mod skill_discovery;
+pub use skill_discovery::SkillDiscovery;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -1306,17 +1309,6 @@ fn discover_skill_paths_inner(
     }
 }
 
-/// Skill candidate selected as the current winner for a skill name collision.
-struct SelectedSkill {
-    /// Parsed skill metadata and content for the winning candidate.
-    skill: Skill,
-    /// Filesystem modification time used as the fallback collision tie-breaker.
-    modified: Option<SystemTime>,
-    /// Optional root precedence where lower values beat higher values before
-    /// modification time is considered.
-    source_precedence: Option<u32>,
-}
-
 fn skill_modified_time(path: &Path) -> Option<SystemTime> {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -1441,104 +1433,7 @@ fn load_skills_from_skill_dirs_with_limits(
     dirs: &[SkillDir],
     limits: DiscoveryLimits,
 ) -> LoadSkillsResult {
-    let mut skills_by_name: BTreeMap<SkillName, SelectedSkill> = BTreeMap::new();
-    let mut all_diagnostics = Vec::new();
-
-    for dir in dirs {
-        let (paths, discovery_diagnostics) = discover_skill_paths_with_limits(&dir.path, limits);
-        all_diagnostics.extend(discovery_diagnostics);
-        for path in paths {
-            let content = match read_skill_discovery_content(&path) {
-                Ok(content) => content,
-                Err(diagnostic) => {
-                    all_diagnostics.push(diagnostic);
-                    continue;
-                }
-            };
-
-            let (skill, diags) = load_skill_from_content(&content, &path);
-            all_diagnostics.extend(diags);
-
-            if let Some(mut skill) = skill {
-                if !skill.add_to_prompt_explicit {
-                    skill.add_to_prompt |= dir.add_to_prompt_by_default;
-                }
-                let modified = skill_modified_time(&skill.file_path);
-                if let Some(existing) = skills_by_name.get_mut(&skill.name) {
-                    let ordering = compare_skill_candidate(
-                        dir.source_precedence,
-                        modified,
-                        existing.source_precedence,
-                        existing.modified,
-                    );
-                    if ordering == Ordering::Greater {
-                        let reason = if dir.source_precedence != existing.source_precedence
-                            && dir.source_precedence.is_some()
-                            && existing.source_precedence.is_some()
-                        {
-                            "higher-priority skill root"
-                        } else {
-                            "newer modified time"
-                        };
-                        let message = collision_message(
-                            &skill.name,
-                            &skill.file_path,
-                            &existing.skill.file_path,
-                            reason,
-                        );
-                        all_diagnostics.push(SkillDiagnostic {
-                            path: existing.skill.file_path.clone(),
-                            kind: DiagnosticKind::Collision,
-                            message,
-                        });
-                        *existing = SelectedSkill {
-                            skill,
-                            modified,
-                            source_precedence: dir.source_precedence,
-                        };
-                    } else {
-                        let reason = if dir.source_precedence != existing.source_precedence
-                            && dir.source_precedence.is_some()
-                            && existing.source_precedence.is_some()
-                        {
-                            "higher-priority skill root"
-                        } else if ordering == Ordering::Equal {
-                            "same or unavailable modified time"
-                        } else {
-                            "newer modified time"
-                        };
-                        all_diagnostics.push(SkillDiagnostic {
-                            path: skill.file_path.clone(),
-                            kind: DiagnosticKind::Collision,
-                            message: collision_message(
-                                &skill.name,
-                                &existing.skill.file_path,
-                                &skill.file_path,
-                                reason,
-                            ),
-                        });
-                    }
-                } else {
-                    skills_by_name.insert(
-                        skill.name.clone(),
-                        SelectedSkill {
-                            skill,
-                            modified,
-                            source_precedence: dir.source_precedence,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    LoadSkillsResult {
-        skills: skills_by_name
-            .into_values()
-            .map(|selected| selected.skill)
-            .collect(),
-        diagnostics: all_diagnostics,
-    }
+    SkillDiscovery::resolve([&SkillDiscovery::scan_with_limits(dirs, limits)])
 }
 
 /// Load skills from a single directory.
