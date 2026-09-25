@@ -1461,7 +1461,7 @@ fn built_in_prompts_place_payload_envelope_provenance_notice_between_tools_and_s
             BUILT_IN_SYSTEM_TEMPLATE_NAME,
             "## Tool calling",
             "## Skills and skill system",
-            "94458a41d0b481928c9e10ebe43b3bec9c3abc49a135748cf0933228e77e0eac",
+            "b8407a259b285d2b0da86c499dbd15a742f7638b47a217f13f4f9454540bbb2e",
         ),
         (
             BIG_SYSTEM_TEMPLATE_NAME,
