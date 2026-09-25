@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
-    CborValue, DiscoveryAgentsFile, DiscoveryModifiedMicros, DiscoverySkillCandidate, Event,
-    ExtAgentContextPublish, ExtensionAgentDiscoverySnapshotDeclared, ExtensionContextReady,
-    ExtensionSessionContextReady, ExtensionSessionDiscoverySnapshotDeclared, HarnessInputMessage,
-    PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded, SessionStarted,
-    ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind, ToolSpec, ToolTag,
+    CborValue, DiscoveryModifiedMicros, DiscoverySkillCandidate, Event, ExtAgentContextPublish,
+    ExtensionAgentDiscoverySnapshotDeclared, ExtensionContextReady, ExtensionSessionContextReady,
+    ExtensionSessionDiscoverySnapshotDeclared, HarnessInputMessage, PromptContent, PromptFragment,
+    PromptPriority, SessionAgentLoaded, SessionStarted, ToolCancelled, ToolExample,
+    ToolExampleSelector, ToolResult, ToolResultKind, ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -38,6 +38,7 @@ mod config;
 mod cwd_state;
 mod diff;
 mod dir_lock;
+mod discovery_source;
 mod display;
 mod isolation;
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
@@ -56,7 +57,7 @@ mod ui_shell_shutdown_generation;
 #[cfg(test)]
 mod tests;
 
-use crate::agents::{ancestor_dirs, discover_session_agents_files};
+use crate::agents::ancestor_dirs;
 use crate::artifact_transfer::{ArtifactTransferControl, ArtifactTransferManager};
 use crate::config::{ExtConfig, ShellConfig};
 use crate::cwd_state::{CwdState, WorkdirSnapshot};
@@ -2776,55 +2777,27 @@ fn build_discovery_snapshot(
     _started: SessionStarted,
     discovery_policy: DiscoverySourcePolicy,
 ) -> DiscoveryScan {
-    let mut diagnostics = Vec::new();
-    let mut frontmatter_diagnostics = Vec::new();
-    let (skills, agents_files) = if discovery_policy.reads_environment() {
-        let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
-        let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
-        let (malformed, ordinary): (Vec<_>, Vec<_>) = result
-            .diagnostics
-            .into_iter()
-            .partition(|diagnostic| diagnostic.kind == tau_skills::DiagnosticKind::Frontmatter);
-        frontmatter_diagnostics.extend(malformed.into_iter().map(|diagnostic| {
-            tau_proto::DiscoveryFrontmatterDiagnostic {
-                file_path: diagnostic.path,
-                message: diagnostic.message,
-            }
-        }));
-        push_skill_diagnostic_requests(&mut diagnostics, ordinary);
-        let skills = result
-            .skills
-            .into_iter()
-            .map(discovery_skill_candidate)
-            .collect();
-        let agents_files = discover_session_agents_files()
-            .into_iter()
-            .map(|file| DiscoveryAgentsFile {
-                file_path: file.file_path,
-                content: file.content,
-            })
-            .collect();
-        (skills, agents_files)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    if discovery_policy.reads_environment() {
+        return discovery_source::DiscoverySource::new(dirs::home_dir())
+            .scan_project(_started.session_id, std::env::current_dir().ok().as_deref());
+    }
     DiscoveryScan {
         snapshot: ExtensionSessionDiscoverySnapshotDeclared {
-            frontmatter_diagnostics,
+            frontmatter_diagnostics: Vec::new(),
             session_id: _started.session_id,
-            skills,
-            agents_files,
+            skills: Vec::new(),
+            agents_files: Vec::new(),
         },
-        diagnostics,
+        diagnostics: Vec::new(),
     }
 }
 
-fn discovery_skill_candidate(skill: tau_skills::Skill) -> DiscoverySkillCandidate {
+fn discovery_skill_candidate(
+    skill: tau_skills::Skill,
+    modified: Option<std::time::SystemTime>,
+) -> DiscoverySkillCandidate {
     let file_path = skill.file_path.canonicalize().unwrap_or(skill.file_path);
-    let sampled_modified = std::fs::metadata(&file_path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(system_time_to_discovery_micros);
+    let sampled_modified = modified.and_then(system_time_to_discovery_micros);
     DiscoverySkillCandidate {
         visibility: skill.visibility,
         name: skill.name,
@@ -2968,19 +2941,7 @@ fn session_skill_dirs(
     cwd: Option<std::path::PathBuf>,
     home: Option<std::path::PathBuf>,
 ) -> Vec<tau_skills::SkillDir> {
-    let mut skill_dirs = Vec::new();
-    if let Some(cwd) = cwd.as_deref() {
-        for project_dir in project_skill_ancestor_dirs(cwd, home.as_deref()) {
-            push_existing_project_skill_dir(
-                &mut skill_dirs,
-                project_dir.join(".agents").join("skills"),
-            );
-            push_existing_project_skill_dir(
-                &mut skill_dirs,
-                project_dir.join(".agents.local").join("skills"),
-            );
-        }
-    }
+    let mut skill_dirs = project_skill_dirs(cwd.as_deref(), home.as_deref());
     if let Some(home) = home {
         skill_dirs.push(user_skill_dir_precedence(
             home.join(".config").join("agents").join("skills"),
@@ -2998,6 +2959,23 @@ fn session_skill_dirs(
             home.join(".agents.local").join("skills"),
             LEGACY_USER_SKILL_SOURCE_PRECEDENCE,
         ));
+    }
+    skill_dirs
+}
+
+fn project_skill_dirs(cwd: Option<&Path>, home: Option<&Path>) -> Vec<tau_skills::SkillDir> {
+    let mut skill_dirs = Vec::new();
+    if let Some(cwd) = cwd {
+        for project_dir in project_skill_ancestor_dirs(cwd, home) {
+            push_existing_project_skill_dir(
+                &mut skill_dirs,
+                project_dir.join(".agents").join("skills"),
+            );
+            push_existing_project_skill_dir(
+                &mut skill_dirs,
+                project_dir.join(".agents.local").join("skills"),
+            );
+        }
     }
     skill_dirs
 }

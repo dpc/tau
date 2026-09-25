@@ -12,17 +12,6 @@ pub(crate) struct DiscoveredAgentsFile {
     pub(crate) content: String,
 }
 
-pub(crate) fn discover_session_agents_files() -> Vec<DiscoveredAgentsFile> {
-    let mut roots = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        roots.extend(user_agents_roots(&home));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.extend(ancestor_agents_roots(&cwd));
-    }
-    discover_agents_files_from_roots(roots)
-}
-
 #[cfg(test)]
 pub(crate) fn discover_agents_files_from(cwd: &Path) -> Vec<DiscoveredAgentsFile> {
     discover_agents_files_from_roots(ancestor_agents_roots(cwd))
@@ -104,7 +93,7 @@ fn agents_file_sort_key(path: &Path) -> (u8, String) {
     (rank, name.to_owned())
 }
 
-fn ancestor_agents_roots(cwd: &Path) -> Vec<PathBuf> {
+pub(crate) fn ancestor_agents_roots(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for dir in ancestor_dirs(cwd) {
         dirs.push(dir.clone());

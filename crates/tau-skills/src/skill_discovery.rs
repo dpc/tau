@@ -58,6 +58,18 @@ impl SkillDiscovery {
         Self::scan_with_limits(dirs, DEFAULT_DISCOVERY_LIMITS)
     }
 
+    /// Iterate every candidate with its discovery-time modification timestamp.
+    ///
+    /// Consumers can capture host-specific source metadata for losing
+    /// candidates too, without rereading it when a different scope is
+    /// replaced.
+    pub fn candidates(&self) -> impl Iterator<Item = (&Skill, Option<SystemTime>)> {
+        self.entries.iter().filter_map(|entry| match entry {
+            DiscoveryEntry::Candidate(candidate) => Some((&candidate.skill, candidate.modified)),
+            DiscoveryEntry::Diagnostic(_) => None,
+        })
+    }
+
     /// Capture bounded traversal observations before resolving name collisions.
     pub(crate) fn scan_with_limits(dirs: &[SkillDir], limits: DiscoveryLimits) -> Self {
         let mut entries = Vec::new();
