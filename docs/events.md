@@ -93,7 +93,13 @@ for control of the emit/intercept pipeline.
   effective configuration, including their display descriptions for UIs.
 - **`harness.agent_context_initialized`** — Protected transient current-state
   projection for one exact agent initialization, carrying model-listed skills
-  and ordered AGENTS.md path/line/byte summaries.
+  and ordered AGENTS.md path/line/byte summaries, discovery revision, degraded
+  diagnostics, and installed source-refresh outcomes.
+- **`harness.agent_discovery_refresh_requested`** — Protected transient request
+  to scan one bound shell source from its actual committed cwd value, correlated
+  by session, agent, stable load identity, metadata key, and refresh token. It
+  echoes the source-owned original user capture for same-load replacement
+  processes, without recapturing user files.
 - **`harness.session_skills_available`** — Protected transient complete
   validated session skill snapshot for role preflight and manual completion.
   Effective skill sources are tagged as file-backed absolute paths or a

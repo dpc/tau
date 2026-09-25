@@ -1113,6 +1113,9 @@ fn suffix_after_initialization_events<'a>(
         })
         .ok_or_else(|| format!("{agent_id} lacks its prior initialization fact"))?;
     let tau_proto::AgentInitializationContextSet {
+        discovery_revision: current_revision,
+        discovery_refreshes: current_refreshes,
+        discovery_diagnostics: current_diagnostics,
         session_id: current_session_id,
         agent_id: current_agent_id,
         agent_initialization_id: current_initialization_id,
@@ -1121,6 +1124,9 @@ fn suffix_after_initialization_events<'a>(
         agents_files: current_agents_files,
     } = current;
     let tau_proto::AgentInitializationContextSet {
+        discovery_revision: previous_revision,
+        discovery_refreshes: previous_refreshes,
+        discovery_diagnostics: previous_diagnostics,
         session_id: previous_session_id,
         agent_id: previous_agent_id,
         agent_initialization_id: previous_initialization_id,
@@ -1137,6 +1143,9 @@ fn suffix_after_initialization_events<'a>(
         || current_agents_message != previous_agents_message
         || current_effective_skills != previous_effective_skills
         || current_agents_files != previous_agents_files
+        || current_revision != previous_revision
+        || current_refreshes != previous_refreshes
+        || current_diagnostics != previous_diagnostics
     {
         return Err(format!("{agent_id} did not append a fresh equivalent initialization").into());
     }

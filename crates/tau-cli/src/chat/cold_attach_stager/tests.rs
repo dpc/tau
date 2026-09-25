@@ -720,6 +720,9 @@ fn tool_history_keeps_later_attach_snapshots_silent_until_boundary() {
             pid: Some(123),
         }),
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: "session-1".parse().expect("valid session id"),
             agent_id: "agent-1".parse().expect("valid agent id"),

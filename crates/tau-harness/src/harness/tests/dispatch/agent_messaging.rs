@@ -5717,6 +5717,9 @@ fn initialization_payload_envelope_notice_matches_preflight_and_materialization(
     h.publish_for_agent(
         &cid,
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id,
             agent_initialization_id: tau_proto::AgentInitializationId::parse(

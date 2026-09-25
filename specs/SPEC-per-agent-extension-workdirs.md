@@ -25,7 +25,8 @@ and cross-harness agents do not gain implicit workdir inheritance.
 
 The model-facing `workdir` tool replaces persistent `cd`. Omitting `path` reads
 the remembered path and status. Providing `path` validates and canonicalizes an
-existing directory, then completes only after the matching metadata commit. At
+existing directory, then completes only after the matching metadata commit and
+the source-local discovery replacement is durably installed. At
 most one setter may be pending for an agent and instance. The request carries an
 opaque correlation id echoed by the committed fact, so an unrelated same-value
 write cannot impersonate the setter's linearization point. Absolute setters can
@@ -58,8 +59,32 @@ the workdir capability, its shell-workdir guidance is also absent. The guidance
 explains that each visible shell family has independent state, that a setter
 affects later calls from only that instance, and that dependent calls require a
 later turn; it may call out cwd-sensitive configured wrappers without claiming
-that any wrapper is enabled. Instruction and skill discovery remain
-process/session startup behavior and is not rebased by workdir changes.
+that any wrapper is enabled.
+
+Agent-load project discovery uses the explicit remembered, inherited, or restored
+cwd on the shell execution host; only absent metadata uses the process-startup
+fallback. Every canonical persistent cwd change, including a same-path setter,
+replaces only that shell instance's project skills and AGENTS contribution.
+User inputs retain their existing lifecycle; builtin, other-instance, and
+other-agent inputs are unchanged. Getters and invocation-local overrides do not
+refresh discovery. The existing root order, symlink traversal, collision, and
+role-filter rules still apply.
+
+The canonical commit starts a source-local readiness barrier. Dependent inference
+and selected-agent `:skill` expansion wait for the latest installed replacement,
+independently of setter cancellation or backgrounding. A superseded scan cannot
+install over a newer mutation. No agent reinitialization, provider restart, or
+cache-history rewrite occurs. The durable bootstrap slot is replaced rather than
+appending another AGENTS message; already-loaded skill messages and historical
+transcript/compaction content remain unchanged. See
+[SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).
+
+A true scan failure, timeout, or disconnected scanner removes stale project input,
+retains user and other-source input, and installs an explicit degraded diagnostic.
+An affected setter reports that the cwd committed but discovery failed, never
+claims rollback. Established/restored agents missing a required skill remain
+loaded and usable for an absolute or same-path repair; fresh initialization stays
+strict. Successful repair replaces the degraded view.
 
 User `!` and `!!` commands execute through exactly one shell instance and from
 the target agent's admission-time workdir. With no instance they fail; with

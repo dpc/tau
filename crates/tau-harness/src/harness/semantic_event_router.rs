@@ -53,6 +53,7 @@ pub(crate) fn should_persist_event(event: &Event, persist: bool) -> bool {
                 | Event::ExtPromptFragmentPublish(_)
                 | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
                 | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
+                | Event::HarnessAgentDiscoveryRefreshRequested(_)
                 | Event::ExtensionSessionContextProviderRegister(_)
                 | Event::ExtensionSessionContextReady(_)
                 | Event::ExtensionContextProviderRegister(_)

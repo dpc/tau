@@ -378,6 +378,12 @@ fn set_test_agent_context_wait(
         .insert(
             agent_id,
             PendingAgentDiscovery {
+                revision: 0,
+                publishing_revision: None,
+                retained_install: None,
+                superseded_refreshes: Vec::new(),
+                validated_skills: Default::default(),
+                workdir_sources: Default::default(),
                 initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
                 skill_candidates: h
@@ -408,8 +414,9 @@ fn finish_test_agent_context_wait(h: &mut Harness, agent_id: &tau_proto::AgentId
         .insert(
             agent_id.clone(),
             crate::frozen_agent_discovery::FrozenAgentDiscovery {
-                initialization_id: pending.initialization_id,
-                skills: pending.skills,
+                initialization_id: pending.initialization_id.clone(),
+                skills: pending.skills.clone(),
+                inputs: pending,
             },
         );
 }

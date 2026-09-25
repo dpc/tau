@@ -399,6 +399,9 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "models_available");
     pub const HARNESS_ROLES_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "roles_available");
+    /// Request to refresh one configured source after committed cwd mutation.
+    pub const HARNESS_AGENT_DISCOVERY_REFRESH_REQUESTED: Self =
+        Self::from_static(EventCategory::Harness, "agent_discovery_refresh_requested");
     /// Current harness-owned projection for one initialized agent.
     pub const HARNESS_AGENT_CONTEXT_INITIALIZED: Self =
         Self::from_static(EventCategory::Harness, "agent_context_initialized");

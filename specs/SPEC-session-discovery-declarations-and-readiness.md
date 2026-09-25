@@ -66,9 +66,11 @@ snapshot or readiness cannot settle another agent.
 
 Ready-before-snapshot finalizes the seeded baseline. Duplicate snapshots replace
 the pending source; duplicate readiness is inert. Wrong session, agent,
-initialization id, connection generation, post-finalization declarations, and
+initialization id, connection generation, unsolicited post-finalization declarations, and
 unload-time late traffic are effect-free. Disconnect removes the source from
 pending state and its wait set, but never mutates a frozen agent snapshot.
+Bound workdir refreshes have the source-local correlation and degraded fallback
+specified by [SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).
 
 ## Finalized state and consumers
 
@@ -81,14 +83,16 @@ set, and renders included instructions without frontmatter. It publishes one dur
 including an unchanged cold-restored initialization with a fresh ID. The reducer
 stores the latest durable fact as agent side state without creating a transcript
 node or advancing the branch
-head. Missing AGENTS.md files clear the bootstrap slot on the next initialization.
+head. Missing AGENTS.md files clear the bootstrap slot on the next initialization
+or applicable project refresh.
 
 The committed fact freezes the agent's effective skills and bootstrap block for
 the load attempt. Provider `<available_skills>`, the model `skill` tool,
 selected-agent `:skill` expansion, and the protected transient
 `harness.agent_context_initialized` projection all consume that frozen state.
-Initial non-literal `:skill` commands wait for finalization before expansion.
-Later session/source updates do not mutate an already-frozen agent.
+Non-literal `:skill` commands wait for pending discovery before expansion.
+Unsolicited session/source updates do not mutate an already-frozen agent;
+canonical workdir mutations explicitly replace only their bound source.
 
 The bootstrap block is materialized once as a provider user-context block outside
 ordinary transcript history. Branching and compaction retain the latest folded
@@ -132,14 +136,19 @@ evaluates each prospective role independently. All initialized consumers,
 including advertisement, exact/search/content model access, `:skill`, selected
 completion, and role previews, use that agent's eligible frozen set. File bodies
 remain live reads, but editing a header does not resample eligibility until a
-new initialization. This does not restrict direct filesystem access.
+new initialization or applicable project refresh. Unchanged user and other-source
+eligibility is not resampled by a project refresh. This does not restrict direct
+filesystem access.
 
-An unavailable per-agent required skill rejects that initialization before the
+An unavailable per-agent required skill rejects a fresh initialization before the
 durable replacement is published. Accepted delegated starts use their existing
 correlated failure terminal; pending previews and initial UI prompts receive
 their existing failure responses and the rejected runtime is unloaded. Other
 agents and the harness remain operational. Session-level selected/default-role
-preflight failure remains a startup error.
+preflight failure remains a fresh-session startup error. Resume preserves role
+definitions and defers validation to each agent's restored project context.
+Previously initialized agents remain loaded with explicit missing-required-skill
+diagnostics so they can repair an unavailable cwd; repair clears those diagnostics.
 
 Malformed headers and filters follow
 [REQ-context-file-frontmatter-fail-open](REQ-context-file-frontmatter-fail-open.md).

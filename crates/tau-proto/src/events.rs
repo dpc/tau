@@ -7069,6 +7069,8 @@ pub enum Event {
     ExtensionSessionDiscoverySnapshotDeclared(ExtensionSessionDiscoverySnapshotDeclared),
     #[serde(rename = "extension.agent_discovery_snapshot_declared")]
     ExtensionAgentDiscoverySnapshotDeclared(ExtensionAgentDiscoverySnapshotDeclared),
+    #[serde(rename = "harness.agent_discovery_refresh_requested")]
+    HarnessAgentDiscoveryRefreshRequested(crate::HarnessAgentDiscoveryRefreshRequested),
     #[serde(rename = "extension.context_provider_register")]
     ExtensionContextProviderRegister(ExtensionContextProviderRegister),
     #[serde(rename = "extension.session_context_provider_register")]
@@ -7569,6 +7571,9 @@ impl Event {
             Self::ExtensionAgentDiscoverySnapshotDeclared(_) => {
                 EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED
             }
+            Self::HarnessAgentDiscoveryRefreshRequested(_) => {
+                EventName::HARNESS_AGENT_DISCOVERY_REFRESH_REQUESTED
+            }
             Self::ExtensionContextProviderRegister(_) => {
                 EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER
             }
@@ -7844,6 +7849,7 @@ impl Event {
                 | Self::ExtPromptFragmentPublish(_)
                 | Self::ExtensionSessionDiscoverySnapshotDeclared(_)
                 | Self::ExtensionAgentDiscoverySnapshotDeclared(_)
+                | Self::HarnessAgentDiscoveryRefreshRequested(_)
                 | Self::ExtensionSessionContextProviderRegister(_)
                 | Self::ExtensionSessionContextReady(_)
                 | Self::ExtensionContextProviderRegister(_)

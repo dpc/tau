@@ -792,6 +792,7 @@ impl Harness {
                     && !self.extensions.restart_budget_disabled.contains(&replaced),
                 "replacement must follow complete cleanup and consume its deadline"
             );
+            self.rebind_workdir_discovery_source(&replaced, &connection_id);
             self.extensions.entries.remove(&replaced);
             self.extensions.activation_staging.remove(&replaced);
             self.extensions.ready_received.remove(&replaced);

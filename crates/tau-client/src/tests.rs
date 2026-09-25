@@ -501,6 +501,9 @@ impl TauExtension for ContextReadyEmitExtension {
             )?;
             cx.handle().declare_agent_discovery_snapshot(
                 tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                    workdir_binding: None,
+                    refresh_id: None,
+                    discovery_error: None,
                     frontmatter_diagnostics: Vec::new(),
                     session_id: tau_proto::SessionId::parse("session-1")
                         .expect("known-safe SessionId must be valid"),
@@ -1988,6 +1991,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let agent = Event::ExtensionAgentDiscoverySnapshotDeclared(
         tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+            workdir_binding: None,
+            refresh_id: None,
+            discovery_error: None,
             frontmatter_diagnostics: Vec::new(),
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
@@ -2006,6 +2012,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let replacement =
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
@@ -2023,6 +2032,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let agent_projection =
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()

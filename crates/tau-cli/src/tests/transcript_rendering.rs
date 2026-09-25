@@ -677,6 +677,9 @@ fn deferred_initial_discovery_final_uses_atomic_publication_cut() {
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("main"),
@@ -1009,6 +1012,9 @@ fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
     );
     let initialized = |agent: &str, skill: &str, path: &str| {
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: test_session_id("session-1"),
             agent_id: agent_id(agent),

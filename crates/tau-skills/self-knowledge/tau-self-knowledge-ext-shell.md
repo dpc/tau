@@ -153,6 +153,14 @@ Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bin
 `argument-hint` metadata and publishes one complete source snapshot at session
 discovery and for each correlated agent initialization. The harness atomically
 selects collision winners and freezes each initialized agent's view.
+Agent-load discovery uses the remembered/inherited/restored cwd, not the process
+startup cwd unless metadata is absent. Persistent `workdir(path)` commits,
+including same-path setters, replace only that shell instance's project discovery;
+getters and call-local overrides do not. Dependent inference and `:skill`
+expansion wait for installation even if the setter backgrounds or is cancelled.
+True scan failure removes stale project input, retains user/other-source input,
+and reports the committed-cwd/degraded-discovery outcome. Established agents stay
+usable for absolute or same-path repair when required skills disappear.
 `disable-model-invocation` hides a skill from that agent's
 `<available_skills>` and model `skill` tool and implies user invocation, while
 `:skill <name> [args]` (or `:skill:<name> [args]`) expands against the selected
@@ -167,7 +175,8 @@ lists admit everyone; explicitly empty lists match nobody. Role/group names
 match exactly, using actual configured groups rather than role-name prefixes.
 Each AGENTS file filters independently; headers are stripped from injected
 instructions. Skill winners are selected before filtering, so hiding a winner
-does not expose duplicates. Eligibility freezes at agent initialization while
+does not expose duplicates. Eligibility freezes at agent initialization or the
+applicable source-local project refresh, while
 later skill loads still read current bodies. Malformed filters fail open and
 produce file-specific UI warnings retained for late attachment. Unparseable
 headers preserve raw useful instructions. These filters are not filesystem ACLs.

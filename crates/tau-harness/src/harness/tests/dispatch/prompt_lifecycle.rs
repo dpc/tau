@@ -1692,7 +1692,10 @@ fn queued_initial_skill_is_resolved_before_steering_drain() {
     )
     .expect("queue initial prompt");
     let cid = test_user_agent(&h);
-    assert!(!h.fold_pending_prompts_as_steered_with_completion(&cid, None));
+    assert_eq!(
+        h.fold_pending_prompts_as_steered_with_completion(&cid, None),
+        crate::harness::tool_runtime::PromptFoldDisposition::Empty,
+    );
 
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,

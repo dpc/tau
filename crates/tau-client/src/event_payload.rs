@@ -120,6 +120,11 @@ impl_event_payload!(
     tau_proto::Event::HarnessAgentContextInitialized
 );
 impl_event_payload!(
+    tau_proto::HarnessAgentDiscoveryRefreshRequested,
+    tau_proto::EventName::HARNESS_AGENT_DISCOVERY_REFRESH_REQUESTED,
+    tau_proto::Event::HarnessAgentDiscoveryRefreshRequested
+);
+impl_event_payload!(
     tau_proto::HarnessSessionSkillsAvailable,
     tau_proto::EventName::HARNESS_SESSION_SKILLS_AVAILABLE,
     tau_proto::Event::HarnessSessionSkillsAvailable

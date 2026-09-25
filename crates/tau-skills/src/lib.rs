@@ -28,7 +28,7 @@ pub use skill_discovery::SkillDiscovery;
 // ---------------------------------------------------------------------------
 
 /// A validated, loaded skill.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Skill {
     /// Role policy sampled at discovery, independent of live instruction
     /// bodies.
@@ -115,7 +115,7 @@ impl Skill {
 }
 
 /// Non-fatal diagnostic emitted during skill loading.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillDiagnostic {
     /// Path of the skill file, directory entry, or root associated with the
     /// diagnostic.
@@ -127,7 +127,7 @@ pub struct SkillDiagnostic {
 }
 
 /// Category for a skill loading diagnostic.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticKind {
     /// Malformed context metadata; must become a replayable UI warning.
     Frontmatter,

@@ -35,6 +35,7 @@ mod debug_log;
 mod dedup;
 mod diagnostic_cleanup;
 mod discovery;
+mod discovery_workdir_source;
 mod error;
 mod event;
 mod event_log;

@@ -664,6 +664,17 @@ fn captured_scopes_preserve_nontransitive_collision_order() {
     let user_only = SkillDiscovery::resolve([&user]);
     assert_eq!(user_only.skills[0].description, "xdg-user");
     assert!(!user_only.skills[0].add_to_prompt);
+    let encoded = serde_yaml_ng::to_string(&user).expect("serialize raw user scope");
+    drop(user);
+    let user: SkillDiscovery = serde_yaml_ng::from_str(&encoded).expect("restore raw user scope");
+    assert_eq!(
+        SkillDiscovery::resolve([&project, &user]).skills,
+        combined.skills
+    );
+    assert_eq!(
+        SkillDiscovery::resolve([&user]).diagnostics,
+        user_only.diagnostics
+    );
 
     // A different project with the same name gets a new scan; the user scope
     // remains sampled, even if its files have since been edited or removed.

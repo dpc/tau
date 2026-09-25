@@ -2888,6 +2888,9 @@ fn cold_attach_suppresses_routine_snapshots_and_announces_session_once() {
     renderer.handle_cold_attach_replay_socket_delivery(
         &tau_proto::Event::HarnessAgentContextInitialized(
             tau_proto::HarnessAgentContextInitialized {
+                discovery_revision: 0,
+                discovery_refreshes: Vec::new(),
+                discovery_diagnostics: Vec::new(),
                 effective_skills: vec![tau_proto::DiscoveryEffectiveSkill {
                     visibility: Default::default(),
                     name: "restored-skill".into(),
@@ -3439,6 +3442,9 @@ fn deferred_tool_ownership_routes_later_progress_after_publication() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.handle(&tau_proto::Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: tau_proto::SessionId::parse("session-one").expect("valid session id"),
             agent_id: owner.clone(),

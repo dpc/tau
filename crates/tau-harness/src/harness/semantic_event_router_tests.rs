@@ -107,6 +107,9 @@ fn discovery_snapshot_declarations_never_enter_semantic_history() {
         ),
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                workdir_binding: None,
+                refresh_id: None,
+                discovery_error: None,
                 frontmatter_diagnostics: Vec::new(),
                 session_id: "test-session"
                     .parse::<tau_proto::SessionId>()

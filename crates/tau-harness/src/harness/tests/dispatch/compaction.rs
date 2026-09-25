@@ -45,6 +45,9 @@ fn standalone_prefix_byte_fit_matches_fully_materialized_context() {
     h.publish_for_agent(
         &cid,
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id: agent_id.clone(),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("init-byte-fit")
@@ -4087,6 +4090,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         panic!("cold reopen suffix must be an initialization replacement");
     };
     let tau_proto::AgentInitializationContextSet {
+        discovery_revision: previous_revision,
+        discovery_refreshes: previous_refreshes,
+        discovery_diagnostics: previous_diagnostics,
         session_id: previous_session_id,
         agent_id: previous_agent_id,
         agent_initialization_id: previous_initialization_id,
@@ -4095,6 +4101,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         agents_files: previous_agents_files,
     } = previous;
     let tau_proto::AgentInitializationContextSet {
+        discovery_revision: current_revision,
+        discovery_refreshes: current_refreshes,
+        discovery_diagnostics: current_diagnostics,
         session_id: current_session_id,
         agent_id: current_agent_id,
         agent_initialization_id: current_initialization_id,
@@ -4110,6 +4119,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     assert_eq!(current_agents_message, previous_agents_message);
     assert_eq!(current_effective_skills, previous_effective_skills);
     assert_eq!(current_agents_files, previous_agents_files);
+    assert_eq!(current_revision, previous_revision);
+    assert_eq!(current_refreshes, previous_refreshes);
+    assert_eq!(current_diagnostics, previous_diagnostics);
     assert_eq!(
         second_records
             .iter()

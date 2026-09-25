@@ -48,6 +48,22 @@ and conform to our standards and guidelines.
 
 ## Guidelines
 
+### Persistent workdir and project discovery
+
+When `workdir` is exposed, distinguish the top-level persistent setter from
+`shell_command.workdir`, which applies only to one invocation. In disposable
+project directories, verify that a successful persistent setter makes the new
+project AGENTS/skill catalog available before a dependent turn; a getter and
+call-local override must not change discovery. A same-path setter must rescan
+edited or deleted project files. Do not run dependent calls as sibling tools.
+
+Verify unavailable-project failure reports the actual committed cwd and degraded
+discovery rather than claiming rollback or retaining stale project instructions.
+User and unrelated shell/agent contributions must remain intact. For automated
+background/cancellation probes, discovery readiness must outlive the setter and
+selected-agent `:skill` expansion must wait for the installed replacement.
+Restore the original workdir with a separate setter when the probe finishes.
+
 ### Tool result output structure
 All tools should return a normalized HTTP-protocol-like structure:
 

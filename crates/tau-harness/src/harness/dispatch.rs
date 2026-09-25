@@ -454,22 +454,6 @@ impl Harness {
                     });
             if has_durable_activation {
                 let _ = self.ensure_agent_id_for_agent(&agent_id);
-                if self
-                    .agent_runtime
-                    .agent_registry
-                    .agents
-                    .get(&agent_id)
-                    .is_some_and(|agent| agent.dispatch.pending_replay_activation)
-                {
-                    let restore_prompts =
-                        self.take_pending_restore_prompts_for_user_prompt(&agent_id);
-                    if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&agent_id)
-                    {
-                        agent.dispatch.pending_prompts.extend(restore_prompts);
-                    }
-                    self.fold_pending_prompts_as_steered(&agent_id);
-                }
-                let selected_wakes = self.selected_branch_wake_view(&agent_id);
                 let output_length_owner_ready = self
                     .agent_runtime
                     .agent_registry
@@ -481,6 +465,25 @@ impl Harness {
                             path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
                         )
                     });
+                // A restored continuation already owns an exact through cut.
+                // Leave ordinary restore/input notices for the following turn.
+                if !output_length_owner_ready
+                    && self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get(&agent_id)
+                        .is_some_and(|agent| agent.dispatch.pending_replay_activation)
+                {
+                    let restore_prompts =
+                        self.take_pending_restore_prompts_for_user_prompt(&agent_id);
+                    if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&agent_id)
+                    {
+                        agent.dispatch.pending_prompts.extend(restore_prompts);
+                    }
+                    self.fold_pending_prompts_as_steered(&agent_id);
+                }
+                let selected_wakes = self.selected_branch_wake_view(&agent_id);
                 if !output_length_owner_ready {
                     let preflight_started = materialization_timing.as_ref().map(|_| Instant::now());
                     if !self.validate_prompt_render_for_dispatch(&agent_id) {
@@ -618,6 +621,8 @@ impl Harness {
                             tau_proto::AgentPromptFailureStage::Preprocessing,
                             &message,
                         );
+                    } else {
+                        self.emit_info_important(&message);
                     }
                     continue;
                 }
@@ -896,8 +901,10 @@ impl Harness {
             let initial_prompt_correlation = non_passive
                 .as_ref()
                 .and_then(|(_, prompt)| prompt.initial_prompt_correlation.as_ref());
-            if initial_prompt_correlation.is_some()
-                && !self.agent_initialization_ready_for(agent_id)
+            if !self.agent_context_ready_for(agent_id)
+                || conv.dispatch.discovery_fold_pending
+                || (initial_prompt_correlation.is_some()
+                    && !self.agent_initialization_ready_for(agent_id))
             {
                 continue;
             }
@@ -1066,6 +1073,7 @@ impl Harness {
         match self.agent_runtime.agent_registry.agents.get(agent_id) {
             Some(conv) => {
                 conv.dispatch.terminating
+                    || conv.dispatch.discovery_fold_pending
                     || conv.dispatch.in_flight_prompt.is_some()
                     || !matches!(
                         conv.dispatch.activation_dispatch,

@@ -44,6 +44,15 @@ and the current model route. Each owner and `(agent_id, agent_prompt_id)` admits
 at most one prompt-start fact and one live continuation. Delivery consumes the
 continuation once; replay never recreates it.
 
+A canonical source-local workdir refresh may park an exact retained undelivered
+phase outside the global publication queue until discovery installs. Only its
+current synthetic bootstrap and system discovery text are rebuilt, using the
+original capability/provider surface. Prompt identity, selected model, tools,
+accounting, compaction trigger/owner, opaque history, and historical skill loads
+are unchanged. Pre-materialization waits retain only their exact live callback;
+neither form reconstructs replayed work or reissues an already delivered request.
+See [SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).
+
 Recovery never reconstructs or resends the transient full request, including
 after a crash between owner commit, prompt-start commit, and provider delivery.
 A journal may end after the owner and before prompt-start. Duplicate prompt-start

@@ -1,5 +1,9 @@
 //! Atomic discovery snapshot regressions.
 
+mod workdir_refresh;
+
+use std::collections::HashMap;
+
 use super::*;
 use crate::harness::{PendingRenderedPreview, PendingRenderedPrompt};
 use crate::internal_tools::InternalToolHost;
@@ -40,6 +44,26 @@ fn snapshot(
         skills,
         agents_files,
     }
+}
+
+/// Hold fresh agents at the real discovery barrier instead of replacing an
+/// already-installed initialization in strict-startup fixtures.
+fn register_discovery_test_provider(h: &mut Harness, source: &str) {
+    h.handle_extension_message(
+        &crate::test_connection_id(source),
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+        }),
+    )
+    .expect("subscribe to agent loads");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id(source),
+        Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
+    )
+    .expect("register context provider");
 }
 
 /// Role filtering follows collision selection, freezes independently per agent,
@@ -233,6 +257,9 @@ fn context_frontmatter_diagnostics_are_alerts_only_for_current_snapshots() {
     h.apply_agent_discovery_snapshot(
         &crate::test_connection_id("source"),
         tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+            workdir_binding: None,
+            refresh_id: None,
+            discovery_error: None,
             frontmatter_diagnostics: vec![diagnostic],
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id: tau_proto::AgentId::parse("not-loaded").expect("id"),
@@ -353,8 +380,18 @@ fn context_required_skill_is_validated_against_agent_specific_eligibility() {
         h.required_skill_unavailable_reason(&"required".into(), &role)
             .is_none()
     );
+    connect_ready_configured_extension(&mut h, "source", "source", tau_proto::ClientKind::Tool);
+    register_discovery_test_provider(&mut h, "source");
     let cid = h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    assert!(
+        h.session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("fresh agent")
+            .initialization_context()
+            .is_none()
+    );
     let init = tau_proto::AgentInitializationId::parse("agent-specific").expect("id");
     h.prompt_coordination
         .context_discovery
@@ -362,6 +399,12 @@ fn context_required_skill_is_validated_against_agent_specific_eligibility() {
         .insert(
             agent_id.clone(),
             PendingAgentDiscovery {
+                revision: 0,
+                publishing_revision: None,
+                retained_install: None,
+                superseded_refreshes: Vec::new(),
+                validated_skills: HashMap::new(),
+                workdir_sources: HashMap::new(),
                 initialization_id: init.clone(),
                 skill_candidates: Default::default(),
                 skills: Default::default(),
@@ -374,6 +417,9 @@ fn context_required_skill_is_validated_against_agent_specific_eligibility() {
     h.apply_agent_discovery_snapshot(
         &crate::test_connection_id("source"),
         tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+            workdir_binding: None,
+            refresh_id: None,
+            discovery_error: None,
             frontmatter_diagnostics: Vec::new(),
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id: agent_id.clone(),
@@ -419,8 +465,17 @@ fn context_required_skill_callback_failure_is_agent_local() {
         let role = h.config.selected_role.clone();
         let survivor =
             h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+        register_discovery_test_provider(&mut h, "required-source");
         let cid = h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
         let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        assert!(
+            h.session_runtime
+                .agent_store
+                .agent(agent_id.as_str())
+                .expect("fresh agent")
+                .initialization_context()
+                .is_none()
+        );
         let init = tau_proto::AgentInitializationId::parse("required-failure").expect("init");
         h.config
             .available_roles
@@ -433,6 +488,12 @@ fn context_required_skill_callback_failure_is_agent_local() {
             .insert(
                 agent_id.clone(),
                 PendingAgentDiscovery {
+                    revision: 0,
+                    publishing_revision: None,
+                    retained_install: None,
+                    superseded_refreshes: Vec::new(),
+                    validated_skills: HashMap::new(),
+                    workdir_sources: HashMap::new(),
                     initialization_id: init.clone(),
                     skill_candidates: Default::default(),
                     skills: Default::default(),
@@ -938,6 +999,12 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
         .insert(
             agent_id.clone(),
             PendingAgentDiscovery {
+                revision: 0,
+                publishing_revision: None,
+                retained_install: None,
+                superseded_refreshes: Vec::new(),
+                validated_skills: HashMap::new(),
+                workdir_sources: HashMap::new(),
                 initialization_id: initialization_id.clone(),
                 skill_candidates: Default::default(),
                 skills: Default::default(),
@@ -951,6 +1018,9 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     let event = |initialization_id| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                workdir_binding: None,
+                refresh_id: None,
+                discovery_error: None,
                 frontmatter_diagnostics: vec![tau_proto::DiscoveryFrontmatterDiagnostic {
                     file_path: path.clone(),
                     message: "agent-only malformed header".to_owned(),
@@ -1118,6 +1188,12 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
         .insert(
             agent_id.clone(),
             PendingAgentDiscovery {
+                revision: 0,
+                publishing_revision: None,
+                retained_install: None,
+                superseded_refreshes: Vec::new(),
+                validated_skills: HashMap::new(),
+                workdir_sources: HashMap::new(),
                 initialization_id: initialization_id.clone(),
                 skill_candidates: Default::default(),
                 skills: Default::default(),
@@ -1132,6 +1208,9 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
     let event = |candidate| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                workdir_binding: None,
+                refresh_id: None,
+                discovery_error: None,
                 frontmatter_diagnostics: Vec::new(),
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -1284,6 +1363,9 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                workdir_binding: None,
+                refresh_id: None,
+                discovery_error: None,
                 frontmatter_diagnostics: Vec::new(),
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -1463,6 +1545,9 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
                  skills| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                workdir_binding: None,
+                refresh_id: None,
+                discovery_error: None,
                 frontmatter_diagnostics: Vec::new(),
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()

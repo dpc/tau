@@ -60,9 +60,14 @@ fn replacing_project_preserves_user_snapshot_and_collision_fallback() {
             .any(|file| file.content == "PROJECT A")
     );
 
+    let retained = source.retained_user_state();
+    drop(source);
     write_skill(&xdg_skill, "edited-user", 1000);
     fs::remove_file(&legacy_skill).expect("remove legacy skill");
     fs::write(&user_agents, "USER EDITED").expect("edit user instructions");
+    let source =
+        DiscoverySource::from_retained_user_state(&retained).expect("restore original user");
+    assert_eq!(source.user_candidates().len(), 2);
     let second = source.scan_project("session".parse().expect("session id"), Some(&b));
     assert_eq!(second.snapshot.skills.len(), 1);
     let user = &second.snapshot.skills[0];
@@ -129,8 +134,12 @@ fn replacing_project_preserves_user_symlink_targets_and_deduplication() {
     fs::write(&shared_agents, "SHARED INSTRUCTIONS").expect("agents");
     symlink(&shared_agents, project.join("AGENTS.md")).expect("project link");
     let source = DiscoverySource::new(Some(home));
+    let retained = source.retained_user_state();
+    drop(source);
     fs::remove_file(&link).expect("unlink");
     symlink(&next_target, &link).expect("retarget");
+    let source =
+        DiscoverySource::from_retained_user_state(&retained).expect("restore symlink sample");
     let scan = source.scan_project("session".parse().expect("session id"), Some(&project));
     assert_eq!(scan.snapshot.skills[0].description, "original-user");
     assert_eq!(

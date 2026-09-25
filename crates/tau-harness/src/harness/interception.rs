@@ -52,6 +52,8 @@ pub(crate) struct PromptDispatchContinuation {
 /// Prompt identity and route authority shared by both one-shot dispatch phases.
 #[derive(Clone)]
 pub(crate) struct PromptDispatchAuthority {
+    /// Content-only rebuild inputs owned until this exact request is delivered.
+    pub(crate) discovery_render: super::prompt_discovery_render::PromptDiscoveryRender,
     /// Exact compact fact that owns this continuation.
     pub(crate) started: tau_proto::AgentPromptStarted,
     /// Provider route resolved from the captured model at admission.
@@ -983,6 +985,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::PROVIDER_MODEL_DECLARATION_DIAGNOSTIC,
     EventName::AGENT_INITIALIZATION_CONTEXT_SET,
     EventName::HARNESS_AGENT_CONTEXT_INITIALIZED,
+    EventName::HARNESS_AGENT_DISCOVERY_REFRESH_REQUESTED,
     EventName::HARNESS_SESSION_SKILLS_AVAILABLE,
     EventName::TOOL_REGISTER,
     EventName::TOOL_UNREGISTER,
@@ -1141,6 +1144,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::ProviderModelDeclarationDiagnostic(_)
             | Event::AgentInitializationContextSet(_)
             | Event::HarnessAgentContextInitialized(_)
+            | Event::HarnessAgentDiscoveryRefreshRequested(_)
             | Event::HarnessSessionSkillsAvailable(_)
             | Event::ToolRegister(_)
             | Event::ToolUnregister(_)
@@ -1520,6 +1524,13 @@ impl Harness {
     /// agent, suspend an in-flight responder, and resume unrelated FIFO
     /// work.
     pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
+        self.prompt_coordination
+            .context_discovery
+            .deferred_folds
+            .remove(cid);
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+            agent.dispatch.discovery_fold_pending = false;
+        }
         let canceled_interaction =
             self.cancel_ui_interactions_for_agent(cid, "agent teardown canceled pending UI input");
         self.prompt_coordination
@@ -1527,6 +1538,28 @@ impl Harness {
             .pending_uncertain_supersessions
             .remove(cid);
         let mut canceled_prompt_ids = Vec::new();
+        self.prompt_coordination
+            .context_discovery
+            .parked_prompts
+            .retain(|_, publish| {
+                let canceled = publish
+                    .sync_head_for
+                    .as_ref()
+                    .is_some_and(|sync| &sync.cid == cid);
+                if canceled
+                    && let Some(authority) = publish
+                        .sync_head_for
+                        .as_ref()
+                        .and_then(ConversationHeadSync::prompt_dispatch)
+                {
+                    canceled_prompt_ids.push(authority.started.agent_prompt_id.clone());
+                }
+                !canceled
+            });
+        self.prompt_coordination
+            .context_discovery
+            .parked_materializations
+            .retain(|_, parked| &parked.cid != cid);
         let mut canceled_initial_prompts = Vec::new();
         let mut canceled_watch_retirements = Vec::new();
         let removed_pending = self
@@ -2398,6 +2431,12 @@ impl Harness {
     /// provider request.
     fn agent_can_start_deferred_inference_dispatch(&self, cid: &AgentId) -> bool {
         self.agent_context_ready_for(cid)
+            && !self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .is_some_and(|agent| agent.dispatch.discovery_fold_pending)
             && self
                 .agent_runtime
                 .agent_registry
@@ -2434,6 +2473,15 @@ impl Harness {
     }
 
     fn deferred_prompt_dispatch_is_actionable(&self, deferred: &DeferredPromptDispatch) -> bool {
+        if self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(&deferred.cid)
+            .is_some_and(|agent| agent.dispatch.discovery_fold_pending)
+        {
+            return false;
+        }
         let selected =
             !deferred.obligation.is_committed() || self.deferred_activation_is_selected(deferred);
         if !selected {
@@ -3005,12 +3053,69 @@ impl Harness {
     fn dispatch_publish_step(
         &mut self,
         mut source: PublicationSource,
-        event: Event,
+        mut event: Event,
         persist: bool,
         must_pass: bool,
-        sync_head_for: Option<ConversationHeadSync>,
+        mut sync_head_for: Option<ConversationHeadSync>,
         mut cursor: Option<InterceptorCursor>,
     ) {
+        if cursor.is_none()
+            && let Some(sync) = sync_head_for.as_ref()
+            && let Some(authority) = sync.prompt_dispatch()
+            && self.prompt_dispatch_runtime_matches(
+                sync,
+                authority,
+                sync.prompt_dispatch_phase() == Some(PromptDispatchPhase::Delivery),
+            )
+        {
+            if !self.agent_context_ready_for(&sync.cid) {
+                let agent_id = authority.started.agent_id.clone();
+                let previous = self
+                    .prompt_coordination
+                    .context_discovery
+                    .parked_prompts
+                    .insert(
+                        agent_id,
+                        DeferredPublish {
+                            source,
+                            event,
+                            persist,
+                            must_pass,
+                            sync_head_for,
+                        },
+                    );
+                assert!(
+                    previous.is_none(),
+                    "one live continuation owns each undelivered prompt"
+                );
+                return;
+            }
+            let refreshed = match sync_head_for
+                .as_mut()
+                .and_then(|sync| sync.continuation.as_mut())
+            {
+                Some(PostCommitContinuation::PromptMaterialization(continuation)) => self
+                    .refresh_undelivered_prompt_discovery(
+                        Arc::make_mut(&mut continuation.prompt),
+                        &mut continuation.authority.discovery_render,
+                    ),
+                Some(PostCommitContinuation::PromptDelivery(authority)) => {
+                    if let Event::AgentPromptCreated(prompt) = &mut event {
+                        self.refresh_undelivered_prompt_discovery(
+                            prompt,
+                            &mut authority.discovery_render,
+                        )
+                    } else {
+                        Ok(())
+                    }
+                }
+                _ => Ok(()),
+            };
+            if let Err(error) = refreshed {
+                self.fail_prompt_dispatch_continuation(sync_head_for.as_ref(), &error);
+                return;
+            }
+        }
         loop {
             let Some(interceptor_match) = self
                 .runtime_io
@@ -3098,6 +3203,78 @@ impl Harness {
                 set: interceptor_match.set,
                 registration: interceptor,
             });
+        }
+    }
+
+    /// Wake only retained live continuations; never reconstruct replayed
+    /// owners.
+    pub(super) fn resume_discovery_dispatches(&mut self, agent_id: &tau_proto::AgentId) {
+        if self
+            .prompt_coordination
+            .context_discovery
+            .pending_agents
+            .contains_key(agent_id)
+        {
+            return;
+        }
+        if let Some(parked) = self
+            .prompt_coordination
+            .context_discovery
+            .parked_prompts
+            .remove(agent_id)
+        {
+            let DeferredPublish {
+                source,
+                event,
+                persist,
+                must_pass,
+                sync_head_for,
+            } = parked;
+            if self.runtime_io.publication.pending_intercept.is_some() {
+                self.runtime_io
+                    .publication
+                    .deferred
+                    .push_back(DeferredPublish {
+                        source,
+                        event,
+                        persist,
+                        must_pass,
+                        sync_head_for,
+                    });
+            } else {
+                self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
+            }
+        }
+        if let Some(parked) = self
+            .prompt_coordination
+            .context_discovery
+            .parked_materializations
+            .remove(agent_id)
+        {
+            let current = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&parked.cid)
+                .is_some_and(|agent| {
+                    agent.identity.runtime_incarnation == parked.runtime_incarnation
+                        && agent.identity.agent_id.as_ref() == Some(agent_id)
+                        && agent.dispatch.pending_cancel.is_none()
+                        && match &agent.dispatch.activation_dispatch {
+                            path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                                agent_prompt_id,
+                                ..
+                            } => agent_prompt_id == &parked.prompt_id,
+                            path_crate_agent::ActivationDispatchState::Running {
+                                compact_prompt_id,
+                                ..
+                            } => compact_prompt_id == &parked.prompt_id,
+                            _ => false,
+                        }
+                });
+            if current {
+                self.send_prompt_to_agent_for_with_timing(&parked.cid, parked.timing);
+            }
         }
     }
 

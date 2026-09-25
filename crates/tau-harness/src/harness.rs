@@ -1594,6 +1594,7 @@ mod compaction_supplement;
 mod connection_startup;
 mod construction;
 mod context_discovery_state;
+mod discovery_refresh;
 mod extension_activation;
 mod extension_lifecycle;
 mod harness_config_state;
@@ -1614,6 +1615,7 @@ mod prepared_standalone_failure;
 mod prepared_standalone_terminal;
 mod prompt_acceptance_timing;
 mod prompt_coordination_state;
+mod prompt_discovery_render;
 mod prompt_materialization;
 mod prompt_materialization_timing;
 #[cfg(test)]

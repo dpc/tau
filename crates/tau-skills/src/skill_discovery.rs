@@ -20,7 +20,7 @@ use crate::{
 /// separate and resolve them together in original root order. Resolving each
 /// scope first loses candidates: precedence applies only when both roots
 /// specify it, so the collision comparator is not transitive.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SkillDiscovery {
     /// Scan observations in traversal order, before name collision resolution.
     entries: Vec<DiscoveryEntry>,
@@ -28,7 +28,7 @@ pub struct SkillDiscovery {
 
 /// One ordered observation, preserving diagnostics alongside candidate
 /// sampling.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum DiscoveryEntry {
     /// A candidate whose parsed metadata and ordering inputs are frozen.
     Candidate(SampledSkill),
@@ -37,16 +37,20 @@ enum DiscoveryEntry {
 }
 
 /// One parsed candidate and the exact collision inputs sampled with it.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SampledSkill {
     /// Parsed metadata, including the root's advertisement default.
     skill: Skill,
     /// Modification time sampled during discovery, not during resolution.
+    #[serde(with = "sampled_time")]
     modified: Option<SystemTime>,
     /// Explicit root priority, considered only against another explicit
     /// priority.
     source_precedence: Option<u32>,
 }
+
+/// Lossless signed timestamps, including files dated before the Unix epoch.
+mod sampled_time;
 
 impl SkillDiscovery {
     /// Scan roots in order with the same traversal and read limits as skill
@@ -166,3 +170,6 @@ impl SkillDiscovery {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

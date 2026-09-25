@@ -1034,7 +1034,7 @@ impl Harness {
                 );
                 if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
                     conv.dispatch.pending_cancel = None;
-                    conv.dispatch.pending_prompts.clear();
+                    conv.dispatch.clear_pending_prompts();
                 }
             }
             AgentTurnState::AgentThinking { .. } => {
@@ -1235,7 +1235,7 @@ impl Harness {
                 || terminal_write_pending
             {
                 if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                    agent.dispatch.pending_prompts.clear();
+                    agent.dispatch.clear_pending_prompts();
                 }
                 return;
             }
@@ -1333,7 +1333,7 @@ impl Harness {
         }
         if self.provider_terminal_publication_pending(cid, &canceled_prompt_id) {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                agent.dispatch.pending_prompts.clear();
+                agent.dispatch.clear_pending_prompts();
             }
             return;
         }
@@ -1415,7 +1415,7 @@ impl Harness {
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             conv.dispatch.pending_cancel = None;
             conv.turn.work_status.clear_working_reminder();
-            conv.dispatch.pending_prompts.clear();
+            conv.dispatch.clear_pending_prompts();
             conv.dispatch.in_flight_prompt = None;
             if matches!(
                 &conv.dispatch.activation_dispatch,
@@ -2173,7 +2173,14 @@ impl Harness {
         let agent_id = &prompt.agent_id;
         let is_user_interaction =
             prompt.originator.is_user() && !prompt.message_class.is_internal();
-        let text = if is_user_interaction && !prompt.literal {
+        let defer_skill = is_user_interaction
+            && !prompt.literal
+            && self
+                .prompt_coordination
+                .context_discovery
+                .pending_agents
+                .contains_key(&prompt.agent_id);
+        let text = if is_user_interaction && !prompt.literal && !defer_skill {
             match self.expand_user_skill_command(&prompt.agent_id, &prompt.text) {
                 Ok(text) => text,
                 Err(message) => {
@@ -2184,12 +2191,13 @@ impl Harness {
         } else {
             prompt.text.clone()
         };
-        let pending = Self::pending_authenticated_ui_prompt(
+        let mut pending = Self::pending_authenticated_ui_prompt(
             text,
             prompt.message_class,
             is_user_interaction,
             prompt.ctx_id.clone(),
         );
+        pending.expand_user_skill_on_dispatch = defer_skill;
         let will_accept = prompt.session_id == self.session_runtime.current_session_id
             && self
                 .agent_runtime

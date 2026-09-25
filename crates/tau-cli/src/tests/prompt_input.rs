@@ -1224,6 +1224,9 @@ fn clearing_selected_agent_clears_response_editor_context() {
 #[test]
 fn agent_context_initialization_skill_stats_measure_prompt_description() {
     let initialized = tau_proto::HarnessAgentContextInitialized {
+        discovery_revision: 0,
+        discovery_refreshes: Vec::new(),
+        discovery_diagnostics: Vec::new(),
         effective_skills: Vec::new(),
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),

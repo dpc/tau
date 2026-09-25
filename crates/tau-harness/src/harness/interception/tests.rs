@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness::prompt_discovery_render::PromptDiscoveryRender;
 
 /// Builds a registration whose full ordering identity is explicit in each
 /// successor-selection oracle.
@@ -164,6 +165,15 @@ fn unique_prompt_handoff_moves_constituent_allocations() {
 
     let continuation = super::PromptDispatchContinuation {
         authority: super::PromptDispatchAuthority {
+            discovery_render: PromptDiscoveryRender {
+                revision: 0,
+                role: "test".to_owned(),
+                capabilities: Vec::new(),
+                providers: Vec::new(),
+                effective_names: Default::default(),
+                has_bootstrap: false,
+                history_provenance: false,
+            },
             started: tau_proto::AgentPromptStarted::from(&prompt),
             provider_connection_id: tau_proto::ConnectionId::parse("provider-move-owned")
                 .expect("provider connection"),

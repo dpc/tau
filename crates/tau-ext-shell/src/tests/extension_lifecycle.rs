@@ -256,6 +256,8 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
             EventSelector::Exact(EventName::SESSION_AGENT_LOADED),
             EventSelector::Exact(EventName::SESSION_AGENT_UNLOADED),
             EventSelector::Exact(EventName::AGENT_REPLAY_COMPLETE),
+            EventSelector::Exact(EventName::HARNESS_AGENT_DISCOVERY_REFRESH_REQUESTED),
+            EventSelector::Exact(EventName::HARNESS_AGENT_CONTEXT_INITIALIZED),
             EventSelector::Exact(EventName::AGENT_METADATA_SET),
             EventSelector::Exact(EventName::AGENT_METADATA_UNSET),
             EventSelector::Exact(EventName::SESSION_SHUTDOWN),

@@ -111,6 +111,9 @@ fn context_completion_switches_frozen_agents_and_prospective_roles() {
         ("old-peer-agent", Vec::new()),
     ] {
         state.apply_agent_snapshot(&tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             session_id: session_id.clone(),
             agent_id: agent.parse().expect("agent"),
             agent_initialization_id: "init".parse().expect("initialization"),

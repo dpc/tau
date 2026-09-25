@@ -7,6 +7,30 @@
 use std::fmt::{self, Write as _};
 
 use super::*;
+use crate::agent::OutputLengthContinuationState;
+
+/// Whether a FIFO fold had no work, published it, or retained its live owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PromptFoldDisposition {
+    /// Nothing remained after normal filtering and skill expansion.
+    Empty,
+    /// Ordered steers now own the completion through normal publication.
+    Published,
+    /// Discovery owns the FIFO fold and its completion until installation.
+    Deferred,
+}
+
+/// A live fold intent whose prompts stay in the agent's existing cancellable
+/// FIFO.
+pub(crate) struct DiscoveryDeferredFold {
+    /// Incarnation which owns the queued work; never reused after unload.
+    pub(crate) runtime_incarnation: u64,
+    /// Exact optional publication continuation, not a fabricated retry event.
+    pub(crate) completion: Option<AgentPublishCompletion>,
+    /// A synchronous callback requested another fold after the current FIFO
+    /// drain began; process it before releasing the dispatch barrier.
+    pub(crate) requested_again: bool,
+}
 
 /// Maximum UTF-8 width of one Unicode scalar.
 pub(super) const MAX_UTF8_BYTES_PER_SCALAR: usize = 4;
@@ -1425,13 +1449,158 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         completion: Option<AgentPublishCompletion>,
-    ) -> bool {
+    ) -> PromptFoldDisposition {
+        let needs_discovery = !self.agent_context_ready_for(cid)
+            && self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .is_some_and(|agent| {
+                    agent
+                        .dispatch
+                        .pending_prompts
+                        .iter()
+                        .any(|prompt| prompt.expand_user_skill_on_dispatch)
+                });
+        let already_deferred = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.dispatch.discovery_fold_pending);
+        if needs_discovery || already_deferred {
+            let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
+                return PromptFoldDisposition::Empty;
+            };
+            if !already_deferred {
+                self.prompt_coordination
+                    .context_discovery
+                    .deferred_folds
+                    .insert(
+                        cid.clone(),
+                        DiscoveryDeferredFold {
+                            runtime_incarnation: agent.identity.runtime_incarnation,
+                            completion,
+                            requested_again: false,
+                        },
+                    );
+                agent.dispatch.discovery_fold_pending = true;
+            } else {
+                let retained = self
+                    .prompt_coordination
+                    .context_discovery
+                    .deferred_folds
+                    .get_mut(cid)
+                    .expect("deferred fold retains its owner");
+                retained.requested_again = true;
+                if let Some(completion) = completion {
+                    assert!(
+                        retained.completion.is_none(),
+                        "two completion owners for one deferred FIFO fold"
+                    );
+                    retained.completion = Some(completion);
+                }
+            }
+            return PromptFoldDisposition::Deferred;
+        }
+        self.fold_ready_prompts_as_steered(cid, completion)
+    }
+
+    /// Resume before discovery wakes dispatch, retaining the barrier across any
+    /// synchronous preprocessing, publication, and completion callbacks.
+    pub(super) fn resume_discovery_fold(&mut self, cid: &AgentId) {
+        loop {
+            if !self.agent_context_ready_for(cid) {
+                return;
+            }
+            let Some(mut retained) = self
+                .prompt_coordination
+                .context_discovery
+                .deferred_folds
+                .remove(cid)
+            else {
+                return;
+            };
+            let current = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .is_some_and(|agent| {
+                    agent.identity.runtime_incarnation == retained.runtime_incarnation
+                        && agent.dispatch.discovery_fold_pending
+                });
+            if !current {
+                return;
+            }
+            let completion = retained.completion.take();
+            retained.requested_again = false;
+            // Reentrant no-completion fold requests coalesce into the same
+            // owner.
+            self.prompt_coordination
+                .context_discovery
+                .deferred_folds
+                .insert(cid.clone(), retained);
+            let disposition = self.fold_ready_prompts_as_steered(cid, completion.clone());
+            if disposition == PromptFoldDisposition::Empty
+                && let Some(completion) = completion
+            {
+                let through = self
+                    .selected_head_for_agent(cid)
+                    .unwrap_or(tau_proto::AgentHead::Root);
+                self.complete_agent_publish(cid, completion, through);
+            }
+            if !self.agent_context_ready_for(cid) {
+                return;
+            }
+            let repeat = self
+                .prompt_coordination
+                .context_discovery
+                .deferred_folds
+                .get(cid)
+                .is_some_and(|retained| retained.requested_again);
+            if repeat {
+                continue;
+            }
+            self.prompt_coordination
+                .context_discovery
+                .deferred_folds
+                .remove(cid);
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+                agent.dispatch.discovery_fold_pending = false;
+            }
+            break;
+        }
+    }
+
+    /// Perform the existing FIFO fold after its discovery dependency is ready.
+    fn fold_ready_prompts_as_steered(
+        &mut self,
+        cid: &AgentId,
+        completion: Option<AgentPublishCompletion>,
+    ) -> PromptFoldDisposition {
         let mut pending: Vec<PendingPrompt> = self
             .agent_runtime
             .agent_registry
             .agents
             .get_mut(cid)
-            .map(|c| c.dispatch.pending_prompts.drain(..).collect())
+            .map(|c| match c.turn.output_length_continuation {
+                OutputLengthContinuationState::Planned(_) => {
+                    // The exact plan owns the next branch fact. Ordinary inputs
+                    // keep their relative FIFO order for a later boundary.
+                    c.dispatch
+                        .pending_prompts
+                        .iter()
+                        .position(PendingPrompt::is_output_length_continuation)
+                        .and_then(|position| c.dispatch.pending_prompts.remove(position))
+                        .into_iter()
+                        .collect()
+                }
+                OutputLengthContinuationState::OwnerReady(_)
+                | OutputLengthContinuationState::OwnerPending(_) => Vec::new(),
+                _ => c.dispatch.pending_prompts.drain(..).collect(),
+            })
             .unwrap_or_default();
         // These markers request a turn only; their payload is already folded by
         // the canonical incoming fact.
@@ -1462,7 +1631,7 @@ impl Harness {
             pending = active;
         }
         if pending.is_empty() {
-            return false;
+            return PromptFoldDisposition::Empty;
         }
         if pending.iter().any(PendingPrompt::is_loop_guard) {
             self.mark_loop_guard_breakers_dispatched(cid);
@@ -1487,11 +1656,11 @@ impl Harness {
             })
             .collect();
         if pending.is_empty() {
-            return false;
+            return PromptFoldDisposition::Empty;
         }
         self.materialize_background_completion_preview_group(&mut pending);
         self.publish_prompts_as_steered(cid, pending, completion);
-        true
+        PromptFoldDisposition::Published
     }
 
     /// Materialize one exact preview-publication group before ownership

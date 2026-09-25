@@ -17,15 +17,16 @@ use super::{
     DiscoverySourcePolicy, UiShellScheduleContext, UiShellShutdownGenerationCounter,
     apply_started_cwd_metadata, apply_working_directory, cwd_context_event, cwd_notice_event,
     dir_lock_tool_spec, dispatch_action_invoke, dispatch_session_agent_loaded,
-    dispatch_session_started, invalid_cwd_context_event, is_shell_tool,
-    publish_agent_discovery_snapshot_for, schedule_tool_started, schedule_ui_shell_command,
-    send_identity_failure, send_ui_shell_saturated_failure, with_lock_wait_duration,
+    dispatch_session_started, invalid_cwd_context_event, is_shell_tool, schedule_tool_started,
+    schedule_ui_shell_command, send_identity_failure, send_ui_shell_saturated_failure,
+    with_lock_wait_duration,
 };
 use crate::Output;
 use crate::artifact_transfer::ArtifactTransferManager;
 use crate::config::ExtConfig;
-use crate::cwd_state::CwdState;
+use crate::cwd_state::{CwdState, WorkdirSnapshot};
 use crate::dir_lock::DirLockManager;
+use crate::discovery_source::DiscoverySource;
 use crate::scheduler::WorkScheduler;
 use crate::tool_lifecycle::{CancelOutcome, ToolCancellationState};
 
@@ -41,6 +42,8 @@ pub(super) struct ShellRuntime {
     /// Whether session discovery may read process HOME and working-directory
     /// inputs.
     discovery_policy: DiscoverySourcePolicy,
+    /// Per-load user snapshots retained while only project roots move.
+    discovery_sources: HashMap<tau_proto::AgentId, DiscoverySource>,
     scheduler: Option<WorkScheduler>,
     tx: Output,
     /// Shared pre-effect and active cancellation state for model tool calls.
@@ -136,6 +139,7 @@ impl ShellRuntime {
         Self {
             config,
             discovery_policy,
+            discovery_sources: HashMap::new(),
             scheduler: Some(WorkScheduler::new(Default::default())),
             tx,
             cancellation: ToolCancellationState::default(),
@@ -307,6 +311,12 @@ impl ShellRuntime {
                 self.handle_agent_metadata_unset(unset, is_replay)?
             }
             Event::AgentReplayComplete(done) => self.handle_agent_replay_complete(done)?,
+            Event::HarnessAgentDiscoveryRefreshRequested(request) if !is_replay => {
+                self.handle_discovery_refresh(request)?;
+            }
+            Event::HarnessAgentContextInitialized(context) if !is_replay => {
+                self.handle_discovery_installed(context)?;
+            }
             Event::SessionShutdown(shutdown) => {
                 if self.bound_session_id.as_ref() != Some(&shutdown.session_id) {
                     return Err(tau_client::ClientError::handler(
@@ -388,6 +398,7 @@ impl ShellRuntime {
         self.cwd_state.unset(&unloaded.agent_id);
         self.cwd_state.take_pending_ready(&unloaded.agent_id);
         self.cwd_state.remove_initialization(&unloaded.agent_id);
+        self.discovery_sources.remove(&unloaded.agent_id);
         self.cwd_state
             .take_pending_workdir_result(&unloaded.agent_id);
         self.start_agent_owners
@@ -452,7 +463,12 @@ impl ShellRuntime {
                 &cwd,
             )));
         }
-        self.complete_pending_workdir_after_text_metadata(pending_workdir, &cwd)?;
+        // Loaded agents settle only after the correlated replacement is
+        // durable. The old direct path remains for standalone
+        // fixture/tool lifecycles.
+        if !self.discovery_sources.contains_key(&agent_id) {
+            self.complete_pending_workdir_after_text_metadata(pending_workdir, &cwd)?;
+        }
         self.publish_ready_if_pending(agent_id)
     }
 
@@ -528,9 +544,10 @@ impl ShellRuntime {
                 ),
             ))?;
         }
-        if let Some(pending) = self
-            .cwd_state
-            .correlated_pending_workdir_result(&agent_id, mutation_id)
+        if !self.discovery_sources.contains_key(&agent_id)
+            && let Some(pending) = self
+                .cwd_state
+                .correlated_pending_workdir_result(&agent_id, mutation_id)
         {
             self.send_pending_workdir_error(
                 pending,
@@ -619,25 +636,36 @@ impl ShellRuntime {
     }
 
     fn handle_agent_replay_complete(
-        &self,
+        &mut self,
         done: tau_proto::AgentReplayComplete,
     ) -> tau_client::ClientResult<()> {
         let Some((session_id, initialization_id)) = self.cwd_state.pending_ready(&done.agent_id)
         else {
             return Ok(());
         };
-        publish_agent_discovery_snapshot_for(
-            session_id.clone(),
-            done.agent_id.clone(),
-            initialization_id.clone(),
-            &self.tx,
-            self.discovery_policy,
-        )?;
         if done.error.is_some() {
             self.cwd_state.take_pending_ready(&done.agent_id);
             self.cwd_state.set_replay_failed(done.agent_id);
             return Ok(());
         }
+        let source = if self.discovery_policy.reads_environment() {
+            DiscoverySource::new(dirs::home_dir())
+        } else {
+            DiscoverySource::empty()
+        };
+        self.discovery_sources.insert(done.agent_id.clone(), source);
+        let cwd = match self.cwd_state.snapshot(&done.agent_id) {
+            Ok(WorkdirSnapshot::Valid(cwd)) => Ok(cwd),
+            Ok(_) => Err("remembered cwd is malformed or replay failed".to_owned()),
+            Err(error) => Err(error),
+        };
+        self.publish_current_discovery(
+            session_id.clone(),
+            done.agent_id.clone(),
+            initialization_id.clone(),
+            cwd,
+            None,
+        )?;
         if let Some(cwd) = self.cwd_state.get(&done.agent_id) {
             self.tx
                 .send_checked(HarnessInputMessage::emit_transient(cwd_context_event(
@@ -678,9 +706,140 @@ impl ShellRuntime {
         Ok(())
     }
 
+    /// Scan on the shell execution host, retaining only user inputs on failure.
+    fn publish_current_discovery(
+        &self,
+        session_id: tau_proto::SessionId,
+        agent_id: tau_proto::AgentId,
+        initialization_id: tau_proto::AgentInitializationId,
+        cwd: Result<PathBuf, String>,
+        refresh_id: Option<u64>,
+    ) -> tau_client::ClientResult<()> {
+        let Some(source) = self.discovery_sources.get(&agent_id) else {
+            return Ok(());
+        };
+        let cwd = cwd.and_then(|cwd| {
+            if !cwd.is_absolute() {
+                return Err("remembered cwd is not absolute".to_owned());
+            }
+            std::fs::read_dir(&cwd).map_err(|error| {
+                format!("project discovery at {} failed: {error}", cwd.display())
+            })?;
+            Ok(cwd)
+        });
+        let discovery_error = cwd.as_ref().err().cloned();
+        let project = if self.discovery_policy.reads_environment() {
+            cwd.as_ref().ok().map(PathBuf::as_path)
+        } else {
+            None
+        };
+        let scan = source.scan_project(session_id.clone(), project);
+        let binding = refresh_id.is_none().then(|| {
+            let user = source.scan_project(session_id.clone(), None).snapshot;
+            tau_proto::DiscoveryWorkdirBinding {
+                metadata_key: self.cwd_state.key(),
+                user_skills: user.skills,
+                user_candidates: source.user_candidates(),
+                retained_user_state: source.retained_user_state(),
+                user_agents_files: user.agents_files,
+            }
+        });
+        self.tx.send_checked(HarnessInputMessage::emit_transient(
+            Event::ExtensionAgentDiscoverySnapshotDeclared(
+                tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                    workdir_binding: binding,
+                    refresh_id,
+                    discovery_error,
+                    frontmatter_diagnostics: scan.snapshot.frontmatter_diagnostics,
+                    session_id,
+                    agent_id,
+                    agent_initialization_id: initialization_id,
+                    skills: scan.snapshot.skills,
+                    agents_files: scan.snapshot.agents_files,
+                },
+            ),
+        ))
+    }
+
+    /// Reply only to this loaded source's canonical committed-value request.
+    fn handle_discovery_refresh(
+        &mut self,
+        request: tau_proto::HarnessAgentDiscoveryRefreshRequested,
+    ) -> tau_client::ClientResult<()> {
+        if request.metadata_key != self.cwd_state.key()
+            || self.cwd_state.initialization(&request.agent_id)
+                != Some((
+                    request.session_id.clone(),
+                    request.agent_initialization_id.clone(),
+                ))
+        {
+            return Ok(());
+        }
+        let restored = DiscoverySource::from_retained_user_state(&request.retained_user_state);
+        let cwd = match request.metadata_value {
+            Some(CborValue::Text(path)) => Ok(PathBuf::from(path)),
+            _ => Err("committed cwd is absent or malformed; retained user context only".to_owned()),
+        }
+        .and_then(|cwd| restored.as_ref().map(|_| cwd).map_err(Clone::clone));
+        if let Ok(source) = restored {
+            self.discovery_sources
+                .insert(request.agent_id.clone(), source);
+        }
+        self.publish_current_discovery(
+            request.session_id,
+            request.agent_id,
+            request.agent_initialization_id,
+            cwd,
+            Some(request.refresh_id),
+        )
+    }
+
+    /// Release a setter only after its matching replacement was installed.
+    fn handle_discovery_installed(
+        &self,
+        context: tau_proto::HarnessAgentContextInitialized,
+    ) -> tau_client::ClientResult<()> {
+        if self.cwd_state.initialization(&context.agent_id)
+            != Some((context.session_id, context.agent_initialization_id))
+        {
+            return Ok(());
+        }
+        for refresh in context.discovery_refreshes {
+            if refresh.metadata_key != self.cwd_state.key() {
+                continue;
+            }
+            let Some(pending) = self
+                .cwd_state
+                .correlated_pending_workdir_result(&context.agent_id, refresh.mutation_id.as_ref())
+            else {
+                continue;
+            };
+            if let Some(error) = refresh.error {
+                self.send_pending_workdir_error(
+                    pending,
+                    &format!("cwd metadata committed, but discovery failed: {error}"),
+                )?;
+            } else if let Some(cwd) = self.cwd_state.get(&context.agent_id) {
+                let pending = self.cwd_state.committed_pending_workdir_result(
+                    &context.agent_id,
+                    &cwd,
+                    refresh.mutation_id.as_ref(),
+                );
+                self.complete_pending_workdir_after_text_metadata(pending, &cwd)?;
+            } else {
+                self.send_pending_workdir_error(
+                    pending,
+                    "cwd metadata committed, but current cwd is unavailable",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn shutdown_session(&mut self) {
         self.shutdown();
         self.start_agent_owners.clear();
+        self.discovery_sources.clear();
     }
 
     fn handle_start_agent_result(&mut self, result: tau_proto::StartAgentResult) {

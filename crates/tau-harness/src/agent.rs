@@ -773,6 +773,7 @@ impl Agent {
                 provider_switch_warning: Default::default(),
                 in_flight_prompt: None,
                 pending_prompts: VecDeque::new(),
+                discovery_fold_pending: false,
                 pending_message_wakes: VecDeque::new(),
                 pending_replay_activation: false,
                 terminating: false,

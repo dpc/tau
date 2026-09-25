@@ -20,6 +20,8 @@ pub(crate) struct AgentDispatchState {
     /// independently; the provider extension
     /// serializes its own consumption of `AgentPromptCreated`.
     pub(crate) pending_prompts: VecDeque<PendingPrompt>,
+    /// Discovery owns a deferred FIFO steer fold; no new dispatch may pass it.
+    pub(crate) discovery_fold_pending: bool,
     /// Canonical incoming facts waiting to activate one coalesced agent turn.
     pub(crate) pending_message_wakes: VecDeque<PendingMessageWake>,
     /// Replay found a committed activation after the latest completed dispatch.
@@ -51,4 +53,12 @@ pub(crate) struct AgentDispatchState {
     /// should carry their own [`PendingPrompt::ctx_id`] and copy it here only
     /// when that exact prompt is dispatched.
     pub(crate) next_ctx_id: Option<String>,
+}
+
+impl AgentDispatchState {
+    /// Discard queued prompts and any discovery-owned intent to fold them.
+    pub(crate) fn clear_pending_prompts(&mut self) {
+        self.pending_prompts.clear();
+        self.discovery_fold_pending = false;
+    }
 }

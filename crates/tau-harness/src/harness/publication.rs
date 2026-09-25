@@ -1969,6 +1969,19 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
+        if agent.identity.agent_id.as_ref().is_some_and(|agent_id| {
+            self.prompt_coordination
+                .context_discovery
+                .parked_materializations
+                .get(agent_id)
+                .is_some_and(|parked| {
+                    &parked.cid == cid
+                        && &parked.prompt_id == agent_prompt_id
+                        && parked.runtime_incarnation == agent.identity.runtime_incarnation
+                })
+        }) {
+            return false;
+        }
         let compaction_publication_targets_agent = |event: &Event| {
             let target = match event {
                 Event::AgentManualCompactionRequested(requested) => &requested.target_agent_id,
@@ -2506,6 +2519,7 @@ impl Harness {
                 self.rollback_rejected_activation_successor(&event);
                 if capacity_full {
                     self.retain_admission_rejected_activation_successor(&event);
+                    self.retain_capacity_rejected_discovery_install(&event);
                 }
                 self.rollback_rejected_ui_compaction_acceptance(&event);
                 self.retain_rejected_ui_compaction_start(&event);

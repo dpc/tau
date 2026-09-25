@@ -142,6 +142,16 @@ pub struct ExtensionSessionDiscoverySnapshotDeclared {
 /// lists clear it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionAgentDiscoverySnapshotDeclared {
+    /// Source-local workdir binding declared during initial agent discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir_binding: Option<DiscoveryWorkdirBinding>,
+    /// Exact harness-requested refresh, absent for initial discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_id: Option<u64>,
+    /// Recoverable discovery failure; the snapshot contains retained user
+    /// inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_error: Option<String>,
     /// Malformed context headers encountered by this correlated scan.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frontmatter_diagnostics: Vec<DiscoveryFrontmatterDiagnostic>,
@@ -160,6 +170,15 @@ pub struct ExtensionAgentDiscoverySnapshotDeclared {
 /// Durable replacement state for one completed agent initialization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentInitializationContextSet {
+    /// Runtime revision of this load's replaceable discovery state.
+    #[serde(default)]
+    pub discovery_revision: u64,
+    /// Source refreshes represented by this installed replacement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovery_refreshes: Vec<DiscoveryRefreshOutcome>,
+    /// Explicit degraded context diagnostics retained with the current view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovery_diagnostics: Vec<String>,
     /// Session containing the initialized agent.
     pub session_id: SessionId,
     /// Agent whose bootstrap context and skill state are replaced.
@@ -178,6 +197,16 @@ pub struct AgentInitializationContextSet {
 /// Harness-owned current projection of one completed agent initialization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessAgentContextInitialized {
+    /// Runtime revision of this load's installed discovery state.
+    #[serde(default)]
+    pub discovery_revision: u64,
+    /// Correlated refresh outcomes acknowledged only after durable
+    /// installation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovery_refreshes: Vec<DiscoveryRefreshOutcome>,
+    /// Explicit degraded context diagnostics in the installed view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovery_diagnostics: Vec<String>,
     /// Session containing the initialized agent.
     pub session_id: SessionId,
     /// Agent whose current initialization is projected.
@@ -211,4 +240,58 @@ pub struct DiscoveryFrontmatterDiagnostic {
     pub file_path: PathBuf,
     /// Actionable parser diagnostic; never a replacement for the source body.
     pub message: String,
+}
+
+/// One configured source's persistent-workdir discovery binding.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryWorkdirBinding {
+    /// Metadata key whose canonical changes replace this source's project
+    /// inputs.
+    pub metadata_key: crate::AgentMetadataKey,
+    /// Captured user candidates retained when project discovery is unavailable.
+    pub user_skills: Vec<DiscoverySkillCandidate>,
+    /// Complete sampled user candidates, before source-local collisions, whose
+    /// eligibility remains fixed for this load.
+    pub user_candidates: Vec<DiscoverySkillCandidate>,
+    /// Source-owned serialized user scope, echoed unchanged on refresh so a
+    /// replacement process need not recapture user files.
+    pub retained_user_state: Vec<u8>,
+    /// Captured user instructions retained when project discovery is
+    /// unavailable.
+    pub user_agents_files: Vec<DiscoveryAgentsFile>,
+}
+
+/// Harness request to scan one source after its canonical workdir changes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HarnessAgentDiscoveryRefreshRequested {
+    /// Session owning this transient request.
+    pub session_id: SessionId,
+    /// Loaded agent whose source contribution must be replaced.
+    pub agent_id: AgentId,
+    /// Stable load identity; refreshing does not reinitialize other providers.
+    pub agent_initialization_id: AgentInitializationId,
+    /// Exact source-local metadata key selected by the initial binding.
+    pub metadata_key: crate::AgentMetadataKey,
+    /// Actual committed value, absent after an unset rather than a startup
+    /// default.
+    pub metadata_value: Option<crate::CborValue>,
+    /// Unique runtime correlation, superseded by a later canonical mutation.
+    pub refresh_id: u64,
+    /// Original source-owned user scope from this load's accepted binding.
+    pub retained_user_state: Vec<u8>,
+}
+
+/// Installed disposition of one source-local discovery refresh.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryRefreshOutcome {
+    /// Metadata binding identifying the refreshed configured source.
+    pub metadata_key: crate::AgentMetadataKey,
+    /// Exact refresh request represented by the installed context.
+    pub refresh_id: u64,
+    /// Original setter correlation when the canonical metadata fact carried
+    /// one.
+    pub mutation_id: Option<crate::AgentMetadataMutationId>,
+    /// Explicit degraded outcome, never a claim that the cwd mutation rolled
+    /// back.
+    pub error: Option<String>,
 }

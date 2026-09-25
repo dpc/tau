@@ -1223,6 +1223,18 @@ impl tau_client::TauExtension for ShellExtension {
                 cx.state
                     .handle_event(Event::AgentReplayComplete(cx.event.clone()), false)
             })
+            .on_live::<tau_proto::HarnessAgentDiscoveryRefreshRequested>(|cx| {
+                cx.state.handle_event(
+                    Event::HarnessAgentDiscoveryRefreshRequested(cx.event.clone()),
+                    false,
+                )
+            })
+            .on_live::<tau_proto::HarnessAgentContextInitialized>(|cx| {
+                cx.state.handle_event(
+                    Event::HarnessAgentContextInitialized(cx.event.clone()),
+                    false,
+                )
+            })
             .on_restore::<tau_proto::AgentMetadataSet>(|cx| {
                 cx.state
                     .handle_event(Event::AgentMetadataSet(cx.event.clone()), true)
@@ -2878,6 +2890,9 @@ fn agent_discovery_message(
 ) -> HarnessInputMessage {
     HarnessInputMessage::emit_transient(Event::ExtensionAgentDiscoverySnapshotDeclared(
         ExtensionAgentDiscoverySnapshotDeclared {
+            workdir_binding: None,
+            refresh_id: None,
+            discovery_error: None,
             frontmatter_diagnostics: snapshot.frontmatter_diagnostics,
             session_id: snapshot.session_id,
             agent_id,

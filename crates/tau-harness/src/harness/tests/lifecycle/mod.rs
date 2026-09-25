@@ -807,7 +807,7 @@ impl path_std_io::Write for RecordingWriter {
 }
 
 /// Construct one eligible reasoning-only output-cap response.
-fn reasoning_only_length_response(
+pub(super) fn reasoning_only_length_response(
     prompt: &tau_proto::AgentPromptCreated,
     response_received_tokens: u64,
 ) -> ProviderResponseFinished {

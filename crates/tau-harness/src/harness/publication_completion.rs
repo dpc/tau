@@ -9,6 +9,7 @@ use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublica
 use super::prompt_materialization_timing::PromptMaterializationTiming;
 use super::prompt_runtime_state::UncertainSupersessionPhase;
 use super::start_coordinator::StartPhase;
+use super::tool_runtime::PromptFoldDisposition;
 use super::*;
 
 /// Exact persistence failure scope consumed by startup targeting.
@@ -135,6 +136,7 @@ impl Harness {
 
     /// Wake every publication owner retained by temporary admission pressure.
     pub(super) fn handle_publication_capacity_ready(&mut self) {
+        self.retry_capacity_rejected_discovery_installs();
         if !self
             .runtime_io
             .publication
@@ -3710,8 +3712,9 @@ impl Harness {
                     complete_on_commit: true,
                     owned_publication: None,
                 };
-                if !self
+                if self
                     .fold_pending_prompts_as_steered_with_completion(&cid, Some(completion.clone()))
+                    == PromptFoldDisposition::Empty
                 {
                     let through = self
                         .agent_runtime
@@ -3897,7 +3900,7 @@ impl Harness {
                     ..
                 }
             ) {
-                agent.dispatch.pending_prompts.clear();
+                agent.dispatch.clear_pending_prompts();
                 agent.dispatch.pending_replay_activation = false;
             }
         }
@@ -4097,7 +4100,7 @@ impl Harness {
                 agent.dispatch.pending_cancel = None;
                 agent.turn.work_status.clear_working_reminder();
                 if terminated.reason == AgentPromptTerminationReason::Canceled {
-                    agent.dispatch.pending_prompts.clear();
+                    agent.dispatch.clear_pending_prompts();
                 }
             }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
@@ -4255,6 +4258,18 @@ impl Harness {
         }
         if let Event::AgentInitializationContextSet(context) = event {
             self.apply_finalized_agent_initialization_context(context);
+        }
+        match event {
+            Event::AgentMetadataSet(set) => self.begin_workdir_discovery_refresh(
+                &set.agent_id,
+                &set.key,
+                Some(set.value.clone()),
+                set.mutation_id.clone(),
+            ),
+            Event::AgentMetadataUnset(unset) => {
+                self.begin_workdir_discovery_refresh(&unset.agent_id, &unset.key, None, None)
+            }
+            _ => {}
         }
         if let Event::AgentHeadMoved(moved) = event
             && let Some(cid) = self.runtime_agent_id_for_target_agent(Some(moved.agent_id.as_str()))

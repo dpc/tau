@@ -62,8 +62,9 @@ they do not block worker threads on protocol flush. Sole model-tool terminals,
 user-shell completion, session and per-agent discovery, correlated context,
 prerequisite metadata, and readiness use checked ordered writes instead. The
 extension retains tool ownership until checked terminal flush and retains a
-workdir-setter reservation through its canonical metadata echo until the
-echo-correlated terminal flushes. A failure in mandatory output
+workdir-setter reservation through its canonical metadata echo and, for a loaded
+agent, the installed-discovery acknowledgement until the correlated terminal
+flushes. A failure in mandatory output
 wakes and exits the extension loop, allowing disconnect cleanup to release
 harness waiters rather than leaving a connected provider with missing
 settlement. Configure-time tool
@@ -237,6 +238,13 @@ each `session.started`. For every `session.agent_loaded`, it publishes one
 complete snapshot correlated to that load's `agent_initialization_id`, then
 correlated workdir context and readiness. Replay defers this sequence until the
 per-agent replay boundary so restored metadata wins over process defaults.
+The per-agent scan uses that remembered cwd explicitly. User inputs are captured
+separately from the replaceable project scan. A harness-correlated canonical cwd
+refresh scans on this execution host and replies under the same load identity;
+unavailable project roots return retained user-only context with a diagnostic.
+Loaded workdir setters retain their reservation through metadata echo until the
+installed discovery ACK, including when cancelled. Discovery readiness is owned
+by the harness, not by the setter's foreground/background lifetime.
 Skill collision diagnostics belong to session discovery and are not repeated for
 per-agent snapshots.
 All discovery publications use `persist=false` metadata and the ordering required by

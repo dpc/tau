@@ -432,6 +432,24 @@ impl Harness {
         agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
         frontmatter_diagnostics: Vec<tau_proto::DiscoveryFrontmatterDiagnostic>,
     ) -> Option<ValidatedDiscoverySnapshot> {
+        self.validate_discovery_candidates(
+            source_id,
+            skills,
+            agents_files,
+            frontmatter_diagnostics,
+            true,
+        )
+    }
+
+    /// Validate complete raw user inputs without discarding same-name losers.
+    fn validate_discovery_candidates(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        skills: Vec<tau_proto::DiscoverySkillCandidate>,
+        agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
+        frontmatter_diagnostics: Vec<tau_proto::DiscoveryFrontmatterDiagnostic>,
+        unique_names: bool,
+    ) -> Option<ValidatedDiscoverySnapshot> {
         let mut accepted_items = 0usize;
         let mut accepted_bytes = 0usize;
         // Mandatory warnings reserve their share of the existing bounds before
@@ -485,7 +503,7 @@ impl Harness {
                 continue;
             }
             accepted_bytes = accepted_bytes.saturating_add(item_bytes);
-            if !seen_skills.insert(skill.name.clone()) {
+            if unique_names && !seen_skills.insert(skill.name.clone()) {
                 self.emit_info_important(&format!(
                     "skill skipped: duplicate `{}` in complete source snapshot",
                     skill.name
@@ -653,7 +671,61 @@ impl Harness {
         if pending.initialization_id != snapshot.agent_initialization_id {
             return;
         }
-        let Some((skills, agents_files)) = self.validate_discovery_snapshot(
+        if let Some(refresh_id) = snapshot.refresh_id {
+            if !pending
+                .workdir_sources
+                .get(source_id)
+                .is_some_and(|source| {
+                    source.deadline.is_some()
+                        && source
+                            .refresh
+                            .as_ref()
+                            .is_some_and(|refresh| refresh.refresh_id == refresh_id)
+                })
+            {
+                return;
+            }
+        } else if pending.workdir_sources.contains_key(source_id) {
+            // Same-load replay from a replacement must not recapture users.
+            // Only a correlated scan may replace an already accepted binding.
+            return;
+        }
+        let binding = if snapshot.refresh_id.is_none() {
+            if let Some(binding) = snapshot.workdir_binding {
+                let Some((user_candidates, _)) = self.validate_discovery_candidates(
+                    source_id,
+                    binding.user_candidates,
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                ) else {
+                    return;
+                };
+                let Some((user_skills, user_agents_files)) = self.validate_discovery_snapshot(
+                    source_id,
+                    binding.user_skills,
+                    binding.user_agents_files,
+                    Vec::new(),
+                ) else {
+                    return;
+                };
+                Some(crate::discovery_workdir_source::DiscoveryWorkdirSource {
+                    metadata_key: binding.metadata_key,
+                    user_skills,
+                    user_candidates,
+                    retained_user_state: binding.retained_user_state,
+                    user_agents_files,
+                    refresh: None,
+                    deadline: None,
+                    error: snapshot.discovery_error.clone(),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some((mut skills, mut agents_files)) = self.validate_discovery_snapshot(
             source_id,
             snapshot.skills,
             snapshot.agents_files,
@@ -669,6 +741,58 @@ impl Harness {
         else {
             return;
         };
+        if let Some(binding) = binding {
+            pending.workdir_sources.insert(source_id.clone(), binding);
+        }
+        if snapshot.discovery_error.is_some()
+            && let Some(source) = pending.workdir_sources.get(source_id)
+        {
+            skills = source.user_skills.clone();
+            agents_files = source.user_agents_files.clone();
+        }
+        // Resample only the moving source's project loadability. User
+        // candidates and other sources keep the eligibility sampled for
+        // this loaded agent.
+        let user_keys = pending
+            .workdir_sources
+            .get(source_id)
+            .map(|source| {
+                source
+                    .user_candidates
+                    .iter()
+                    .map(|(name, skill)| (source_id.clone(), name.clone(), skill.source.label()))
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        pending
+            .validated_skills
+            .retain(|key, _| &key.0 != source_id || user_keys.contains(key));
+        // Sample every supplied candidate, not only global collision winners:
+        // another source's later refresh can expose any of these slots without
+        // granting permission to resample this source's eligibility.
+        let mut frontmatter_warnings = Vec::new();
+        for (name, skill) in pending
+            .workdir_sources
+            .get(source_id)
+            .into_iter()
+            .flat_map(|source| &source.user_candidates)
+            .chain(skills.iter())
+        {
+            pending
+                .validated_skills
+                .entry((source_id.clone(), name.clone(), skill.source.label()))
+                .or_insert_with(|| {
+                    match user_skill_invocation::read_user_invoked_skill_body(&skill.source) {
+                        Ok(loaded) => {
+                            if let Some(warning) = loaded.frontmatter_warning {
+                                frontmatter_warnings.push((skill.source.label(), warning));
+                            }
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                });
+        }
         replace_discovery_source(
             &mut pending.skill_candidates,
             &mut pending.skills,
@@ -677,6 +801,24 @@ impl Harness {
             skills,
             agents_files,
         );
+        if snapshot.refresh_id.is_some() {
+            if let Some(source) = pending.workdir_sources.get_mut(source_id) {
+                source.deadline = None;
+                source.error = snapshot.discovery_error.clone();
+                if let Some(refresh) = &mut source.refresh {
+                    refresh.error = snapshot.discovery_error;
+                }
+            }
+            pending.waiting_on.remove(source_id);
+        }
+        for (source, warning) in frontmatter_warnings {
+            self.emit_context_frontmatter_warning(Path::new(&source), &warning);
+        }
+        if snapshot.refresh_id.is_some()
+            && let Err(error) = self.finalize_agent_discovery(&snapshot.agent_id)
+        {
+            self.fail_agent_initialization(&snapshot.agent_id, &error.to_string());
+        }
     }
 
     pub(super) fn publish_session_skills_projection(&mut self) {

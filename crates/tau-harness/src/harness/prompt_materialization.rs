@@ -136,6 +136,8 @@ fn hosted_web_search_collides(
 
 /// Fully compiled provider-visible prompt surface.
 pub(super) struct MaterializedPromptSurface {
+    /// Original render inputs retained without repeating one-shot accounting.
+    discovery_render: super::prompt_discovery_render::PromptDiscoveryRender,
     /// Authorized and selected ordinary tool metadata.
     tool_specs: Vec<tau_proto::ToolSpec>,
     /// Provider-facing ordinary tool definitions.
@@ -591,6 +593,26 @@ impl Harness {
         {
             return None;
         }
+        if !self.agent_context_ready_for(cid)
+            || self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .is_some_and(|agent| agent.dispatch.discovery_fold_pending)
+        {
+            self.prompt_coordination
+                .context_discovery
+                .parked_materializations
+                .entry(agent_id.clone())
+                .or_insert(super::prompt_discovery_render::DiscoveryCheckpointResume {
+                    cid: cid.clone(),
+                    prompt_id: owned_prompt_id,
+                    runtime_incarnation,
+                    timing,
+                });
+            return None;
+        }
         let owned_model = match owned_model {
             Some(model) if self.provider_runtime.model_routes.contains_key(&model) => model,
             model => {
@@ -626,7 +648,8 @@ impl Harness {
             );
             return None;
         }
-        let prompt = self.prepare_agent_prompt_for_dispatch_timed(cid, timing.as_ref())?;
+        let (prompt, discovery_render) =
+            self.prepare_agent_prompt_for_dispatch_timed(cid, timing.as_ref())?;
         self.ensure_outer_turn_started(cid);
         if prompt.operation == tau_proto::PromptOperation::Inference
             && self
@@ -685,6 +708,7 @@ impl Harness {
                 continuation: Some(PostCommitContinuation::PromptMaterialization(
                     PromptDispatchContinuation {
                         authority: interception::PromptDispatchAuthority {
+                            discovery_render,
                             started,
                             provider_connection_id,
                             runtime_incarnation,
@@ -1058,6 +1082,7 @@ impl Harness {
         cid: &AgentId,
     ) -> Option<AgentPromptCreated> {
         self.prepare_agent_prompt_for_dispatch_timed(cid, None)
+            .map(|(prompt, _)| prompt)
     }
 
     /// Builds a provider prompt while optionally recording content-free local
@@ -1066,7 +1091,10 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         timing: Option<&PromptMaterializationTiming>,
-    ) -> Option<AgentPromptCreated> {
+    ) -> Option<(
+        AgentPromptCreated,
+        super::prompt_discovery_render::PromptDiscoveryRender,
+    )> {
         let _ = self.ensure_agent_id_for_agent(cid);
         let conv = self
             .agent_runtime
@@ -1220,6 +1248,8 @@ impl Harness {
         };
         let mut contains_payload_envelope_provenance_projection =
             prompt_context.contains_payload_envelope_provenance_projection;
+        let history_provenance = contains_payload_envelope_provenance_projection;
+        let mut has_bootstrap = false;
         let mut context = prompt_context.context;
         if let Some(initialization_block) =
             tree.and_then(crate::prompt::initialization_agents_context_block)
@@ -1229,6 +1259,7 @@ impl Harness {
                     &initialization_block,
                 );
             context.blocks.insert(0, initialization_block);
+            has_bootstrap = true;
         }
         if compaction_transaction.is_some() {
             context.blocks.push(tau_proto::ContextBlock::UserInput(
@@ -1298,6 +1329,7 @@ impl Harness {
             }
         };
         let MaterializedPromptSurface {
+            mut discovery_render,
             tool_specs,
             tool_definitions: tools,
             hosted_tools,
@@ -1305,6 +1337,8 @@ impl Harness {
             system_prompt,
             context_size_alerts,
         } = surface;
+        discovery_render.has_bootstrap = has_bootstrap;
+        discovery_render.history_provenance = history_provenance;
         let durable_agent_id = agent_id_for_tree.as_deref().unwrap_or(cid.as_ref());
         let agent_prompt_id = reserved_compact_prompt_id
             .or_else(|| checkpointed_inference.map(|(prompt_id, _)| prompt_id))
@@ -1458,24 +1492,83 @@ impl Harness {
                 steer: tau_proto::local_summary_continuation_steer(),
             })
             .collect();
-        Some(AgentPromptCreated {
-            agent_prompt_id,
-            agent_id,
-            session_id,
-            system_prompt,
-            context,
-            tools,
-            tools_ref: None,
-            local_summary_continuation,
-            hosted_tools,
-            model,
-            model_params: prompt_params,
-            tool_choice,
-            originator,
-            ctx_id,
-            compaction,
-            operation,
-        })
+        Some((
+            AgentPromptCreated {
+                agent_prompt_id,
+                agent_id,
+                session_id,
+                system_prompt,
+                context,
+                tools,
+                tools_ref: None,
+                local_summary_continuation,
+                hosted_tools,
+                model,
+                model_params: prompt_params,
+                tool_choice,
+                originator,
+                ctx_id,
+                compaction,
+                operation,
+            },
+            discovery_render,
+        ))
+    }
+
+    /// Refresh only current discovery content inside one undelivered request.
+    pub(super) fn refresh_undelivered_prompt_discovery(
+        &mut self,
+        prompt: &mut AgentPromptCreated,
+        render: &mut super::prompt_discovery_render::PromptDiscoveryRender,
+    ) -> Result<(), String> {
+        let Some(frozen) = self
+            .prompt_coordination
+            .context_discovery
+            .frozen_agents
+            .get(&prompt.agent_id)
+        else {
+            return Ok(());
+        };
+        let revision = frozen.inputs.revision;
+        if render.revision == revision {
+            return Ok(());
+        }
+        let bootstrap = self
+            .session_runtime
+            .agent_store
+            .agent(prompt.agent_id.as_str())
+            .and_then(crate::prompt::initialization_agents_context_block);
+        let provenance = render.history_provenance
+            || bootstrap.as_ref().is_some_and(
+                crate::prompt::context_block_contains_payload_envelope_provenance_projection,
+            );
+        let providers = render.providers.iter().collect::<Vec<_>>();
+        let rendered = self
+            .try_build_system_prompt_for_role_and_agent_with_snapshot(
+                &render.role,
+                Some(&prompt.agent_id),
+                Some(&prompt.agent_id),
+                &render.capabilities,
+                Some(&prompt.model),
+                provenance,
+                &providers,
+                &render.effective_names,
+            )
+            .map_err(|error| format!("failed to refresh discovery prompt content: {error}"))?;
+        if render.has_bootstrap {
+            prompt.context.blocks.remove(0);
+        }
+        render.has_bootstrap = bootstrap.is_some();
+        if let Some(bootstrap) = bootstrap {
+            prompt.context.blocks.insert(0, bootstrap);
+        }
+        prompt.system_prompt = rendered.system_prompt;
+        self.prompt_coordination
+            .prompt_runtime
+            .context_size_alerts
+            .insert(prompt.agent_prompt_id.clone(), rendered.context_size_alerts);
+        render.revision = revision;
+        Ok(())
     }
 
     /// Validate the current prompt surface before committing the durable
@@ -1880,6 +1973,22 @@ impl Harness {
             )
             .map_err(PromptSurfaceError::Render)?;
         Ok(MaterializedPromptSurface {
+            discovery_render: super::prompt_discovery_render::PromptDiscoveryRender {
+                revision: context_agent_id
+                    .and_then(|id| {
+                        self.prompt_coordination
+                            .context_discovery
+                            .frozen_agents
+                            .get(id)
+                    })
+                    .map_or(0, |frozen| frozen.inputs.revision),
+                role: role_name.to_owned(),
+                capabilities: capability_specs,
+                providers: providers.into_iter().cloned().collect(),
+                effective_names: effective_tool_names,
+                has_bootstrap: false,
+                history_provenance: contains_payload_envelope_provenance_projection,
+            },
             tool_specs: specs,
             tool_definitions: tools,
             hosted_tools,
@@ -2139,8 +2248,21 @@ impl Harness {
                     })
                 })
                 .collect();
+            let mut system_prompt = rendered.system_prompt;
+            if let Some(diagnostics) = context_agent_id
+                .and_then(|id| self.session_runtime.agent_store.agent(id.as_str()))
+                .and_then(|tree| tree.initialization_context())
+                .map(|context| &context.discovery_diagnostics)
+                .filter(|diagnostics| !diagnostics.is_empty())
+            {
+                system_prompt.push_str("\n\n### Discovery status\n");
+                for diagnostic in diagnostics {
+                    system_prompt.push_str("\n- ");
+                    system_prompt.push_str(diagnostic);
+                }
+            }
             RenderedRolePrompt {
-                system_prompt: rendered.system_prompt,
+                system_prompt,
                 context_size_alerts,
             }
         });

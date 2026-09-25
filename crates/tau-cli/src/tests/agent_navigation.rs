@@ -573,6 +573,9 @@ fn context_skill_completion_follows_selected_agent_projection() {
     for (agent, name) in [("first-agent", "first"), ("second-agent", "second")] {
         renderer.handle(&Event::HarnessAgentContextInitialized(
             tau_proto::HarnessAgentContextInitialized {
+                discovery_revision: 0,
+                discovery_refreshes: Vec::new(),
+                discovery_diagnostics: Vec::new(),
                 session_id: test_session_id("s1"),
                 agent_id: agent_id(agent),
                 agent_initialization_id: "init".parse().expect("init"),
@@ -620,6 +623,9 @@ fn agent_context_initialization_summary_is_concise_and_literal() {
         argument_hint: None,
     };
     let initialized = tau_proto::HarnessAgentContextInitialized {
+        discovery_revision: 0,
+        discovery_refreshes: Vec::new(),
+        discovery_diagnostics: Vec::new(),
         effective_skills: Vec::new(),
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
@@ -667,6 +673,9 @@ fn agent_context_initialization_summary_is_concise_and_literal() {
 #[test]
 fn agent_context_initialization_summary_omits_empty_sections() {
     let initialized = tau_proto::HarnessAgentContextInitialized {
+        discovery_revision: 0,
+        discovery_refreshes: Vec::new(),
+        discovery_diagnostics: Vec::new(),
         effective_skills: Vec::new(),
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
@@ -720,6 +729,9 @@ fn agent_context_initialization_event_aggregates_session_skills() {
     renderer.switch_agent(agent_id("agent-1"));
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: test_session_id("session-1"),
             agent_id: agent_id("agent-1"),
@@ -763,6 +775,9 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
     }));
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: test_session_id("session-1"),
             agent_id: agent_id("restored"),

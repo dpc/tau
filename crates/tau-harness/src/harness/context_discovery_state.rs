@@ -23,6 +23,14 @@ pub(crate) struct ContextDiscoveryState {
     pub(crate) pending_agents: HashMap<tau_proto::AgentId, PendingAgentDiscovery>,
     /// Frozen effective discovery snapshots for initialized agents.
     pub(crate) frozen_agents: HashMap<tau_proto::AgentId, FrozenAgentDiscovery>,
+    /// Undelivered prompt envelopes parked off the global publication queue.
+    pub(crate) parked_prompts: HashMap<tau_proto::AgentId, interception::DeferredPublish>,
+    /// Exact committed owners paused before any full request is constructed.
+    pub(crate) parked_materializations:
+        HashMap<tau_proto::AgentId, super::prompt_discovery_render::DiscoveryCheckpointResume>,
+    /// Exact FIFO fold continuations awaiting discovery, keyed by runtime
+    /// route.
+    pub(crate) deferred_folds: HashMap<AgentId, super::tool_runtime::DiscoveryDeferredFold>,
     /// Canonical initialized context projection for each loaded agent.
     pub(crate) initialized_agent_context:
         HashMap<tau_proto::AgentId, tau_proto::HarnessAgentContextInitialized>,
@@ -65,6 +73,9 @@ impl ContextDiscoveryState {
             session_context_providers: HashSet::new(),
             pending_agents: HashMap::new(),
             frozen_agents: HashMap::new(),
+            parked_prompts: HashMap::new(),
+            parked_materializations: HashMap::new(),
+            deferred_folds: HashMap::new(),
             initialized_agent_context: HashMap::new(),
             pending_rendered_prompts: HashMap::new(),
             session_skills,

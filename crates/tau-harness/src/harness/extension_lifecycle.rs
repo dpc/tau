@@ -29,7 +29,25 @@ impl Harness {
             .session_context_providers
             .remove(&disconnected);
         let mut finalize = Vec::new();
+        let refresh_agents = self
+            .prompt_coordination
+            .context_discovery
+            .pending_agents
+            .iter()
+            .filter(|(_, pending)| pending.workdir_sources.contains_key(&disconnected))
+            .map(|(agent, _)| agent.clone())
+            .collect::<Vec<_>>();
+        for agent_id in refresh_agents {
+            self.fail_discovery_refresh(
+                &agent_id,
+                &disconnected,
+                "project discovery source disconnected; retained user context only",
+            );
+        }
         for (agent_id, pending) in &mut self.prompt_coordination.context_discovery.pending_agents {
+            if pending.workdir_sources.contains_key(&disconnected) {
+                continue;
+            }
             replace_discovery_source(
                 &mut pending.skill_candidates,
                 &mut pending.skills,
@@ -1390,6 +1408,7 @@ impl Harness {
                 | Event::ProviderModelsUpdated(_)
                 | Event::AgentInitializationContextSet(_)
                 | Event::HarnessAgentContextInitialized(_)
+                | Event::HarnessAgentDiscoveryRefreshRequested(_)
                 | Event::HarnessSessionSkillsAvailable(_)
                 | Event::ToolRegister(_)
                 | Event::ToolUnregister(_)

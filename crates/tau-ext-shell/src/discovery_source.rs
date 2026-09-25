@@ -1,6 +1,6 @@
 //! Shell-host discovery with independently captured user and project scopes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tau_proto::{DiscoveryAgentsFile, DiscoverySkillCandidate};
@@ -17,6 +17,7 @@ mod tests;
 
 /// One shell source's stable user contribution and explicit project scan
 /// inputs.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct DiscoverySource {
     /// User instructions and candidates captured once for this source
     /// lifecycle.
@@ -26,12 +27,13 @@ pub(crate) struct DiscoverySource {
 }
 
 /// Parsed candidates plus wire metadata sampled on the shell's execution host.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct CapturedScope {
     /// Complete ordered candidates needed for cross-scope name resolution.
     skills: SkillDiscovery,
     /// Canonical source paths and timestamps captured even for hidden
     /// candidates.
-    wire_skills: HashMap<PathBuf, DiscoverySkillCandidate>,
+    wire_skills: BTreeMap<PathBuf, DiscoverySkillCandidate>,
     /// Ordered instruction contents sampled from this scope's roots.
     agents_files: Vec<DiscoveryAgentsFile>,
 }
@@ -66,6 +68,46 @@ impl CapturedScope {
 }
 
 impl DiscoverySource {
+    /// Serialize original user observations, without sampling any live files.
+    pub(crate) fn retained_user_state(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(self, &mut bytes).expect("captured user discovery is serializable");
+        bytes
+    }
+
+    /// Restore source-owned user observations without filesystem access.
+    pub(crate) fn from_retained_user_state(bytes: &[u8]) -> Result<Self, String> {
+        let source: Self = ciborium::from_reader(bytes)
+            .map_err(|error| format!("invalid retained user discovery: {error}"))?;
+        if source
+            .user
+            .skills
+            .candidates()
+            .any(|(skill, _)| !source.user.wire_skills.contains_key(&skill.file_path))
+        {
+            return Err(
+                "invalid retained user discovery: missing candidate wire metadata".to_owned(),
+            );
+        }
+        Ok(source)
+    }
+
+    /// All sampled user candidates, including those hidden by collisions.
+    pub(crate) fn user_candidates(&self) -> Vec<DiscoverySkillCandidate> {
+        self.user
+            .skills
+            .candidates()
+            .map(|(skill, _)| self.user.wire_skills[&skill.file_path].clone())
+            .collect()
+    }
+
+    /// Capture no ambient inputs for an isolated harness fixture.
+    pub(crate) fn empty() -> Self {
+        Self {
+            user: CapturedScope::scan(&[], Vec::new()),
+            home: None,
+        }
+    }
     /// Capture user roots once, preserving their existing discovery lifecycle.
     pub(crate) fn new(home: Option<PathBuf>) -> Self {
         let user = CapturedScope::scan(

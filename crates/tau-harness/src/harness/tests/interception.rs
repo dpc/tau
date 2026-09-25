@@ -5881,6 +5881,9 @@ fn discovery_canonical_events_are_protected() {
         tau_proto::AgentInitializationId::parse("init-1").expect("test identifier must be valid");
     let events = [
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id: agent_id.clone(),
             agent_initialization_id: initialization_id.clone(),
@@ -5889,6 +5892,9 @@ fn discovery_canonical_events_are_protected() {
             agents_files: Vec::new(),
         }),
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id,

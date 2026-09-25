@@ -1983,6 +1983,9 @@ fn representative_events() -> Vec<Event> {
             },
         ),
         Event::ExtensionAgentDiscoverySnapshotDeclared(ExtensionAgentDiscoverySnapshotDeclared {
+            workdir_binding: None,
+            refresh_id: None,
+            discovery_error: None,
             frontmatter_diagnostics: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
@@ -2065,6 +2068,9 @@ fn representative_events() -> Vec<Event> {
             error: None,
         }),
         Event::AgentInitializationContextSet(AgentInitializationContextSet {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
             agent_initialization_id: AgentInitializationId::parse("init-1")
@@ -2155,7 +2161,19 @@ fn representative_events() -> Vec<Event> {
                 ProviderModelDeclarationIssue::StandaloneCompactionPrefixBudgetZero,
             ],
         }),
+        Event::HarnessAgentDiscoveryRefreshRequested(HarnessAgentDiscoveryRefreshRequested {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("agent-1"),
+            agent_initialization_id: AgentInitializationId::parse("init-1").expect("load"),
+            metadata_key: AgentMetadataKey::new("ext_core-shell_cwd"),
+            metadata_value: Some(CborValue::Text("/project".to_owned())),
+            refresh_id: 1,
+            retained_user_state: vec![1, 2, 3],
+        }),
         Event::HarnessAgentContextInitialized(HarnessAgentContextInitialized {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
             effective_skills: Vec::new(),
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
@@ -2956,11 +2974,12 @@ fn discovery_snapshot_events_round_trip_complete_wire_payloads() {
                     | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                     | Event::AgentInitializationContextSet(_)
                     | Event::HarnessAgentContextInitialized(_)
+                    | Event::HarnessAgentDiscoveryRefreshRequested(_)
                     | Event::HarnessSessionSkillsAvailable(_)
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(events.len(), 5);
+    assert_eq!(events.len(), 6);
 
     for event in events {
         let json = serde_json::to_vec(&event).expect("encode discovery event as JSON");
@@ -3039,6 +3058,9 @@ fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
     );
 
     let empty = Event::AgentInitializationContextSet(AgentInitializationContextSet {
+        discovery_revision: 0,
+        discovery_refreshes: Vec::new(),
+        discovery_diagnostics: Vec::new(),
         session_id: test_session_id("s1"),
         agent_id: agent_id("agent-1"),
         agent_initialization_id: AgentInitializationId::parse("init-empty")
@@ -3107,6 +3129,7 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::AgentWatchesUpdated(_)
                 | Event::AgentStatsUpdated(_)
                 | Event::HarnessAgentContextInitialized(_)
+                | Event::HarnessAgentDiscoveryRefreshRequested(_)
                 | Event::HarnessSessionSkillsAvailable(_)
                 | Event::AgentReplayComplete(_)
                 | Event::SessionReplayComplete(_)
@@ -3212,6 +3235,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "extension.exited",
         "harness.agent_context_usage_changed",
         "harness.agent_context_initialized",
+        "harness.agent_discovery_refresh_requested",
         "harness.context_usage_changed",
         "harness.efforts_available",
         "harness.models_available",
@@ -4477,7 +4501,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 9, "minor": 0})
+        serde_json::json!({"major": 10, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4569,7 +4593,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 9, "minor": 0})
+        serde_json::json!({"major": 10, "minor": 0})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

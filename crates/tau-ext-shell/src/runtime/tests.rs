@@ -3,6 +3,8 @@ use std::time as path_std_time;
 use super::super::DiscoverySourcePolicy;
 use super::*;
 
+mod workdir_discovery;
+
 /// Ensures correlated delegate completion removes lifecycle state for queued
 /// work that scheduler ownership drops, so late cancellation cannot report.
 #[test]

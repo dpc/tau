@@ -18,6 +18,7 @@ name = "tau_skills"
 workspace = true
 
 [dependencies]
+serde.workspace = true
 serde_yaml_ng.workspace = true
 tau-proto.workspace = true
 

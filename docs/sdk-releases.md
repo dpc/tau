@@ -20,6 +20,13 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+The protocol `10.0` SDK candidate uses `dpc-tau-proto` and `dpc-tau-client`
+`0.8.0`; both leaf dependencies remain `0.1.0`. Workdir-driven discovery
+refresh adds public DTO fields and events. A setter now waits for the harness's
+installed acknowledgement, which older harnesses cannot produce. Configured
+extensions must rebuild together for protocol 10; UI and cooperative peer
+best-effort skew exceptions are unchanged. This candidate is not published.
+
 The protocol `9.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.7.0`; both leaf dependencies remain `0.1.0`. Directed bridge
 receiver resolution adds source-incompatible public enum variants. Older

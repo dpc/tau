@@ -31,7 +31,12 @@ duplicated-path-label case requires the rewritten final frame itself to fit.
 
 Workdir coverage includes initialization, replay precedence, malformed state,
 setter admission/commit/cancellation, concurrent rejection, and call-local
-`cwd`/`workdir` behavior. Harness-boundary tests cover provider cardinality,
+`cwd`/`workdir` behavior. Runtime discovery tests cover explicit initial cwd,
+canonical committed-value scans, same-path deletion, unavailable roots, and
+installed-ACK setter reservations through cancellation. Harness discovery tests
+cover source/agent isolation, superseded tokens, timeout/disconnect fallback,
+required-skill repair, source reconnection, and both retained prompt phases.
+Harness-boundary tests cover provider cardinality,
 stale-session rejection, targeted execution, multi-UI projection, delivery loss,
 bounded IDs, delayed events, and exactly one terminal result.
 Prompt coverage asserts the shell-owned declaration and prose, default/prefixed

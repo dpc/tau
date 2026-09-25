@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 10.0 adds per-agent workdir discovery refresh and installed
+acknowledgements. The shell's committed setter waits for the acknowledgement;
+an older harness cannot answer it, so silent omission would hang rather than
+degrade. Configured extensions must rebuild together and major skew is rejected
+before Configure/Ready. The UI and cooperative cross-harness exceptions below
+remain unchanged. SDK proto/client 0.8 reflects the source-incompatible public
+DTO additions; this does not change journal physical-format versions.
+
 Protocol 9.0 adds directed receiver resolution for configured message bridges.
 An older harness cannot answer the operation and there is no silent-ignore
 fallback. Configured extensions must rebuild together; unchanged bridges gain no

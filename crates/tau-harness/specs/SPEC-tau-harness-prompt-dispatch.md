@@ -427,6 +427,14 @@ source, a trusted span covering the full UTF-8 text, and exactly:
 
 New successors and replay accept only this exact text.
 
+The reserved successor takes priority over ordinary queued inputs. While the
+plan owes its steer, only that internal marker is folded; while its owner
+checkpoint is owed, ordinary inputs cannot advance the captured branch cut.
+Ordinary inputs retain their relative FIFO order until the next eligible
+ordinary boundary (including a later tool round), and the reserved request
+does not see them yet. Explicit cancellation remains a separate operation and
+settles the reservation under its existing cancellation contract.
+
 It grants no model, route, branch, tool, or compaction authority. The successor
 uses the captured provider-qualified model and activation cut. Branch movement,
 cancellation, or a missing logical model route cannot redirect the reservation.

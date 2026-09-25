@@ -1901,7 +1901,7 @@ impl Harness {
             .get_mut(cid)
             .and_then(|conv| {
                 conv.dispatch.terminating = true;
-                conv.dispatch.pending_prompts.clear();
+                conv.dispatch.clear_pending_prompts();
                 conv.dispatch.pending_message_wakes.clear();
                 conv.dispatch.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
                 conv.identity
@@ -2619,6 +2619,12 @@ impl Harness {
             .insert(
                 agent_id.clone(),
                 PendingAgentDiscovery {
+                    revision: 0,
+                    publishing_revision: None,
+                    retained_install: None,
+                    superseded_refreshes: Vec::new(),
+                    validated_skills: HashMap::new(),
+                    workdir_sources: HashMap::new(),
                     initialization_id: agent_initialization_id.clone(),
                     skill_candidates: self
                         .prompt_coordination

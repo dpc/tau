@@ -1,5 +1,10 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 10.0 adds per-agent workdir discovery refresh and installed
+acknowledgements. Configured extensions require compatible rebuilds: an older
+harness cannot acknowledge the shell's committed setter. UI and cooperative
+peer skew exceptions remain unchanged.
+
 Protocol 9.0 adds private configured-message-bridge receiver resolution.
 It is a directed request/result, not a roster grant, input delivery or journal
 event. Older harnesses cannot answer it; configured peers require compatible
