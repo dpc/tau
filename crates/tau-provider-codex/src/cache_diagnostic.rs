@@ -10,6 +10,7 @@ use tau_provider::debug_capture_writer::{ProviderDebugCapture, ProviderDebugCapt
 
 use crate::attempt_context::AttemptOperation;
 
+mod response_cache;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod warm;
@@ -363,12 +364,14 @@ fn response_fields(config: &crate::responses::ResponsesConfig, event: Option<&Va
     if tier.is_some_and(|v| !v.is_null()) && actual_tier.is_none() {
         malformed.push("actual_service_tier");
     }
+    let response_cache = response_cache::project(response);
     json!({
         "actual_model": actual_model, "model_revision": null,
         "actual_service_tier": actual_tier,
         "reported_usage": reported, "reported_eligibility": null,
         "attribution_status": if usage.is_some() { "unsupported_shape" } else { "absent" },
         "attribution_total_check": "not_checkable", "attribution": [], "omitted_entries": 0,
+        "response_cache": response_cache,
         "malformed_fields": malformed, "omitted_identity_fields": omitted
     })
 }

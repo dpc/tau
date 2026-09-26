@@ -196,6 +196,17 @@ canonical accounting. Missing counters, exact eligibility, model revision and
 unavailable chain counts stay null. There is no established per-item attribution
 parser yet: `raw_attribution` is false, the attribution array stays empty, and
 present usage is labeled `unsupported_shape` for attribution.
+Codex `attempt_end` also carries a separate `response_cache` projection of
+upstream-reported policy and comparison diagnostics. Each closed literal or
+unsigned count has `status: recognized`, `absent`, `unknown`, or `malformed`;
+unknown strings are never copied. `retention`, response `mode`/`ttl`, diagnostic
+`type`, and documented classified miss `reason` remain distinct from dispatch
+`cache_mode`/`cache_ttl_seconds`, which describe request-side controls and stay
+null when unset. Diagnostic comparison token counts are not usage or billing
+counts. The comparison response ID becomes only a bounded-presence flag; an
+`unavailable` diagnostic supplies no miss reason. Neither returned policy nor
+diagnostic availability establishes cache residency or explains an unclassified
+miss.
 Chat Completions retains the latest observed allowlisted usage member, even on
 later failure, without merging or normalizing repeated members. Its raw cache
 counters follow the exact route's selected OpenAI or DeepSeek schema; unselected
