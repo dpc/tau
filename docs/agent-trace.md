@@ -405,14 +405,19 @@ counts, cache reuse, cost, and work patterns remain sensitive metadata.
 The first row uses schema `tau.agent_performance`, version `0`, and contains the
 root/included agent IDs, `time_unit: "microseconds"`,
 `timing_fidelity: "recorded_at_wall_clock_append_invocation_interval"`, and
-`content_included: false`. Each included agent then emits occurrence rows ordered
+`content_included: false`. When the selected snapshot has a nonzero journal
+append timestamp, the header also contains `origin_recorded_at_unix_micros`,
+the earliest such Unix-epoch microsecond timestamp across **all selected
+journal occurrences**, including occurrences omitted from performance rows.
+Each included agent then emits occurrence rows ordered
 by authoritative start journal sequence, then stable family/key, followed by one
 `agent_summary`; agents remain in lexical order. `--include-descendants` uses the same authenticated creator scope
 and snapshot as every other format.
 
 ```text
 header: schema, schema_version, record_type, root_agent_id,
-        included_agent_ids, time_unit, timing_fidelity, content_included
+        included_agent_ids, time_unit, timing_fidelity, content_included,
+        optional origin_recorded_at_unix_micros
 provider_prompt: record_type, agent_id, agent_prompt_id, model, journal_seq,
                  optional terminal_journal_seq,
                  optional at_us, optional terminal_at_us,
@@ -519,7 +524,16 @@ The optional
 wall-clock append-invocation timestamps. They are not durable commit time,
 provider wire/model latency, or exact execution time, and intervals can overlap.
 Zero timestamps are unavailable; decreasing clocks omit the interval. Relative
-offsets are absent when no nonzero trace origin exists. Missing terminals stay
+offsets are absent when no nonzero trace origin exists. Each available relative
+`*_at_us` offset maps to a Unix timestamp by adding it to
+`origin_recorded_at_unix_micros`. The single origin applies to the whole selected
+snapshot, not separately to each agent; an included descendant can supply the
+earliest timestamp even if the root's journal appears first. This mapping does
+not make cross-agent clock order causal or turn append-invocation samples into
+execution/commit timestamps. The origin and offsets cover only the finite
+validated snapshot; a running journal's checkpoint may omit newer writes, and
+selecting a later snapshot can change its origin if newly included records have
+earlier timestamps. Missing terminals stay
 explicitly incomplete. Duplicate lifecycle/terminal facts for one agent/prompt
 correlation fail projection rather than selecting one.
 

@@ -41,6 +41,9 @@ struct Header<'a> {
     time_unit: &'static str,
     /// Clock and boundary represented by elapsed intervals.
     timing_fidelity: &'static str,
+    /// Earliest available journal append timestamp in the selected snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_recorded_at_unix_micros: Option<u64>,
     /// Confirms that provider and tool payload bodies are absent.
     content_included: bool,
 }
@@ -62,6 +65,7 @@ pub(super) fn write_jsonl(
             included_agent_ids: snapshot.agent_ids().collect(),
             time_unit: "microseconds",
             timing_fidelity: "recorded_at_wall_clock_append_invocation_interval",
+            origin_recorded_at_unix_micros: origin.map(UnixMicros::get),
             content_included: false,
         },
     )?;

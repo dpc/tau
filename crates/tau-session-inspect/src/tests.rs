@@ -1345,6 +1345,7 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
 
     assert_eq!(rows[0]["schema"], "tau.agent_performance");
     assert_eq!(rows[0]["schema_version"], 0);
+    assert_eq!(rows[0]["origin_recorded_at_unix_micros"], 1);
     assert_eq!(
         rows[0]["timing_fidelity"],
         "recorded_at_wall_clock_append_invocation_interval"
@@ -1366,6 +1367,7 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
             "time_unit",
             "timing_fidelity",
             "content_included",
+            "origin_recorded_at_unix_micros",
         ])
     );
 
@@ -1375,6 +1377,13 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
         .expect("accounted provider prompt");
     assert_eq!(accounted["at_us"], 9);
     assert_eq!(accounted["terminal_at_us"], 29);
+    assert_eq!(
+        rows[0]["origin_recorded_at_unix_micros"]
+            .as_u64()
+            .expect("absolute origin")
+            + accounted["at_us"].as_u64().expect("relative start"),
+        10
+    );
     assert_eq!(accounted["recorded_at_wall_elapsed_us"], 20);
     assert_eq!(accounted["prompt_sent_tokens"], 1_000);
     assert_eq!(accounted["prompt_cached_tokens"], 1_000);
@@ -1573,6 +1582,82 @@ fn rows_or_empty(output: &str) -> Vec<serde_json::Value> {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+}
+
+/// A descendant's earlier append timestamp anchors the entire selected
+/// workflow, not just that descendant's rows or the root journal's first
+/// record.
+#[test]
+fn agent_performance_origin_maps_offsets_across_agents() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = AgentId::parse("agent-root").expect("root id");
+    create_trace_agent(
+        temp.path(),
+        root.as_str(),
+        tau_proto::AgentCreator::User,
+        None,
+        100,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-child",
+        tau_proto::AgentCreator::Agent {
+            agent_id: root.clone(),
+            session_id: "trace-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("session id"),
+        },
+        Some(root.as_str()),
+        40,
+    );
+    append_trace_prompt_lifecycle(temp.path(), root.as_str(), "root-prompt", 110);
+    append_trace_prompt_lifecycle(temp.path(), "agent-child", "child-prompt", 50);
+    let output = export_trace(
+        temp.path(),
+        &root,
+        DescendantSelection::Include,
+        AgentTraceFormat::AgentPerformanceJsonl,
+    )
+    .expect("performance trace");
+    let rows = rows_or_empty(&output);
+    let origin = rows[0]["origin_recorded_at_unix_micros"]
+        .as_u64()
+        .expect("absolute origin");
+    assert_eq!(origin, 40);
+    for (prompt_id, timestamp) in [("root-prompt", 110), ("child-prompt", 50)] {
+        let row = rows
+            .iter()
+            .find(|row| row["agent_prompt_id"] == prompt_id)
+            .expect("prompt row");
+        assert_eq!(
+            origin + row["at_us"].as_u64().expect("relative time"),
+            timestamp
+        );
+    }
+}
+
+/// An all-zero selected journal must not claim a Unix origin or relative time.
+#[test]
+fn agent_performance_omits_origin_without_available_timestamp() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = AgentId::parse("agent-root").expect("root id");
+    create_trace_agent(
+        temp.path(),
+        root.as_str(),
+        tau_proto::AgentCreator::User,
+        None,
+        0,
+    );
+    let output = export_trace(
+        temp.path(),
+        &root,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentPerformanceJsonl,
+    )
+    .expect("performance trace");
+    let rows = rows_or_empty(&output);
+    assert_eq!(rows.len(), 2, "header and summary");
+    assert!(rows[0].get("origin_recorded_at_unix_micros").is_none());
 }
 
 fn performance_prompt_row(start: u64, terminal: u64) -> serde_json::Value {
