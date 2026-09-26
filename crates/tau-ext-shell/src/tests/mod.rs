@@ -30,7 +30,7 @@ use crate::dir_lock::DIR_LOCK_TOOL_NAME;
 use crate::tool_lifecycle::{ToolCancellationState, ToolLifecycleRegistry};
 use crate::tools::edit::edit_file as edit_file_with_world;
 use crate::tools::find::run_find;
-use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
+use crate::tools::grep::{grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
 use crate::tools::read::{format_read_range, read_file as read_file_with_world, slice_lines};
 use crate::tools::shell::{

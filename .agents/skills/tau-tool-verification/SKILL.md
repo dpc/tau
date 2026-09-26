@@ -205,7 +205,10 @@ evidence remain truthful. Verify `apply_patch` headers name the first changed
 path instead of repeating the tool name, append `,…` when other distinct paths
 changed, and show the `NF` file count before aggregate `+N/-M` diff totals.
 
-`grep` renders matches heading-grouped: each file's path appears once as a
+`grep` searches in-process without requiring `rg`; cancellation during traversal,
+buffered reads, and callbacks is cooperative and does not interrupt a blocked
+filesystem operation or executing matcher. Normal status is 0 for matches (including
+limit-reached results), 1 for no matches. `grep` renders matches heading-grouped: each file's path appears once as a
 heading line, followed by `LINE:CONTENT` for match lines and `LINE-CONTENT`
 for context lines. Over-long path headings are truncated to the same
 `GREP_MAX_LINE_LENGTH` (500 chars) as match body lines, with an ellipsis and

@@ -895,7 +895,7 @@ fn grep_result_map_omits_request_context() {
     // The agent already knows the grep request arguments it sent. Do not echo
     // pattern/path/glob in the result headers; keep only execution outcome and
     // payload metadata.
-    let result = grep_result_map(Some(0), 3, "src/a.rs:1:foo".to_owned());
+    let result = grep_result_map(0, 3, "src/a.rs:1:foo".to_owned());
     assert!(cbor_map_text(&result, "pattern").is_none());
     assert!(cbor_map_text(&result, "path").is_none());
     assert!(cbor_map_text(&result, "glob").is_none());
@@ -905,7 +905,7 @@ fn grep_result_map_omits_request_context() {
     assert_eq!(cbor_int_field(&result, "output_lines"), Some(1));
     assert_eq!(cbor_int_field(&result, "output_bytes"), Some(14));
 
-    let no_matches = grep_result_map(Some(1), 0, "no matches found".to_owned());
+    let no_matches = grep_result_map(1, 0, "no matches found".to_owned());
     assert_eq!(cbor_int_field(&no_matches, "status"), Some(1));
     assert_eq!(cbor_int_field(&no_matches, "matches"), Some(0));
     assert_eq!(cbor_int_field(&no_matches, "output_lines"), Some(1));
@@ -1997,40 +1997,6 @@ fn mark_line_merges_existing_markers_when_truncating() {
         "out(no_nl,truncated)"
     );
 }
-#[test]
-fn classify_ripgrep_stderr_recognizes_stable_prefixes() {
-    // Bad regex from the agent. The trailing `error: <diagnostic>`
-    // line is the useful one — the header and caret lines aren't.
-    let parsed = classify_ripgrep_stderr(
-        "regex parse error:\n    (?:Result<(.*Address.*TweakIdx)\n    ^\nerror: unclosed group",
-    );
-    assert!(
-        matches!(parsed, RipgrepError::Usage { .. }),
-        "got: {parsed:?}"
-    );
-    assert_eq!(parsed.to_string(), "regex parse error: unclosed group");
-    // Missing path / file.
-    assert_eq!(
-        classify_ripgrep_stderr("No such file or directory (os error 2)"),
-        RipgrepError::NotFound,
-    );
-    assert_eq!(
-        classify_ripgrep_stderr("No such file or directory (os error 2)").to_string(),
-        "no such file or directory",
-    );
-    // Permission denied.
-    assert_eq!(
-        classify_ripgrep_stderr("Permission denied (os error 13)"),
-        RipgrepError::Permission,
-    );
-    // Anything else (genuine runtime fault) keeps the first stderr
-    // line so the chip still carries a useful signal.
-    assert_eq!(
-        classify_ripgrep_stderr("some unfamiliar ripgrep failure").to_string(),
-        "ripgrep error: some unfamiliar ripgrep failure",
-    );
-}
-
 /// Ensures a large read stays visibly bounded while exposing the exact complete
 /// line-numbered rendering through its private saved path.
 #[test]

@@ -93,6 +93,10 @@ Repository-owned pager fixtures cover protected environment precedence, preserve
 `TERM`, protected `JJ_PAGER`, deliberately ordinary `MANPAGER` / `BAT_PAGER`,
 the explicit opt-out, post-EOF pager stalls, timeout, and model/user surface
 parity without relying on host pager configuration.
+The dedicated grep regressions exercise in-process matching, ignore overrides,
+explicit symlink and special-file policy, Unicode/BOM/invalid-byte rendering,
+the global extra-match sentinel, search-buffer exhaustion and cooperative read
+cancellation without relying on an installed `rg` executable.
 Other targets cover equivalent foreground and bounded-drain behavior;
 Windows-only changes are compiled for Windows when practical. See
 [`SPEC-tau-ext-shell-process-lifecycle`](specs/SPEC-tau-ext-shell-process-lifecycle.md).

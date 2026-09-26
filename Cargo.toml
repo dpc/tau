@@ -142,6 +142,8 @@ futures-util = { version = "0.3", default-features = false, features = [
   "std",
 ] }
 globset = { version = "0.4", default-features = false }
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
 handlebars = { version = "6", default-features = false }
 ignore = { version = "0.4", default-features = false }
 image = { version = "0.25", default-features = false, features = [

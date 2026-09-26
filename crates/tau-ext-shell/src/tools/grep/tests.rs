@@ -1,10 +1,238 @@
-use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::{io as path_std_io, process as path_std_process, time as path_std_time};
-
-use base64::engine as path_base64_engine;
 
 use super::*;
+
+fn search_file(
+    bytes: &[u8],
+    pattern: &str,
+    extra: &[(&str, CborValue)],
+) -> Result<ToolOutput, ToolFailure> {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let file = tempdir.path().join("input.txt");
+    std::fs::write(&file, bytes).expect("write");
+    let mut entries = vec![
+        (
+            CborValue::Text("pattern".into()),
+            CborValue::Text(pattern.into()),
+        ),
+        (
+            CborValue::Text("path".into()),
+            CborValue::Text(file.to_string_lossy().into_owned()),
+        ),
+    ];
+    entries.extend(
+        extra
+            .iter()
+            .map(|(key, value)| (CborValue::Text((*key).into()), value.clone())),
+    );
+    run_grep(&CborValue::Map(entries))
+}
+
+fn result_text(output: &ToolOutput) -> &str {
+    let CborValue::Map(entries) = &output.result else {
+        panic!("expected map")
+    };
+    let (_, CborValue::Text(text)) = entries
+        .iter()
+        .find(|(key, _)| key == &CborValue::Text("output".into()))
+        .expect("output field")
+    else {
+        panic!("expected output text")
+    };
+    text
+}
+
+fn search_dir(
+    path: &Path,
+    pattern: &str,
+    extra: &[(&str, CborValue)],
+) -> Result<ToolOutput, ToolFailure> {
+    let mut entries = vec![
+        (
+            CborValue::Text("pattern".into()),
+            CborValue::Text(pattern.into()),
+        ),
+        (
+            CborValue::Text("path".into()),
+            CborValue::Text(path.to_string_lossy().into_owned()),
+        ),
+    ];
+    entries.extend(
+        extra
+            .iter()
+            .map(|(key, value)| (CborValue::Text((*key).into()), value.clone())),
+    );
+    run_grep(&CborValue::Map(entries))
+}
+
+/// Recursion includes hidden files, respects ignore rules and permits a
+/// positive override to unignore a specific file.
+#[test]
+fn grep_library_ignore_hidden_and_override() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(td.path().join(".hidden"), b"needle\n").expect("hidden");
+    std::fs::write(td.path().join(".ignore"), b"ignored.txt\n").expect("ignore rule");
+    std::fs::write(td.path().join("ignored.txt"), b"needle\n").expect("ignored");
+    let default = search_dir(td.path(), "needle", &[]).expect("default search");
+    assert_eq!(default.display.stats.matches, Some(1));
+    let overridden = search_dir(
+        td.path(),
+        "needle",
+        &[("glob", CborValue::Text("**/ignored.txt".into()))],
+    )
+    .expect("override");
+    assert_eq!(overridden.display.stats.matches, Some(1));
+    assert!(result_text(&overridden).contains("ignored.txt"));
+    let excluded = search_dir(
+        td.path(),
+        "needle",
+        &[("glob", CborValue::Text("!**/.hidden".into()))],
+    )
+    .expect("negative override");
+    assert_eq!(excluded.display.stats.matches, Some(0));
+    let explicit =
+        search_dir(&td.path().join("ignored.txt"), "needle", &[]).expect("explicit ignored file");
+    assert_eq!(explicit.display.stats.matches, Some(1));
+}
+
+/// Ripgrep-specific ignore files outrank ordinary `.ignore` and a positive
+/// override can still explicitly select a path excluded by `.rgignore`.
+#[test]
+fn grep_library_rgignore_precedence() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(td.path().join(".ignore"), b"allowed.txt\n").expect(".ignore");
+    std::fs::write(td.path().join(".rgignore"), b"!allowed.txt\nblocked.txt\n").expect(".rgignore");
+    std::fs::write(td.path().join("allowed.txt"), b"needle\n").expect("allowed");
+    std::fs::write(td.path().join("blocked.txt"), b"needle\n").expect("blocked");
+    let default = search_dir(td.path(), "needle", &[]).expect("default");
+    assert_eq!(default.display.stats.matches, Some(1));
+    assert!(result_text(&default).contains("allowed.txt"));
+    let overridden = search_dir(
+        td.path(),
+        "needle",
+        &[("glob", CborValue::Text("**/blocked.txt".into()))],
+    )
+    .expect("override .rgignore");
+    assert_eq!(overridden.display.stats.matches, Some(1));
+    assert!(result_text(&overridden).contains("blocked.txt"));
+}
+
+/// Reject special roots before opening them, but allow explicit regular-file
+/// symlinks.
+#[cfg(unix)]
+#[test]
+fn grep_library_regular_file_policy() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let file = td.path().join("file");
+    std::fs::write(&file, b"needle\n").expect("file");
+    let link = td.path().join("link");
+    symlink(&file, &link).expect("symlink");
+    assert_eq!(
+        search_dir(&link, "needle", &[])
+            .expect("explicit symlink")
+            .display
+            .stats
+            .matches,
+        Some(1)
+    );
+    let dir = search_dir(td.path(), "needle", &[]).expect("recursive");
+    assert_eq!(dir.display.stats.matches, Some(1));
+    let socket = td.path().join("socket");
+    let _listener = UnixListener::bind(&socket).expect("socket");
+    let error = search_dir(&socket, "needle", &[]).expect_err("reject socket");
+    assert!(error.message.contains("regular file or directory"));
+}
+
+/// Keeps fixed-string defaults distinct from opt-in regex and Unicode folding.
+#[test]
+fn grep_library_pattern_modes_and_unicode() {
+    let literal = search_file(b"a.*\naZZ\n", "a.*", &[]).expect("literal");
+    assert_eq!(literal.display.stats.matches, Some(1));
+    assert!(result_text(&literal).contains("1:a.*"));
+    let regex =
+        search_file(b"a.*\naZZ\n", "^a.+$", &[("regex", CborValue::Bool(true))]).expect("regex");
+    assert_eq!(regex.display.stats.matches, Some(2));
+    let fold = search_file(
+        "ÉTÉ\n".as_bytes(),
+        "été",
+        &[("ignoreCase", CborValue::Bool(true))],
+    )
+    .expect("unicode fold");
+    assert_eq!(fold.display.stats.matches, Some(1));
+    assert!(
+        search_file(b"a\n", "(?=a)", &[("regex", CborValue::Bool(true))]).is_err(),
+        "unsupported regex syntax must fail, not report no matches"
+    );
+}
+
+/// The extra match proves truncation; exactly the requested count does not.
+#[test]
+fn grep_library_limit_uses_extra_match_sentinel() {
+    let limit = [("limit", CborValue::Integer(1.into()))];
+    let exact = search_file(b"x\n", "x", &limit).expect("exact");
+    assert!(!result_text(&exact).contains("matches limit reached"));
+    let extra = search_file(b"x\ncontext\nx\n", "x", &limit).expect("extra");
+    assert_eq!(extra.display.stats.matches, Some(1));
+    assert!(result_text(&extra).contains("matches limit reached"));
+    assert!(!result_text(&extra).contains("3:x"));
+}
+
+/// A global limit crosses file boundaries without rendering a dangling heading
+/// for a second file's unrendered sentinel match.
+#[test]
+fn grep_library_limit_across_files() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(td.path().join("first"), b"x\n").expect("first");
+    std::fs::write(td.path().join("second"), b"x\n").expect("second");
+    let output =
+        search_dir(td.path(), "x", &[("limit", CborValue::Integer(1.into()))]).expect("search");
+    assert_eq!(output.display.stats.matches, Some(1));
+    assert!(result_text(&output).contains("matches limit reached"));
+    let headings = result_text(&output)
+        .lines()
+        .filter(|line| line.ends_with("/first") || line.ends_with("/second"))
+        .count();
+    assert_eq!(headings, 1);
+}
+
+/// BOM decoding, CRLF display, invalid text, and explicit-file NUL conversion
+/// must preserve the old line-oriented presentation without JSON transport.
+#[test]
+fn grep_library_decoding_and_binary() {
+    let utf16 =
+        search_file(&[0xff, 0xfe, b'x', 0, b'\r', 0, b'\n', 0], "x", &[]).expect("UTF-16 BOM");
+    assert!(
+        result_text(&utf16).contains("1:x"),
+        "{:?}",
+        result_text(&utf16)
+    );
+    assert!(!result_text(&utf16).contains("1:x\r"));
+    let invalid = search_file(b"x\xff\n", "x", &[]).expect("invalid bytes");
+    assert!(result_text(&invalid).contains("1:x�"));
+    let binary = search_file(b"a\0x\n", "x", &[]).expect("explicit binary file");
+    assert_eq!(binary.display.stats.matches, Some(1));
+    let bare_cr = search_file(b"x\r", "x", &[]).expect("lone CR");
+    assert!(
+        result_text(&bare_cr).contains("1:x\r"),
+        "{:?}",
+        result_text(&bare_cr)
+    );
+}
+
+/// Invalid globs and over-budget lines fail rather than silently producing
+/// partial results.
+#[test]
+fn grep_library_invalid_glob_and_heap_limit() {
+    assert!(search_file(b"x\n", "x", &[("glob", CborValue::Text("[".into()))]).is_err());
+    let enormous = vec![b'x'; 16 * 1024 * 1024 + 1];
+    let err = search_file(&enormous, "x", &[]).expect_err("search heap bound");
+    assert!(
+        err.message.contains("resource") || err.message.contains("heap"),
+        "{err:?}"
+    );
+}
 
 fn args(extra: (&str, CborValue)) -> CborValue {
     CborValue::Map(vec![
@@ -16,98 +244,16 @@ fn args(extra: (&str, CborValue)) -> CborValue {
     ])
 }
 
-/// Ensures C11's literal/regex modes retain their exact OsString argv while C5
-/// keeps omitted and leading-hyphen roots positional after the separator.
+/// Defaults to a literal pattern and current-directory search.
 #[test]
-fn grep_pattern_mode_preserves_schema_defaults_display_and_ripgrep_argv() {
-    let cases = [
-        (
-            "omitted path and regex default to current-directory literal search",
-            None,
-            true,
-            "-needle.*",
-            None,
-        ),
-        (
-            "false regex selects literal with separator and suffix path",
-            Some(CborValue::Bool(false)),
-            true,
-            "needle.*",
-            Some("./search-root/suffix"),
-        ),
-        (
-            "true regex preserves leading-hyphen positional path",
-            Some(CborValue::Bool(true)),
-            false,
-            "needle.*",
-            Some("-search-root"),
-        ),
-    ];
-
-    for (label, regex, expects_fixed_strings, pattern, path) in cases {
-        let mut entries = vec![(
-            CborValue::Text("pattern".to_owned()),
-            CborValue::Text(pattern.to_owned()),
-        )];
-        if let Some(path) = path {
-            entries.push((
-                CborValue::Text("path".to_owned()),
-                CborValue::Text(path.to_owned()),
-            ));
-        }
-        if let Some(regex) = regex {
-            entries.push((CborValue::Text("regex".to_owned()), regex));
-        }
-        let options = GrepOptions::parse(&CborValue::Map(entries))
-            .unwrap_or_else(|error| panic!("{label}: parse failed: {error:?}"));
-        let args = options.ripgrep_args();
-        let separators = args
-            .iter()
-            .enumerate()
-            .filter_map(|(index, argument)| (argument == OsStr::new("--")).then_some(index))
-            .collect::<Vec<_>>();
-        assert_eq!(separators.len(), 1, "{label}: exactly one -- separator");
-        let separator = separators[0];
-        let path = path.unwrap_or(".");
-        let mut expected = vec![
-            "--json",
-            "--hidden",
-            "--with-filename",
-            "--max-columns",
-            "500",
-            "--max-columns-preview",
-        ];
-        if expects_fixed_strings {
-            expected.push("--fixed-strings");
-        }
-        expected.extend(["--", pattern, path]);
-
-        assert_eq!(
-            matches!(&options.pattern, GrepPattern::Literal(_)),
-            expects_fixed_strings,
-            "{label}"
-        );
-        assert_eq!(
-            options.display_args(),
-            format!("{pattern:?} in {path}"),
-            "{label}"
-        );
-        assert_eq!(
-            options.search_path(),
-            Path::new(path),
-            "{label}: search root"
-        );
-        assert_eq!(
-            args[separator + 1..],
-            [OsString::from(pattern), OsString::from(path)],
-            "{label}: pattern and path must follow -- in order"
-        );
-        assert_eq!(
-            args,
-            expected.into_iter().map(OsString::from).collect::<Vec<_>>(),
-            "{label}: ripgrep argv"
-        );
-    }
+fn grep_pattern_defaults() {
+    let options = GrepOptions::parse(&CborValue::Map(vec![(
+        CborValue::Text("pattern".into()),
+        CborValue::Text("a.*".into()),
+    )]))
+    .expect("parse");
+    assert!(matches!(options.pattern, GrepPattern::Literal(_)));
+    assert_eq!(options.search_path(), Path::new("."));
 }
 
 /// Ensures grep rejects wrong-typed path/glob instead of searching the
@@ -190,20 +336,6 @@ fn grep_rejects_context_above_cap() {
         format!("context must be <= {MAX_GREP_CONTEXT}")
     );
 }
-/// Protects the stderr drain used while grep reads stdout. The capture must
-/// stay bounded so a noisy ripgrep cannot trade pipe backpressure for
-/// unbounded memory growth in the drain thread.
-#[test]
-fn grep_stderr_drain_caps_captured_bytes() {
-    let captured = read_limited_bytes(
-        path_std_io::Cursor::new(vec![b'x'; MAX_OUTPUT_BYTES + 100]),
-        32,
-    );
-
-    assert_eq!(captured.len(), 32);
-    assert!(captured.iter().all(|byte| *byte == b'x'));
-}
-
 /// Ensures an early cancellation request takes the cancellable grep path
 /// and reports cancellation rather than a normal grep result.
 #[test]
@@ -228,119 +360,6 @@ fn grep_cancellable_stops_on_early_cancel_request() {
     assert!(matches!(result, CancellableToolRun::Cancelled));
 }
 
-/// Ensures the ripgrep waiter can terminate an already-running child when a
-/// cancellation request arrives after process start.
-#[test]
-fn grep_waiter_kills_running_child_on_cancel_request() {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 10")
-        .stdout(path_std_process::Stdio::null())
-        .stderr(path_std_process::Stdio::null())
-        .spawn()
-        .expect("spawn sleeping child");
-    let (cancel_tx, cancel_rx) = mpsc::channel();
-    let (_stop_tx, stop_rx) = mpsc::channel();
-    let started = path_std_time::Instant::now();
-
-    cancel_tx.send(()).expect("send cancel");
-    let (_status, cancelled) = wait_ripgrep(child, stop_rx, Some(cancel_rx)).expect("wait child");
-
-    assert!(cancelled);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
-}
-
-/// Ensures the match-limit stop path kills a running child promptly without
-/// reporting the run as caller-cancelled.
-#[test]
-fn grep_waiter_kills_running_child_on_match_limit_stop() {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 10")
-        .stdout(path_std_process::Stdio::null())
-        .stderr(path_std_process::Stdio::null())
-        .spawn()
-        .expect("spawn sleeping child");
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let started = path_std_time::Instant::now();
-
-    stop_tx.send(()).expect("send stop");
-    let (_status, cancelled) = wait_ripgrep(child, stop_rx, None).expect("wait child");
-
-    assert!(!cancelled);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
-}
-
-/// Protects grep output from path line injection by escaping control
-/// characters in ripgrep JSON path text before rendering records.
-#[test]
-fn grep_escapes_control_characters_in_paths() {
-    let json = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": "line\nbreak.txt" },
-            "lines": { "text": "needle\n" },
-            "line_number": 7
-        }
-    });
-    let output = read_grep_json(json.to_string().as_bytes(), 10);
-
-    assert_eq!(output.result_lines, vec!["line\\nbreak.txt", "7:needle"]);
-}
-
-/// Ensures grep handles ripgrep byte paths without silently dropping the
-/// record, marking invalid UTF-8 while preserving a lossy escaped path.
-#[test]
-fn grep_renders_invalid_utf8_byte_paths() {
-    let encoded = base64::Engine::encode(
-        &path_base64_engine::general_purpose::STANDARD,
-        b"bad\xffname.txt",
-    );
-    let json = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "bytes": encoded },
-            "lines": { "text": "needle\n" },
-            "line_number": 3
-        }
-    });
-    let output = read_grep_json(json.to_string().as_bytes(), 10);
-
-    assert_eq!(
-        output.result_lines,
-        vec!["(invalid-utf8) bad�name.txt", "3:needle"]
-    );
-}
-
-/// Ensures grep reports the number of rendered matches, not the extra
-/// over-limit match used only to detect that the limit was reached.
-#[test]
-fn grep_limit_reports_rendered_match_count() {
-    let first = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": "file.txt" },
-            "lines": { "text": "needle one\n" },
-            "line_number": 1
-        }
-    });
-    let second = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": "file.txt" },
-            "lines": { "text": "needle two\n" },
-            "line_number": 2
-        }
-    });
-    let input = format!("{first}\n{second}\n");
-
-    let output = read_grep_json(input.as_bytes(), 1);
-
-    assert_eq!(output.match_count, 1);
-    assert!(output.match_limit_reached);
-    assert_eq!(output.result_lines, vec!["file.txt", "1:needle one"]);
-}
-
 /// Ensures grep long-line shortening preserves the line number prefix
 /// instead of replacing the whole rendered match with a marker.
 #[test]
@@ -353,122 +372,16 @@ fn grep_long_line_truncation_preserves_location_prefix() {
     assert!(line.len() <= GREP_MAX_LINE_LENGTH);
 }
 
-/// Ensures read_grep_json groups match lines under a single per-file path
-/// heading, using `:` for matches and `-` for context lines.
-#[test]
-fn grep_renders_heading_grouped_matches_and_context() {
-    let match_rec = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": "src/a.rs" },
-            "lines": { "text": "needle here\n" },
-            "line_number": 7
-        }
-    });
-    let context_rec = serde_json::json!({
-        "type": "context",
-        "data": {
-            "path": { "text": "src/a.rs" },
-            "lines": { "text": "context line\n" },
-            "line_number": 8
-        }
-    });
-    let second_match = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": "src/b.rs" },
-            "lines": { "text": "needle two\n" },
-            "line_number": 3
-        }
-    });
-    let input = format!("{match_rec}\n{context_rec}\n{second_match}\n");
-    let output = read_grep_json(input.as_bytes(), 10);
-
-    assert_eq!(
-        output.result_lines,
-        vec![
-            "src/a.rs",
-            "7:needle here",
-            "8-context line",
-            "src/b.rs",
-            "3:needle two",
-        ]
-    );
-    assert_eq!(output.match_count, 2);
-}
-
-/// Ensures hitting the match limit on a new file's first match does not
-/// leave a dangling path heading with no body line beneath it.
-#[test]
-fn grep_limit_break_leaves_no_dangling_heading() {
-    let first = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": "a.rs" },
-            "lines": { "text": "needle one\n" },
-            "line_number": 1
-        }
-    });
-    let second = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": "b.rs" },
-            "lines": { "text": "needle two\n" },
-            "line_number": 2
-        }
-    });
-    let input = format!("{first}\n{second}\n");
-
-    let output = read_grep_json(input.as_bytes(), 1);
-
-    assert!(output.match_limit_reached);
-    assert_eq!(output.match_count, 1);
-    // a.rs heading + its body line; b.rs must not leave a dangling heading.
-    assert_eq!(output.result_lines, vec!["a.rs", "1:needle one"]);
-}
-
 /// Ensures over-long path headings are capped at the display budget with an
 /// ellipsis, matching how match body lines are truncated, so every rendered
 /// line stays within `GREP_MAX_LINE_LENGTH`.
 #[test]
 fn grep_heading_caps_overlong_path() {
     let long_path = format!("{}pad", "p".repeat(GREP_MAX_LINE_LENGTH));
-    let json = serde_json::json!({
-        "type": "match",
-        "data": {
-            "path": { "text": long_path },
-            "lines": { "text": "needle\n" },
-            "line_number": 7
-        }
-    });
-    let output = read_grep_json(json.to_string().as_bytes(), 10);
-
-    assert!(output.lines_truncated);
-    assert_eq!(output.result_lines.len(), 2);
-    assert!(output.result_lines[0].ends_with('…'));
-    assert!(output.result_lines[0].len() <= GREP_MAX_LINE_LENGTH);
-    assert_eq!(output.result_lines[1], "7:needle");
-}
-
-/// Ensures the per-file heading falls back to the `begin` record's path when
-/// a match/context record omits the path field.
-#[test]
-fn grep_heading_uses_begin_record_path_fallback() {
-    let begin = serde_json::json!({
-        "type": "begin",
-        "data": { "path": { "text": "src/lib.rs" } }
-    });
-    let match_rec = serde_json::json!({
-        "type": "match",
-        "data": {
-            "lines": { "text": "needle\n" },
-            "line_number": 4
-        }
-    });
-    let input = format!("{begin}\n{match_rec}\n");
-    let output = read_grep_json(input.as_bytes(), 10);
-
-    assert_eq!(output.result_lines, vec!["src/lib.rs", "4:needle"]);
+    let (heading, truncated) = render_grep_heading(&long_path);
+    assert!(truncated);
+    assert!(heading.ends_with('…'));
+    assert!(heading.len() <= GREP_MAX_LINE_LENGTH);
 }
 
 /// Ensures grep notices are included without exceeding the documented 10

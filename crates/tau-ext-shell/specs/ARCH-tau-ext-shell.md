@@ -144,10 +144,8 @@ command matcher with its paired workdir and optional description so an agent can
 choose a permitted command. Generated denial text never includes the submitted
 denied command. Descriptions are model-visible and appear in denial diagnostics,
 so operators must not put secrets in them.
-Fixed internal subprocesses such as the `rg` used by `grep` do not participate.
-At configuration, ext-shell checks its process `PATH` for executable `rg` and
-requests a best-effort warning notice if absent. It does not fail startup or
-prevalidate user shell commands and configured shell/wrapper programs.
+The in-process `grep` tool does not participate in shell allowlist checks.
+Startup does not prevalidate user shell commands or configured shell/wrapper programs.
 
 When the allowlist is present, the shell-owned prompt fragment also declares
 that enforcement is enabled and lists the effective typed command/workdir
@@ -186,8 +184,9 @@ tombstones. UI `!` / `!!` commands keep their separate cancellation path.
 
 Long-running read-only search tools that run after dequeuing (`grep` / `find`)
 also register cancellation handles while active. Tool cancellation and runtime
-shutdown signal those handles so a running ripgrep child or filesystem traversal
-can stop before scheduler drop waits for worker threads to exit.
+shutdown signal those handles so filesystem traversal and buffered grep reads
+can stop before scheduler drop waits for worker threads to exit. Grep cancellation
+is cooperative; it cannot interrupt a blocked filesystem call or executing matcher.
 
 At every session or process shutdown path, including explicit
 `session_shutdown`, `disconnect`, EOF, reader decode errors, and output

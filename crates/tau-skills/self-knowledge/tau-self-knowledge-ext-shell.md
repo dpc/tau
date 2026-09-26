@@ -59,17 +59,20 @@ Model-visible tools:
 - `shell` — runs `sh -c`-style commands with an optional call-local `cwd` and timeout (300 seconds when omitted), stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support. Its `cwd` never changes remembered state. It is the generic shell execution alternative.
 - `workdir` — with no path, reads this shell instance's current per-agent path/status; with a path, validates, canonicalizes, commits, and persistently changes it. State uses inheritable instance-scoped metadata (for the built-in shell, `ext_core-shell_cwd`). Dependent shell/filesystem calls belong in a later turn after a setter succeeds. It carries `shell:workdir`.
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. Its optional call-local `workdir` resolves from the remembered persistent workdir and never changes later calls; the separate top-level `workdir(path)` tool reads or changes persistent state, and dependent calls must occur after a successful setter in a later turn. It does not accept the removed GPT `cwd` spelling. It carries the neutral `shell:exec:shell_command` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
-- `grep` — ripgrep-backed literal or regex search with context, glob filtering, truncation, escaped control characters in paths, invalid-UTF-8 path markers for byte paths, `limit` capped at 2000 matches, and `context` capped at 20 lines.
+- `grep` — in-process ripgrep-library literal or regex search with context, glob filtering, truncation, escaped control characters in paths, invalid-UTF-8 path markers for byte paths, `limit` capped at 2000 matches, and `context` capped at 20 lines.
 - `find` — ignore-aware glob file search with escaped control characters in paths, invalid-UTF-8 path markers, and `limit` capped at 2000 results.
 - `ls` — sorted directory listing with 1-based entry prefixes, escaped control characters/backslashes, Unicode replacement for invalid filename bytes plus `invalid-utf8` flags, `limit` capped at 2001 entries, and standard truncation metadata. When `limit_reached` is true, entries are a bounded filesystem-order sample sorted for display rather than a complete alphabetic prefix.
 - `dir_lock` — manual directory update lock/unlock for coordinating mutating agents.
 
 Test builds or the `echo-agent` cargo feature also register `echo` for harness tests.
-At initialization, the extension checks its process `PATH` for executable `rg`,
-which its `grep` tool invokes directly. If missing, it requests a user-visible
-warning explaining how to fix the extension's `PATH`; startup continues. This
-does not check arbitrary commands submitted through `shell` or `shell_command`,
-or executables selected by custom shell configuration.
+The dedicated `grep` tool does not require an external `rg` executable and does
+not read `RIPGREP_CONFIG_PATH`; generic shell commands may still use `rg`.
+It searches regular files or directories (including explicit symlinks to regular
+files), not named special files. It uses buffered reads rather than memory maps,
+with a 16 MiB search-buffer limit, 10 MiB regex compilation limit and 16 MiB
+DFA-cache limit; exhaustion produces an error, not partial success. Cancellation
+is cooperative during traversal, reads, and result callbacks, and cannot
+interrupt a blocked filesystem operation or an executing regex matcher.
 
 Every filesystem, shell, lock, and user `!`/`!!` invocation snapshots its
 instance workdir at admission. Queued or lock-waiting work does not drift after
@@ -237,8 +240,7 @@ operator prose is model-visible and appears in denial diagnostics, so it must no
 contain secrets; it does not affect matching. It does not inspect
 shell syntax, wrapper argv, environment, `PATH`, or resolved executables. Generated
 denial errors show the typed configured command matcher/workdir pairs and optional
-descriptions, but never the submitted denied command. The fixed `rg` subprocess behind `grep` and unrelated
-subprocess systems are not covered.
+descriptions, but never the submitted denied command. The in-process `grep` search and unrelated subprocess systems are not covered.
 
 When the allowlist is present, the shell prompt also identifies command
 enforcement and lists typed `command_glob`/`command_regex` plus `workdir`

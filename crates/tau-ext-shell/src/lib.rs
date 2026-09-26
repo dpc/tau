@@ -43,7 +43,6 @@ mod display;
 mod isolation;
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 mod pty_stdio;
-mod required_commands;
 mod runtime;
 mod scheduler;
 mod shell_output_spool;
@@ -753,7 +752,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(GREP_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Search file contents for a pattern using ripgrep. Patterns are literal by default; \
+            "Search file contents for a pattern using in-process ripgrep libraries. Patterns are literal by default; \
              regex metacharacters like `|` require `regex: true`. Returns matching lines \
              with file paths and line numbers. Respects .gitignore. Output is truncated at \
              `limit` matches or 10 KiB of visible output. Visible-cap truncation provides a private saved-output path, or explicit unavailable metadata when storage fails; limit-only and per-line truncation retain native metadata. Long lines are truncated to 500 chars."

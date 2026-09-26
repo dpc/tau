@@ -309,7 +309,7 @@ fn path_to_slash(path: &Path) -> String {
     render_path(path)
 }
 
-fn render_path(path: &Path) -> String {
+pub(crate) fn render_path(path: &Path) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
