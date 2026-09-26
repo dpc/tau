@@ -255,6 +255,11 @@ impl ShellRuntime {
                 false,
             ))?;
         }
+        for notice in crate::required_commands::missing_command_notices() {
+            // Routine startup diagnostics are best effort, not configuration
+            // errors.
+            let _ = self.tx.send(notice);
+        }
         tracing::info!(
             target: "tau_ext_shell",
             directory_locking = self.config.dir_lock.enable,

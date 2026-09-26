@@ -145,6 +145,9 @@ choose a permitted command. Generated denial text never includes the submitted
 denied command. Descriptions are model-visible and appear in denial diagnostics,
 so operators must not put secrets in them.
 Fixed internal subprocesses such as the `rg` used by `grep` do not participate.
+At configuration, ext-shell checks its process `PATH` for executable `rg` and
+requests a best-effort warning notice if absent. It does not fail startup or
+prevalidate user shell commands and configured shell/wrapper programs.
 
 When the allowlist is present, the shell-owned prompt fragment also declares
 that enforcement is enabled and lists the effective typed command/workdir

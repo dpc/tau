@@ -65,6 +65,11 @@ Model-visible tools:
 - `dir_lock` — manual directory update lock/unlock for coordinating mutating agents.
 
 Test builds or the `echo-agent` cargo feature also register `echo` for harness tests.
+At initialization, the extension checks its process `PATH` for executable `rg`,
+which its `grep` tool invokes directly. If missing, it requests a user-visible
+warning explaining how to fix the extension's `PATH`; startup continues. This
+does not check arbitrary commands submitted through `shell` or `shell_command`,
+or executables selected by custom shell configuration.
 
 Every filesystem, shell, lock, and user `!`/`!!` invocation snapshots its
 instance workdir at admission. Queued or lock-waiting work does not drift after

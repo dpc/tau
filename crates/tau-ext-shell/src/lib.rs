@@ -43,6 +43,7 @@ mod display;
 mod isolation;
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 mod pty_stdio;
+mod required_commands;
 mod runtime;
 mod scheduler;
 mod shell_output_spool;
