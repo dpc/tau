@@ -309,6 +309,7 @@ fn inspect_connection<R: Read, W: Write>(
     };
     let configure = Configure {
         purpose: tau_proto::ConfigurePurpose::DeclarationInspection,
+        harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
         config: tau_proto::CborValue::serialized(&extension.config)
             .map_err(|_| Outcome::Unavailable)?,
         instance_name: extension.name.parse().map_err(|_| Outcome::Unavailable)?,

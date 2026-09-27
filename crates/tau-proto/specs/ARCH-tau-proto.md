@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 10.1 adds optional-to-use, User-scope papercut history read and
+conditional archive operations to the existing extension-data request/reply
+contract. Configure optionally advertises the harness revision so a newer
+extension can reject these operations locally without disconnecting when an
+older harness lacks them. See
+[SPEC-extension-protocol-versioning](../../../specs/SPEC-extension-protocol-versioning.md).
+
 Protocol 10.0 adds per-agent workdir discovery refresh and installed
 acknowledgements. Configured extensions require compatible rebuilds: an older
 harness cannot acknowledge the shell's committed setter. UI and cooperative

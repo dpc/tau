@@ -8,6 +8,7 @@
 mod artifact_image;
 mod daily_schedule;
 mod host_timezone;
+pub mod papercut_history;
 mod read_image;
 #[cfg(test)]
 mod tests;
@@ -36,12 +37,18 @@ pub const EXTENSION_NAME: &str = "tau-ext-utils";
 pub const TIMER_TOOL_NAME: &str = "timer";
 /// Model-visible best-effort diagnostic reporting tool name.
 pub const PAPERCUT_TOOL_NAME: &str = "papercut";
+/// Model-visible active papercut metadata tool.
+pub const PAPERCUT_LIST_TOOL_NAME: &str = "papercut_list";
+/// Model-visible full active papercut history tool.
+pub const PAPERCUT_READ_TOOL_NAME: &str = "papercut_read";
+/// Model-visible validated active papercut archive tool.
+pub const PAPERCUT_ARCHIVE_TOOL_NAME: &str = "papercut_archive";
 /// Model-visible artifact image inspection tool name.
 pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
 const PAPERCUT_MODEL_GUIDANCE: &str = "Use this tool only if you encounter an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Record one concise, best-effort report, then continue the primary task. Do not call it merely to state that no problem occurred, and do not retry.";
 
 /// Canonical JSONL filename owned by the standard papercut reporter.
-pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";
+pub const PAPERCUT_FILE_NAME: &str = tau_proto::PAPERCUT_FILE_NAME;
 /// Schema version emitted by the standard papercut reporter.
 pub const PAPERCUT_SCHEMA_VERSION: u64 = 1;
 const MAX_PAPERCUT_REPORT_CHARS: usize = 4096;
@@ -102,7 +109,7 @@ where
             .deserialized::<UtilsConfig>()
             .map_err(|_| tau_client::ClientError::handler("invalid utility configuration"))?;
         Ok(tau_proto::InspectionComplete {
-            tools: tool_registrations(config.papercut.enable),
+            tools: tool_registrations(config.papercut.enable, config.papercut_history.enable),
             ..Default::default()
         })
     })?
@@ -136,13 +143,24 @@ where
             return Ok(());
         }
     };
+    runtime.state_mut().papercut_history_supported =
+        supports_papercut_history(configure.harness_protocol_version);
     if config.papercut.enable {
         let storage = RpcPapercutStorage {
             client: runtime.extension_data_client(),
         };
         runtime.state_mut().papercut_storage = Some(Box::new(storage));
     }
-    send_startup(&mut runtime, config.papercut.enable)?;
+    if config.papercut_history.enable {
+        let client = runtime.extension_data_client();
+        runtime.state_mut().papercut_history_storage =
+            Some(Box::new(RpcPapercutHistoryStorage { client }));
+    }
+    send_startup(
+        &mut runtime,
+        config.papercut.enable,
+        config.papercut_history.enable,
+    )?;
     tracing::info!(
         target: "tau_ext_utils",
         papercut_enabled = config.papercut.enable,
@@ -188,6 +206,8 @@ struct TimerRuntime {
     /// Configured wire name for papercut calls after optional tool-prefix
     /// scoping.
     papercut_tool_name: Option<tau_proto::ToolName>,
+    /// Opt-in history tool wire names, including configured prefix scoping.
+    papercut_history_tool_names: Vec<(tau_proto::ToolName, PapercutHistoryAction)>,
     /// Configured wire name for artifact image reads.
     read_image_tool_name: Option<tau_proto::ToolName>,
     /// Harness-authoritative immutable session identifier for papercut
@@ -198,6 +218,10 @@ struct TimerRuntime {
     /// Optional per-instance User-scope append service enabled by extension
     /// configuration.
     papercut_storage: Option<Box<dyn PapercutStorage>>,
+    /// Optional User-scope history RPC, never needed for ordinary reporting.
+    papercut_history_storage: Option<Box<dyn PapercutHistoryStorage>>,
+    /// Whether Configure identified a harness capable of locked history RPC.
+    papercut_history_supported: bool,
     /// Artifact-backed image reads and bounded decoder lifecycle.
     artifact_images: Option<artifact_image::ArtifactImageManager>,
 }
@@ -208,6 +232,17 @@ struct TimerRuntime {
 struct UtilsConfig {
     /// Best-effort papercut reporter configuration.
     papercut: PapercutConfig,
+    /// Opt-in access to active history and its whole-file archive.
+    papercut_history: PapercutHistoryConfig,
+}
+
+/// Operator switch for all three history tools, default-off independently of
+/// the existing default-on reporter.
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PapercutHistoryConfig {
+    /// Expose active-history list, read, and archive tools when true.
+    enable: bool,
 }
 
 /// Operator configuration controlling the model-visible papercut tool.
@@ -228,6 +263,65 @@ impl Default for PapercutConfig {
 trait PapercutStorage {
     /// Append one complete JSONL record to the reporter-owned file.
     fn append_papercut(&self, contents: Vec<u8>) -> Result<(), String>;
+}
+
+/// Locked User-scope snapshot and conditional archive operations.
+trait PapercutHistoryStorage {
+    /// Return an absent or complete active reporter snapshot.
+    fn read(&self) -> Result<Option<Vec<u8>>, String>;
+    /// Archive only the previously validated exact bytes.
+    fn archive(&self, expected_generation: &str) -> Result<String, String>;
+}
+
+/// Harness-mediated papercut history operations in the reporter's own scope.
+struct RpcPapercutHistoryStorage {
+    /// Existing extension data client bound to this configured instance.
+    client: ExtensionDataClient,
+}
+
+impl PapercutHistoryStorage for RpcPapercutHistoryStorage {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        match self.client.request(
+            ExtensionDataScope::User,
+            ExtensionDataRequestOp::ReadPapercuts,
+        ) {
+            Ok(ExtensionDataValue::ReadPapercuts { contents }) => Ok(contents),
+            Ok(other) => Err(format!("unexpected papercut read result: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn archive(&self, expected_generation: &str) -> Result<String, String> {
+        match self.client.request(
+            ExtensionDataScope::User,
+            ExtensionDataRequestOp::ArchivePapercuts {
+                expected_generation: expected_generation.to_owned(),
+            },
+        ) {
+            Ok(ExtensionDataValue::ArchivePapercuts { archive }) => Ok(archive.into_string()),
+            Ok(other) => Err(format!("unexpected papercut archive result: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+/// Active-history operation selected by its prefixed declared wire name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PapercutHistoryAction {
+    /// Show safe attribution and timestamps, without report bodies.
+    List,
+    /// Show complete active reports as copyable Markdown.
+    Read,
+    /// Archive all validated active reports without deleting their bytes.
+    Archive,
+}
+
+/// Older or unknown harness revisions cannot decode history RPC variants.
+fn supports_papercut_history(version: Option<tau_proto::ProtocolVersion>) -> bool {
+    version.is_some_and(|version| {
+        version.major == tau_proto::PROTOCOL_VERSION.major
+            && version >= tau_proto::ProtocolVersion::new(10, 1)
+    })
 }
 
 /// Production papercut storage using the general per-instance User-scope data
@@ -592,10 +686,13 @@ impl TimerRuntime {
             reported_timer_agents: HashSet::new(),
             timer_tool_name: None,
             papercut_tool_name: None,
+            papercut_history_tool_names: Vec::new(),
             read_image_tool_name: None,
             bound_session_id: None,
             session_active: false,
             papercut_storage: None,
+            papercut_history_storage: None,
+            papercut_history_supported: false,
             artifact_images: Some(artifact_image::ArtifactImageManager::new(handle)),
         }
     }
@@ -1012,6 +1109,54 @@ impl TimerRuntime {
             .is_some_and(|papercut| papercut == name)
     }
 
+    /// Resolve only registered opt-in history tools by their configured names.
+    fn papercut_history_action(&self, name: &tau_proto::ToolName) -> Option<PapercutHistoryAction> {
+        self.papercut_history_tool_names
+            .iter()
+            .find_map(|(registered, action)| (registered == name).then_some(*action))
+    }
+
+    /// Run one active-only history operation with truthful storage failures.
+    fn run_papercut_history(&self, action: PapercutHistoryAction) -> Result<String, String> {
+        if !self.session_active {
+            return Err("no active session is available".to_owned());
+        }
+        if !self.papercut_history_supported {
+            return Err("papercut history tools require harness protocol 10.1 or newer".to_owned());
+        }
+        let storage = self
+            .papercut_history_storage
+            .as_ref()
+            .ok_or_else(|| "papercut history storage is unavailable".to_owned())?;
+        let contents = storage.read()?;
+        let records = papercut_history::parse_records(contents.as_deref().unwrap_or_default())?;
+        match action {
+            PapercutHistoryAction::List => {
+                let mut output = format!("{} active papercut report(s)\n", records.len());
+                for record in records {
+                    output.push_str(&papercut_history::format_timestamp(record.timestamp_us())?);
+                    output.push(' ');
+                    output.push_str(record.agent_id().as_str());
+                    output.push_str(" [");
+                    output.push_str(record.session_id().as_str());
+                    output.push_str("]\n");
+                }
+                Ok(output)
+            }
+            PapercutHistoryAction::Read => papercut_history::format_markdown(&records),
+            PapercutHistoryAction::Archive => {
+                let Some(contents) = contents else {
+                    return Ok("archived 0 papercut report(s); no archive created".to_owned());
+                };
+                let archive = storage.archive(blake3::hash(&contents).to_hex().as_ref())?;
+                Ok(format!(
+                    "archived {} papercut report(s) at {archive}",
+                    records.len()
+                ))
+            }
+        }
+    }
+
     fn unload_agent(&mut self, agent_id: &AgentId) {
         self.replay_complete_agents.remove(agent_id);
         self.pending_invocations
@@ -1321,6 +1466,7 @@ fn read_initial_config(
 fn send_startup(
     runtime: &mut ManualExtensionRuntime<TimerRuntime>,
     papercut_enabled: bool,
+    papercut_history_enabled: bool,
 ) -> ClientResult<()> {
     let handle = runtime.handle();
     let scope = handle.tool_name_scope()?;
@@ -1332,6 +1478,16 @@ fn send_startup(
     runtime.state_mut().timer_tool_name = Some(timer_tool_name);
     runtime.state_mut().read_image_tool_name = Some(read_image_tool_name);
     runtime.state_mut().papercut_tool_name = papercut_tool_name;
+    if papercut_history_enabled {
+        runtime.state_mut().papercut_history_tool_names = [
+            (PAPERCUT_LIST_TOOL_NAME, PapercutHistoryAction::List),
+            (PAPERCUT_READ_TOOL_NAME, PapercutHistoryAction::Read),
+            (PAPERCUT_ARCHIVE_TOOL_NAME, PapercutHistoryAction::Archive),
+        ]
+        .into_iter()
+        .map(|(name, action)| scope.wire_tool(name).map(|wire| (wire, action)))
+        .collect::<Result<_, _>>()?;
+    }
     runtime.startup_subscribe_split(
         [
             EventSelector::Exact(EventName::TOOL_STARTED),
@@ -1351,18 +1507,68 @@ fn send_startup(
             EventSelector::Exact(EventName::TOOL_CANCELLED),
         ],
     )?;
-    for registration in tool_registrations(papercut_enabled) {
+    for registration in tool_registrations(papercut_enabled, papercut_history_enabled) {
         runtime.startup_local_tool(registration)?;
     }
     runtime.startup_ready(Some("utils ready".to_owned()))
 }
 
-fn tool_registrations(papercut_enabled: bool) -> Vec<tau_proto::ToolRegistrationDeclared> {
+fn tool_registrations(
+    papercut_enabled: bool,
+    papercut_history_enabled: bool,
+) -> Vec<tau_proto::ToolRegistrationDeclared> {
     let mut registrations = vec![timer_registration(), read_image_registration()];
     if papercut_enabled {
         registrations.push(papercut_registration());
     }
+    if papercut_history_enabled {
+        registrations.extend([
+            papercut_history_registration(
+                PAPERCUT_LIST_TOOL_NAME,
+                "List timestamps and attribution for active papercut reports, without report bodies.",
+            ),
+            papercut_history_registration(
+                PAPERCUT_READ_TOOL_NAME,
+                "Read all active papercut reports as copyable Markdown, including their full bodies.",
+            ),
+            papercut_history_registration(
+                PAPERCUT_ARCHIVE_TOOL_NAME,
+                "Archive the complete validated active papercut file; never delete preserved reports. New reports remain active.",
+            ),
+        ]);
+    }
     registrations
+}
+
+/// Register one explicitly opted-in active-history operation.
+fn papercut_history_registration(
+    name: &str,
+    description: &str,
+) -> tau_proto::ToolRegistrationDeclared {
+    tau_proto::ToolRegistrationDeclared {
+        tool: ToolSpec {
+            provider_scope: None,
+            name: tau_proto::ToolName::new(name),
+            model_visible_name: None,
+            description: Some(description.to_owned()),
+            tool_type: ToolType::Function,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })),
+            format: None,
+            tags: vec![],
+            enabled_by_default: true,
+            background_support: Some(tau_proto::BackgroundSupport::Never),
+            examples: vec![],
+        },
+        tool_group: Some(tau_proto::ToolGroup {
+            name: tau_proto::ToolGroupName::new("papercut"),
+            prompt_fragment: None,
+        }),
+        prompt_fragment: None,
+    }
 }
 
 fn read_image_registration() -> tau_proto::ToolRegistrationDeclared {
@@ -1445,6 +1651,18 @@ fn handle_delivery(
         }
         Event::ToolStarted(invoke) if runtime.state().is_papercut_tool(&invoke.tool_name) => {
             report_papercut_tool(runtime.state(), runtime.handle(), invoke)?;
+        }
+        Event::ToolStarted(invoke)
+            if runtime
+                .state()
+                .papercut_history_action(&invoke.tool_name)
+                .is_some() =>
+        {
+            let action = runtime
+                .state()
+                .papercut_history_action(&invoke.tool_name)
+                .expect("matched history tool");
+            report_papercut_history_tool(runtime.state(), runtime.handle(), invoke, action)?;
         }
         Event::ToolStarted(invoke) if runtime.state().is_read_image_tool(&invoke.tool_name) => {
             if let Some(images) = runtime.state_mut().artifact_images.as_mut() {
@@ -1561,6 +1779,74 @@ fn report_papercut_tool(
         display: Some(ok_display("papercut".to_owned())),
         originator: invoke.originator.clone(),
     })
+}
+
+/// Terminalize one live history call, retaining storage errors as tool errors.
+fn report_papercut_history_tool(
+    state: &TimerRuntime,
+    handle: ClientHandle,
+    invoke: &ToolStarted,
+    action: PapercutHistoryAction,
+) -> ClientResult<()> {
+    let result = match &invoke.arguments {
+        CborValue::Map(arguments) if arguments.is_empty() => state.run_papercut_history(action),
+        _ => Err("papercut history tools accept no arguments".to_owned()),
+    };
+    handle.report_tool_terminal(papercut_history_terminal(invoke, result))
+}
+
+/// Select a bounded terminal before sending anything through the writer.
+fn papercut_history_terminal(
+    invoke: &ToolStarted,
+    result: Result<String, String>,
+) -> tau_client::ToolTerminalOutcome {
+    match result {
+        Ok(text) => {
+            let result = ToolResult {
+                presentation: Default::default(),
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                tool_type: ToolType::Function,
+                result: text_result(text),
+                provider_content: Vec::new(),
+                kind: ToolResultKind::Final,
+                display: Some(ok_display(invoke.tool_name.as_str().to_owned())),
+                originator: invoke.originator.clone(),
+            };
+            if papercut_history_result_fits(&result) {
+                result.into()
+            } else {
+                papercut_history_error(
+                    invoke,
+                    "active papercut history exceeds the tool result limit; use `tau dev papercut list` or `tau dev papercut clear`".to_owned(),
+                )
+                .into()
+            }
+        }
+        Err(message) => papercut_history_error(invoke, message).into(),
+    }
+}
+
+/// Measure the exact transient result frame, including its routed metadata and
+/// CBOR escaping, before the client writer could reject an oversized result.
+fn papercut_history_result_fits(result: &ToolResult) -> bool {
+    let frame = HarnessInputMessage::emit_transient(Event::ToolResultReported(result.clone()));
+    tau_client::encoded_outbound_frame_bytes(&frame)
+        .is_ok_and(|size| size <= tau_client::MAX_OUTBOUND_FRAME_BYTES)
+}
+
+/// Construct a compact failure for ordinary terminal reporting.
+fn papercut_history_error(invoke: &ToolStarted, message: String) -> ToolError {
+    ToolError {
+        presentation: Default::default(),
+        call_id: invoke.call_id.clone(),
+        tool_name: invoke.tool_name.clone(),
+        tool_type: ToolType::Function,
+        message,
+        details: None,
+        display: Some(error_display(invoke.tool_name.as_str().to_owned())),
+        originator: invoke.originator.clone(),
+    }
 }
 
 fn timer_display_args(arguments: &CborValue, call_id: &str) -> String {

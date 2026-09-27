@@ -9,9 +9,7 @@ use std::io::{Error as IoError, ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt as _;
-use tau_ext_utils::{PAPERCUT_FILE_NAME, PapercutRecord, PapercutRecordParseError};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
+use tau_ext_utils::{PAPERCUT_FILE_NAME, PapercutRecord, papercut_history};
 
 use crate::cli::PapercutCommand;
 use crate::{CliError, line_output};
@@ -19,7 +17,7 @@ use crate::{CliError, line_output};
 /// Configured instance name for Tau's standard utility extension.
 const STD_UTILS_INSTANCE: &str = "std-utils";
 /// Prefix for preserved files removed from the active papercut listing.
-const PAPERCUT_ARCHIVE_PREFIX: &str = "papercuts.archive-";
+const PAPERCUT_ARCHIVE_PREFIX: &str = tau_proto::PAPERCUT_ARCHIVE_PREFIX;
 
 /// Runs one `tau dev papercut` command.
 pub(crate) fn run(command: PapercutCommand) -> Result<(), CliError> {
@@ -188,37 +186,7 @@ impl PapercutStore {
                 "papercut records exceed the extension data file limit".to_owned(),
             ));
         }
-        let contents = String::from_utf8(contents).map_err(|_| {
-            CliError::Participant("papercut records are not valid UTF-8".to_owned())
-        })?;
-        let mut records = Vec::new();
-        for (line_number, line) in contents.lines().enumerate() {
-            let record = match PapercutRecord::parse_json_line(line) {
-                Ok(record) => record,
-                Err(PapercutRecordParseError::Invalid) => {
-                    return Err(CliError::Participant(format!(
-                        "invalid papercut record at line {}",
-                        line_number + 1
-                    )));
-                }
-                Err(PapercutRecordParseError::UnsupportedSchema) => {
-                    return Err(CliError::Participant(format!(
-                        "unsupported papercut record schema at line {}",
-                        line_number + 1
-                    )));
-                }
-            };
-            let _ = format_timestamp(record.timestamp_us())?;
-            records.push(record);
-        }
-        records.sort_unstable_by(|left, right| {
-            left.timestamp_us()
-                .cmp(&right.timestamp_us())
-                .then_with(|| left.agent_id().cmp(right.agent_id()))
-                .then_with(|| left.session_id().cmp(right.session_id()))
-                .then_with(|| left.report().cmp(right.report()))
-        });
-        Ok(records)
+        papercut_history::parse_records(&contents).map_err(CliError::Participant)
     }
 
     /// Synchronizes a deterministic test at the post-removal clear boundary.
@@ -252,92 +220,14 @@ fn format_clear_result(result: &PapercutClearResult) -> String {
     }
 }
 
-/// Formats the concise, line-oriented representation used by default.
+/// Formats the same line-oriented representation as the shared reporter reader.
 fn format_plain(records: &[PapercutRecord]) -> Result<String, CliError> {
-    if records.is_empty() {
-        return Ok("no papercut reports\n".to_owned());
-    }
-    let mut output = String::new();
-    for record in records {
-        output.push_str(&format_timestamp(record.timestamp_us())?);
-        output.push(' ');
-        output.push_str(record.agent_id().as_str());
-        output.push_str(" [");
-        output.push_str(record.session_id().as_str());
-        output.push_str("] ");
-        output.push_str(&line_output::escape_field(record.report()));
-        output.push('\n');
-    }
-    Ok(output)
+    papercut_history::format_plain(records).map_err(CliError::Participant)
 }
 
-/// Formats records as copyable Markdown without interpreting report text as
-/// Markdown.
+/// Formats the same copyable Markdown representation as the shared reader.
 fn format_markdown(records: &[PapercutRecord]) -> Result<String, CliError> {
-    let mut output = String::from("# Papercuts\n\n");
-    if records.is_empty() {
-        output.push_str("No papercut reports.\n");
-        return Ok(output);
-    }
-    for record in records {
-        output.push_str("## ");
-        output.push_str(&format_timestamp(record.timestamp_us())?);
-        output.push_str("\n\n- Agent: `");
-        output.push_str(record.agent_id().as_str());
-        output.push_str("`\n- Session: `");
-        output.push_str(record.session_id().as_str());
-        output.push_str("`\n\n");
-        let fence = markdown_fence(record.report());
-        output.push_str(&fence);
-        output.push_str("text\n");
-        output.push_str(&escape_markdown_code(record.report()));
-        if !record.report().ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str(&fence);
-        output.push_str("\n\n");
-    }
-    Ok(output)
-}
-
-/// Formats a stored operation timestamp as an RFC 3339 UTC value.
-fn format_timestamp(timestamp_us: tau_proto::UnixMicros) -> Result<String, CliError> {
-    let timestamp = OffsetDateTime::from_unix_timestamp_nanos(
-        i128::from(timestamp_us.get()) * 1_000,
-    )
-    .map_err(|_| CliError::Participant("papercut record has an invalid timestamp".to_owned()))?;
-    timestamp
-        .format(&Rfc3339)
-        .map_err(|_| CliError::Participant("could not format papercut timestamp".to_owned()))
-}
-
-/// Escapes terminal controls while retaining report line boundaries in a code
-/// block.
-fn escape_markdown_code(value: &str) -> String {
-    let mut escaped = String::new();
-    for character in value.chars() {
-        match character {
-            '\n' => escaped.push('\n'),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character if character.is_control() => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-/// Selects a fence longer than any backtick run in one report.
-fn markdown_fence(report: &str) -> String {
-    let longest = report
-        .split(|character| character != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or_default();
-    "`".repeat(3.max(longest + 1))
+    papercut_history::format_markdown(records).map_err(CliError::Participant)
 }
 
 /// Opens an existing extension data root without following a final symlink.

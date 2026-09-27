@@ -1229,6 +1229,7 @@ fn tool_spec(name: &str) -> ToolSpec {
 fn config_with_unknown_field() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "unknown": 4 })),
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1289,6 +1290,7 @@ fn ready_frame_index(frames: &[HarnessInputMessage]) -> usize {
 fn configure_message() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 3 })),
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1574,6 +1576,7 @@ fn configure_application_failure_sends_config_error() {
         &[
             HarnessOutputMessage::Configure(Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                harness_protocol_version: None,
                 tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
                 instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1623,6 +1626,7 @@ fn configure_application_failure_runs_error_hook() {
         0,
         &[HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1658,6 +1662,7 @@ fn raw_configure_error_emits_config_error_and_continues() {
         &[
             HarnessOutputMessage::Configure(Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                harness_protocol_version: None,
                 tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
                 instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -3564,6 +3569,7 @@ fn manual_loop_dispatch_config_error_continues() {
     let written = writer.clone();
     let initial = HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 7 })),
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -3973,6 +3979,7 @@ fn builder_rejects_duplicate_intercept_handlers() {
 fn configured_tool_prefix_maps_registration_and_dispatch() {
     let configure = HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Null,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -4065,6 +4072,7 @@ fn rejected_configure_discards_buffered_declaration_and_withholds_ready() {
 fn manual_loop_uses_configured_tool_scope() {
     let configure = HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Map(Vec::new()),
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -4096,6 +4104,7 @@ fn manual_loop_recv_rejects_changed_prefix_and_preserves_scope() {
     let configure = |prefix: &str| {
         HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -4140,6 +4149,7 @@ fn manual_loop_try_recv_rejects_changed_prefix_and_preserves_scope() {
     let configure = |prefix: &str| {
         HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -4191,6 +4201,7 @@ fn changed_tool_prefix_is_rejected_without_reconfiguring() {
     let configure = |prefix: &str, value| {
         HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: tau_proto::json_to_cbor(&serde_json::json!({ "value": value })),
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -4219,6 +4230,7 @@ fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
     let configure = |prefix: &str| {
         HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -4259,6 +4271,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
     handle
         .install_tool_name_scope(ToolNameScope::from_configure(&Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
             config: CborValue::Map(Vec::new()),
             instance_name: tau_proto::ExtensionName::parse("test-extension")

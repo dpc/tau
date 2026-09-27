@@ -393,6 +393,7 @@ fn disconnect_frame(reason: Option<String>) -> HarnessOutputMessage {
 fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),

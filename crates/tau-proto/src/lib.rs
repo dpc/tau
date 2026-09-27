@@ -109,7 +109,12 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(10, 0);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(10, 1);
+
+/// Reporter-owned filename used by the locked papercut history RPC.
+pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";
+/// Numbered archive prefix shared by the operator CLI and history RPC.
+pub const PAPERCUT_ARCHIVE_PREFIX: &str = "papercuts.archive-";
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

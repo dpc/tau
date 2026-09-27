@@ -125,6 +125,7 @@ fn configured_frames_with_config(
 ) -> Vec<HarnessInputMessage> {
     let configure = HarnessOutputMessage::Configure(Configure {
         purpose,
+        harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         instance_name: tau_proto::ExtensionName::parse("std-utils").expect("extension name"),
         config,
@@ -283,10 +284,13 @@ fn runtime_with_timezone_provider(
         reported_timer_agents: HashSet::new(),
         timer_tool_name: None,
         papercut_tool_name: None,
+        papercut_history_tool_names: Vec::new(),
         read_image_tool_name: None,
         bound_session_id: None,
         session_active: false,
         papercut_storage: None,
+        papercut_history_storage: None,
+        papercut_history_supported: false,
         artifact_images: None,
     }
 }
@@ -1426,10 +1430,29 @@ fn papercut_config_defaults_on_and_gates_visibility_and_prompt() {
     .expect("enabled config");
 
     assert!(default.papercut.enable);
+    assert!(!default.papercut_history.enable);
     assert!(!disabled.papercut.enable);
     assert!(enabled.papercut.enable);
-    assert_eq!(tool_registrations(false).len(), 2);
-    let registrations = tool_registrations(true);
+    assert_eq!(tool_registrations(false, false).len(), 2);
+    assert_eq!(tool_registrations(true, false).len(), 3);
+    let history = tool_registrations(false, true);
+    assert_eq!(history.len(), 5);
+    for name in [
+        PAPERCUT_LIST_TOOL_NAME,
+        PAPERCUT_READ_TOOL_NAME,
+        PAPERCUT_ARCHIVE_TOOL_NAME,
+    ] {
+        let tool = history
+            .iter()
+            .find(|registration| registration.tool.name.as_str() == name)
+            .expect("history registration");
+        assert!(tool.tool.enabled_by_default);
+        assert_eq!(
+            tool.tool.parameters.as_ref().expect("empty arguments")["additionalProperties"],
+            false
+        );
+    }
+    let registrations = tool_registrations(true, false);
     let papercut = registrations
         .iter()
         .find(|registration| registration.tool.name.as_str() == PAPERCUT_TOOL_NAME)
@@ -1556,6 +1579,7 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
     writer
         .write_message(&HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
             instance_name: tau_proto::ExtensionName::parse("std-utils").expect("instance"),
             config: cbor_map(vec![(
@@ -2459,6 +2483,213 @@ fn papercut_config_rejects_unknown_fields() {
         }))
         .is_err()
     );
+    assert!(
+        serde_json::from_value::<UtilsConfig>(serde_json::json!({
+            "papercut_history": {"enabled": true}
+        }))
+        .is_err()
+    );
+}
+
+/// In-memory history fixture retains the same complete-byte generation check
+/// as the harness, without touching any live reporter-owned state.
+struct FakePapercutHistory {
+    /// Shared active-file bytes, absent before reporting or after archive.
+    active: Rc<RefCell<Option<Vec<u8>>>>,
+    /// Count of RPC-equivalent operations issued by the extension.
+    requests: Rc<RefCell<usize>>,
+}
+
+impl PapercutHistoryStorage for FakePapercutHistory {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        *self.requests.borrow_mut() += 1;
+        Ok(self.active.borrow().clone())
+    }
+
+    fn archive(&self, expected_generation: &str) -> Result<String, String> {
+        *self.requests.borrow_mut() += 1;
+        let mut active = self.active.borrow_mut();
+        let contents = active.as_ref().ok_or("active file disappeared")?;
+        if blake3::hash(contents).to_hex().as_str() != expected_generation {
+            return Err("papercut records changed since they were validated".to_owned());
+        }
+        *active = None;
+        Ok("papercuts.archive-0000000000000001.jsonl".to_owned())
+    }
+}
+
+/// List omits report bodies; read includes them, and archive preserves the
+/// validated whole snapshot while removing it from active history.
+#[test]
+fn papercut_history_tools_separate_metadata_full_read_and_archive() {
+    let mut rt = runtime();
+    rt.session_active = true;
+    rt.papercut_history_supported = true;
+    let active = Rc::new(RefCell::new(Some(
+        b"{\"schema\":1,\"agent_id\":\"agent-one\",\"session_id\":\"session-one\",\"timestamp_us\":1000000,\"report\":\"secret report\"}\n".to_vec(),
+    )));
+    rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
+        active: Rc::clone(&active),
+        requests: Rc::new(RefCell::new(0)),
+    }));
+    let list = rt
+        .run_papercut_history(PapercutHistoryAction::List)
+        .expect("list");
+    assert_eq!(
+        list,
+        "1 active papercut report(s)\n1970-01-01T00:00:01Z agent-one [session-one]\n"
+    );
+    assert!(!list.contains("secret report"));
+    let read = rt
+        .run_papercut_history(PapercutHistoryAction::Read)
+        .expect("read");
+    assert!(read.contains("secret report"));
+    assert_eq!(
+        rt.run_papercut_history(PapercutHistoryAction::Archive)
+            .expect("archive"),
+        "archived 1 papercut report(s) at papercuts.archive-0000000000000001.jsonl"
+    );
+    assert!(active.borrow().is_none());
+    assert_eq!(
+        rt.run_papercut_history(PapercutHistoryAction::List)
+            .expect("empty list"),
+        "0 active papercut report(s)\n"
+    );
+}
+
+/// Invalid or unsupported records must block archive before any mutating RPC;
+/// the exact private active bytes remain untouched.
+#[test]
+fn papercut_history_archive_fails_closed_on_malformed_snapshot() {
+    let mut rt = runtime();
+    rt.session_active = true;
+    rt.papercut_history_supported = true;
+    let active = Rc::new(RefCell::new(Some(b"invalid JSON\n".to_vec())));
+    rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
+        active: Rc::clone(&active),
+        requests: Rc::new(RefCell::new(0)),
+    }));
+    assert_eq!(
+        rt.run_papercut_history(PapercutHistoryAction::Archive)
+            .expect_err("malformed record"),
+        "invalid papercut record at line 1"
+    );
+    assert_eq!(
+        active.borrow().as_deref(),
+        Some(b"invalid JSON\n".as_slice())
+    );
+    *active.borrow_mut() = Some(
+        b"{\"schema\":2,\"agent_id\":\"agent-one\",\"session_id\":\"session-one\",\"timestamp_us\":1000000,\"report\":\"report\"}\n".to_vec(),
+    );
+    assert_eq!(
+        rt.run_papercut_history(PapercutHistoryAction::Archive)
+            .expect_err("unsupported schema"),
+        "unsupported papercut record schema at line 1"
+    );
+}
+
+/// Unknown and older harness revisions produce a local unsupported error
+/// before any history RPC is issued; current and compatible future minor
+/// revisions remain available.
+#[test]
+fn papercut_history_on_old_harness_fails_before_storage_rpc() {
+    for version in [
+        None,
+        Some(tau_proto::ProtocolVersion::new(10, 0)),
+        Some(tau_proto::ProtocolVersion::new(9, 99)),
+        Some(tau_proto::ProtocolVersion::new(11, 0)),
+    ] {
+        assert!(!supports_papercut_history(version));
+        let mut rt = runtime();
+        rt.session_active = true;
+        rt.papercut_history_supported = supports_papercut_history(version);
+        let requests = Rc::new(RefCell::new(0));
+        rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
+            active: Rc::new(RefCell::new(Some(b"original bytes".to_vec()))),
+            requests: Rc::clone(&requests),
+        }));
+        for action in [
+            PapercutHistoryAction::List,
+            PapercutHistoryAction::Read,
+            PapercutHistoryAction::Archive,
+        ] {
+            assert_eq!(
+                rt.run_papercut_history(action).expect_err("old harness"),
+                "papercut history tools require harness protocol 10.1 or newer"
+            );
+        }
+        assert_eq!(*requests.borrow(), 0);
+    }
+    assert!(supports_papercut_history(Some(tau_proto::PROTOCOL_VERSION)));
+    assert!(supports_papercut_history(Some(
+        tau_proto::ProtocolVersion::new(10, 2)
+    )));
+}
+
+/// An escape-heavy but valid history can expand beyond the outbound frame
+/// budget. It becomes one bounded tool error; a later small history still
+/// becomes a successful terminal without restarting the extension.
+#[test]
+fn oversized_papercut_read_returns_tool_error_then_accepts_next_read() {
+    let mut rt = runtime();
+    rt.session_active = true;
+    rt.papercut_history_supported = true;
+    let report = "`".repeat(4096);
+    let record = PapercutRecord::new(
+        AgentId::parse("agent-one").expect("agent"),
+        tau_proto::SessionId::parse("session-one").expect("session"),
+        UnixMicros::new(1_000_000),
+        report,
+    );
+    let line = serde_json::to_vec(&record).expect("record");
+    let mut contents = Vec::new();
+    for _ in 0..1_100 {
+        contents.extend_from_slice(&line);
+        contents.push(b'\n');
+    }
+    assert!(contents.len() < 8 * 1024 * 1024);
+    let active = Rc::new(RefCell::new(Some(contents)));
+    rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
+        active: Rc::clone(&active),
+        requests: Rc::new(RefCell::new(0)),
+    }));
+    let mut invoke = papercut_started("call-big", "agent-one", "not a report call");
+    invoke.tool_name = tau_proto::ToolName::new(PAPERCUT_READ_TOOL_NAME);
+    invoke.arguments = cbor_map(Vec::new());
+    let big = rt
+        .run_papercut_history(PapercutHistoryAction::Read)
+        .expect("valid, large Markdown");
+    assert!(big.len() > tau_client::MAX_OUTBOUND_FRAME_BYTES as usize);
+    let terminal = papercut_history_terminal(&invoke, Ok(big));
+    let tau_client::ToolTerminalOutcome::Failure(error) = terminal else {
+        panic!("oversized result must become tool error");
+    };
+    assert!(error.message.contains("tool result limit"));
+    assert_eq!(
+        active.borrow().as_ref().expect("not archived").len(),
+        line.len() * 1_100 + 1_100
+    );
+    *active.borrow_mut() = Some(
+        format!(
+            "{}\n",
+            serde_json::to_string(&PapercutRecord::new(
+                AgentId::parse("agent-one").expect("agent"),
+                tau_proto::SessionId::parse("session-one").expect("session"),
+                UnixMicros::new(1_000_000),
+                "later report".to_owned()
+            ))
+            .expect("small record")
+        )
+        .into_bytes(),
+    );
+    invoke.call_id = ToolCallId::new("call-small");
+    let small = rt
+        .run_papercut_history(PapercutHistoryAction::Read)
+        .expect("subsequent small read");
+    assert!(matches!(
+        papercut_history_terminal(&invoke, Ok(small)),
+        tau_client::ToolTerminalOutcome::Result(_)
+    ));
 }
 
 /// Ensures the model-visible schema retains its bounded report contract while

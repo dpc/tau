@@ -3587,6 +3587,10 @@ fn configure_includes_extension_state_dir_and_creates_it() {
     let expected =
         tau_config::settings::extension_state_dir_of(&sp, "std-email").expect("safe name");
     assert_eq!(configure.state_dir.as_deref(), Some(expected.as_path()));
+    assert_eq!(
+        configure.harness_protocol_version,
+        Some(tau_proto::PROTOCOL_VERSION)
+    );
     assert!(expected.is_dir(), "{} should exist", expected.display());
 }
 

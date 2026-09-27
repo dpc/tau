@@ -32,6 +32,7 @@ fn with_transport(
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: Default::default(),
+            harness_protocol_version: None,
             config: CborValue::Map(Vec::new()),
             instance_name: "image-test".parse().expect("instance"),
             tool_prefix: None,

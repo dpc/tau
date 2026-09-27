@@ -1695,6 +1695,7 @@ impl Harness {
         }
         let configure = HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
             config: tau_proto::json_to_cbor(&config_json),
             instance_name: self
                 .extensions

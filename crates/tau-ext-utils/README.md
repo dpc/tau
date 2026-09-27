@@ -58,6 +58,30 @@ By default, Tau declares the model-visible `papercut` tool with one required
 policy still applies, so an explicit role allow-list or disable rule can also
 hide it. The setting does not bypass that policy.
 
+The separate history tools are **off by default**. Enable them for a
+configured utility extension instance with:
+
+```yaml
+extensions:
+  std-utils:
+    config:
+      papercut_history:
+        enable: true
+```
+
+`papercut_list` shows only active report count, timestamps, agent IDs, and
+session IDs. `papercut_read` shows complete active reports in the same Markdown
+format as `tau dev papercut list --markdown`. `papercut_archive` validates
+and preserves the whole active file in a numbered private archive, like
+`tau dev papercut clear`; it does not delete reports. All three take no
+arguments. Each call reads a fresh snapshot, so listing or reading does not
+reserve the reports for a later archive. Archive fails rather than moving a
+file that changed after validation. They use the authenticated extension
+instance's User-scope storage and still obey global and role tool policy.
+When the harness is older than protocol 10.1 or does not advertise its
+revision, all three tools return an explicit unsupported error without
+sending a history request or interrupting other utility tools.
+
 
 ## Records
 

@@ -617,6 +617,7 @@ impl Harness {
         admission: ExtensionFrameAdmission,
     ) {
         let request_id = request.request_id;
+        let papercut_read = matches!(request.op, tau_proto::ExtensionDataRequestOp::ReadPapercuts);
         let secret_scope = request.scope == tau_proto::ExtensionDataScope::Secret;
         let result = match self.run_extension_data_request(
             connection_id,
@@ -636,6 +637,11 @@ impl Harness {
                     error.message
                 },
             },
+        };
+        let result = if papercut_read {
+            bounded_papercut_read_response(&request_id, result)
+        } else {
+            result
         };
         self.send_extension_data_result(connection_id, request_id, result);
     }
@@ -657,6 +663,28 @@ impl Harness {
         let is_secret = scope == tau_proto::ExtensionDataScope::Secret;
         let root = self.extension_data_scope_root(connection_id, scope.clone())?;
         match op {
+            tau_proto::ExtensionDataRequestOp::ReadPapercuts => {
+                if scope == tau_proto::ExtensionDataScope::User {
+                    run_papercut_read(&root)
+                } else {
+                    Err(ExtensionDataError::new(
+                        tau_proto::ExtensionDataErrorKind::Permission,
+                        "papercuts are available only in user scope",
+                    ))
+                }
+            }
+            tau_proto::ExtensionDataRequestOp::ArchivePapercuts {
+                expected_generation,
+            } => {
+                if scope == tau_proto::ExtensionDataScope::User {
+                    run_papercut_archive(&root, &expected_generation)
+                } else {
+                    Err(ExtensionDataError::new(
+                        tau_proto::ExtensionDataErrorKind::Permission,
+                        "papercuts are available only in user scope",
+                    ))
+                }
+            }
             tau_proto::ExtensionDataRequestOp::ReadFile { path } => {
                 if is_secret {
                     run_extension_data_read_file_with_limit(
@@ -870,3 +898,38 @@ impl Harness {
         }
     }
 }
+
+/// Measure the complete directed reply, not the raw file size: a byte-vector
+/// CBOR encoding and its envelope can exceed the protocol frame budget.
+fn bounded_papercut_read_response(
+    request_id: &str,
+    result: tau_proto::ExtensionDataResultPayload,
+) -> tau_proto::ExtensionDataResultPayload {
+    if !matches!(
+        result,
+        tau_proto::ExtensionDataResultPayload::Ok {
+            value: tau_proto::ExtensionDataValue::ReadPapercuts { .. }
+        }
+    ) {
+        return result;
+    }
+    let response =
+        HarnessOutputMessage::ExtensionDataResult(Box::new(tau_proto::ExtensionDataResult {
+            request_id: request_id.to_owned(),
+            result: result.clone(),
+        }));
+    if tau_proto::encode_harness_output_to_vec(&response)
+        .is_ok_and(|bytes| bytes.len() as u64 <= tau_proto::MAX_PROTOCOL_MESSAGE_BYTES)
+    {
+        result
+    } else {
+        tau_proto::ExtensionDataResultPayload::Error {
+            kind: tau_proto::ExtensionDataErrorKind::QuotaExceeded,
+            message: "active papercut history exceeds the tool transport limit; use `tau dev papercut list` or `tau dev papercut clear`"
+                .to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

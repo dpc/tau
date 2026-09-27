@@ -172,6 +172,10 @@ fn inspection_configure_contains_only_permitted_inputs() {
         configure.purpose,
         tau_proto::ConfigurePurpose::DeclarationInspection
     );
+    assert_eq!(
+        configure.harness_protocol_version,
+        Some(tau_proto::PROTOCOL_VERSION)
+    );
     assert_eq!(configure.tool_prefix, extension.tool_prefix);
     assert_eq!(
         configure

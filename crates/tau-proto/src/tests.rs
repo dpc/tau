@@ -2646,6 +2646,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     vec![
         HarnessOutputMessage::Configure(Configure {
             purpose: crate::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             instance_name: crate::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             tool_prefix: None,
@@ -4415,10 +4416,12 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     assert_eq!(parsed.config, CborValue::Null);
     assert_eq!(parsed.instance_name.as_str(), "demo");
     assert_eq!(parsed.state_dir, None);
+    assert_eq!(parsed.harness_protocol_version, None);
     assert!(parsed.secrets.is_empty());
 
     let with_state = Configure {
         purpose: crate::ConfigurePurpose::Runtime,
+        harness_protocol_version: Some(crate::PROTOCOL_VERSION),
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
@@ -4432,11 +4435,16 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
         json["state_dir"],
         serde_json::json!("/tmp/tau/state/ext/demo")
     );
+    assert_eq!(
+        json["harness_protocol_version"],
+        serde_json::json!({"major": 10, "minor": 1})
+    );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
 
     let without_state = serde_json::to_value(Configure {
         purpose: crate::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
@@ -4447,6 +4455,34 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     })
     .expect("serialize configure without state dir");
     assert!(without_state.get("state_dir").is_none());
+    assert!(without_state.get("harness_protocol_version").is_none());
+}
+
+/// Old Configure decoders ignore the optional advertised harness revision,
+/// while new decoders accept an old Configure without that field.
+#[test]
+fn configure_protocol_revision_advertisement_is_additive() {
+    #[derive(serde::Deserialize)]
+    struct OldConfigure {
+        /// Required original config field.
+        config: CborValue,
+        /// Required original instance identity.
+        instance_name: crate::ExtensionName,
+    }
+
+    let legacy = serde_json::json!({"config": null, "instance_name": "std-utils"});
+    let decoded: Configure = serde_json::from_value(legacy.clone()).expect("old configure");
+    assert_eq!(decoded.harness_protocol_version, None);
+    let mut newer = legacy;
+    newer["harness_protocol_version"] = serde_json::json!({"major": 10, "minor": 1});
+    let old: OldConfigure = serde_json::from_value(newer.clone()).expect("old decoder");
+    assert_eq!(old.instance_name.as_str(), "std-utils");
+    assert_eq!(old.config, CborValue::Null);
+    let decoded: Configure = serde_json::from_value(newer).expect("new decoder");
+    assert_eq!(
+        decoded.harness_protocol_version,
+        Some(crate::PROTOCOL_VERSION)
+    );
 }
 
 /// Ensures configure secrets round-trip while Debug output redacts secret
@@ -4459,6 +4495,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
         purpose: crate::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
@@ -4501,7 +4538,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 10, "minor": 0})
+        serde_json::json!({"major": 10, "minor": 1})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4593,7 +4630,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 10, "minor": 0})
+        serde_json::json!({"major": 10, "minor": 1})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

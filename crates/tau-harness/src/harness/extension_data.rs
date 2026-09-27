@@ -908,6 +908,126 @@ pub(super) fn run_extension_data_rename_file(
     run_extension_data_rename_file_with(root, from, to, rename_extension_data_file_noreplace)
 }
 
+/// Read only the standard reporter file while holding the User-scope append
+/// lock; absent storage does not create a new reporter directory.
+pub(super) fn run_papercut_read(
+    root: &Path,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    if !root
+        .try_exists()
+        .map_err(|error| ExtensionDataError::io("failed to inspect papercut storage", error))?
+    {
+        // A dangling symlink must fail rather than masquerade as absent.
+        if path_std_fs::symlink_metadata(root)
+            .is_err_and(|error| error.kind() == path_std_io::ErrorKind::NotFound)
+        {
+            return Ok(tau_proto::ExtensionDataValue::ReadPapercuts { contents: None });
+        }
+    }
+    with_extension_data_scope_lock(root, || {
+        let rel = Path::new(tau_proto::PAPERCUT_FILE_NAME);
+        let file = checked_extension_data_path(root, rel, true)?;
+        match path_std_fs::symlink_metadata(&file) {
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {
+                Ok(tau_proto::ExtensionDataValue::ReadPapercuts { contents: None })
+            }
+            Err(error) => Err(ExtensionDataError::io(
+                "failed to inspect papercut records",
+                error,
+            )),
+            Ok(_) => Ok(tau_proto::ExtensionDataValue::ReadPapercuts {
+                contents: Some(read_papercut_bytes(&file)?),
+            }),
+        }
+    })
+}
+
+/// Read one checked reporter file without following its final symlink.
+fn read_papercut_bytes(file: &Path) -> Result<Vec<u8>, ExtensionDataError> {
+    let mut file = open_read_no_follow(file)
+        .map_err(|error| ExtensionDataError::io("failed to open papercut records", error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| ExtensionDataError::io("failed to inspect papercut records", error))?;
+    if !metadata.is_file() {
+        return Err(ExtensionDataError::new(
+            tau_proto::ExtensionDataErrorKind::NotFile,
+            "papercut records are not a regular file",
+        ));
+    }
+    let mut contents = Vec::new();
+    file.by_ref()
+        .take(EXTENSION_DATA_MAX_FILE_BYTES + 1)
+        .read_to_end(&mut contents)
+        .map_err(|error| ExtensionDataError::io("failed to read papercut records", error))?;
+    ensure_file_len_within_limit(
+        Path::new(tau_proto::PAPERCUT_FILE_NAME),
+        contents.len() as u64,
+        EXTENSION_DATA_MAX_FILE_BYTES,
+    )?;
+    Ok(contents)
+}
+
+/// Archive a previously validated reporter snapshot only if no append or
+/// replacement changed its bytes in the meantime. The lock covers the complete
+/// generation check, collision selection, no-replace rename, and directory
+/// sync.
+pub(super) fn run_papercut_archive(
+    root: &Path,
+    expected_generation: &str,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    if expected_generation.len() != 64
+        || !expected_generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ExtensionDataError::new(
+            tau_proto::ExtensionDataErrorKind::InvalidPath,
+            "invalid papercut snapshot generation",
+        ));
+    }
+    with_extension_data_scope_lock(root, || {
+        let file =
+            checked_extension_data_path(root, Path::new(tau_proto::PAPERCUT_FILE_NAME), false)?;
+        let contents = read_papercut_bytes(&file)?;
+        if blake3::hash(&contents).to_hex().as_str() != expected_generation {
+            return Err(ExtensionDataError::new(
+                tau_proto::ExtensionDataErrorKind::GenerationMismatch,
+                "papercut records changed since they were validated",
+            ));
+        }
+        for index in 1_u64.. {
+            let name = format!("{}{index:016}.jsonl", tau_proto::PAPERCUT_ARCHIVE_PREFIX);
+            let archive = root.join(&name);
+            match path_std_fs::symlink_metadata(&archive) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ExtensionDataError::io(
+                        "failed to inspect papercut archive path",
+                        error,
+                    ));
+                }
+            }
+            match rename_extension_data_file_noreplace(&file, &archive) {
+                Ok(()) => {
+                    return Ok(tau_proto::ExtensionDataValue::ArchivePapercuts {
+                        archive: tau_proto::ExtensionDataPath::new(name),
+                    });
+                }
+                Err(error) if error.kind() == path_std_io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(ExtensionDataError::io(
+                        "failed to archive papercut records",
+                        error,
+                    ));
+                }
+            }
+        }
+        unreachable!("u64 archive namespace cannot be exhausted in practice")
+    })
+}
+
 /// Validates a rename request and applies the selected scope-specific rename
 /// operation.
 pub(super) fn run_extension_data_rename_file_with(

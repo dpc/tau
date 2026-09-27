@@ -104,6 +104,7 @@ fn live_artifact_manager() -> (
 ) {
     let configure = HarnessOutputMessage::Configure(tau_proto::Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         instance_name: "artifact-client-fixture".parse().expect("extension name"),
         config: CborValue::Map(Vec::new()),

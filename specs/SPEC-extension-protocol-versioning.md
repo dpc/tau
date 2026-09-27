@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 10.1 adds User-scope, reporter-file-only locked papercut snapshot
+reading and conditional archival. An optional Configure revision advertisement
+lets an updated utility extension refuse all three history operations locally
+before sending RPC to a harness older than 10.1 (or one that omits its
+revision). Its reporter, timers and other tools keep working. Older extensions
+ignore the extra Configure field and keep working with an updated harness.
+No new handshake phase or durable event is introduced.
+
 Protocol 10.0 adds per-agent workdir discovery refresh and installed
 acknowledgements. The shell's committed setter waits for the acknowledgement;
 an older harness cannot answer it, so silent omission would hang rather than

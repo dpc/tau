@@ -341,6 +341,7 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
             writer
                 .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
                     purpose: tau_proto::ConfigurePurpose::Runtime,
+                    harness_protocol_version: None,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
                     instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -6602,6 +6603,7 @@ fn configured_instance_reaches_runtime_missing_login_status() {
     input.push(encode_frames(&[
         HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: None,
             config: tau_proto::CborValue::Map(Vec::new()),
             instance_name: tau_proto::ExtensionName::parse("provider-work")

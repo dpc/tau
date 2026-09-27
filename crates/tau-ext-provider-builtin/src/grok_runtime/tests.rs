@@ -121,6 +121,7 @@ fn grok_worker_secret_callbacks_suppress_exchanged_generation_not_readback() {
             writer
                 .write_message(&HarnessOutputMessage::Configure(Configure {
                     purpose: Default::default(),
+                    harness_protocol_version: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
                     instance_name: "grok-callback-test".parse().expect("instance"),
                     tool_prefix: None,

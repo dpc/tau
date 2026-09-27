@@ -224,6 +224,7 @@ fn write_script(dir: &tempfile::TempDir, source: &str) -> std::path::PathBuf {
 fn configure_with_script(path: &Path) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
@@ -240,6 +241,7 @@ fn configure_with_script(path: &Path) -> HarnessOutputMessage {
 fn empty_configure() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
@@ -261,6 +263,7 @@ fn configure_with_script_and_extra(
     config.append(&mut extra);
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
@@ -703,6 +706,7 @@ fn start_runs_after_ready_with_host_functions() {
     );
     let configure = HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),

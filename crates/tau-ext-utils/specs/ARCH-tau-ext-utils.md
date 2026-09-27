@@ -16,6 +16,19 @@ The reporter is declared unless its configured instance sets
 `papercut.enable: false`; ordinary global and role tool policy still controls
 its effective visibility.
 
+The independent `papercut_history.enable: true` switch declares three otherwise
+absent history tools: metadata-only `papercut_list`, whole-active-history
+`papercut_read`, and whole-active-file `papercut_archive`. All use the
+reporter's authenticated User-scope instance and the same locked active file
+as the operator CLI. The two readers each take a separate snapshot; neither
+reserves records for archive. Archive validates the shared v1 record contract
+before requesting conditional archival. The harness verifies that the
+complete file generation still matches while holding the reporter's append
+lock, then no-replace renames to the first unused numbered archive and syncs
+the directory. A concurrent change fails instead of archiving a new,
+unvalidated report. Archives are private and never enumerated or deleted by
+these tools.
+
 The dedicated inspection bootstrap runs before timer state, timezone discovery
 or extension-data clients exist. It shares the ordinary configured tool
 registration constructor, including groups, prompt fragments and

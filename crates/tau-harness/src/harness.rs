@@ -120,8 +120,8 @@ use crate::harness::extension_data::{
     run_extension_data_create_file, run_extension_data_create_file_with_limit,
     run_extension_data_delete_file, run_extension_data_list_files, run_extension_data_read_file,
     run_extension_data_read_file_with_limit, run_extension_data_rename_file,
-    run_extension_data_write_file, run_extension_data_write_file_with_limit,
-    run_scoped_extension_data_append_file, run_secret_data_delete_file,
+    run_extension_data_write_file, run_extension_data_write_file_with_limit, run_papercut_archive,
+    run_papercut_read, run_scoped_extension_data_append_file, run_secret_data_delete_file,
     run_secret_data_rename_file, with_extension_data_scope_lock,
 };
 use crate::harness::extensions::StartupDeadline;

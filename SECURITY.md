@@ -870,6 +870,20 @@ Plain output escapes controls; Markdown uses literal report blocks. Malformed,
 unsupported, oversized, symlinked, non-regular, or unrenderable records fail
 closed without exposing raw data.
 
+The `std-utils` history tools are a separate **default-off**, model-facing
+access path: an operator must set `papercut_history.enable: true`, and ordinary
+global and role tool policy still determines which agents can call them. The
+tools access only their authenticated configured instance's User-scope active
+file, shared across sessions using that state root and instance. `papercut_list`
+exposes report metadata; `papercut_read` publishes unredacted historical
+report bodies as ordinary tool results and provider context. Enabling it
+therefore grants eligible agents access to reports from other sessions.
+`papercut_archive` moves the whole validated active file into private
+numbered storage without deleting it. See the
+[`std-utils` README](crates/tau-ext-utils/README.md) for configuration and
+[ARCH-tau-ext-utils](crates/tau-ext-utils/specs/ARCH-tau-ext-utils.md) for the
+conditional archive boundary.
+
 Clear takes the same exclusive extension-directory lock as harness User-scope
 appends, validates the same file, and atomically renames it to the first unused
 `papercuts.archive-NNNNNNNNNNNNNNNN.jsonl` path while holding that lock. It

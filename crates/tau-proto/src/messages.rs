@@ -139,6 +139,11 @@ pub struct Configure {
     /// Collectors must first check Hello's explicit inspection support.
     #[serde(default, skip_serializing_if = "ConfigurePurpose::is_runtime")]
     pub purpose: ConfigurePurpose,
+    /// Actual harness protocol revision, absent when connected to an older
+    /// harness that does not advertise it. Optional extension features must
+    /// fail locally instead of sending unsupported operations when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_protocol_version: Option<ProtocolVersion>,
     /// Free-form extension configuration from harness settings.
     pub config: CborValue,
     /// Stable configured extension instance name.
@@ -1149,6 +1154,9 @@ impl AsRef<str> for ExtensionDataPath {
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ExtensionDataRequestOp {
+    /// Read the standard reporter's active User-scope papercut snapshot under
+    /// its append lock, without creating an absent reporter directory.
+    ReadPapercuts,
     /// Read one whole file at an extension-provided path, subject to harness
     /// path validation and file-size quota.
     ReadFile { path: ExtensionDataPath },
@@ -1200,6 +1208,14 @@ pub enum ExtensionDataRequestOp {
         /// scope.
         to: ExtensionDataPath,
     },
+    /// Archive the standard reporter's User-scope active papercut file only
+    /// when its complete content still matches a previously validated snapshot.
+    /// The harness chooses the first unused numbered archive under the same
+    /// directory lock as reporter appends.
+    ArchivePapercuts {
+        /// Lowercase BLAKE3 digest of the validated complete JSONL snapshot.
+        expected_generation: String,
+    },
     /// List direct children of an extension-provided directory path after
     /// harness validation, subject to the harness directory-entry quota.
     ListFiles { path: ExtensionDataPath },
@@ -1208,6 +1224,7 @@ pub enum ExtensionDataRequestOp {
 impl std::fmt::Debug for ExtensionDataRequestOp {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ReadPapercuts => formatter.write_str("ReadPapercuts"),
             Self::ReadFile { path } => formatter
                 .debug_struct("ReadFile")
                 .field("path", path)
@@ -1245,6 +1262,12 @@ impl std::fmt::Debug for ExtensionDataRequestOp {
                 .debug_struct("RenameFile")
                 .field("from", from)
                 .field("to", to)
+                .finish(),
+            Self::ArchivePapercuts {
+                expected_generation,
+            } => formatter
+                .debug_struct("ArchivePapercuts")
+                .field("expected_generation", expected_generation)
                 .finish(),
             Self::ListFiles { path } => formatter
                 .debug_struct("ListFiles")
@@ -1305,6 +1328,8 @@ impl std::fmt::Debug for ExtensionDataResultPayload {
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ExtensionDataValue {
+    /// Locked active reporter snapshot; absent when no active file exists.
+    ReadPapercuts { contents: Option<Vec<u8>> },
     /// Whole file contents from a read request.
     ReadFile { contents: Vec<u8> },
     /// Empty success marker for a write request.
@@ -1319,6 +1344,8 @@ pub enum ExtensionDataValue {
     DeleteFile,
     /// Empty success marker for a rename request.
     RenameFile,
+    /// Relative User-scope filename of the preserved archive.
+    ArchivePapercuts { archive: ExtensionDataPath },
     /// Direct child entries from a list request.
     ListFiles { entries: Vec<ExtensionDataEntry> },
 }
@@ -1326,6 +1353,10 @@ pub enum ExtensionDataValue {
 impl std::fmt::Debug for ExtensionDataValue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ReadPapercuts { contents } => formatter
+                .debug_struct("ReadPapercuts")
+                .field("contents_len", &contents.as_ref().map(Vec::len))
+                .finish(),
             Self::ReadFile { contents } => formatter
                 .debug_struct("ReadFile")
                 .field("contents_len", &contents.len())
@@ -1336,6 +1367,10 @@ impl std::fmt::Debug for ExtensionDataValue {
             Self::AppendFile => formatter.write_str("AppendFile"),
             Self::DeleteFile => formatter.write_str("DeleteFile"),
             Self::RenameFile => formatter.write_str("RenameFile"),
+            Self::ArchivePapercuts { archive } => formatter
+                .debug_struct("ArchivePapercuts")
+                .field("archive", archive)
+                .finish(),
             Self::ListFiles { entries } => formatter
                 .debug_struct("ListFiles")
                 .field("entries", entries)

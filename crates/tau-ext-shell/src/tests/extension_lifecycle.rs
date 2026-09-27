@@ -1567,6 +1567,7 @@ fn mandatory_discovery_write_failure_exits_production_manual_loop() {
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("extension name"),
@@ -1650,6 +1651,7 @@ fn mandatory_terminal_preparation_failure_exits_production_manual_loop() {
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: None,
             instance_name: test_extension_name("test-extension"),
             config: cbor_map(vec![(
@@ -1755,6 +1757,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -1818,6 +1821,7 @@ fn shell_extension_rejects_invalid_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -1883,6 +1887,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),

@@ -108,6 +108,7 @@ fn queued_cancellation_precedes_ready_decoder_completion() {
         writer
             .write_message(&HarnessOutputMessage::Configure(Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                harness_protocol_version: None,
                 tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
                 instance_name: tau_proto::ExtensionName::parse("std-utils").expect("instance"),
                 config: cbor_map(vec![(
@@ -216,7 +217,12 @@ fn queued_cancellation_precedes_ready_decoder_completion() {
         .config
         .deserialized::<crate::UtilsConfig>()
         .expect("utility configuration");
-    send_startup(&mut runtime, config.papercut.enable).expect("utility startup");
+    send_startup(
+        &mut runtime,
+        config.papercut.enable,
+        config.papercut_history.enable,
+    )
+    .expect("utility startup");
     runtime
         .extension_data_client()
         .request(

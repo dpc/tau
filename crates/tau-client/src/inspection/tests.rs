@@ -26,6 +26,7 @@ impl TauExtension for Runtime {
 fn configure(purpose: ConfigurePurpose) -> Configure {
     Configure {
         purpose,
+        harness_protocol_version: None,
         config: tau_proto::CborValue::Null,
         instance_name: "inspection-test"
             .parse()

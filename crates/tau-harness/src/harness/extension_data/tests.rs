@@ -2,6 +2,182 @@ use std::fs as path_std_fs;
 
 use super::*;
 
+/// An absent reporter never creates storage, while a locked read returns the
+/// exact active bytes (including an intentionally empty existing file).
+#[test]
+fn papercut_read_preserves_absence_and_complete_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("ext/std-utils");
+    assert_eq!(
+        run_papercut_read(&root).expect("absent history"),
+        tau_proto::ExtensionDataValue::ReadPapercuts { contents: None }
+    );
+    assert!(!root.exists());
+    path_std_fs::create_dir_all(&root).expect("root");
+    path_std_fs::write(root.join("papercuts.jsonl"), b"").expect("empty active file");
+    assert_eq!(
+        run_papercut_read(&root).expect("existing empty history"),
+        tau_proto::ExtensionDataValue::ReadPapercuts {
+            contents: Some(Vec::new())
+        }
+    );
+}
+
+/// A stale generation cannot archive a concurrent append; archive collision
+/// selection preserves previous private bytes and leaves fresh appends active.
+#[test]
+fn papercut_archive_rejects_stale_snapshot_and_preserves_collisions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("ext/std-utils");
+    path_std_fs::create_dir_all(&root).expect("root");
+    let active = root.join("papercuts.jsonl");
+    let first = b"{\"schema\":1,\"agent_id\":\"agent-a\",\"session_id\":\"session-a\",\"timestamp_us\":1000000,\"report\":\"first\"}\n";
+    path_std_fs::write(&active, first).expect("active");
+    let old_generation = blake3::hash(first).to_hex().to_string();
+    run_locked_extension_data_append_file(
+        &root,
+        "papercuts.jsonl".to_owned(),
+        b"{\"schema\":1,\"agent_id\":\"agent-b\",\"session_id\":\"session-b\",\"timestamp_us\":2000000,\"report\":\"second\"}\n".to_vec(),
+    )
+    .expect("concurrent reporter append");
+    let error = run_papercut_archive(&root, &old_generation).expect_err("stale generation");
+    assert_eq!(
+        error.kind,
+        tau_proto::ExtensionDataErrorKind::GenerationMismatch
+    );
+    let new_bytes = path_std_fs::read(&active).expect("active intact");
+    let existing = root.join("papercuts.archive-0000000000000001.jsonl");
+    path_std_fs::write(&existing, b"preserved").expect("first archive");
+    let result = run_papercut_archive(&root, blake3::hash(&new_bytes).to_hex().as_ref())
+        .expect("matching snapshot");
+    assert_eq!(
+        result,
+        tau_proto::ExtensionDataValue::ArchivePapercuts {
+            archive: tau_proto::ExtensionDataPath::new("papercuts.archive-0000000000000002.jsonl")
+        }
+    );
+    assert_eq!(
+        path_std_fs::read(existing).expect("first archive"),
+        b"preserved"
+    );
+    assert_eq!(
+        path_std_fs::read(root.join("papercuts.archive-0000000000000002.jsonl"))
+            .expect("second archive"),
+        new_bytes
+    );
+    assert!(!active.exists());
+    run_locked_extension_data_append_file(&root, "papercuts.jsonl".to_owned(), b"after\n".to_vec())
+        .expect("append after archive");
+    assert_eq!(path_std_fs::read(active).expect("fresh active"), b"after\n");
+}
+
+/// A symlink occupying the first numbered archive path is not replaced or
+/// followed; the same existing collision rule also applies to dangling links.
+#[cfg(unix)]
+#[test]
+fn papercut_archive_skips_occupied_symlink_without_changing_its_target() {
+    use std::os::unix::fs as unix_fs;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("ext/std-utils");
+    path_std_fs::create_dir_all(&root).expect("root");
+    let active = root.join("papercuts.jsonl");
+    path_std_fs::write(&active, b"validated\n").expect("active");
+    let link = root.join("papercuts.archive-0000000000000001.jsonl");
+    unix_fs::symlink("missing-target", &link).expect("dangling occupied archive");
+    let result = run_papercut_archive(&root, blake3::hash(b"validated\n").to_hex().as_ref())
+        .expect("next archive");
+    assert_eq!(
+        result,
+        tau_proto::ExtensionDataValue::ArchivePapercuts {
+            archive: tau_proto::ExtensionDataPath::new("papercuts.archive-0000000000000002.jsonl")
+        }
+    );
+    assert!(
+        path_std_fs::symlink_metadata(link)
+            .expect("link intact")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// A symlinked active reporter file fails before reading or archiving arbitrary
+/// data outside the authenticated extension directory.
+#[cfg(unix)]
+#[test]
+fn papercut_read_and_archive_reject_symlinked_active_file() {
+    use std::os::unix::fs as unix_fs;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("ext/std-utils");
+    path_std_fs::create_dir_all(&root).expect("root");
+    let outside = temp.path().join("outside");
+    path_std_fs::write(&outside, b"not reporter data").expect("outside");
+    unix_fs::symlink(&outside, root.join("papercuts.jsonl")).expect("symlink");
+    assert!(run_papercut_read(&root).is_err());
+    assert!(
+        run_papercut_archive(&root, blake3::hash(b"not reporter data").to_hex().as_ref()).is_err()
+    );
+    assert_eq!(
+        path_std_fs::read(outside).expect("outside intact"),
+        b"not reporter data"
+    );
+}
+
+/// Racing an append with conditional archival cannot silently lose either
+/// report: an append before the archive makes the old generation stale, while
+/// an append afterward creates a fresh active file.
+#[test]
+fn papercut_archive_and_append_race_has_no_lost_report() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("ext/std-utils");
+    path_std_fs::create_dir_all(&root).expect("root");
+    let first = b"first\n";
+    let second = b"second\n";
+    path_std_fs::write(root.join("papercuts.jsonl"), first).expect("active");
+    let gate = Arc::new(Barrier::new(3));
+    let archive_root = root.clone();
+    let archive_gate = Arc::clone(&gate);
+    let archive = std::thread::spawn(move || {
+        archive_gate.wait();
+        run_papercut_archive(&archive_root, blake3::hash(first).to_hex().as_ref())
+    });
+    let append_root = root.clone();
+    let append_gate = Arc::clone(&gate);
+    let append = std::thread::spawn(move || {
+        append_gate.wait();
+        run_locked_extension_data_append_file(
+            &append_root,
+            "papercuts.jsonl".to_owned(),
+            second.to_vec(),
+        )
+    });
+    gate.wait();
+    let result = archive.join().expect("archive thread");
+    append.join().expect("append thread").expect("append");
+    match result {
+        Ok(tau_proto::ExtensionDataValue::ArchivePapercuts { archive }) => {
+            assert_eq!(
+                path_std_fs::read(root.join(archive.as_str())).expect("archive"),
+                first
+            );
+            assert_eq!(
+                path_std_fs::read(root.join("papercuts.jsonl")).expect("active"),
+                second
+            );
+        }
+        Err(error) if error.kind == tau_proto::ExtensionDataErrorKind::GenerationMismatch => {
+            assert_eq!(
+                path_std_fs::read(root.join("papercuts.jsonl")).expect("active"),
+                [first.as_slice(), second.as_slice()].concat()
+            );
+        }
+        other => panic!("unexpected archive outcome: {other:?}"),
+    }
+}
+
 /// Proves a successful Secret mutation synchronizes every containing directory
 /// from the leaf parent through Tau's state root, including a freshly prepared
 /// scope hierarchy that the current mutation did not create.
