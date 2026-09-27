@@ -6666,6 +6666,55 @@ fn current_role_disabled_tool_error_names_role_model_authority() {
     h.shutdown().expect("shutdown");
 }
 
+/// A direct call cannot bypass role policy for a registered but default-off
+/// history tool, including when the ordinary reporter group is granted.
+#[test]
+fn default_off_papercut_history_direct_call_is_rejected() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(&td.path().join("state")).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    h.config.selected_role = "reporter".to_owned();
+    h.config.available_roles.insert(
+        "reporter".to_owned(),
+        tau_config::settings::AgentRole {
+            enable_tool_groups: vec![tau_proto::ToolGroupName::new("papercut")],
+            ..Default::default()
+        },
+    );
+    let mut history = shared_test_tool_spec("papercut_read");
+    history.enabled_by_default = false;
+    h.tool_routing.registry.register_with_prompt_fragment(
+        &crate::test_connection_id("conn-history"),
+        tau_core::ToolRegistration {
+            tool: history,
+            tool_group: Some(tau_proto::ToolGroup {
+                name: tau_proto::ToolGroupName::new("papercut_history"),
+                prompt_fragment: None,
+            }),
+            prompt_fragment: None,
+        },
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    h.execute_agent_tool_call(
+        &cid,
+        &AgentToolCall {
+            call_ref: None,
+            id: "unauthorized-history".into(),
+            name: ToolName::new("papercut_read"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+    )
+    .expect("unauthorized call handled");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderToolError(error)
+            if error.call_id.as_str() == "unauthorized-history"
+                && error.message.contains("disabled for the current role/model")
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// Ensures unknown-tool suggestions for a provider response use the prompt's
 /// advertised tool snapshot rather than the current role surface, which can
 /// change while the model is thinking.

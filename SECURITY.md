@@ -871,8 +871,10 @@ unsupported, oversized, symlinked, non-regular, or unrenderable records fail
 closed without exposing raw data.
 
 The `std-utils` history tools are a separate **default-off**, model-facing
-access path: an operator must set `papercut_history.enable: true`, and ordinary
-global and role tool policy still determines which agents can call them. The
+access path: an operator must set `papercut_history.enable: true` and explicitly
+grant the history tools to a role by name or by their distinct `papercut_history`
+group. They are disabled by default for all roles; granting the ordinary `papercut`
+reporter group does not grant history access. The
 tools access only their authenticated configured instance's User-scope active
 file, shared across sessions using that state root and instance. `papercut_list`
 exposes report metadata; `papercut_read` publishes unredacted historical

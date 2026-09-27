@@ -1446,7 +1446,15 @@ fn papercut_config_defaults_on_and_gates_visibility_and_prompt() {
             .iter()
             .find(|registration| registration.tool.name.as_str() == name)
             .expect("history registration");
-        assert!(tool.tool.enabled_by_default);
+        assert!(!tool.tool.enabled_by_default);
+        assert_eq!(
+            tool.tool_group
+                .as_ref()
+                .expect("history group")
+                .name
+                .as_str(),
+            "papercut_history"
+        );
         assert_eq!(
             tool.tool.parameters.as_ref().expect("empty arguments")["additionalProperties"],
             false

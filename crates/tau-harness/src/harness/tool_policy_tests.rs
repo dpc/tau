@@ -908,6 +908,92 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
     );
 }
 
+/// History remains unavailable to unlisted and future roles even when reporter
+/// access is granted; the coordinator must explicitly opt into each history
+/// tool.
+#[test]
+fn papercut_history_requires_separate_explicit_role_grants() {
+    fn tool_names(harness: &Harness) -> Vec<String> {
+        harness
+            .gather_effective_tool_specs_for_role_model(
+                ROLE,
+                harness.config.selected_model.as_ref(),
+            )
+            .into_iter()
+            .map(|spec| spec.name.into_string())
+            .collect()
+    }
+
+    fn register_tools(harness: &mut Harness) {
+        for (name, enabled, group) in [
+            ("papercut", true, "papercut"),
+            ("papercut_list", false, "papercut_history"),
+            ("papercut_read", false, "papercut_history"),
+            ("papercut_archive", false, "papercut_history"),
+        ] {
+            harness.tool_routing.registry.register_with_prompt_fragment(
+                &crate::test_connection_id("utils"),
+                ToolRegistration {
+                    tool: tagged_tool(name, enabled, &[]),
+                    tool_group: Some(ToolGroup {
+                        name: ToolGroupName::new(group),
+                        prompt_fragment: None,
+                    }),
+                    prompt_fragment: None,
+                },
+            );
+        }
+    }
+
+    let history = ["papercut_list", "papercut_read", "papercut_archive"];
+    for role in [
+        AgentRole::default(),
+        AgentRole {
+            enable_tool_groups: vec![ToolGroupName::new("papercut")],
+            ..AgentRole::default()
+        },
+    ] {
+        let mut policy = policy_harness(&[], role);
+        register_tools(&mut policy.harness);
+        let tools = tool_names(&policy.harness);
+        assert!(tools.contains(&"papercut".to_owned()));
+        assert!(
+            history
+                .iter()
+                .all(|name| !tools.iter().any(|tool| tool == name))
+        );
+    }
+
+    let mut coordinator = policy_harness(
+        &[],
+        AgentRole {
+            enable_tools: history.iter().map(|name| ToolName::new(*name)).collect(),
+            ..AgentRole::default()
+        },
+    );
+    register_tools(&mut coordinator.harness);
+    let tools = tool_names(&coordinator.harness);
+    assert!(
+        history
+            .iter()
+            .all(|name| tools.iter().any(|tool| tool == name))
+    );
+
+    let mut future = policy_harness(
+        &[],
+        AgentRole {
+            disable_tools: vec![ToolName::new("timer")],
+            ..AgentRole::default()
+        },
+    );
+    register_tools(&mut future.harness);
+    assert!(
+        history
+            .iter()
+            .all(|name| !tool_names(&future.harness).iter().any(|tool| tool == name))
+    );
+}
+
 /// Ensures the Rostra group enables every read, authenticated-write, and
 /// notification tool, while an exact Rostra name remains a narrow opt-in.
 #[test]

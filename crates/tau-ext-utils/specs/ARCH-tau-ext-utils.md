@@ -18,7 +18,10 @@ its effective visibility.
 
 The independent `papercut_history.enable: true` switch declares three otherwise
 absent history tools: metadata-only `papercut_list`, whole-active-history
-`papercut_read`, and whole-active-file `papercut_archive`. All use the
+`papercut_read`, and whole-active-file `papercut_archive`. Their registration
+defaults off for every role, and their distinct `papercut_history` group prevents
+ordinary reporter-group grants from authorizing history; exact role grants or an
+explicit history-group grant are required. All use the
 reporter's authenticated User-scope instance and the same locked active file
 as the operator CLI. The two readers each take a separate snapshot; neither
 reserves records for archive. Archive validates the shared v1 record contract

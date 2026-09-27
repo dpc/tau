@@ -69,6 +69,25 @@ extensions:
         enable: true
 ```
 
+This only declares the history tools; it does not make them visible or callable
+for any role. Grant the three exact names to the intended role, for example:
+
+```yaml
+agents:
+  role_groups:
+    coordinator:
+      roles:
+        coordinator:
+          enable_tools: [papercut_list, papercut_read, papercut_archive]
+```
+
+Merge these settings into the existing role and instance configuration. Future
+roles remain unable to use history without an explicit grant. The separate
+`papercut_history` tool group may also be enabled deliberately; enabling the
+ordinary `papercut` reporter group does not grant history access. Restrict the
+instance opt-in to the intended sandbox: a role grant applies wherever that
+configuration is loaded.
+
 `papercut_list` shows only active report count, timestamps, agent IDs, and
 session IDs. `papercut_read` shows complete active reports in the same Markdown
 format as `tau dev papercut list --markdown`. `papercut_archive` validates
