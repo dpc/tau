@@ -27,6 +27,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-agent-coordination` — delegation, messaging across agents and sessions, watches, status, background tools, timers, and discovery.
 - `tau-self-knowledge-roles` — role/group policy, tool permissions, runtime selections, and identity inspection.
 - `tau-self-knowledge-skills` — create, discover, invoke, inspect, and resolve collisions between skills.
+- `tau-self-knowledge-context-management` — automatic/manual compaction policy, model-aware thresholds, context-size alerts, and overflow recovery.
 - `tau-self-knowledge-email` — secure configuration for the standard `std-pim` email module.
 - `tau-self-knowledge-ext-pim` — extension capabilities, configuration, OAuth, and approval workflow for the standard `std-pim` email/calendar extension.
 - `tau-self-knowledge-ext-rostra` — `std-rostra` configuration, Rostra tool authority, durable local state, synchronization, and following notifications.
@@ -39,6 +40,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-ext-provider-builtin` — extension details for built-in providers, model publication, ChatGPT/Codex, Chat Completions, and OpenRouter.
 - `tau-self-knowledge-ext-rhai` — extension details for the disabled `std-rhai` trusted local scripting extension and Rhai event hooks.
 - `tau-self-knowledge-ext-shell` — extension details for `core-shell` filesystem, shell, editing, directory-lock, and AGENTS.md discovery tools.
+- `tau-self-knowledge-ext-utils` — `std-utils` timer wakeups and papercut reporting, inspection, and opt-in history access.
 - `tau-self-knowledge-ext-std-notifications` — extension details for prompt/response sounds, idle notifications, OSC 1337, bells, and notification commands.
 - `tau-self-knowledge-ext-test-dummy` — extension details for the disabled test-only dummy extension and restart/interception behavior.
 - `tau-self-knowledge-ext-websearch` — `std-websearch` provider pools, all hosted adapters, credentials, current provider plans, failover, and configuration.
@@ -47,6 +49,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-community` — places to ask questions or talk about Tau.
 - `tau-self-knowledge-debugging` — debugging workflow for Tau sessions, daemon behavior, logs, state, and provider request captures.
 - `tau-self-knowledge-debugging-extensions` — supervised extension logging, startup/crash/reconnect investigation, and stderr privacy.
+- `tau-self-knowledge-cache` — offline agent/session cache inspector, attribution, continuity, geometry, and partial evidence.
 - `tau-self-knowledge-tracing` — content-free execution audits, bounded semantic traces, complete journal exports, and privacy boundaries.
 - `tau-self-knowledge-e2e-testing` — manual E2E testing with `tau dev tmux`, scratch state, and opt-in provider profile access through `testing.yaml`.
 When working _on_ Tau project, prefer the repository's local developer-centric skills when available.

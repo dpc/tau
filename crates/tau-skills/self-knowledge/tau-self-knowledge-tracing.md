@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-tracing
-description: Use when auditing Tau agent execution, performance, orchestration, or durable semantic traces.
+description: Use when auditing Tau agent execution, performance, cost, session stats, chat export, orchestration, or durable semantic traces.
 ---
 
 # Durable agent tracing
@@ -13,10 +13,26 @@ tau agent trace <agent-id> --include-descendants --format agent-tools-toon
 tau agent trace <agent-id> --include-descendants --format tau-jsonl
 ```
 
-Use `agent-performance-jsonl` by default. It is content-free and covers ordinary
+The CLI itself defaults to `agent-tools-toon` in lite mode. Prefer
+`agent-performance-jsonl` for content-free audits. It covers ordinary
 provider usage/cost, tool/background lifecycle, typed waits and effective input
 timeouts, outer turns, and standalone compaction attempts. It still exposes
 identities, models, activity timing, usage, cost, membership, and work patterns.
+
+For a session-wide activity/usage summary, run
+`tau session stats --session SESSION_ID`; it traverses durable session
+membership and agent journals, marking unavailable facts rather than inventing
+them. For a human conversation export from a durable agent branch, run
+`tau agent export chat AGENT_ID` (Markdown by default, or `--toons` for
+strict TOON). The export contains metadata, user prompts, and assistant
+responses: keep it private. Neither is a provider invoice.
+
+The live UI `$self/$subtree` equivalent-USD estimate counts an agent and its
+authenticated same-session creator descendants, including completed children;
+messaged peers are not descendants. It resets with the active session/runtime.
+Coverage and fallback prices make this an eyeballed comparison, not billing
+reconciliation. An offline trace and a live status display can cover different
+windows of activity.
 
 Use `agent-tools-toon` or `agent-tools-jsonl` only for bounded semantic
 explanation. Both formats use `tau.agent_trace_compact`, schema version `0`, and contain

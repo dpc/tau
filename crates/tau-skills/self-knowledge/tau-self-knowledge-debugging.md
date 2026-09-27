@@ -179,8 +179,12 @@ zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-
 
 ## Token/cache efficiency analysis
 
-When asked to analyze cache hit or token usage efficiency for a session, inspect
-`events.jsonl`. Raw Provider input uses
+For durable cache evidence, start with `tau agent cache AGENT` or
+`tau session cache SESSION`; load `tau-self-knowledge-cache` for its views,
+source limits, and privacy boundary. Use the following debug-log method
+only for transient event ordering or session-log-specific questions.
+`events.jsonl` is best-effort, not a complete accounting source; absence
+does not prove no call. Raw Provider input uses
 `provider.response_finished_reported`; the enriched harness-canonical published record
 uses `provider.response_finished`. Prefer canonical `type: "published"` records for
 harness-derived usage, or select one name/type explicitly rather than combining both.
@@ -211,12 +215,12 @@ for label, subset in [('all', rows), ('user', [r for r in rows if (r[6] or {}).g
     total_uncached = sum(r[4] for r in subset)
     total_out = sum(r[5] for r in subset)
     pct = 100 * total_cached / total_in if total_in else 0
-    print(label, 'calls', len(subset), 'input', total_in, 'cached', total_cached, 'uncached', total_uncached, 'cache_pct', round(pct, 1), 'output', total_out)
+    print(label, 'observed responses', len(subset), 'input', total_in, 'cached', total_cached, 'non-read input', total_uncached, 'read_pct', round(pct, 1), 'output', total_out)
 
-print('\nlargest uncached calls:')
+print('\nlargest non-read observations:')
 for sp, ln, inp, cached, uncached, out, origin in sorted(rows, key=lambda r: r[4], reverse=True)[:10]:
     pct = 100 * cached / inp if inp else 0
-    print(sp, 'line', ln, 'input', inp, 'cached', cached, 'uncached', uncached, 'cache_pct', round(pct, 1), 'output', out, 'origin', origin)
+    print(sp, 'line', ln, 'input', inp, 'cached', cached, 'non-read input', uncached, 'read_pct', round(pct, 1), 'output', out, 'origin', origin)
 PY
 ```
 

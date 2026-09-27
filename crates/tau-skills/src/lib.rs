@@ -266,6 +266,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
         content: include_str!("../self-knowledge/tau-self-knowledge-skills.md"),
     },
     BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-context-management.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-context-management.md"),
+    },
+    BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-email.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-email.md"),
     },
@@ -288,6 +292,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
     BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-ext-shell.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-ext-shell.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-ext-utils.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-ext-utils.md"),
     },
     BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-ext-slack.md",
@@ -344,6 +352,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
     BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-debugging-extensions.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-debugging-extensions.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-cache.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-cache.md"),
     },
     BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-tracing.md",

@@ -975,12 +975,14 @@ const BUILT_IN_SKILL_NAMES: &[&str] = &[
     "tau-self-knowledge-agent-coordination",
     "tau-self-knowledge-roles",
     "tau-self-knowledge-skills",
+    "tau-self-knowledge-context-management",
     "tau-self-knowledge-email",
     "tau-self-knowledge-ext-pim",
     "tau-self-knowledge-ext-rostra",
     "tau-self-knowledge-ext-provider-builtin",
     "tau-self-knowledge-ext-rhai",
     "tau-self-knowledge-ext-shell",
+    "tau-self-knowledge-ext-utils",
     "tau-self-knowledge-ext-slack",
     "tau-self-knowledge-ext-telegram",
     "tau-self-knowledge-ext-discord",
@@ -995,6 +997,7 @@ const BUILT_IN_SKILL_NAMES: &[&str] = &[
     "tau-self-knowledge-community",
     "tau-self-knowledge-debugging",
     "tau-self-knowledge-debugging-extensions",
+    "tau-self-knowledge-cache",
     "tau-self-knowledge-tracing",
     "tau-self-knowledge-e2e-testing",
 ];
@@ -1231,6 +1234,32 @@ fn built_in_skill_root_indexes_exactly_the_focused_built_ins() {
         .filter(|token| token.starts_with("tau-self-knowledge-"))
         .collect();
     assert_eq!(referenced_names, focused_names);
+}
+
+/// Keeps the new practical help discoverable from the root index and focused
+/// descriptions, rather than requiring knowledge of exact skill names.
+#[test]
+fn context_cache_and_utilities_self_knowledge_has_searchable_routes() {
+    let skills = built_in_skills();
+    for (name, terms) in [
+        (
+            "tau-self-knowledge-context-management",
+            &["compaction", "context-size alerts"][..],
+        ),
+        (
+            "tau-self-knowledge-cache",
+            &["offline", "cache", "continuity"][..],
+        ),
+        ("tau-self-knowledge-ext-utils", &["timer", "papercut"][..]),
+    ] {
+        let skill = skills.iter().find(|skill| skill.name == name).expect(name);
+        for term in terms {
+            assert!(
+                skill.description.contains(term),
+                "{name} should be searchable by {term}"
+            );
+        }
+    }
 }
 
 /// Ensures embedded content resolves the package version token before callers
