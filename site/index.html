@@ -1805,13 +1805,15 @@
       <details class="feature-detail">
         <summary><span><strong>Provider choice &amp; local models</strong><span class="feature-teaser">Choose the model and where it runs.</span></span><span class="feature-kind">CLI</span></summary>
         <div class="feature-body">
-          <div><p>Connect ChatGPT/Codex accounts, OpenRouter, public OpenAI Responses
-            endpoints, or compatible Chat Completions servers, including local
-            servers such as llama.cpp.</p><p>Provider profiles and credentials live
+          <div><p>Connect ChatGPT/Codex accounts, Grok subscriptions via xAI device
+            authorization, OpenRouter, public OpenAI Responses endpoints, or
+            compatible Chat Completions servers, including local servers such as
+            llama.cpp.</p><p>Provider profiles and credentials live
             separately. Account quotas, API billing, and supported tools or
             modalities depend on the route &mdash; not every model supports every feature.</p>
             <a href="https://github.com/dpc/tau/blob/master/docs/providers.md">Provider setup &rarr;</a></div>
-          <div class="feature-example"><p>Shell &middot; example: ChatGPT account setup</p><pre><code>tau provider add chatgpt
+          <div class="feature-example"><p>Shell &middot; examples: account setup</p><pre><code>tau provider add chatgpt
+tau provider add grok
 tau provider list
 
 # In Tau, choose a configured route:
