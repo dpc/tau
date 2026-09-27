@@ -20,6 +20,16 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+The protocol `10.1` SDK candidate uses `dpc-tau-proto` and `dpc-tau-client`
+`0.9.0`; both leaf dependencies remain `0.1.0`. The optional Configure harness
+revision field and papercut-history enum variants change Rust source construction
+and exhaustive matching, so they require a new pre-1.0 minor SDK line.
+The client pins exact proto `=0.9.0`. This is preparation, not a claim of registry
+publication. Protocol 10.0 extensions built with SDK 0.8.0 remain admitted with
+a same-major warning and best-effort operation; they do not need the optional
+10.1 papercut-history operations. Cargo source compatibility and wire admission
+remain separate.
+
 The protocol `10.0` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.8.0`; both leaf dependencies remain `0.1.0`. Workdir-driven discovery
 refresh adds public DTO fields and events. A setter now waits for the harness's

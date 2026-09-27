@@ -5,9 +5,10 @@
 `tau provider add grok` runs device authorization with the public xAI issuer,
 validates the userinfo subject, and discovers a model snapshot. The default
 public CLI client ID is `b1a00492-073a-47ea-816f-4c329264a828`; setup accepts an
-override. General third-party reuse policy and subscription entitlement have
-not been independently verified. This implementation was tested offline, not
-with a live subscription or paid inference.
+override. General third-party reuse policy and entitlement across accounts have
+not been independently verified. Offline coverage is supplemented by a live
+native compaction trial described below; it is not general subscription or
+inference qualification.
 
 The `grok` profile uses fixed public xAI Responses/SSE, not ChatGPT credentials,
 private CLI proxy headers, cookies, or an API-key fallback. Credentials live in
@@ -38,8 +39,12 @@ instruction is included in every compact input: before history initially,
 or immediately after the prior opaque item when re-compacting, even if the
 instruction changed. Subsequent inference sends its current instruction
 separately. Tau does not retry an ambiguous compact attempt or
-fall back to a second paid summary call. OAuth compact entitlement and live
-fidelity have not been verified; endpoint rejection installs no replacement.
+fall back to a second paid summary call. On September 27, 2026, one account's
+`grok-4.7` trial returned two HTTP 200 native compaction responses containing
+encrypted items, including a recompaction with a prior opaque item. Debug events
+showed installation of both replacements. This establishes acceptance for that
+trial, not all-account entitlement, semantic fidelity, subsequent inference,
+or durable restart/replay verification. Endpoint rejection installs no replacement.
 
 Expired credentials and one exact HTTP 401 enter process-local single-flight
 refresh with Secret CAS and authoritative reload. Omitted rotation metadata is

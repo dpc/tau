@@ -189,7 +189,7 @@ class PublicationTests(SourceFixture, unittest.TestCase):
                     "runtime_qualification": "not-performed",
                 }, "source": source, "source_file_sha256": dict.fromkeys(files, "a" * 64),
                     "third_party_notices_sha256": "b" * 64,
-                    "sdk_lock_versions": {n: ["0.6.0" if core else "0.4.0"]
+                    "sdk_lock_versions": {n: ["0.9.0" if core else "0.8.0"]
                                           for n in ("dpc-tau-client", "dpc-tau-proto")},
                                    "package_version": version, "package_revision": revision})
             prefix = f"tau-1.2.3-{arch}"
@@ -244,6 +244,27 @@ class PublicationTests(SourceFixture, unittest.TestCase):
         native.write_json(buildfile, build)
         with self.assertRaisesRegex(ValueError, "provenance"):
             release_assets.verify(output, self.repo, self.sha, "v1.2.3")
+
+    def test_release_requires_current_core_and_compatible_external_sdk(self):
+        """Reject stale or mixed SDK closures even with matching metadata digests."""
+        output = self.candidate()
+        sourcefile = output / "tau-1.2.3-amd64-source-manifest.json"
+        buildfile = output / "tau-1.2.3-amd64-build-manifest.json"
+        original = sourcefile.read_bytes()
+        build = json.loads(buildfile.read_text())
+        for component, versions in (
+            (0, ["0.8.0"]),
+            (1, ["0.6.0"]),
+            (1, ["0.8.0", "0.6.0"]),
+        ):
+            with self.subTest(component=component, versions=versions):
+                source = json.loads(original)
+                source["components"][component]["sdk_lock_versions"]["dpc-tau-proto"] = versions
+                native.write_json(sourcefile, source)
+                build["metadata_sha256"]["source-manifest.json"] = native.sha256(sourcefile.read_bytes())
+                native.write_json(buildfile, build)
+                with self.assertRaisesRegex(ValueError, "provenance"):
+                    release_assets.verify(output, self.repo, self.sha, "v1.2.3")
 
     def test_metadata_corruption_and_weakened_qualification_fail(self):
         output = self.candidate()

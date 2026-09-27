@@ -30,7 +30,7 @@ def component_valid(component, product, expected_source, arch):
     interpreter = native.ARCHES[arch][1]
     allowed = {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "libpthread.so.0",
                "libdl.so.2", Path(interpreter).name}
-    sdk = "0.6.0" if product["name"] == "tau" else "0.4.0"
+    sdk = "0.9.0" if product["name"] == "tau" else "0.8.0"
     return all([
         component["source"] == source,
         set(hashes) == expected_files, all(digest(v) for v in hashes.values()),

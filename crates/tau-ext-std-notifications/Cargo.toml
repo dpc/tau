@@ -1,6 +1,6 @@
 [package]
 name = "dpc-tau-ext-std-notifications"
-version.workspace = true
+version = "0.2.0"
 edition.workspace = true
 description.workspace = true
 repository.workspace = true

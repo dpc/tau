@@ -1,6 +1,6 @@
 [package]
 name = "dpc-tau-ext-utils"
-version.workspace = true
+version = "0.2.0"
 description.workspace = true
 edition.workspace = true
 homepage.workspace = true

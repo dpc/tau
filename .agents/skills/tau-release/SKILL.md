@@ -45,6 +45,12 @@ or external pins match them.
    and lock their published inputs **before** freezing the Tau candidate. A
    same-major minor protocol warning alone is not proof of incompatibility or
    proof of which binary is deployed.
+   Inspect every pinned lock independently: during 0.2.0 preparation four pins
+   still selected protocol 8.1 despite newer compatible sources already being
+   published. Ask owning projects for verified existing revisions before
+   commissioning another migration. Also update and regression-test the
+   release asset verifier's explicit SDK lock expectations when the release
+   closure changes; prepared manifests alone do not update that gate.
 3. Inventory the baseline: full source SHA, application version from
    `crates/tau/Cargo.toml`, `tau --version` (CLI embeds this string), SDK/protocol
    versions, flake-lock extension sources, expected native inventory, and release
