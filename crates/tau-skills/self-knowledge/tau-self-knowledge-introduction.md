@@ -15,6 +15,14 @@ at a time in short prose with a concrete command or small YAML example, and end 
 segment with a question or a few next-topic choices. Adapt to the user's experience
 and current goal.
 
+For a first repository task, use `docs/getting-started.md`: install by its
+current source-based route, run `tau init`, configure a provider, start on a
+clean/disposable branch, ask for a proposed bounded change before edits, then
+inspect the diff and rerun the reported focused check yourself. A model's
+summary and "do not edit yet" instruction are not enforcement or verification.
+Before sending private source, load `tau-self-knowledge-trust-and-data`; see
+`tau-self-knowledge-harness` for stop, detach, resume, and safe upgrades.
+
 Offer these topics:
 
 - initial setup with `tau init`, `tau provider add`, and the XDG config/state/runtime

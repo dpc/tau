@@ -121,6 +121,23 @@ including model-facing internal prompts even when `show-internal-prompts` is on.
 
 ## Prompt history and editing
 
+Default `Enter` submits; `Shift-Enter`/`Alt-Enter` inserts a newline.
+`Ctrl-C` clears a nonempty draft (undoable). On an empty draft, the first
+`Ctrl-C` arms cancellation and a second consecutive press cancels the current
+response. `Ctrl-D` exits only when no agent/session work is in progress;
+otherwise use `:quit-session` for explicit daemon shutdown. `Tab` cycles roles
+within the role group; `BackTab`/`Shift-Tab` cycles groups, unless a completion
+menu is open (then it cycles candidates backward). Typing `&` completes a
+running session ID, but the inserted ID is still ordinary prompt text.
+Some terminals send Backspace as `Ctrl-H`, whose default binding switches
+agents; configure Backspace to send DEL or override the binding.
+
+For a paste of at least 8 KiB, Tau uploads normalized text and inserts an
+editable artifact reference rather than submitting the text. See
+`tau-self-knowledge-artifacts` for upload failure, Enter retry, Ctrl-C
+discard, and retention behavior. `docs/cli-keybindings.md` is the complete
+key reference.
+
 Submitted prompts are kept in the current process and persisted under the state directory as `prompt-history.cbor`. Up/Down navigate prompt history. Built-in key bindings also support prompt undo/redo, Ctrl-R history search, Ctrl-O/Ctrl-G external editor integration, and shell-backed prompt insertion commands. `:edit-prompt [response_rel_idx]` opens the editor with a selected prior response, where zero is newest. `:edit-prompt-chat` and the shifted `C-O` binding place the complete durable Markdown conversation below the existing trailer marker; terminals that report bare `^O` keep ordinary `C-o`.
 
 ## Compact and verbose transcript modes

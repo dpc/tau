@@ -976,9 +976,13 @@ const BUILT_IN_SKILL_NAMES: &[&str] = &[
     "tau-self-knowledge-roles",
     "tau-self-knowledge-skills",
     "tau-self-knowledge-context-management",
+    "tau-self-knowledge-artifacts",
+    "tau-self-knowledge-trust-and-data",
+    "tau-self-knowledge-extension-authoring",
     "tau-self-knowledge-email",
     "tau-self-knowledge-ext-pim",
     "tau-self-knowledge-ext-rostra",
+    "tau-self-knowledge-ext-xmpp",
     "tau-self-knowledge-ext-provider-builtin",
     "tau-self-knowledge-ext-rhai",
     "tau-self-knowledge-ext-shell",
@@ -1251,6 +1255,38 @@ fn context_cache_and_utilities_self_knowledge_has_searchable_routes() {
             &["offline", "cache", "continuity"][..],
         ),
         ("tau-self-knowledge-ext-utils", &["timer", "papercut"][..]),
+    ] {
+        let skill = skills.iter().find(|skill| skill.name == name).expect(name);
+        for term in terms {
+            assert!(
+                skill.description.contains(term),
+                "{name} should be searchable by {term}"
+            );
+        }
+    }
+}
+
+#[test]
+fn operator_and_integration_help_has_searchable_routes() {
+    let skills = built_in_skills();
+    for (name, terms) in [
+        (
+            "tau-self-knowledge-artifacts",
+            &["artifact", "paste", "read_image"][..],
+        ),
+        (
+            "tau-self-knowledge-trust-and-data",
+            &["private", "retention", "provider"][..],
+        ),
+        (
+            "tau-self-knowledge-extension-authoring",
+            &["extension", "interceptor", "declaring"][..],
+        ),
+        ("tau-self-knowledge-ext-xmpp", &["XMPP", "std-xmpp"][..]),
+        (
+            "tau-self-knowledge-harness",
+            &["serve", "upgrade", "idle"][..],
+        ),
     ] {
         let skill = skills.iter().find(|skill| skill.name == name).expect(name);
         for term in terms {

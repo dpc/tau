@@ -1,6 +1,6 @@
 ---
 name: tau-self-knowledge-harness
-description: Use when operating or explaining the Tau harness daemon, including startup, UI clients, Unix sockets, activation modes, socket activation, readiness signaling, attach behavior, or embedded harness runs.
+description: Use when operating the Tau harness daemon, including session serve, idle shutdown, upgrade and recovery, UI clients, sockets, attach/resume, or embedded runs.
 advertise: false
 ---
 
@@ -65,6 +65,46 @@ fails without recreating an empty session. With no target, Tau auto-selects the
 sole unlocked session, opens a picker with locked rows disabled when several
 sessions are eligible, or reports that every persisted target is locked and
 suggests `tau attach SESSION`.
+
+## Session operation and upgrade
+
+`tau` creates a durable session; `tau attach [SESSION]` joins a live daemon
+without ownership, while `tau resume [SESSION]` starts a daemon from persisted
+state. Foreground-owned interactive sessions normally stop after the last UI
+quits; `:detach` deliberately keeps the daemon alive, and `:quit-session`
+requests shutdown. Supervised `tau serve --session SESSION` remains alive
+across UI disconnects. It requires exactly one guard: `--create` requires an
+absent state directory, `--existing` requires valid persisted state, and
+`--create-or-existing` atomically creates an absent target or strictly resumes
+valid state. None repairs partial/malformed/locked state. SIGINT/SIGTERM
+normally trigger orderly shutdown; a second signal can interrupt cleanup.
+
+Opt-in `session_idle_shutdown: 48h` in `harness.yaml` stops an idle daemon;
+default `null` disables it. Accepted prompts and in-flight inference, tools,
+and input waits keep the session active; passive probes, attached UIs, and
+scheduled timers alone do not. Shutdown preserves durable state, and resume
+starts a new idle window. Process-local timers stop with the daemon. See
+`docs/session-startup.md` for duration syntax and precise lifecycle behavior.
+
+`serve --mirror-extension-stderr` optionally copies framed extension stderr
+to the supervisor's stderr; private extension logs remain authoritative.
+Mirroring is best-effort, may drop records, and can expose sensitive content
+to the supervisor's logging sink. Bootstrap requires both
+`--bootstrap-prompt-file PATH` and `--bootstrap-id ID`; the durable marker
+skips the same id on restart without rereading the source. It guarantees
+at-most-once creation, **not** successful model completion. A new id
+deliberately starts another generation; inspect ambiguous failures before
+choosing one. Keep sensitive bootstrap input out of world-readable paths
+and the Nix store.
+
+For upgrades, finish active turns, note session IDs/version, explicitly stop
+daemons with `:quit-session`, preserve the old binary or install revision, and
+back up **both config and state roots while stopped**. Replace the binary,
+check `tau --version`, then resume and inspect one session before the rest.
+Running daemons do not adopt a new executable or reread startup settings.
+Tau does not promise backward compatibility: keep the backup until tested.
+Never use `tau init --force`, deletion, journal truncation, or repeated model
+turns as generic recovery. See `docs/lifecycle-and-upgrades.md`.
 
 ## Foreground daemon APIs
 

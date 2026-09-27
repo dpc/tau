@@ -1,10 +1,10 @@
 # Configuring extensions
 
-This checkout uses protocol **8.1**. Configured providers, tools, and core
-extensions built for protocol 7 are rejected before configuration and must be
-updated together with the harness. All separately maintained extension inputs
-exported by this flake are pinned to revisions built against registry SDK
-**0.6.0** and protocol **8.1**.
+This checkout declares protocol **10.1** in `crates/tau-proto/src/lib.rs`.
+Configured extensions must use a compatible protocol major; an executable
+built for an older major is rejected before configuration. Separately
+maintained extension inputs may have their own release and compatibility
+status: check their pinned revisions and owning projects before enabling them.
 
 ## Tau-state access
 
@@ -195,8 +195,8 @@ package, ensure the executable is available through `PATH`, and then enable the
 instance. The
 [`tau-ext-xmpp` project](https://radicle.network/nodes/radicle.dpc.pw/rad%3AzpN6uwkd6ok9qRAX5yZaF7w8xzDd)
 owns the authoritative XMPP configuration, security, lifecycle, and testing
-documentation. The pinned executable speaks Tau protocol 8.1 using registry
-SDK 0.6.0. The removed
+documentation. Verify the installed extension's protocol compatibility
+against this checkout before enabling it. The removed
 `muc.room_prefix` key is an error; `muc.room_template` controls the complete
 room localpart.
 
