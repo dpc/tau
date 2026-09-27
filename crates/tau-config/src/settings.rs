@@ -1098,6 +1098,8 @@ pub struct NotificationDeliveryPolicies {
 pub struct HarnessSettings {
     /// Optional lifetime of inactive session state directories.
     pub session_retention: Option<RetentionDuration>,
+    /// Optional inactivity period before the running session shuts down.
+    pub session_idle_shutdown: Option<RetentionDuration>,
     /// Optional lifetime of unreferenced durable agent transcripts.
     pub agent_retention: Option<RetentionDuration>,
     /// Optional lifetime of non-authoritative session diagnostic files.
@@ -1190,6 +1192,8 @@ pub struct HarnessSettings {
 struct HarnessSettingsWire {
     /// Optional whole-session directory retention.
     session_retention: Option<RetentionDuration>,
+    /// Optional runtime inactivity period before session shutdown.
+    session_idle_shutdown: Option<RetentionDuration>,
     /// Optional unreferenced durable-agent retention.
     agent_retention: Option<RetentionDuration>,
     /// Optional non-authoritative session diagnostic retention.
@@ -1306,6 +1310,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         .map_err(D::Error::custom)?;
         let mut settings = Self {
             session_retention: wire.session_retention,
+            session_idle_shutdown: wire.session_idle_shutdown,
             agent_retention: wire.agent_retention,
             diagnostic_retention: wire.diagnostic_retention,
             artifact_retention: wire.artifact_retention,
@@ -2527,6 +2532,12 @@ impl HarnessSettings {
     #[must_use]
     pub fn session_retention(&self) -> Option<Duration> {
         self.session_retention.map(RetentionDuration::duration)
+    }
+
+    /// Returns the optional runtime inactivity limit for the current session.
+    #[must_use]
+    pub fn session_idle_shutdown(&self) -> Option<Duration> {
+        self.session_idle_shutdown.map(RetentionDuration::duration)
     }
 
     /// Returns the configured unreferenced-agent retention duration.
@@ -4617,6 +4628,7 @@ fn validate_retention_config_values(
 ) -> Result<(), SettingsError> {
     for key in [
         "session_retention",
+        "session_idle_shutdown",
         "agent_retention",
         "diagnostic_retention",
         "artifact_retention",

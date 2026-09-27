@@ -16,6 +16,8 @@ pub(crate) struct RuntimeIoState {
     pub(crate) component_ingress: ComponentIngress,
     /// Event held while overdue-deadline catch-up completes.
     pub(crate) pending_runtime_event: Option<HarnessEvent>,
+    /// Monotonic idle clock for the opt-in daemon shutdown policy.
+    pub(crate) idle_session: IdleSession,
     /// Deterministic post-receive clock cut for scheduler tests.
     #[cfg(test)]
     pub(crate) runtime_event_receive_cut: Option<Instant>,

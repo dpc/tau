@@ -161,8 +161,15 @@ never keep a session alive. Unconditional UI-requested shutdown uses the
 payload-free `ui_shutdown_request` with the same attached-socket-UI authority;
 it enters the same canonical lifecycle as signal or policy shutdown and does
 not itself become an event. UI tree inspection uses `ui_tree_request` and
-returns one requester-directed, non-published multiline notice. The
-directed `ui_retry_extension_request` similarly selects only tool/core
+returns one requester-directed, non-published multiline notice.
+The independent `session_idle_shutdown` startup setting defaults to disabled. When
+enabled, the daemon shuts down through ordinary session teardown after the
+configured period without accepted activity or in-flight agent work. Its
+monotonic inactivity window starts fresh on process launch and after work
+finishes; passive probes and housekeeping do not renew it. Scheduled timers
+alone do not hold the daemon open: their extension-owned, process-local state
+has the same lifetime as on other ordinary shutdown paths.
+The directed `ui_retry_extension_request` similarly selects only tool/core
 extensions disabled by exhausted automatic-restart budgets, resets a fresh
 bounded cycle through the ordinary supervisor and Ready path, and returns
 requester-directed feedback. It does not restart healthy, already-retrying, or

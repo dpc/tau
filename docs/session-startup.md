@@ -29,6 +29,22 @@ After terminal cleanup the UI prints `Session detached` or `Session terminated`
 to stderr according to the actual outcome. Failed or unconfirmed termination
 gets a diagnostic instead of a success line.
 
+To shut down an otherwise idle daemon after a configurable period, opt in via
+`harness.yaml`:
+
+```yaml
+session_idle_shutdown: 48h
+```
+
+The built-in value is `null` (disabled). Positive whole-number durations accept
+`s`, `m`, `h`, `d`, or `w`. The idle window starts when the daemon starts or its
+accepted work finishes; accepted prompts and in-flight inference, tools, and
+input waits keep it open. Passive probes, attached UIs, and housekeeping do not
+reset the window. Scheduled timers alone do not hold a session open and, like
+other ordinary shutdowns, extension-owned process-local timers stop with the
+daemon. Shutdown preserves durable transcripts and session state; resume starts
+a fresh idle window.
+
 `serve` is the foreground supervisor entrypoint for one fixed persisted session.
 It starts no terminal UI, remains alive across attachment
 disconnects, and publishes the ordinary runtime socket and metadata, so `tau

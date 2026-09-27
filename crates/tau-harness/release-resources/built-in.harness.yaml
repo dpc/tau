@@ -1,6 +1,8 @@
 # Built-in HarnessSettings defaults. Harness-owned roles and prompt fragments
 # are provided as ordinary config so user partial overrides keep built-in fields.
 session_retention: null
+# Disable automatic shutdown until a positive idle duration is configured.
+session_idle_shutdown: null
 artifact_retention: null
 agent_retention: null
 diagnostic_retention: 30d

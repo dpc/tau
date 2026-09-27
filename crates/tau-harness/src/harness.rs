@@ -57,6 +57,7 @@ pub(crate) use self::construction::InProcessTool;
 use self::context_limit_telemetry::{
     PromptContextLimitSnapshot, TranscriptGrowth, context_limit_observation, transcript_growth,
 };
+use self::idle_session::IdleSession;
 use self::preview_requests::{PendingRenderedPreview, PendingRenderedPrompt};
 pub(crate) use self::provider_runtime::CurrentProviderQuota;
 use self::provider_runtime::ProviderQuotaTombstone;
@@ -1598,6 +1599,7 @@ mod discovery_refresh;
 mod extension_activation;
 mod extension_lifecycle;
 mod harness_config_state;
+mod idle_session;
 mod local_summary_continuation;
 mod notification_delivery;
 mod operator_agent_unload;

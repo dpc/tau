@@ -432,6 +432,7 @@ impl Harness {
                 component_ingress_tx,
                 component_ingress,
                 pending_runtime_event: None,
+                idle_session: IdleSession::new(harness_settings.session_idle_shutdown()),
                 #[cfg(test)]
                 runtime_event_receive_cut: None,
                 bus,
@@ -1041,6 +1042,7 @@ impl Harness {
                 component_ingress_tx,
                 component_ingress,
                 pending_runtime_event: None,
+                idle_session: IdleSession::new(parts.harness_settings.session_idle_shutdown()),
                 #[cfg(test)]
                 runtime_event_receive_cut: None,
                 bus,

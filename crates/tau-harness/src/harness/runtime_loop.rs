@@ -537,6 +537,27 @@ impl Harness {
             if Self::should_stop_run_loop(max_clients, served_clients) {
                 break;
             }
+            self.checkpoint_idle_session(Instant::now(), false);
+            if self
+                .runtime_io
+                .idle_session
+                .deadline()
+                .is_some_and(|deadline| deadline <= Instant::now())
+                && self.runtime_io.pending_runtime_event.is_none()
+            {
+                // A queued input wins over an idle timeout, including one that
+                // arrived while a preceding runtime deadline was processed.
+                match self.runtime_io.rx.try_recv() {
+                    Ok(event) => {
+                        self.runtime_io.pending_runtime_event =
+                            Some(self.expand_component_ingress_wake(event));
+                    }
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
+                        tracing::info!(target: "tau_harness", "shutting down idle session");
+                        break;
+                    }
+                }
+            }
             let harness_evt = match self.next_runtime_event() {
                 RuntimeEventWait::Event(event) => event,
                 RuntimeEventWait::DeadlineElapsed => continue,
@@ -546,10 +567,76 @@ impl Harness {
                 self.ui_runtime.shutdown_cause = Some(cause);
                 break;
             }
+            let activity = Self::is_idle_session_activity(&harness_evt);
             self.log_event(&harness_evt);
             self.handle_runtime_event(harness_evt, &mut served_clients)?;
+            self.checkpoint_idle_session(Instant::now(), activity);
         }
         Ok(())
+    }
+
+    /// Reuse the unload no-discard check so in-flight agent work cannot expire.
+    fn checkpoint_idle_session(&mut self, now: Instant, activity: bool) {
+        if self
+            .config
+            .accepted_harness_settings
+            .session_idle_shutdown()
+            .is_none()
+        {
+            return;
+        }
+        let busy = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .iter()
+            .any(|(cid, agent)| {
+                agent.identity.agent_id.as_ref().map_or_else(
+                    || {
+                        !matches!(agent.turn.turn_state, AgentTurnState::Idle)
+                            || agent.dispatch.in_flight_prompt.is_some()
+                            || !agent.dispatch.pending_prompts.is_empty()
+                            || agent.execution.tools_in_flight != 0
+                    },
+                    |agent_id| self.agent_has_accepted_work(cid, agent_id),
+                )
+            })
+            || !self.ui_runtime.pending_ui_shell_commands.is_empty()
+            || !self
+                .ui_runtime
+                .pending_ui_shell_output_injections
+                .is_empty()
+            || !self.ui_runtime.active_ui_shell_command_ids.is_empty()
+            || !self.ui_runtime.pending_action_invocations.is_empty()
+            || !self.ui_runtime.pending_retry_prompts.is_empty()
+            || !self.ui_runtime.pending_bootstrap_creates.is_empty();
+        self.runtime_io.idle_session.checkpoint(now, busy, activity);
+    }
+
+    /// Ignore polling, diagnostics, admission, and extension housekeeping.
+    fn is_idle_session_activity(event: &HarnessEvent) -> bool {
+        match event {
+            HarnessEvent::FromConnection { message, .. } => match message.as_ref() {
+                HarnessInputMessage::Emit(emit) => matches!(
+                    emit.event.as_ref(),
+                    Event::UiPromptSubmitted(_)
+                        | Event::UiShellCommand(_)
+                        | Event::UiCreateAgent(_)
+                        | Event::UiCompactRequest(_)
+                        | Event::UiRetryPrompt(_)
+                        | Event::UiCancelPrompt(_)
+                        | Event::UiRoleSelect(_)
+                        | Event::AgentMessageSent(_)
+                        | Event::AgentPromptSubmitted(_)
+                        | Event::ExtInternalPromptSubmitRequest(_)
+                        | Event::StartAgentRequest(_)
+                ),
+                HarnessInputMessage::ExternalAgentMessage(_)
+                | HarnessInputMessage::UnloadSessionAgent(_) => true,
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     pub(super) fn should_stop_run_loop(max_clients: Option<usize>, served_clients: usize) -> bool {
@@ -574,7 +661,14 @@ impl Harness {
                 Err(mpsc::TryRecvError::Disconnected) => RuntimeEventWait::Disconnected,
             };
         }
-        if let Some(deadline) = self.next_runtime_deadline() {
+        if let Some(deadline) = [
+            self.next_runtime_deadline(),
+            self.runtime_io.idle_session.deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        {
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.runtime_io.rx.recv_timeout(timeout) {
                 Ok(event) => {

@@ -1025,6 +1025,37 @@ fn artifact_retention_is_independent_and_nullable() {
     }
 }
 
+/// Idle shutdown is opt-in, layered like other harness settings, and rejects
+/// zero or malformed durations before starting a session.
+#[test]
+fn session_idle_shutdown_is_optional_layered_and_positive() {
+    assert_eq!(HarnessSettings::built_in().session_idle_shutdown(), None);
+    let td = TempDir::new().expect("tempdir");
+    let path = td.path().join("harness.yaml");
+    std::fs::write(&path, "session_idle_shutdown: 48h\n").expect("write settings");
+    assert_eq!(
+        load_harness_settings_in(&dirs_with_config(td.path()))
+            .expect("load idle shutdown")
+            .session_idle_shutdown(),
+        Some(Duration::from_secs(48 * 60 * 60))
+    );
+    std::fs::write(&path, "session_idle_shutdown: null\n").expect("disable settings");
+    assert_eq!(
+        load_harness_settings_in(&dirs_with_config(td.path()))
+            .expect("load disabled idle shutdown")
+            .session_idle_shutdown(),
+        None
+    );
+    for invalid in ["0s", "1.5h", "48", "-1h"] {
+        std::fs::write(&path, format!("session_idle_shutdown: {invalid}\n"))
+            .expect("write invalid settings");
+        assert!(
+            load_harness_settings_in(&dirs_with_config(td.path())).is_err(),
+            "{invalid} must fail"
+        );
+    }
+}
+
 /// Ensures non-authoritative diagnostic cleanup defaults to thirty days and
 /// can be disabled independently from whole-session retention.
 #[test]

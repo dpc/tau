@@ -126,7 +126,11 @@ impl Harness {
 
     /// Returns whether teardown would discard accepted work owned by this
     /// agent.
-    fn agent_has_accepted_work(&self, cid: &AgentId, agent_id: &tau_proto::AgentId) -> bool {
+    pub(super) fn agent_has_accepted_work(
+        &self,
+        cid: &AgentId,
+        agent_id: &tau_proto::AgentId,
+    ) -> bool {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return true;
         };

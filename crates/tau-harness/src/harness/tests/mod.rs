@@ -31,7 +31,9 @@ use tau_proto::{
 use tau_session_inspect::open_session_store;
 use tempfile::TempDir;
 
-use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall};
+use super::{
+    AgentToolCall, HARNESS_CONNECTION_ID, Harness, IdleSession, NormalizedFinishedToolCall,
+};
 use crate::agent::{
     AgentTurnState, DeliveryDeadlineKind, DeliverySchedule, PendingPrompt, PendingPromptSource,
 };
@@ -2729,6 +2731,7 @@ mod bridge_receiver;
 mod config_error;
 mod dedup;
 mod dispatch;
+mod idle_session;
 mod interception;
 mod lifecycle;
 mod mode;
