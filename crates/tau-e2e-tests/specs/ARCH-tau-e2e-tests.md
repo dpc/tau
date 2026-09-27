@@ -107,12 +107,14 @@ rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's
 bundled core-shell component.
 
 `ProviderBuiltinFixture` is a third, hermetic fixture family for the
-production-provider boundary. It launches the exact Cargo-built
-`tau-ext-provider-builtin` through ordinary Configure/Ready supervision and
-uses only a keyless local Chat Completions profile pointed at its bounded
-`127.0.0.1` HTTP/SSE server. Its retry script parks P1 after a 429
-`rate_limit_exceeded` response with a one-day `Retry-After`, releases it only
-through the ordinary UI retry request, then completes P1 and immediate P2.
+production-provider boundary. Nix CI launches the exact candidate
+`tau-ext-provider-builtin` built with workspace-unified test-support features,
+not a separate default-feature binary, through ordinary Configure/Ready
+supervision. The fixture uses only a keyless local Chat Completions profile
+pointed at its bounded `127.0.0.1` HTTP/SSE server. Its retry script parks P1
+after a 429 `rate_limit_exceeded` response with a one-day `Retry-After`,
+releases it only through the ordinary UI retry request, then completes P1 and
+immediate P2.
 Wire capture owns upstream attempt order and prompt context; live typed events
 own the parked-throttle and accepted-manual-release observations; the durable
 journal owns canonical prompt and terminal uniqueness. Together they require
@@ -120,7 +122,7 @@ one logical P1 terminal and a released cooldown. It has no credentials,
 provider debug-capture oracle, fake-provider retry imitation, clock control,
 automatic-expiry claim, cancellation, restart, or retry-class matrix. Nix
 provides the executable only through `TAU_E2E_PROVIDER_BUILTIN_BIN` after
-checking the exact current-profile path is executable.
+checking the exact current-profile workspace artifact is executable.
 
 Its separate Qwen compatibility script adds only the exact Cargo-built
 `tau-ext-test-dummy` in deterministic success mode. Three bounded SSE responses

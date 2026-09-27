@@ -297,14 +297,13 @@
             tests = craneLib.cargoNextest {
               cargoArtifacts = workspace;
               cargoNextestExtraArgs = "--workspace ${nextestReporterArgs}";
-              # PTY E2E fixtures execute the universal binary for their UI and
-              # component subprocesses. `cargo nextest` does not make that
-              # executable a dependency of its integration-test binaries, so
-              # build the candidate explicitly rather than reusing a stale
-              # artifact from the workspace dependency cache.
+              # PTY E2E fixtures execute the candidate universal binary for
+              # their UI and component subprocesses. Nextest does not require
+              # that executable, so fail if the workspace artifact omitted it
+              # rather than accidentally running a PATH binary.
               preCheck = ''
                 ${nextestBuildBudget}
-                cargo build --profile $CARGO_PROFILE --locked -p dpc-tau --bin tau
+                test -x "$PWD/target/$CARGO_PROFILE/tau"
               '';
               # This terminal gate has no downstream Cargo consumer. Exporting
               # its target directory would recompress about 3 GiB after every run.
@@ -341,11 +340,10 @@
                      ${nextestReporterArgs} \
                      -E 'package(dpc-tau-e2e-tests) & (binary(deterministic_provider) | binary(cancellation_liveness))'
                  if test "$(uname -s)" = Linux; then
-                    # The provider-builtin retry gate runs its exact Cargo-built
-                    # executable against a fixture-owned loopback HTTP/SSE server.
-                    cargo build --locked --profile "$CARGO_PROFILE" \
-                      -p dpc-tau-ext-provider-builtin \
-                      --bin tau-ext-provider-builtin
+                    # Run the exact workspace-built candidate against a
+                    # fixture-owned loopback HTTP/SSE server. Check before
+                    # exporting: without the path, the E2E tests skip.
+                    test -x "$PWD/target/$CARGO_PROFILE/tau-ext-provider-builtin"
                     export TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/$CARGO_PROFILE/tau-ext-provider-builtin"
                    # The provider's documented additive-CA input accepts only
                    # certificate PEM blocks. Nix's source bundle also carries
@@ -354,7 +352,6 @@
                    sed -n '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/p' \
                      "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" \
                      > "$TAU_E2E_PROVIDER_CA_BUNDLE"
-                   test -x "$TAU_E2E_PROVIDER_BUILTIN_BIN"
                    test -s "$TAU_E2E_PROVIDER_CA_BUNDLE"
                    env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
                       --workspace \
@@ -364,8 +361,8 @@
                       -E 'package(dpc-tau-e2e-tests) & binary(provider_builtin_retry)'
                    unset TAU_E2E_PROVIDER_BUILTIN_BIN TAU_E2E_PROVIDER_CA_BUNDLE
                  fi
-                 # The PTY gate must spawn the exact universal binary from this
-                 # Cargo profile rather than discovering a user PATH entry.
+                  # The PTY gate must spawn the exact workspace-built universal
+                  # binary from this Cargo profile, not a user PATH entry.
                  export TAU_E2E_TAU_BIN="$PWD/target/$CARGO_PROFILE/tau"
                   test -x "$TAU_E2E_TAU_BIN"
                   env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
