@@ -254,6 +254,18 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
         content: include_str!("../self-knowledge/tau-self-knowledge-cli-ui.md"),
     },
     BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-agent-coordination.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-agent-coordination.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-roles.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-roles.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-skills.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-skills.md"),
+    },
+    BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-email.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-email.md"),
     },

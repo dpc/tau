@@ -24,6 +24,9 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-secrets` — declared extension secrets, source resolution, Configure and Secret RPC delivery, provider credentials, redaction, and limits.
 - `tau-self-knowledge-isolation` — supervised-extension state views, Linux namespaces and read-only mounts, component exceptions, and trusted-boundary limits.
 - `tau-self-knowledge-cli-ui` — terminal UI behavior, commands, prompt history, key bindings, and prompt completions.
+- `tau-self-knowledge-agent-coordination` — delegation, messaging across agents and sessions, watches, status, background tools, timers, and discovery.
+- `tau-self-knowledge-roles` — role/group policy, tool permissions, runtime selections, and identity inspection.
+- `tau-self-knowledge-skills` — create, discover, invoke, inspect, and resolve collisions between skills.
 - `tau-self-knowledge-email` — secure configuration for the standard `std-pim` email module.
 - `tau-self-knowledge-ext-pim` — extension capabilities, configuration, OAuth, and approval workflow for the standard `std-pim` email/calendar extension.
 - `tau-self-knowledge-ext-rostra` — `std-rostra` configuration, Rostra tool authority, durable local state, synchronization, and following notifications.
