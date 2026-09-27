@@ -2,8 +2,9 @@
 
 This crate owns xAI-specific behavior rather than adapting private ChatGPT/Codex
 authentication. The built-in extension registers native `grok` profiles using
-device OAuth and the fixed public xAI Responses route. No authenticated live
-inference or subscription-entitlement verification was performed for this implementation.
+device OAuth and the fixed public xAI Responses route. Native compact endpoint
+access, fidelity, and subscription entitlement remain unverified in a live
+account.
 
 ## Implemented
 
@@ -28,7 +29,13 @@ inference or subscription-entitlement verification was performed for this implem
 - Native typed image tool outputs on audited image-capable routes, kept inside
   `function_call_output` rather than synthetic user messages. The request-wide
   24 MiB raw / 32 MiB data-URL bounds and unsupported routes produce explicit
-  image omissions. Admitted opaque replay retains its exact raw JSON.
+   image omissions. Admitted opaque replay retains its exact raw JSON.
+- Native standalone `POST /v1/responses/compact` lowers the selected closed
+  prefix through the same typed converter, sends the system instruction as
+  first input on initial compact, or after the prior opaque item on
+  re-compaction, and installs only the validated opaque item. Canceled, rejected,
+  malformed, and ambiguous replies install nothing and never cause an
+  automatic second paid summary request.
 
 The caller supplies bounded Secret read/CAS callbacks; the
 crate opens no state or credential files. Production ownership must comply with
@@ -60,7 +67,8 @@ requires a renewable credential before returning success.
 | Model discovery | Setup joins exact `/v1/models` and `/v1/language-models` identifiers, persisting explicit text-route metadata with known contexts |
 | Images and local tools | Exact audited `grok-4.7` and its discovered aliases enable function tools; other routes require explicit capability configuration. Native tool images are explicit opt-in |
 | Grok inference | Shared finite SSE transport with native lowering and nonretryable partial-limit policy |
-| Native compaction, hosted tools, quota display | Not implemented |
+| Native standalone opaque compaction | Implemented; OAuth entitlement and live fidelity unverified |
+| Hosted tools, quota display | Not implemented |
 | Default OAuth registration | `b1a00492-073a-47ea-816f-4c329264a828`, configurable; general third-party reuse policy remains unverified |
 | Subscription entitlement, Fast model route | Not credential-verified |
 

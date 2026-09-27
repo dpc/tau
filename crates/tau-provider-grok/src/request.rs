@@ -8,6 +8,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use serde_json::value::{RawValue, to_raw_value};
 use tau_proto::{AgentPromptCreated, ContextBlock, ContextItem, ToolResultItem};
 use tau_provider_responses::{
@@ -34,8 +35,7 @@ impl Request {
     ///
     /// `native_images` is the selected route's audited capability, not inferred
     /// from its name or token prices. Unsupported images remain explicit
-    /// textual omissions. Server-side compaction and hosted tools are not
-    /// supported.
+    /// textual omissions. Hosted tools are not supported.
     pub fn lower(
         prompt: &AgentPromptCreated,
         model: &AttemptModel,
@@ -93,6 +93,64 @@ impl Request {
     pub fn prepared(&self) -> &PreparedSseRequest {
         &self.prepared
     }
+
+    /// Lower the closed prefix for xAI's separate two-field compact endpoint.
+    ///
+    /// The internal trigger never reaches xAI. The system instruction is an
+    /// input message because this endpoint accepts only `model` and `input`.
+    /// On re-compaction, the prior opaque item stays first and the current
+    /// system instruction follows it, before subsequent history. Ordinary
+    /// inference also supplies the current instructions separately.
+    pub fn lower_compact(
+        prompt: &AgentPromptCreated,
+        model: &AttemptModel,
+        reasoning_efforts: &[String],
+        native_images: bool,
+    ) -> Result<Box<RawValue>, PrepareSseRequestError> {
+        if prompt.operation != tau_proto::PromptOperation::StandaloneCompaction
+            || prompt.compaction.is_some()
+        {
+            return Err(PrepareSseRequestError);
+        }
+        tau_provider::local_summary_compaction::validate_trailing_trigger(&prompt.context)
+            .map_err(|_| PrepareSseRequestError)?;
+        let mut ordinary = prompt.clone();
+        ordinary.context.blocks.pop();
+        ordinary.operation = tau_proto::PromptOperation::Inference;
+        let inference = Self::lower(&ordinary, model, 0, reasoning_efforts, native_images)?;
+        let fields: BTreeMap<String, &RawValue> =
+            serde_json::from_str(inference.prepared.json().get())
+                .map_err(|_| PrepareSseRequestError)?;
+        let mut input: Vec<Box<RawValue>> =
+            serde_json::from_str(fields["input"].get()).map_err(|_| PrepareSseRequestError)?;
+        if !prompt.system_prompt.trim().is_empty() {
+            let instruction_position =
+                usize::from(input.first().is_some_and(|item| is_compaction_item(item)));
+            input.insert(
+                instruction_position,
+                raw(&serde_json::json!({
+                    "role": "system",
+                    "content": prompt.system_prompt,
+                }))?,
+            );
+        }
+        let mut compact = BTreeMap::new();
+        compact.insert("model", raw(&model.id)?);
+        compact.insert("input", raw(&input)?);
+        raw(&compact)
+    }
+}
+
+/// Determine whether an already validated raw input item is the prior
+/// compaction head without decoding its potentially large encrypted body.
+fn is_compaction_item(item: &RawValue) -> bool {
+    #[derive(Deserialize)]
+    struct ItemKind {
+        /// Decoded JSON item type; other possibly large members are skipped.
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    serde_json::from_str::<ItemKind>(item.get()).is_ok_and(|item| item.kind == "compaction")
 }
 
 /// Serialize owned semantic fields, leaving raw siblings untouched.

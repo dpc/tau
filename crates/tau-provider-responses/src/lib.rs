@@ -4,6 +4,7 @@
 //! implementation. It sends a complete typed transcript on every turn.
 
 mod cache_diagnostic;
+mod compact_diagnostics;
 mod deadlines;
 mod debug_capture;
 mod decoded_event;
@@ -15,6 +16,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub use compact_diagnostics::CompactDiagnostics;
 pub use prepared_sse_request::{PrepareSseRequestError, PreparedSseRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3116,8 +3118,14 @@ fn lower_borrowed_item(item: BorrowedContextItem<'_>) -> Result<Option<Responses
             Err(Error::UnsupportedOutput)
         }
         ContextItem::ReasoningText(_) => Ok(None),
-        ContextItem::CompactionTrigger | ContextItem::Compaction(_) => {
-            Err(Error::UnsupportedOutput)
+        ContextItem::CompactionTrigger => Err(Error::UnsupportedOutput),
+        ContextItem::Compaction(item) => {
+            item.validate_kind(tau_proto::OpaqueProviderItemKind::Compaction)
+                .map_err(|_| Error::UnsupportedOutput)?;
+            RawValue::from_string(item.raw_json().to_owned())
+                .map(ResponsesInputItem::Raw)
+                .map(Some)
+                .map_err(|_| Error::UnsupportedOutput)
         }
     }
 }

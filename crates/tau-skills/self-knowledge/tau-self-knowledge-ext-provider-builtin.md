@@ -25,7 +25,10 @@ Discovery requires joined text-route metadata and known contexts; update
 settings and restart for model changes. Exact audited `grok-4.7` and discovered
 aliases default to function tools; other routes need explicit capability
 configuration. Native tool images are explicit opt-in and not live verified.
-Use shared local summary compaction, not native Grok compaction. No Fast/quota,
+Grok standalone compaction uses xAI's native opaque compact endpoint and replays
+its single encrypted item. OAuth compact entitlement and live fidelity remain
+unverified. A failed native attempt does not silently retry with a second paid
+summary call. No Fast/quota,
 subscription-entitlement, free/unlimited or extra-usage safety promise exists.
 See `docs/providers.md` for the public client-ID caveat, pricing and partial-limit
 behavior. Never initiate login, live inference or paid traffic without consent.

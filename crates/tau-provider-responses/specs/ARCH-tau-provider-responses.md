@@ -18,7 +18,9 @@ The backend replays the complete destination-projected transcript on every
 request. The harness preserves portable message/tool semantics and admits opaque
 material and wire sidecars only for known-compatible producing-provider origin,
 under [REQ-best-effort-provider-switching](../../../specs/REQ-best-effort-provider-switching.md).
-The adapter neither guesses origin nor repairs foreign JSON.
+The adapter neither guesses origin nor repairs foreign JSON. An admitted
+opaque compaction item is replayed from its exact raw JSON; the generic public
+profile does not itself start native compaction.
 It supports assistant text, completed reasoning items, and Function tools.
 Plain `reasoning_text` produces full displayable reasoning under the existing
 thinking-visibility policy and a separate opaque durable item; replay skips the

@@ -4776,6 +4776,80 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
+/// Native unary compaction reuses private redacted captures and the scalar
+/// budget; disabling both policies emits no raw or metadata evidence.
+#[test]
+fn compact_diagnostics_preserve_private_policy_and_redact_provider_content() {
+    use tau_provider::cache_diagnostic::CacheDiagnostics;
+
+    let mut prompt = minimal_prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    let model = AttemptModel {
+        id: tau_proto::ModelName::new("test-model"),
+    };
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&captures);
+    let sink: Arc<dyn Fn(tau_provider::debug_capture_writer::ProviderDebugCapture) + Send + Sync> =
+        Arc::new(move |capture| captured.lock().expect("sink").push(capture));
+    let body = RawValue::from_string(
+        r#"{"model":"test-model","input":[{"role":"user","content":"secret-token"}]}"#.into(),
+    )
+    .expect("request");
+    let ((), rows) = cache_diagnostic::tests::collect(|| {
+        debug_capture::DebugCapture::with_test_sink_scope(sink, || {
+            let diagnostics = CompactDiagnostics::new(
+                &prompt,
+                model.clone(),
+                "http://127.0.0.1".into(),
+                "secret-token".into(),
+                true,
+                CacheDiagnostics::Metadata,
+                tau_proto::ProviderAttempt::ONE,
+            );
+            diagnostics.request(&body);
+            diagnostics.dispatch(&body);
+            diagnostics.response(
+                br#"{"object":"response.compaction","output":[{"encrypted_content":"secret-token"}],"usage":{"input_tokens":5,"output_tokens":2}}"#,
+                true,
+            );
+            diagnostics.finish(true, false);
+        });
+    });
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["transport"], "http_unary");
+    assert_eq!(rows[0]["input_item_count"], 1);
+    assert_eq!(rows[1]["reported_usage"]["input_tokens"], 5);
+    assert!(
+        !serde_json::to_string(&rows)
+            .expect("metadata")
+            .contains("secret-token")
+    );
+    let captures = captures.lock().expect("sink");
+    assert_eq!(captures.len(), 2);
+    for capture in captures.iter() {
+        let text = std::str::from_utf8(capture.json()).expect("capture");
+        assert!(!text.contains("secret-token"));
+        assert!(text.contains("[REDACTED]"));
+    }
+    drop(captures);
+    let ((), rows) = cache_diagnostic::tests::collect(|| {
+        let diagnostics = CompactDiagnostics::new(
+            &prompt,
+            model,
+            "http://127.0.0.1".into(),
+            "secret-token".into(),
+            false,
+            CacheDiagnostics::Off,
+            tau_proto::ProviderAttempt::ONE,
+        );
+        diagnostics.request(&body);
+        diagnostics.dispatch(&body);
+        diagnostics.failed("transport_or_timeout");
+        diagnostics.finish(false, false);
+    });
+    assert!(rows.is_empty());
+}
+
 fn cache_prefix_prompt() -> tau_proto::AgentPromptCreated {
     let mut prompt = minimal_prompt();
     prompt.system_prompt = "stable system authority".to_owned();

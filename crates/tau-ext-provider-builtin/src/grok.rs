@@ -316,6 +316,8 @@ impl GrokProfile {
     pub(crate) fn models_for_provider(&self, name: &ProviderName) -> Vec<ProviderModelInfo> {
         let mut models = crate::responses::models_for_provider(name, &self.responses());
         for (published, configured) in models.iter_mut().zip(&self.models) {
+            published.supports_standalone_compaction = true;
+            published.standalone_compaction_prefix_budget = None;
             if configured.image_input {
                 published.input_modalities = vec![InputModality::Text, InputModality::Image];
             }

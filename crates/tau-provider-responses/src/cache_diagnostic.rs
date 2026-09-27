@@ -117,6 +117,53 @@ impl CacheAttempt {
         reasoning_selector: Option<&'static str>,
         bytes: usize,
     ) {
+        self.dispatch_with_form(
+            prompt,
+            config,
+            model,
+            input_items,
+            reasoning_selector,
+            bytes,
+            "full",
+            transport(config),
+        );
+    }
+
+    /// Observe a one-shot native Responses compact POST under the same scalar
+    /// admission and correlation rules as ordinary inference.
+    pub(super) fn dispatch_compact(
+        &self,
+        prompt: &tau_proto::AgentPromptCreated,
+        config: &AttemptConfig,
+        model: &AttemptModel,
+        input_items: usize,
+        bytes: usize,
+    ) {
+        self.dispatch_with_form(
+            prompt,
+            config,
+            model,
+            input_items,
+            None,
+            bytes,
+            "compact",
+            "http_unary",
+        );
+    }
+
+    /// Construct a single allowlisted dispatch record.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_with_form(
+        &self,
+        prompt: &tau_proto::AgentPromptCreated,
+        config: &AttemptConfig,
+        model: &AttemptModel,
+        input_items: usize,
+        reasoning_selector: Option<&'static str>,
+        bytes: usize,
+        request_form: &'static str,
+        transport_label: &'static str,
+    ) {
         if self.dispatched.swap(true, Ordering::Relaxed) || !self.enabled {
             return;
         }
@@ -129,7 +176,7 @@ impl CacheAttempt {
             &mut record,
             json!({
                 "backend": "public_responses", "backend_mode": "standard",
-                "transport": transport(config),
+                "transport": transport_label,
                 "configured_model": model, "effective_model": model,
                 "omitted_identity_fields": if model.is_none() { vec!["configured_model", "effective_model"] } else { vec![] },
                 "wire_dispatch_index": 1, "request_bytes": bytes,
@@ -142,7 +189,7 @@ impl CacheAttempt {
             "cache_ttl_seconds": config.prompt_cache.map(|p| match p.ttl {
                 crate::PromptCacheTtl::Minutes30 => 1800_u64,
             }),
-                "request_form": "full", "previous_response_present": false,
+                "request_form": request_form, "previous_response_present": false,
                 "anchor_validation": "not_applicable",
                 "connection_epoch": null,
                 "connection_state": match config.transport {
@@ -157,13 +204,6 @@ impl CacheAttempt {
     /// Emit once for a normally returned outcome, without retaining error prose
     /// or changing the extension's terminal and retry policy.
     pub(super) fn finish(&self, config: &AttemptConfig, outcome: &AttemptOutcome) {
-        if !self.enabled {
-            return;
-        }
-        let Some(reservation) = Reservation::acquire() else {
-            return;
-        };
-        let index = self.dispatch_index();
         let (success, canceled, semantic, failure, retry_class) = match outcome {
             AttemptOutcome::Completed(success) => {
                 (true, false, success.has_timed_semantic_output, None, None)
@@ -188,6 +228,40 @@ impl CacheAttempt {
                 None,
             ),
         };
+        self.finish_parts(
+            transport(config),
+            success,
+            canceled,
+            semantic,
+            failure,
+            retry_class,
+        );
+    }
+
+    /// Close native unary evidence without inventing an SSE terminal or retry.
+    pub(super) fn finish_compact(&self, success: bool, canceled: bool) {
+        self.finish_parts("http_unary", success, canceled, false, None, None);
+    }
+
+    /// Emit the same attempt-end schema from already classified finite
+    /// outcomes.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_parts(
+        &self,
+        transport_label: &'static str,
+        success: bool,
+        canceled: bool,
+        semantic: bool,
+        failure: Option<tau_proto::ProviderFailureKind>,
+        retry_class: Option<tau_provider::retry_policy::RetryClass>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(reservation) = Reservation::acquire() else {
+            return;
+        };
+        let index = self.dispatch_index();
         let mut record = self.common(&reservation, "attempt_end");
         merge(
             &mut record,
@@ -200,7 +274,7 @@ impl CacheAttempt {
         merge(
             &mut record,
             json!({
-                "backend": "public_responses", "transport": transport(config),
+                "backend": "public_responses", "transport": transport_label,
                 "dispatch_count": u64::from(index.is_some()),
                 "successful_dispatch_index": if success { index } else { None },
                 "outcome": if canceled { "canceled" } else if success { "success" }

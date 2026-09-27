@@ -31,8 +31,15 @@ discovered aliases; configure other verified routes explicitly. Native
 tool-result images require explicit `native_tool_images: true` together with
 `image_input` and `function_tools`; public-route acceptance has not been
 credential-verified. Unsupported or over-budget tool images become explicit
-textual omissions. Hosted tools and provider-native compaction are unsupported;
-the shared cache-aligned local summary fallback is available instead.
+textual omissions. Hosted tools are unsupported. Standalone Grok compaction
+uses xAI's opaque `/v1/responses/compact` endpoint and replaces the selected
+prefix with its single unmodified compaction item. The current system
+instruction is included in every compact input: before history initially,
+or immediately after the prior opaque item when re-compacting, even if the
+instruction changed. Subsequent inference sends its current instruction
+separately. Tau does not retry an ambiguous compact attempt or
+fall back to a second paid summary call. OAuth compact entitlement and live
+fidelity have not been verified; endpoint rejection installs no replacement.
 
 Expired credentials and one exact HTTP 401 enter process-local single-flight
 refresh with Secret CAS and authoritative reload. Omitted rotation metadata is

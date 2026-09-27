@@ -303,6 +303,17 @@ fn run_loopback_selected_attempt(
     grok: Option<&crate::GrokModel>,
     response: &str,
 ) -> (PromptAttemptOutcome, serde_json::Value) {
+    run_loopback_selected_attempt_with_cancel(prompt, model, grok, response, &mut || false)
+}
+
+/// Drive the production loopback adapter with controlled cancellation reads.
+fn run_loopback_selected_attempt_with_cancel(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &ResponsesModel,
+    grok: Option<&crate::GrokModel>,
+    response: &str,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> (PromptAttemptOutcome, serde_json::Value) {
     use path_std_io::Write as _;
 
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -338,7 +349,7 @@ fn run_loopback_selected_attempt(
         grok,
         false,
         &mut writer,
-        &mut || false,
+        is_canceled,
         &network,
         tau_proto::ProviderAttempt::ONE,
     );
@@ -451,13 +462,12 @@ fn consume_loopback_request(reader: &mut impl path_std_io::Read) -> path_std_io:
     Ok(received.split_off(header_end))
 }
 
-/// Native local compaction uses ordinary Grok inference only on its private
-/// wire copy, preserving the prefix and the original standalone terminal
-/// ownership.
+/// Native compaction submits a finite two-field request and installs only its
+/// single opaque output, not an ordinary assistant narrative.
 #[test]
-fn grok_native_summary_dispatches_ordinary_prefix_and_returns_local_narrative() {
-    FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| observed.borrow_mut().clear());
+fn grok_native_compact_dispatches_once_and_returns_opaque_item() {
     let mut prompt = crate::openai_tests::prompt();
+    prompt.system_prompt = "native Grok instruction".into();
     prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
     prompt
         .context
@@ -475,66 +485,122 @@ fn grok_native_summary_dispatches_ordinary_prefix_and_returns_local_narrative() 
         "id": "grok-4.7", "context_window": 500000, "function_tools": true
     }))
     .expect("native model");
-    let body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"native-summary\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checkpoint for continuation.\"}]}]}}\n\n";
+    let body = r#"{"object":"response.compaction","id":"cmp_test","output":[{"type":"compaction","id":"cmp_test","encrypted_content":"sealed"}],"usage":{"input_tokens":120,"output_tokens":9}}"#;
     let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     let (outcome, wire) = run_loopback_selected_attempt(&prompt, &model, Some(&native), &response);
-    FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| {
-        assert_eq!(
-            *observed.borrow(),
-            [tau_proto::PromptOperation::StandaloneCompaction]
-        );
-        observed.borrow_mut().clear();
-    });
     let PromptAttemptOutcome::Finished(finished) = outcome else {
-        panic!("native local summary must finish");
+        panic!("native opaque compact must finish");
     };
     assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
     assert!(matches!(
         finished.output_items.as_slice(),
-        [tau_proto::ContextItem::LocalCompactionNarrative(_)]
+        [tau_proto::ContextItem::Compaction(_)]
     ));
-    let mut ordinary = prompt.clone();
-    ordinary.operation = tau_proto::PromptOperation::Inference;
-    ordinary.context.blocks.pop();
-    let lowered = GrokRequest::lower(
-        &ordinary,
-        &tau_provider_responses::AttemptModel {
-            id: model.id.clone(),
-        },
-        0,
-        &[],
-        false,
-    )
-    .expect("ordinary prefix");
-    let prefix: serde_json::Value =
-        serde_json::from_str(lowered.prepared().json().get()).expect("prefix JSON");
-    let input = wire["input"].as_array().expect("input");
-    let original = prefix["input"].as_array().expect("ordinary input");
-    assert_eq!(&input[..original.len()], original);
     assert_eq!(
-        input.last().expect("instruction")["content"][0]["text"],
-        tau_provider::local_summary_compaction::REQUEST.as_str()
+        finished.usage.as_ref().expect("usage").prompt_sent_tokens,
+        120
     );
+    assert_eq!(
+        finished
+            .usage
+            .as_ref()
+            .expect("usage")
+            .response_received_tokens,
+        9
+    );
+    let input = wire["input"].as_array().expect("input");
+    assert_eq!(input.first().expect("instruction")["role"], "system");
+    assert_eq!(input[0]["content"], "native Grok instruction");
     assert_eq!(wire["model"], "grok-4.7");
-    assert_eq!(wire["store"], false);
-    assert!(wire.get("previous_response_id").is_none());
+    assert_eq!(wire.as_object().expect("object").len(), 2);
     assert_eq!(
         prompt.operation,
         tau_proto::PromptOperation::StandaloneCompaction
     );
-    assert!(matches!(
-        run_loopback_attempt(&prompt, &model, &response),
-        PromptAttemptOutcome::Finished(_)
-    ));
-    FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| {
-        assert_eq!(
-            *observed.borrow(),
-            [tau_proto::PromptOperation::StandaloneCompaction]
-        );
-    });
+}
+
+/// An invalid or rejected native response must never trigger a second paid
+/// summary request or install a partial compaction window.
+#[test]
+fn grok_native_compact_rejects_non_compaction_output_without_fallback() {
+    let mut prompt = crate::openai_tests::prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            },
+        ));
+    let model: ResponsesModel = serde_json::from_value(serde_json::json!({
+        "id": "grok-4.7", "context_window": 500000
+    }))
+    .expect("model");
+    let native: crate::GrokModel = serde_json::from_value(serde_json::json!({
+        "id": "grok-4.7", "context_window": 500000
+    }))
+    .expect("native");
+    let body =
+        r#"{"object":"response.compaction","output":[{"type":"message","role":"assistant"}]}"#;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let (outcome, _) = run_loopback_selected_attempt(&prompt, &model, Some(&native), &response);
+    assert!(matches!(outcome, PromptAttemptOutcome::Terminal { .. }));
+    let rejected = "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    let (outcome, _) = run_loopback_selected_attempt(&prompt, &model, Some(&native), rejected);
+    assert!(matches!(outcome, PromptAttemptOutcome::Terminal { .. }));
+    // The server may have charged for work before dropping the response. A
+    // second request (including summary fallback) must not be dispatched.
+    let ambiguous = "HTTP/1.1 200 OK\r\ncontent-length: 1000\r\nconnection: close\r\n\r\n{}";
+    let (outcome, _) = run_loopback_selected_attempt(&prompt, &model, Some(&native), ambiguous);
+    assert!(matches!(outcome, PromptAttemptOutcome::Terminal { .. }));
+}
+
+/// Cancellation just after a complete native reply must not turn the paid
+/// attempt into a failure eligible for a second dispatch or commit its output.
+#[test]
+fn grok_native_compact_late_cancel_discards_opaque_output() {
+    let mut prompt = crate::openai_tests::prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            },
+        ));
+    let model: ResponsesModel = serde_json::from_value(serde_json::json!({
+        "id": "grok-4.7", "context_window": 500000
+    }))
+    .expect("model");
+    let native: crate::GrokModel = serde_json::from_value(serde_json::json!({
+        "id": "grok-4.7", "context_window": 500000
+    }))
+    .expect("native");
+    let body = r#"{"object":"response.compaction","id":"cmp_late","output":[{"type":"compaction","id":"cmp_late","encrypted_content":"sealed"}]}"#;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut checks = 0;
+    let (outcome, _) = run_loopback_selected_attempt_with_cancel(
+        &prompt,
+        &model,
+        Some(&native),
+        &response,
+        &mut || {
+            checks += 1;
+            2 <= checks
+        },
+    );
+    assert!(matches!(outcome, PromptAttemptOutcome::Canceled { .. }));
 }
 
 /// Scripted reads make request fragmentation deterministic rather than relying

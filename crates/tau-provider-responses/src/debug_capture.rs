@@ -211,6 +211,71 @@ impl DebugCapture {
         );
     }
 
+    /// Capture a native unary compact request under the existing private
+    /// sanitization, truncation, and non-journaled writer policy.
+    pub(super) fn submit_unary_request(
+        &self,
+        prompt: &tau_proto::AgentPromptCreated,
+        config: &AttemptConfig,
+        model: &AttemptModel,
+        body: &serde_json::value::RawValue,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let mut common = CommonCapture::new(prompt, config, model);
+        common.transport = "http-unary";
+        self.submit(
+            prompt,
+            config,
+            CaptureClass::HttpSseRequest,
+            &RequestCapture { common, body },
+        );
+    }
+
+    /// Capture a bounded raw unary response as private JSON text rather than
+    /// pretending it was a sequence of SSE events.
+    pub(super) fn submit_unary_response(
+        &self,
+        prompt: &tau_proto::AgentPromptCreated,
+        config: &AttemptConfig,
+        model: &AttemptModel,
+        status: Option<u16>,
+        kind: &'static str,
+        body: Option<&str>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let body = body.map(|body| {
+            if body.len() <= MAX_RESPONSE_EVENT_BYTES {
+                body
+            } else {
+                "[response body exceeded private capture limit]"
+            }
+        });
+        let mut common = CommonCapture::new(prompt, config, model);
+        common.transport = "http-unary";
+        self.submit(
+            prompt,
+            config,
+            CaptureClass::HttpSseResponse,
+            &serde_json::json!({
+                "session_id": common.session_id,
+                "agent_prompt_id": common.agent_prompt_id,
+                "transport": common.transport,
+                "backend": common.backend,
+                "model": common.model,
+                "context_item_count": common.context_item_count,
+                "tool_count": common.tool_count,
+                "tool_choice": common.tool_choice,
+                "kind": kind,
+                "http_status": status,
+                "raw_response_json": body,
+            }),
+        );
+    }
+
     /// Submit the exact WebSocket `response.create` payload at frame-send.
     pub(super) fn submit_wire_request(
         &self,
@@ -413,7 +478,7 @@ impl<'a> CommonCapture<'a> {
 
 /// Borrowed request capture, avoiding an unbounded body clone.
 #[derive(Serialize)]
-struct RequestCapture<'a, T> {
+struct RequestCapture<'a, T: ?Sized> {
     /// Shared attempt metadata.
     #[serde(flatten)]
     common: CommonCapture<'a>,

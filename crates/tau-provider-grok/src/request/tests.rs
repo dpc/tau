@@ -43,6 +43,76 @@ fn json_request(prompt: &AgentPromptCreated, native_images: bool) -> Value {
     serde_json::from_str(request.prepared().json().get()).expect("JSON")
 }
 
+/// Standalone compact sends a closed typed prefix plus the current system
+/// instruction, but never leaks Tau's trigger or SSE-only controls.
+#[test]
+fn compact_request_reuses_typed_replay_without_trigger() {
+    let mut prompt = prompt();
+    prompt.operation = PromptOperation::StandaloneCompaction;
+    prompt
+        .context
+        .blocks
+        .push(ContextBlock::UserInput(UserInputBlock {
+            items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::Text {
+                    text: "hello".into(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }));
+    prompt
+        .context
+        .blocks
+        .push(ContextBlock::UserInput(UserInputBlock {
+            items: vec![ContextItem::CompactionTrigger],
+        }));
+    let raw = Request::lower_compact(&prompt, &model(), &[], false).expect("compact request");
+    let value: Value = serde_json::from_str(raw.get()).expect("JSON");
+    assert_eq!(value["model"], "test-model");
+    assert_eq!(value["input"][0]["role"], "system");
+    assert_eq!(value["input"][0]["content"], "test system");
+    assert_eq!(value["input"][1]["content"][0]["text"], "hello");
+    assert_eq!(value["input"].as_array().expect("array").len(), 2);
+    assert_eq!(value.as_object().expect("object").len(), 2);
+
+    prompt
+        .context
+        .blocks
+        .push(ContextBlock::UserInput(UserInputBlock {
+            items: vec![ContextItem::CompactionTrigger],
+        }));
+    assert!(Request::lower_compact(&prompt, &model(), &[], false).is_err());
+}
+
+/// A provider compaction item survives the next ordinary Grok request exactly.
+#[test]
+fn inference_replays_compaction_item_with_exact_raw_json() {
+    let raw = r#"{"type":"compaction","id":"cmp_1","encrypted_content":"sealed","num":1.2300}"#;
+    let mut prompt = prompt();
+    prompt
+        .context
+        .blocks
+        .push(ContextBlock::AssistantResponse(AssistantResponseBlock {
+            provider_response_id: None,
+            backend: None,
+            usage: None,
+            output_items: vec![ContextItem::Compaction(
+                OpaqueProviderItem::from_raw_json(raw).expect("opaque item"),
+            )],
+        }));
+    let request = Request::lower(&prompt, &model(), 0, &[], false).expect("inference");
+    assert!(request.prepared().json().get().contains(raw));
+    let replayed: AgentPromptCreated =
+        serde_json::from_slice(&serde_json::to_vec(&prompt).expect("encode")).expect("replay");
+    let after = Request::lower(&replayed, &model(), 0, &[], false).expect("cold inference");
+    assert_eq!(
+        request.prepared().json().get(),
+        after.prepared().json().get()
+    );
+}
+
 /// Storage, reasoning replay and sticky routing are xAI policy, not OpenAI TTL.
 #[test]
 fn request_uses_xai_policy_and_stable_routing() {
@@ -144,6 +214,60 @@ fn request_preserves_opaque_replay_and_native_tool_images() {
             .contains("image omitted")
     );
     assert!(!unsupported.to_string().contains("base64"));
+}
+
+/// Compact shares the inference converter for opaque history and typed image
+/// tool output; it does not reduce them to text before paid submission.
+#[test]
+fn compact_preserves_reasoning_and_image_tool_output() {
+    let reasoning =
+        r#"{"type":"reasoning","id":"rs_test","encrypted_content":"sealed","num":1.2300}"#;
+    let previous = r#"{"ty\u0070e":"comp\u0061ction","id":"cmp_old","encrypted_content":"old"}"#;
+    let mut prompt = prompt();
+    prompt.system_prompt = "current instructions after old opaque context".into();
+    prompt.operation = PromptOperation::StandaloneCompaction;
+    prompt
+        .context
+        .blocks
+        .push(ContextBlock::AssistantResponse(AssistantResponseBlock {
+            provider_response_id: None,
+            backend: None,
+            usage: None,
+            output_items: vec![
+                ContextItem::Compaction(
+                    OpaqueProviderItem::from_raw_json(previous).expect("prior"),
+                ),
+                ContextItem::Reasoning(
+                    OpaqueProviderItem::from_raw_json(reasoning).expect("reasoning"),
+                ),
+            ],
+        }));
+    prompt
+        .context
+        .blocks
+        .push(ContextBlock::ToolResults(ToolResultsBlock {
+            items: vec![image_result()],
+        }));
+    prompt
+        .context
+        .blocks
+        .push(ContextBlock::UserInput(UserInputBlock {
+            items: vec![ContextItem::CompactionTrigger],
+        }));
+    let body = Request::lower_compact(&prompt, &model(), &[], true).expect("native compact");
+    assert!(body.get().contains(previous));
+    assert!(body.get().contains(reasoning));
+    let value: Value = serde_json::from_str(body.get()).expect("JSON");
+    assert_eq!(value["input"][0]["type"], "compaction");
+    assert_eq!(value["input"][1]["role"], "system");
+    assert_eq!(
+        value["input"][1]["content"],
+        "current instructions after old opaque context"
+    );
+    assert_eq!(value["input"][2]["type"], "reasoning");
+    assert_eq!(value["input"][3]["output"][1]["type"], "input_image");
+    assert_eq!(value["input"].as_array().expect("array").len(), 4);
+    assert_eq!(value.as_object().expect("object").len(), 2);
 }
 
 /// JSON-escaped canonical call IDs still map to their ordered tool results.

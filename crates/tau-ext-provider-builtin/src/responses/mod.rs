@@ -19,6 +19,7 @@ use tau_proto::{ModelName, NativeReasoningEffort, ProviderModelInfo, ProviderNam
 use tau_provider::local_summary_compaction::{
     Config as SummaryCompactionConfig, ConfigError as SummaryCompactionConfigError,
 };
+use tau_provider_grok::compact::Outcome as GrokCompactOutcome;
 use tau_provider_grok::request::Request as GrokRequest;
 
 use self::sampling::ResponsesResponseSampler;
@@ -331,6 +332,21 @@ fn run_selected_prompt_attempt<S: ProviderReportSink>(
     network: &tau_provider::OutboundNetworkPolicy,
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
+    if let Some(grok) = grok
+        && prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+    {
+        return run_grok_compact(
+            agent_prompt_id,
+            prompt,
+            provider,
+            model,
+            grok,
+            debug_provider_requests,
+            is_canceled,
+            network,
+            provider_attempt,
+        );
+    }
     let summary_config = resolved_summary_config(model);
     let compact_prompt = if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
         let Some(config) = summary_config else {
@@ -562,6 +578,102 @@ fn run_selected_prompt_attempt<S: ProviderReportSink>(
             provider,
             failure,
             backend_reached,
+            provider_attempt,
+        ),
+    }
+}
+
+/// Dispatch one native compact attempt; never repeat ambiguous paid work as a
+/// local summary and never expose unvalidated output to the harness.
+#[allow(clippy::too_many_arguments)]
+fn run_grok_compact(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ResponsesProvider,
+    model: &ResponsesModel,
+    grok: &crate::GrokModel,
+    debug_provider_requests: bool,
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+    provider_attempt: tau_proto::ProviderAttempt,
+) -> PromptAttemptOutcome {
+    if !grok.function_tools && !prompt.tools.is_empty() {
+        return invalid_compaction(
+            agent_prompt_id,
+            prompt,
+            provider,
+            "Grok route has no configured function-tool capability",
+            false,
+            provider_attempt,
+        );
+    }
+    let model = tau_provider_responses::AttemptModel {
+        id: model.id.clone(),
+    };
+    let body = match GrokRequest::lower_compact(
+        prompt,
+        &model,
+        &grok.reasoning_efforts,
+        grok.native_tool_images,
+    ) {
+        Ok(body) => body,
+        Err(_) => {
+            return invalid_compaction(
+                agent_prompt_id,
+                prompt,
+                provider,
+                "Grok compact request uses unsupported capabilities",
+                false,
+                provider_attempt,
+            );
+        }
+    };
+    let diagnostics = tau_provider_responses::CompactDiagnostics::new(
+        prompt,
+        model.clone(),
+        provider.base_url.clone(),
+        provider.api_key.clone(),
+        debug_provider_requests,
+        provider.cache_diagnostics,
+        provider_attempt,
+    );
+    match tau_provider_grok::compact::run(
+        &body,
+        &provider.base_url,
+        &provider.api_key,
+        network,
+        is_canceled,
+        &diagnostics,
+    ) {
+        GrokCompactOutcome::Completed(success) => {
+            PromptAttemptOutcome::Finished(Box::new(finished(
+                agent_prompt_id,
+                prompt,
+                provider,
+                vec![success.output],
+                tau_proto::ProviderStopReason::EndTurn,
+                None,
+                None,
+                success.usage,
+                success.response_id,
+                true,
+                provider_attempt,
+            )))
+        }
+        GrokCompactOutcome::Canceled => PromptAttemptOutcome::Canceled {
+            progress: tau_provider_responses::AttemptProgress {
+                output_items: Vec::new(),
+                response_bytes_received: 0,
+                has_timed_semantic_output: false,
+            },
+            backend_reached: true,
+        },
+        GrokCompactOutcome::Failed { dispatched } => invalid_compaction(
+            agent_prompt_id,
+            prompt,
+            provider,
+            "Grok native compaction failed; no replacement was installed",
+            dispatched,
             provider_attempt,
         ),
     }

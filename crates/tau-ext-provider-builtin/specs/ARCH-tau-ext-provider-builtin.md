@@ -22,8 +22,9 @@ adds no operational filesystem access or harness-extension schema. Single-flight
 is process-local; cross-process duplicate exchanges or crash-before-save may
 require login. Exact HTTP 401 is a private finite-attempt fact consumed only by
 native OAuth routing; generic Responses behavior remains unchanged.
-The shared public Responses adapter supplies finite SSE, validation, output
-sampling and local summary compaction after native lowering. See
+The shared public Responses adapter supplies finite SSE, validation, and
+output sampling for Grok inference. Native standalone compaction uses xAI's
+separate bounded unary endpoint and the same private diagnostic policy. See
 [`tau-provider-grok`](../../tau-provider-grok/README.md) for capabilities and
 unverified live-subscription limits.
 
