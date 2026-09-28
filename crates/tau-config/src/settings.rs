@@ -1268,6 +1268,18 @@ struct AgentsSettings {
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(default)]
     required_skills: Vec<tau_proto::SkillName>,
+    #[serde(default)]
+    disable_tool_tags: Option<Vec<ToolTagPattern>>,
+    #[serde(default)]
+    enable_tool_tags: Option<Vec<ToolTagPattern>>,
+    #[serde(default)]
+    disable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    #[serde(default)]
+    enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    #[serde(default)]
+    disable_tools: Option<Vec<ToolName>>,
+    #[serde(default)]
+    enable_tools: Option<Vec<ToolName>>,
     /// Provider settings that default every role before group and role patches.
     #[serde(default, deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
@@ -1657,6 +1669,13 @@ struct HarnessProfileAgentOverrides {
     prompt_fragments: Vec<RolePromptFragment>,
     /// Global required skills applied to every role.
     required_skills: Vec<tau_proto::SkillName>,
+    /// Tool-policy selectors inherited by every role in this profile.
+    disable_tool_tags: Option<Vec<ToolTagPattern>>,
+    enable_tool_tags: Option<Vec<ToolTagPattern>>,
+    disable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    disable_tools: Option<Vec<ToolName>>,
+    enable_tools: Option<Vec<ToolName>>,
     /// Default model patch.
     #[serde(default, deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
@@ -1693,6 +1712,12 @@ impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
             role_groups: profile.role_groups,
             prompt_fragments: profile.prompt_fragments,
             required_skills: profile.required_skills,
+            disable_tool_tags: profile.disable_tool_tags,
+            enable_tool_tags: profile.enable_tool_tags,
+            disable_tool_groups: profile.disable_tool_groups,
+            enable_tool_groups: profile.enable_tool_groups,
+            disable_tools: profile.disable_tools,
+            enable_tools: profile.enable_tools,
             model: profile.model,
             effort: profile.effort,
             verbosity: profile.verbosity,
@@ -1744,6 +1769,12 @@ struct HarnessAgentRoleOverrides {
     prompt_fragments: Vec<RolePromptFragment>,
 
     required_skills: Vec<tau_proto::SkillName>,
+    disable_tool_tags: Option<Vec<ToolTagPattern>>,
+    enable_tool_tags: Option<Vec<ToolTagPattern>>,
+    disable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    disable_tools: Option<Vec<ToolName>>,
+    enable_tools: Option<Vec<ToolName>>,
     #[serde(default, deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
     #[serde(default, deserialize_with = "present_option")]
@@ -1779,6 +1810,12 @@ impl AgentsSettings {
             service_tier: self.service_tier,
             inference_compaction: self.inference_compaction,
             compactions: self.compactions.clone(),
+            disable_tool_tags: self.disable_tool_tags.clone(),
+            enable_tool_tags: self.enable_tool_tags.clone(),
+            disable_tool_groups: self.disable_tool_groups.clone(),
+            enable_tool_groups: self.enable_tool_groups.clone(),
+            disable_tools: self.disable_tools.clone(),
+            enable_tools: self.enable_tools.clone(),
             web_tools: Some(self.web_tools.clone()),
             ..AgentRolePatch::default()
         }
@@ -1798,6 +1835,12 @@ impl HarnessAgentRoleOverrides {
             service_tier: self.service_tier,
             inference_compaction: self.inference_compaction,
             compactions: self.compactions.clone(),
+            disable_tool_tags: self.disable_tool_tags.clone(),
+            enable_tool_tags: self.enable_tool_tags.clone(),
+            disable_tool_groups: self.disable_tool_groups.clone(),
+            enable_tool_groups: self.enable_tool_groups.clone(),
+            disable_tools: self.disable_tools.clone(),
+            enable_tools: self.enable_tools.clone(),
             web_tools: self.web_tools.clone(),
             ..AgentRolePatch::default()
         }
@@ -1907,8 +1950,9 @@ struct RawRoleGroup {
 
 // Role patches must distinguish three scalar states during layered merges:
 // absent means inherit the lower-precedence value, `null` means clear it, and a
-// concrete value replaces it. Replacement lists use `Option<Vec<_>>` so an
-// absent field inherits while an explicit `[]` clears the list. `tools` is a
+// concrete value replaces it. Tool-policy selector lists use `Option<Vec<_>>`:
+// absence inherits, `[]` clears, and nonempty lists append unique entries.
+// Other replacement lists can be cleared with `[]`. `tools` is a
 // nullable replacement list: `tools: null` clears an inherited allow-list back
 // to default tool behavior, while `tools: []` sets an explicit empty
 // allow-list. Prompt fragments and required skills are the exceptions and
@@ -3662,24 +3706,12 @@ impl AgentRole {
         if let Some(tools) = &patch.tools {
             self.tools = tools.clone();
         }
-        if let Some(disable_tool_tags) = &patch.disable_tool_tags {
-            self.disable_tool_tags = disable_tool_tags.clone();
-        }
-        if let Some(enable_tool_tags) = &patch.enable_tool_tags {
-            self.enable_tool_tags = enable_tool_tags.clone();
-        }
-        if let Some(disable_tool_groups) = &patch.disable_tool_groups {
-            self.disable_tool_groups = disable_tool_groups.clone();
-        }
-        if let Some(enable_tool_groups) = &patch.enable_tool_groups {
-            self.enable_tool_groups = enable_tool_groups.clone();
-        }
-        if let Some(disable_tools) = &patch.disable_tools {
-            self.disable_tools = disable_tools.clone();
-        }
-        if let Some(enable_tools) = &patch.enable_tools {
-            self.enable_tools = enable_tools.clone();
-        }
+        apply_tool_selector_patch(&mut self.disable_tool_tags, &patch.disable_tool_tags);
+        apply_tool_selector_patch(&mut self.enable_tool_tags, &patch.enable_tool_tags);
+        apply_tool_selector_patch(&mut self.disable_tool_groups, &patch.disable_tool_groups);
+        apply_tool_selector_patch(&mut self.enable_tool_groups, &patch.enable_tool_groups);
+        apply_tool_selector_patch(&mut self.disable_tools, &patch.disable_tools);
+        apply_tool_selector_patch(&mut self.enable_tools, &patch.enable_tools);
         if let Some(web_tools) = &patch.web_tools {
             self.web_tools.apply_patch(web_tools);
         }
@@ -3687,6 +3719,21 @@ impl AgentRole {
             for skill in required_skills {
                 if !self.required_skills.contains(skill) {
                     self.required_skills.push(skill.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Merge one role tool-policy selector without changing other list semantics.
+fn apply_tool_selector_patch<T: Clone + PartialEq>(effective: &mut Vec<T>, patch: &Option<Vec<T>>) {
+    if let Some(patch) = patch {
+        if patch.is_empty() {
+            effective.clear();
+        } else {
+            for selector in patch {
+                if !effective.contains(selector) {
+                    effective.push(selector.clone());
                 }
             }
         }

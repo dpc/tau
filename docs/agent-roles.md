@@ -51,6 +51,22 @@ A role can also set:
 - `required_skills`: exact skill names that must be
   discoverable and model-loadable before the role is available
 
+The six `enable_*` / `disable_*` tool name, group, and tag lists above
+concatenate across agent defaults, group defaults, and role patches, keeping
+the first occurrence of each name or pattern. At each scope, built-ins, files
+and drop-ins, selected profiles, and ordered `--harness-config` patches apply
+in source order; narrower scopes apply after broader scopes. Omitting a field
+inherits it, while `[]` clears that one list so a later patch can rebuild it.
+For example, a profile's `enable_tools: [papercut_list]` adds that tool without
+repeating inherited `task_info`. A nonempty list **no longer replaces**
+earlier entries. To remove an inherited selection, clear the field in a
+separate preceding layer and rebuild it; there is no selective remove operator.
+`disable_tools` does not cancel a matching inherited `enable_tools`: runtime
+name enables win over name disables (likewise within groups or tags). Audit
+configurations that previously relied on nonempty replacement, especially
+tool enables that may now remain authorized. The nullable `tools` allow-list
+and unrelated lists retain their replacement semantics.
+
 System prompt templates receive `agent_id` when Tau dispatches a prompt for a
 concrete agent. Tau's built-in templates intentionally omit it because agents
 can query authoritative runtime identity with `self_info`; custom templates

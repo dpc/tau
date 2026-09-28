@@ -2295,6 +2295,228 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     assert!(reviewer.disable_tools.is_empty());
 }
 
+/// Tool-policy selectors accumulate without duplicates across sources and
+/// scopes; a later broad CLI default must not reorder an earlier narrow role
+/// selection.
+#[test]
+fn role_tool_selectors_append_across_sources_profiles_and_scopes() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  disable_tool_tags: [base:*, shared:*]
+  enable_tool_tags: [base:*, shared:*]
+  disable_tool_groups: [base, shared]
+  enable_tool_groups: [base, shared]
+  disable_tools: [base, shared]
+  enable_tools: [base, shared]
+  role_groups:
+    custom:
+      disable_tool_tags: [group:*, shared:*]
+      enable_tool_tags: [group:*, shared:*]
+      disable_tool_groups: [group, shared]
+      enable_tool_groups: [group, shared]
+      disable_tools: [group, shared]
+      enable_tools: [group, shared]
+      roles:
+        worker:
+          disable_tool_tags: [role:*, shared:*]
+          enable_tool_tags: [role:*, shared:*]
+          disable_tool_groups: [role, shared]
+          enable_tool_groups: [role, shared]
+          disable_tools: [role, shared]
+          enable_tools: [role, shared]
+profiles:
+  extra:
+    agents:
+      enable_tools: [profile_agent, shared]
+      role_groups:
+        custom:
+          roles:
+            worker:
+              disable_tool_tags: [profile:*, role:*]
+              enable_tool_tags: [profile:*, role:*]
+              disable_tool_groups: [profile, role]
+              enable_tool_groups: [profile, role]
+              disable_tools: [profile, role]
+              enable_tools: [profile, role]
+"#,
+    )
+    .expect("write base");
+    std::fs::create_dir_all(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/10-extra.yaml"),
+        "agents:\n  role_groups:\n    custom:\n      enable_tools: [dropin, shared]\n",
+    )
+    .expect("write drop-in");
+    let cli = [
+        HarnessConfigCliOverride::from_str("agents.enable_tools=[cli,shared]")
+            .expect("CLI agent default"),
+        HarnessConfigCliOverride::from_str(
+            "agents.role_groups.custom.roles.worker.enable_tools=[cli_role,role]",
+        )
+        .expect("CLI role override"),
+    ];
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile_selection("extra,extra")),
+        &[],
+        &cli,
+    )
+    .expect("load");
+    let worker = &settings.roles["worker"];
+    let expected_tags = serde_json::json!(["base:*", "shared:*", "group:*", "role:*", "profile:*"]);
+    let expected_groups = serde_json::json!(["base", "shared", "group", "role", "profile"]);
+    assert_eq!(
+        serde_json::to_value(&worker.disable_tool_tags).unwrap(),
+        expected_tags
+    );
+    assert_eq!(
+        serde_json::to_value(&worker.enable_tool_tags).unwrap(),
+        expected_tags
+    );
+    assert_eq!(
+        serde_json::to_value(&worker.disable_tool_groups).unwrap(),
+        expected_groups
+    );
+    assert_eq!(
+        serde_json::to_value(&worker.enable_tool_groups).unwrap(),
+        expected_groups
+    );
+    assert_eq!(
+        serde_json::to_value(&worker.disable_tools).unwrap(),
+        expected_groups
+    );
+    assert_eq!(
+        serde_json::to_value(&worker.enable_tools).unwrap(),
+        serde_json::json!([
+            "base",
+            "shared",
+            "profile_agent",
+            "cli",
+            "group",
+            "dropin",
+            "role",
+            "profile",
+            "cli_role"
+        ])
+    );
+}
+
+/// A profile can clear the inherited agent-default selector before CLI agent
+/// defaults add new entries, without clearing independent group or role
+/// entries.
+#[test]
+fn profile_agent_tool_selector_reset_precedes_cli_rebuild_and_role_scope() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  enable_tools: [inherited]
+  role_groups:
+    custom:
+      enable_tools: [group]
+      roles:
+        worker:
+          enable_tools: [role]
+profiles:
+  reset:
+    agents:
+      enable_tools: []
+"#,
+    )
+    .expect("write base");
+    let cli = [
+        HarnessConfigCliOverride::from_str("agents.enable_tools=[rebuilt]")
+            .expect("CLI agent override"),
+    ];
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile_selection("reset")),
+        &[],
+        &cli,
+    )
+    .expect("load");
+    assert_eq!(
+        settings.roles["worker"].enable_tools,
+        ["rebuilt", "group", "role"].map(tau_proto::ToolName::new)
+    );
+}
+
+/// An empty selector patch clears only its own field; later layers can rebuild
+/// it, while nullable `tools` and unrelated arrays still replace as before.
+#[test]
+fn role_tool_selector_empty_resets_and_other_arrays_still_replace() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    custom:
+      roles:
+        worker:
+          disable_tool_tags: [old:*]
+          enable_tool_tags: [old:*]
+          disable_tool_groups: [old]
+          enable_tool_groups: [old]
+          disable_tools: [old]
+          enable_tools: [old]
+          tools: [old]
+"#,
+    )
+    .expect("write base");
+    std::fs::create_dir_all(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/10-clear.yaml"),
+        r#"
+agents:
+  role_groups:
+    custom:
+      roles:
+        worker:
+          disable_tool_tags: []
+          enable_tool_tags: []
+          disable_tool_groups: []
+          enable_tool_groups: []
+          disable_tools: []
+          enable_tools: []
+          tools: []
+"#,
+    )
+    .expect("write clear");
+    let cleared = load_harness_settings_in(&dirs_with_config(td.path())).expect("load clear");
+    let worker = &cleared.roles["worker"];
+    assert!(worker.disable_tool_tags.is_empty());
+    assert!(worker.enable_tool_tags.is_empty());
+    assert!(worker.disable_tool_groups.is_empty());
+    assert!(worker.enable_tool_groups.is_empty());
+    assert!(worker.disable_tools.is_empty());
+    assert!(worker.enable_tools.is_empty());
+    assert_eq!(worker.tools, Some(vec![]));
+
+    std::fs::write(
+        td.path().join("harness.d/20-rebuild.yaml"),
+        r#"
+agents:
+  role_groups:
+    custom:
+      roles:
+        worker:
+          enable_tools: [new, new]
+          tools: [new]
+"#,
+    )
+    .expect("write rebuild");
+    let rebuilt = load_harness_settings_in(&dirs_with_config(td.path())).expect("load rebuild");
+    let worker = &rebuilt.roles["worker"];
+    assert_eq!(worker.enable_tools, vec![tau_proto::ToolName::new("new")]);
+    assert!(worker.disable_tools.is_empty());
+    assert_eq!(worker.tools, Some(vec![tau_proto::ToolName::new("new")]));
+}
+
 /// Ensures narrower role fields remain effective over broader group clears from
 /// a later layer.
 #[test]

@@ -203,6 +203,12 @@ array replacement:
 - Role `order` is ordinary role metadata: lower values sort first within a
   group, with role name as the stable tie-breaker.
 - Prompt fragments and required skill names are additive and de-duplicated.
+- The six role tool-policy selector lists (`enable_tools`, `disable_tools`,
+  `enable_tool_groups`, `disable_tool_groups`, `enable_tool_tags`, and
+  `disable_tool_tags`) append unique entries in first-occurrence order at each
+  replayed source and scope. Omission inherits; `[]` clears that field, and a
+  later patch may rebuild it. This does not change runtime enable/deny
+  precedence.
 - A prompt fragment has exactly one template source: inline `text` or
   `textFile`. File paths may be absolute or relative to the Tau config
   directory, independent of the declaring file or process working directory.
@@ -226,7 +232,8 @@ array replacement:
   The interactive CLI threshold command updates `inference_compaction` and the
   named `default` policy while preserving named siblings.
 - Patch fields distinguish absent, explicit `null`, and concrete values. `null`
-  clears nullable/scalar fields; replacement lists can be cleared with `[]`.
+  clears nullable/scalar fields; replacement lists and the additive tool-policy
+  selector lists can be cleared with `[]`.
 - `tools` is a nullable replacement list: `tools: null` clears an inherited
   allow-list back to default behavior, while `tools: []` sets an explicit empty
   allow-list.
