@@ -48,6 +48,11 @@ session `events.jsonl` and provider request/response diagnostics, not those
 extension log files.
 
 Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.
+For a more complete, annotated configuration to learn from, see the
+[sanitized harness example](https://github.com/dpc/tau/blob/master/docs/examples/harness.yaml).
+It illustrates one person's setup, not required defaults: adapt model names,
+roles, paths, and extensions to your installation. Never copy another person's
+credentials or private drop-ins into your own config.
 
 ## Provider and model aliases
 

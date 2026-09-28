@@ -67,6 +67,35 @@ or external pins match them.
    mistake caused a false publication conclusion. Existing versions are
    immutable: inspect their archive checksum and source provenance before
    treating them as satisfied, never overwrite them.
+4. Before freezing a candidate, check whether the owner's current main
+   `~/.config/tau/harness.yaml` is available. If available, inspect that file
+   locally and refresh the repository's canonical annotated
+   `docs/examples/harness.yaml`, related self-knowledge/site learning links,
+   and any affected in-repository configuration snippets for current
+   semantics. Treat the
+   local config as **private input**, not a public artifact: do not read
+   `harness.d` drop-ins, Nix history, referenced secret files, environment
+   variables, or execute referenced commands to inspect their output; do not
+   copy raw config into logs, tickets,
+   review requests, or temporary shared artifacts. Inspect paths and values
+   for names, usernames, home paths, private project names, addresses,
+   endpoints, credentials, tokens, and other personal or security-sensitive
+   details. Distinguish harmless example placeholders and declared secret
+   *names* from credential values, and record any specific identifying values
+   the owner has approved for public use rather than treating every path as
+   an automatic leak. If unapproved personal or security-sensitive information
+   is detected, or its safety is uncertain, **stop the release immediately**:
+   ask the owner to clean the source or explicitly approve a specific safe
+   placeholder resolution before refreshing/importing any example. Do not
+   silently sanitize and proceed, even if the replacement seems obvious.
+   Never edit the owner's live config as part of this step. Obtain independent
+   privacy review of the complete
+   proposed example before any source-history snapshot or publication. Do not
+   run effective configuration with extensions or credentials to validate
+   documentation. If the main file is unavailable, record that it was not
+   inspected and that the example could not be refreshed from it; do not
+   imply a privacy pass for the missing input. Recheck the source if it
+   changes before candidate freeze.
 
 ## 2. Prepare and qualify the exact candidate
 
