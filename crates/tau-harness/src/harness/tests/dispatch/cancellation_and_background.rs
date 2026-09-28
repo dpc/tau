@@ -3683,6 +3683,15 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         h.tool_routing.tool_runtime.tool_agents.get("slow-call"),
         Some(&side_cid)
     );
+    assert!(
+        matches!(
+            h.agent_runtime.agent_registry.agents[&side_cid]
+                .turn
+                .turn_state,
+            AgentTurnState::Idle
+        ),
+        "an old background tool must not strand the completed delegate's turn"
+    );
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
@@ -3750,6 +3759,167 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     );
 
     h.shutdown().expect("shutdown");
+}
+
+/// A completed internal delegate must accept follow-up input while its old
+/// background tool still runs; that tool is not replacement foreground work.
+/// User and peer activations must dispatch without losing the late tool result
+/// or completing the original delegate request a second time.
+#[test]
+fn completed_internal_delegate_with_background_tool_accepts_followup_input() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-slow",
+        "configured-conn-slow",
+        tau_proto::ClientKind::Tool,
+    );
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("conn-slow"),
+        instant_background_test_tool_spec("slow"),
+    );
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert("delegate-call".into(), parent.clone());
+    let mut query = ext_query("q-background-delegate");
+    query.tool_call_id = Some("delegate-call".into());
+    h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
+        .expect("start internal delegate");
+    let cid = ext_query_cid(&h, "q-background-delegate").expect("delegate");
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let initial = read_nth_prompt_created(&h, 0);
+    let originator = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .originator
+        .clone();
+    let mut response =
+        provider_tool_response(&initial, "preview", "slow", CborValue::Map(Vec::new()));
+    response.originator = originator.clone();
+    h.handle_provider_response_finished(response)
+        .expect("start preview");
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&"preview".into())
+    );
+    let continuation = active_prompt_for(&h, &cid);
+    let mut terminal = provider_text_response(&continuation, agent_id.clone(), "preview running");
+    terminal.originator = originator;
+    h.handle_provider_response_finished(terminal)
+        .expect("finish delegate");
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .originator
+            .is_user(),
+        "completed delegate is detached"
+    );
+    assert!(
+        matches!(
+            h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+            AgentTurnState::Idle
+        ),
+        "the old preview must not strand the completed delegate as thinking"
+    );
+    assert!(matches!(
+        h.submit_prompt_to_agent(
+            test_session_id("s1"),
+            agent_id.as_str(),
+            "stop preview".to_owned()
+        )
+        .expect("follow-up input"),
+        PromptSubmission::Dispatched
+    ));
+    assert_eq!(
+        h.tool_routing.tool_runtime.tool_agents.get("preview"),
+        Some(&cid),
+        "follow-up dispatch does not cancel or transfer the background tool"
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &active_prompt_for(&h, &cid),
+        agent_id.clone(),
+        "user input received",
+    ))
+    .expect("finish user turn");
+    h.handle_message_tool_call(
+        &parent,
+        &message_tool_call("peer-followup", agent_id.as_str(), "cancel preview"),
+        ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+    )
+    .expect("peer follow-up");
+    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_secs(180));
+    let message_prompt = active_prompt_for(&h, &cid);
+    assert!(
+        durable_agent_message_received_events(&h)
+            .iter()
+            .any(|message| {
+                message.recipient_id == agent_id && message.message == "cancel preview"
+            })
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &message_prompt,
+        agent_id.clone(),
+        "peer input received",
+    ))
+    .expect("finish peer turn");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("conn-slow"),
+        Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
+            call_id: "preview".into(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("preview stopped".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            originator: tau_proto::PromptOriginator::User,
+            display: None,
+        }),
+    )
+    .expect("late preview result");
+    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_secs(180));
+    assert_eq!(
+        h.tool_routing
+            .tool_runtime
+            .background_completion_targets
+            .get("preview"),
+        Some(&cid)
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &active_prompt_for(&h, &cid),
+        agent_id.clone(),
+        "preview result received",
+    ))
+    .expect("finish background completion turn");
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::StartAgentResult(result) if result.query_id == "q-background-delegate"
+        )),
+        1,
+        "follow-up turns must not complete the original delegate request again"
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+    let mut restored =
+        echo_harness_for("classification-only", td.path()).expect("cold journal reader");
+    assert!(
+        restored
+            .restored_agent_runtime_from_log(agent_id.as_str())
+            .originator
+            .is_user(),
+        "cold replay agrees that the completed delegate is an ordinary agent"
+    );
+    restored.shutdown().expect("shutdown reader");
 }
 
 /// An active tool round folds the real background completion notice into a

@@ -3987,14 +3987,24 @@ impl Harness {
                 .tool_routing
                 .tool_runtime
                 .tool_agents
-                .values()
-                .any(|owner| owner == cid);
+                .iter()
+                .any(|(call_id, owner)| {
+                    owner == cid
+                        && !self
+                            .tool_routing
+                            .tool_runtime
+                            .tool_turn
+                            .is_backgrounded(call_id)
+                });
         // Release before removing or detaching the side agent so
         // queued descendants can still resolve their parent agent
         // while starting. Active descendants keep their own copied state.
         // Result delivery can synchronously dispatch a replacement
         // prompt, so do not overwrite that prompt's running state while
-        // detaching the old request.
+        // detaching the old request. Older background tools have already closed
+        // their foreground rounds and cannot own that replacement turn; keeping
+        // their routing alive must not strand the completed delegate as
+        // thinking.
         if !replacement_prompt_in_flight && !replacement_tool_terminal_in_flight {
             self.set_agent_turn_state(cid, AgentTurnState::Idle);
         }
