@@ -3,26 +3,65 @@
 This is the canonical path from a fresh Tau installation to one reviewed,
 resumable repository change. It assumes Linux, a Git repository, and an account
 that can use OpenAI Codex through ChatGPT. Tau is early-stage software: native
-distribution packaging and broad clean-host qualification are still unfinished.
+Linux packages are published, but broad clean-host qualification is unfinished.
 
 Read [Trust and data](trust-and-data.md) before using Tau with private source or
 credentials. The short version appears below, before the first model request.
 
 ## 1. Install Tau
 
-Choose one of the currently available source-based routes.
+Choose a native package, Nix, or Cargo. For an existing installation, read
+[Upgrade conservatively](#upgrade-conservatively) before replacing anything.
+
+### Native Linux packages
+
+[Tau v0.2.0](https://github.com/dpc/tau/releases/tag/v0.2.0) includes DEB, RPM,
+and tar.gz packages for **amd64** (x86-64) and **arm64** (AArch64).
+The packages require glibc 2.34 or later. Default restricted extension startup
+requires Linux 5.12 or later. Archive, ELF, license and checksum checks passed;
+this is not broad distro installation, CPU/kernel or service-lifecycle testing.
+These binaries expect a conventional glibc loader path. On NixOS, use the
+[Nix route](#try-with-nix) instead of unpacking a native tarball.
+
+For a user-local Tau-only tarball installation, select your architecture:
+
+```sh
+arch=amd64 # use arm64 for AArch64
+base=https://github.com/dpc/tau/releases/download/v0.2.0
+archive="tau-0.2.0-${arch}.tar.gz"
+curl --fail --location --output "$archive" "$base/$archive" &&
+curl --fail --location --output SHA256SUMS "$base/SHA256SUMS" &&
+grep -F "  $archive" SHA256SUMS | sha256sum --check --strict &&
+mkdir -p "$HOME/.local" &&
+tar -xzf "$archive" --strip-components=1 -C "$HOME/.local" &&
+export PATH="$HOME/.local/bin:$PATH" &&
+tau --version
+```
+
+Keep `$HOME/.local/bin` on your shell's `PATH`. For all nine binaries (Tau,
+seven external extension projects, and the Telegram gateway), use
+`tau-full-0.2.0-${arch}.tar.gz` instead. Installing those binaries does not
+configure accounts or enable services.
+
+For DEB/RPM, download the matching architecture's files from the release and
+verify each against `SHA256SUMS` before using your package manager. For example,
+install the Tau-only package with `sudo apt install ./tau-0.2.0-amd64.deb` or
+`sudo dnf install ./tau-0.2.0-amd64.rpm`. The `tau-full` DEB/RPM is a metapackage,
+not a bundle: download its nine matching individual component packages too and
+pass all ten local package files to the package manager in one transaction.
+There is no Tau package repository configured by these commands.
 
 ### Try with Nix
 
 With a Nix installation that has flakes and the `nix` command enabled:
 
 ```sh
-nix run github:dpc/tau -- --version
+nix run github:dpc/tau/v0.2.0 -- --version
 ```
 
 This runs Tau through its flake; it does not install a persistent `tau` command.
 In the remaining examples, replace `tau` with
-`nix run github:dpc/tau --` if you use this route.
+`nix run github:dpc/tau/v0.2.0 --` if you use this route.
 
 ### Install with Cargo
 
@@ -30,15 +69,16 @@ This route requires Rust 1.97 and the native build tools needed by the
 dependencies:
 
 ```sh
-cargo install --locked --git https://github.com/dpc/tau --package dpc-tau
+cargo install --locked dpc-tau --version '=0.2.0'
 tau --version
 ```
 
 The installed binary includes the CLI, harness, built-in providers, and standard
 extensions. NixOS is not required, but Tau is Unix-first and the default
-restricted extension startup requires Linux 5.12 or later. The
-[native packaging tools](../packaging/README.md) currently produce unqualified
-candidates, not published native distributions.
+restricted extension startup requires Linux 5.12 or later. Cargo does not install
+the separately maintained external integration binaries. See the
+[v0.2.0 release notes](releases/v0.2.0.md) for SDK/protocol compatibility and
+the limits of native runtime qualification.
 
 ## 2. Create the starter configuration
 

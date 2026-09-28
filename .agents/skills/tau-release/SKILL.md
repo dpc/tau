@@ -39,6 +39,11 @@ or external pins match them.
    checkout graph is clean, linear, and based on the intended master; source
    remotes and registry are reachable; credentials work *through the supported
    path*. If broker or credential access fails, stop rather than bypassing it.
+   Check draft-read and release-body-write permissions separately: public release
+   reads and workflow reruns do not prove either permission. In v0.2.0, the
+   publisher's Actions credential could publish while the local broker could
+   neither inspect the draft nor update the public notes. Arrange an authorized
+   owner handoff if those operations are unavailable.
    Identify independently maintained extension repositories and exact locked
    revisions. Reconcile SDK/protocol admission and extension builds with current
    harness requirements; coordinate necessary updates in their owning projects
@@ -169,3 +174,15 @@ and blocked steps, source/version/SHA, registry and consumer results, CI/review
 evidence, GitHub workflow/release/asset evidence, documentation state, and
 remaining manual Nix/activation handoff. Update this skill when the real
 procedure changes; do not convert a historical ledger into current facts.
+
+For a `created draft is not visible` failure, creation may already have succeeded.
+Have an authorized owner inspect the draft's tag, source/workflow identity marker,
+draft/prerelease flags and assets before any retry. The v0.2.0 recovery confirmed
+an exact matching empty draft, then used `gh run rerun RUN -R dpc/tau --failed`;
+it did not recreate the tag, rebuild successful architectures or overwrite assets.
+Check that the original artifacts are unexpired and belong to the exact source;
+this workflow retains them for only one day. Workflow artifacts are not published
+release assets. Preserve the `tau-native-release-v1` identity marker when applying
+reviewed human notes, and read back both body and unchanged asset identities.
+If the local broker denies the write, hand the exact reviewed body to the owner;
+do not bypass credentials or retry blindly.

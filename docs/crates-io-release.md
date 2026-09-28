@@ -3,7 +3,7 @@
 Publishing `dpc-tau` requires publishing its internal Rust crate closure first.
 Package preparation does not authorize uploads, tags, or GitHub releases.
 
-## Tau 0.2.0 candidate
+## Tau 0.2.0 release record
 
 The application and CLI advance together to **0.2.0**. The current runtime and
 package-verification closure has **34 crates**: 29 application/internal crates
@@ -25,9 +25,19 @@ requires core SDK 0.9.0 and external SDK 0.8.0 in the recorded lock metadata.
 
 Fresh official sparse-index and archive checks on September 27, 2026 found the
 three reusable leaves published, with matching archive checksums and original
-source provenance. None of the 31 candidate uploads existed; the Grok crate's
-index returned an explicit HTTP 404. Preparation and local package checks do
-not establish registry publication. Recheck exact versions before each upload.
+source provenance. None of the 31 candidate uploads existed at preflight; the
+Grok crate's index returned an explicit HTTP 404. All 31 were subsequently
+published from `4761e99c0375d0b8a4eb8046922b8f3790675398` on September 27.
+Each locked verified dry-run passed; every registry archive matched its local
+checksum and clean source provenance. The registry-only SDK consumer passed
+on Rust 1.91, and a fresh isolated locked `dpc-tau =0.2.0` install passed.
+
+The immutable `v0.2.0` tag identifies that same source. The native
+[GitHub release](https://github.com/dpc/tau/releases/tag/v0.2.0) became public
+on September 28, 2026, with all 67 expected assets verified. Its two native builds
+passed; the publisher initially stopped after draft creation was not immediately
+visible. After owner inspection confirmed the matching empty draft, a failed-only
+retry reused the unexpired exact-source artifacts and published successfully.
 
 Use `.agents/skills/tau-release/SKILL.md` for the full release procedure,
 including the external native inventory, immutable source/tag gates, consumer
@@ -56,7 +66,7 @@ or replace any existing version.
 
 The seven 0.1.1 registry versions were still absent in the September 27, 2026
 sparse-index check. Native release assets did not prove those uploads happened.
-The 0.2.0 candidate does not depend on completing that historical publication.
+The 0.2.0 release did not depend on completing that historical publication.
 
 At the time of the 0.1.1 application release, the external pins selected SDK
 0.4.0 / protocol 7.0 sources; they did not change the extensions' upstream
@@ -181,6 +191,6 @@ prepared source commit `79463b83114722bde95423014c58c39c416b70da`. Never move,
 force, recreate, or push that tag. The approved recovery published the remaining
 0.1.0 archives from later archive/README repair commits; those commits must stay
 ancestors of the new release. Never move the existing `v0.1.1` tag either.
-After source and registry gates pass, coordinate a **new** `v0.2.0` tag and its
-native release workflow. Never promote manual candidate artifacts or represent
-older assets as the new release.
+The `v0.2.0` tag now also exists and must not move. Future releases need their own
+new version/tag after source and registry gates pass. Never promote manual
+candidate artifacts or represent older assets as a new release.
