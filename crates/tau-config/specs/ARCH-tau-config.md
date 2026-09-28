@@ -151,7 +151,7 @@ contains integer `idle_ms`, `wait_any_ms`, and `wait_tool_ms` delays satisfying
 monotonic-clock overflow fails configuration loading. Admission snapshots the
 effective policy, so later configuration or state changes cannot reset a queued
 deadline. The shipped defaults are respectively `0/0/5000`,
-`120000/240000/240000`, `0/5000/120000`, and `0/0/30000` milliseconds.
+`120000/240000/240000`, `0/5000/20000`, and `0/0/30000` milliseconds.
 
 `tau-config::provider_debug_capture` owns the dependency-neutral provider
 capture basename contract shared by provider writers and harness retention:

@@ -1857,7 +1857,7 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
 }
 
 /// Ordinary agent messages use the built-in five-second wait-any deadline while
-/// retaining their immediate idle and two-minute exact-wait deadlines.
+/// retaining their immediate idle and twenty-second exact-wait deadline.
 #[test]
 fn ordinary_agent_message_default_delivery_deadlines_are_exact() {
     let admission_cut = Instant::now()
@@ -1879,8 +1879,8 @@ fn ordinary_agent_message_default_delivery_deadlines_are_exact() {
     );
     assert_eq!(
         schedule.deadline(DeliveryDeadlineKind::WaitTool),
-        admission_cut.checked_add(Duration::from_secs(120)),
-        "ordinary messages must retain the two-minute exact-wait delay"
+        admission_cut.checked_add(Duration::from_secs(20)),
+        "ordinary messages must use the twenty-second exact-wait delay"
     );
 }
 
@@ -4932,7 +4932,7 @@ fn agent_message_interrupts_recipient_active_wait() {
         event,
         Event::ToolResult(result) if result.call_id.as_str() == wait_call_id.as_str()
     )));
-    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(120_000));
+    h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(20_000));
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
