@@ -40,14 +40,16 @@ impl Harness {
         config: &Config,
         sessions_dir: &Path,
         eager_session_id: &str,
-        extension_secrets: &BTreeMap<String, BTreeMap<String, SecretValue>>,
-        skipped_extensions: &BTreeSet<String>,
+        extension_secrets: &crate::secrets::ResolvedExtensionSecrets,
         startup_started_at: Instant,
     ) -> Result<(), HarnessError> {
         let mut extension_connects = Vec::new();
         let mut next_iid = instance_id_factory();
         for ext_config in config.extensions.values() {
-            if skipped_extensions.contains(&ext_config.name) {
+            if extension_secrets
+                .skipped_extensions
+                .contains(&ext_config.name)
+            {
                 continue;
             }
             let kind = match ext_config.role.as_deref() {
@@ -123,6 +125,12 @@ impl Harness {
                     in_process_thread: None,
                     supervised_config: Some(ext_config.clone()),
                     secrets: extension_secrets
+                        .secrets
+                        .get(&ext_config.name)
+                        .cloned()
+                        .unwrap_or_default(),
+                    absent_optional_secrets: extension_secrets
+                        .absent_optional_secrets
                         .get(&ext_config.name)
                         .cloned()
                         .unwrap_or_default(),

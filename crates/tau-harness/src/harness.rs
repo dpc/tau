@@ -34,7 +34,7 @@ use tau_proto::{
     HarnessAgentContextUsageChanged, HarnessContextUsageChanged, HarnessInputMessage,
     HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId, PROTOCOL_VERSION,
     PromptFragment, PromptOriginator, ProviderModelInfo, ProviderResponseFinished,
-    ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
+    ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage, SessionId,
     ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled,
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRegistrationDeclared, ToolRejected,
     ToolRequest, ToolResult, ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget,

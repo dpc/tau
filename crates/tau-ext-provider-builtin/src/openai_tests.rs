@@ -348,6 +348,7 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
                         .expect("test extension name must satisfy the identifier grammar"),
                     state_dir: None,
                     secrets: path_std_collections::BTreeMap::new(),
+                    absent_optional_secrets: Default::default(),
                     settings_files: Default::default(),
                 }))
                 .expect("encode initial configure");
@@ -6610,6 +6611,7 @@ fn configured_instance_reaches_runtime_missing_login_status() {
                 .expect("configured instance"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }),
         live_event(11, Event::AgentPromptCreated(prompt())),

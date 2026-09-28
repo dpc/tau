@@ -540,6 +540,7 @@ fn spawn_extension_with_exit_and_prefix(
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("write initial configure");
@@ -651,6 +652,7 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
             )]),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure dir_lock");
@@ -689,6 +691,7 @@ fn send_shell_regex_allowlist_config(
             )]),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure shell regex allowlist");
@@ -865,6 +868,7 @@ fn run_after_production_fifo_saturation(
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");
@@ -986,6 +990,7 @@ fn assert_mandatory_frame_failure_exits(event: Event, needle: &'static [u8], lab
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");

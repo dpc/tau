@@ -489,6 +489,7 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
                 in_process_thread: None,
                 supervised_config: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 restart_attempt: 0,
                 state: path_crate_extension::ExtensionState::Ready,
                 protocol_io: tau_client::ProtocolIoMeter::default(),

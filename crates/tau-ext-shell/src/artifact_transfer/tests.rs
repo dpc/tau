@@ -110,6 +110,7 @@ fn live_artifact_manager() -> (
         config: CborValue::Map(Vec::new()),
         state_dir: None,
         secrets: Default::default(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let mut input = Vec::new();

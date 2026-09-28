@@ -10,7 +10,7 @@
 //! snake_case names, distinct from [`crate::Event`]'s `{"event":
 //! "tool.started", "payload": {...}}` shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::{fmt, time as path_std_time};
 
@@ -157,6 +157,12 @@ pub struct Configure {
     /// Secret values explicitly authorized for this extension.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, SecretValue>,
+    /// This instance's declared optional secrets successfully resolved as
+    /// absent. Provider-bound declarations are excluded, just as with
+    /// `secrets`. Missing metadata never implies that an unknown secret
+    /// reference is optional.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub absent_optional_secrets: BTreeSet<String>,
     /// Bounded immutable startup snapshot of CLI-owned non-secret settings
     /// files.
     ///

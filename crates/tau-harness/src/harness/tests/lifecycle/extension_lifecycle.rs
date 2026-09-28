@@ -589,6 +589,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
             in_process_thread: Some(spawned.thread),
             supervised_config: None,
             secrets: BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             require: true,
             respawn_allowed: true,
             restart_attempt: 0,
@@ -3654,6 +3655,8 @@ fn memory_only_configure_omits_extension_state_dir() {
     assert!(!sp.exists());
 }
 
+/// The handshake delivers only this entry's retained values and optional
+/// absences, without collecting another extension's declarations.
 #[test]
 fn configure_includes_only_resolved_extension_secrets() {
     // The lifecycle handshake is the authorization boundary for extension
@@ -3662,6 +3665,19 @@ fn configure_includes_only_resolved_extension_secrets() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
     let sink = connect_handshaking_tool(&mut h, "std-email");
+    let _other_sink = connect_handshaking_tool(&mut h, "other");
+    h.extensions
+        .entries
+        .get_mut("other")
+        .expect("other")
+        .absent_optional_secrets
+        .insert("other_key".to_owned());
+    h.extensions
+        .entries
+        .get_mut("std-email")
+        .expect("extension")
+        .absent_optional_secrets
+        .insert("optional_key".to_owned());
     h.extensions
         .entries
         .get_mut("std-email")
@@ -3700,6 +3716,10 @@ fn configure_includes_only_resolved_extension_secrets() {
         .expect("configure sent");
     assert_eq!(configure.secrets.len(), 1);
     assert_eq!(configure.secrets["mail_password"].expose_secret(), "secret");
+    assert_eq!(
+        configure.absent_optional_secrets,
+        BTreeSet::from(["optional_key".to_owned()])
+    );
 }
 
 /// Proves the lifecycle checks the complete encoded Configure frame, including
@@ -4256,8 +4276,12 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
         &config,
         &sessions_dir,
         "s1",
-        &BTreeMap::new(),
-        &BTreeSet::new(),
+        &crate::secrets::ResolvedExtensionSecrets {
+            secrets: BTreeMap::new(),
+            absent_optional_secrets: BTreeMap::new(),
+            skipped_extensions: BTreeSet::new(),
+            diagnostics: Vec::new(),
+        },
         Instant::now(),
     )
     .expect("optional spawn failure should not fail startup");
@@ -4566,6 +4590,7 @@ fn required_pending_external_extension_deadline_survives_event_churn() {
             in_process_thread: Some(spawned.thread),
             supervised_config: None,
             secrets: BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             restart_attempt: 0,
             state: ExtensionState::Spawning,
             protocol_io: spawned.protocol_io,
@@ -5060,6 +5085,7 @@ fn expired_optional_pending_extension_is_disabled_without_blocking_later_ready()
             in_process_thread: None,
             supervised_config: Some(config),
             secrets: BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             restart_attempt: 0,
             state: ExtensionState::Spawning,
             protocol_io: spawned.protocol_io,

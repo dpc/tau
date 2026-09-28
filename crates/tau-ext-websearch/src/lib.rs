@@ -441,6 +441,7 @@ impl ExtConfig {
     fn validate(
         mut self,
         secrets: &std::collections::BTreeMap<String, tau_proto::SecretValue>,
+        absent_optional_secrets: &std::collections::BTreeSet<String>,
     ) -> Result<ValidatedConfig, String> {
         if self.endpoint.is_some()
             && self.exa_endpoint.is_some()
@@ -463,8 +464,8 @@ impl ExtConfig {
                 validate_endpoint(name, endpoint)?;
             }
         }
-        let search_pool = ProviderPool::new("search_providers", self.search_providers)?;
-        let fetch_pool = ProviderPool::new("fetch_providers", self.fetch_providers)?;
+        let mut search_pool = ProviderPool::new("search_providers", self.search_providers)?;
+        let mut fetch_pool = ProviderPool::new("fetch_providers", self.fetch_providers)?;
         let options = RawProviderOptions {
             fetch_pdf_parsing: self.fetch_pdf_parsing,
             fetch_pdf_max_pages: self.fetch_pdf_max_pages,
@@ -509,19 +510,48 @@ impl ExtConfig {
         }
         let exa_api_key = resolve_secret(
             secrets,
+            absent_optional_secrets,
             self.exa_api_key_secret.as_deref(),
             "exa_api_key_secret",
         )?;
         let parallel_api_key = resolve_secret(
             secrets,
+            absent_optional_secrets,
             self.parallel_api_key_secret.as_deref(),
             "parallel_api_key_secret",
         )?;
         let you_api_key = resolve_secret(
             secrets,
+            absent_optional_secrets,
             self.you_api_key_secret.as_deref(),
             "you_api_key_secret",
         )?;
+        let brave_api_key = resolve_secret(
+            secrets,
+            absent_optional_secrets,
+            self.brave_api_key_secret.as_deref(),
+            "brave_api_key_secret",
+        )?;
+        let tavily_api_key = resolve_secret(
+            secrets,
+            absent_optional_secrets,
+            self.tavily_api_key_secret.as_deref(),
+            "tavily_api_key_secret",
+        )?;
+        let firecrawl_api_key = resolve_secret(
+            secrets,
+            absent_optional_secrets,
+            self.firecrawl_api_key_secret.as_deref(),
+            "firecrawl_api_key_secret",
+        )?;
+        let available = |provider| match provider {
+            WebAdapter::Brave => brave_api_key.is_some(),
+            WebAdapter::Tavily => tavily_api_key.is_some(),
+            WebAdapter::Firecrawl => firecrawl_api_key.is_some(),
+            _ => true,
+        };
+        search_pool.retain_available("search_providers", available)?;
+        fetch_pool.retain_available("fetch_providers", available)?;
         let you_endpoint = self.you_endpoint.unwrap_or_else(|| {
             if you_api_key.is_some() {
                 DEFAULT_AUTHENTICATED_YOU_ENDPOINT
@@ -540,23 +570,11 @@ impl ExtConfig {
                 you_endpoint,
                 you_api_key,
                 brave_endpoint: self.brave_endpoint,
-                brave_api_key: resolve_secret(
-                    secrets,
-                    self.brave_api_key_secret.as_deref(),
-                    "brave_api_key_secret",
-                )?,
+                brave_api_key,
                 tavily_endpoint: self.tavily_endpoint,
-                tavily_api_key: resolve_secret(
-                    secrets,
-                    self.tavily_api_key_secret.as_deref(),
-                    "tavily_api_key_secret",
-                )?,
+                tavily_api_key,
                 firecrawl_endpoint: self.firecrawl_endpoint,
-                firecrawl_api_key: resolve_secret(
-                    secrets,
-                    self.firecrawl_api_key_secret.as_deref(),
-                    "firecrawl_api_key_secret",
-                )?,
+                firecrawl_api_key,
                 options: options.clone(),
             },
             options,
@@ -568,6 +586,7 @@ impl ExtConfig {
 
 fn resolve_secret(
     secrets: &std::collections::BTreeMap<String, tau_proto::SecretValue>,
+    absent_optional_secrets: &std::collections::BTreeSet<String>,
     name: Option<&str>,
     field: &str,
 ) -> Result<Option<tau_proto::SecretValue>, String> {
@@ -577,9 +596,12 @@ fn resolve_secret(
     if name.trim().is_empty() {
         return Err(format!("`{field}` must name a non-empty Tau secret"));
     }
-    let value = secrets
-        .get(name)
-        .ok_or_else(|| format!("`{field}` references unavailable secret `{name}`"))?;
+    let Some(value) = secrets.get(name) else {
+        if absent_optional_secrets.contains(name) {
+            return Ok(None);
+        }
+        return Err(format!("`{field}` references unavailable secret `{name}`"));
+    };
     if value.expose_secret().trim().is_empty() {
         return Err(format!("secret `{name}` referenced by `{field}` is empty"));
     }
@@ -796,7 +818,11 @@ impl TauExtension for WebsearchExtension {
         builder
             .configure::<ExtConfig>(|cx| {
                 let secrets = cx.secrets().clone();
-                let cfg = cx.config.validate(&secrets).map_err(ClientError::handler)?;
+                let absent_optional_secrets = cx.absent_optional_secrets().clone();
+                let cfg = cx
+                    .config
+                    .validate(&secrets, &absent_optional_secrets)
+                    .map_err(ClientError::handler)?;
                 let exa_endpoint = cfg.endpoint.or(cfg.exa_endpoint);
                 if exa_endpoint.is_some() {
                     tracing::info!(target: LOG_TARGET, provider = "exa", "applying endpoint override");

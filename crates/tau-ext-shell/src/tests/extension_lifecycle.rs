@@ -1574,6 +1574,7 @@ fn mandatory_discovery_write_failure_exits_production_manual_loop() {
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");
@@ -1660,6 +1661,7 @@ fn mandatory_terminal_preparation_failure_exits_production_manual_loop() {
             )]),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");
@@ -1779,6 +1781,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");
@@ -1834,6 +1837,7 @@ fn shell_extension_rejects_invalid_config() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");
@@ -1897,6 +1901,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");

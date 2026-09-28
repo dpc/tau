@@ -36,6 +36,9 @@ state such as per-agent workdir metadata. The client runtime exposes committed
 metadata events and context publication to the extension; it does not choose a
 shared filesystem namespace or seed workdir state across instances. See
 [SPEC-per-agent-extension-workdirs](../../../specs/SPEC-per-agent-extension-workdirs.md).
+Configuration contexts expose read-only resolved secrets and
+`absent_optional_secrets` metadata without inferring optionality from missing
+values; the harness owns the instance-scoped resolution snapshot.
 Typed discovery helpers publish complete transient session or correlated
 per-agent source snapshots. Context readiness requires the exact
 `AgentInitializationId` received with `session.agent_loaded`; helpers do not

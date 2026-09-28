@@ -76,6 +76,8 @@ pub(crate) struct ExtensionEntry {
     /// Resolved secret values authorized for this extension. Values must not be
     /// logged.
     pub(crate) secrets: std::collections::BTreeMap<String, tau_proto::SecretValue>,
+    /// Instance-scoped optional absences retained across supervised respawns.
+    pub(crate) absent_optional_secrets: std::collections::BTreeSet<String>,
     /// Number of restart attempts performed by the harness.
     pub(crate) restart_attempt: u32,
     /// Current lifecycle state. See `extensions_all_ready` for how this

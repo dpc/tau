@@ -313,6 +313,7 @@ impl Harness {
                 in_process_thread: Some(provider_spawn.thread),
                 supervised_config: None,
                 secrets: BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 restart_attempt: 0,
                 state: ExtensionState::Spawning,
                 protocol_io: provider_spawn.protocol_io,
@@ -350,6 +351,7 @@ impl Harness {
                     in_process_thread: Some(tool_spawn.thread),
                     supervised_config: None,
                     secrets: BTreeMap::new(),
+                    absent_optional_secrets: Default::default(),
                     restart_attempt: 0,
                     state: ExtensionState::Spawning,
                     protocol_io: tool_spawn.protocol_io,
@@ -701,8 +703,7 @@ impl Harness {
             config,
             &startup.sessions_dir,
             eager_session_id,
-            &startup.extension_secrets.secrets,
-            &startup.extension_secrets.skipped_extensions,
+            &startup.extension_secrets,
             startup.started_at,
         ) {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);

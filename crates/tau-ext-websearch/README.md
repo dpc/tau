@@ -146,13 +146,27 @@ extensions:
 ```
 
 Exa, Parallel, and You.com remain usable without named secrets. When
-`you_api_key_secret` is set and `you_endpoint` is omitted, Tau selects the
+`you_api_key_secret` resolves to a value and `you_endpoint` is omitted, Tau selects the
 authenticated `https://api.you.com/mcp` endpoint instead of the anonymous free
 profile. Brave cannot appear in `fetch_providers`; You.com cannot either.
-Selecting Brave, Tavily, or Firecrawl without its named, non-empty Tau secret
+An explicitly declared `optional: true` secret that resolves as absent uses
+anonymous Exa/Parallel/You operation, or removes Brave/Tavily/Firecrawl from
+the configured pools without changing their remaining order. Each search and
+fetch pool must remain nonempty: otherwise the entire extension rejects
+configuration with a pool-specific unavailable-credentials diagnostic, even
+when the other operation still has usable providers.
+
+Missing required or undeclared references, invalid secret names, source decoding
+or I/O failures, and empty values supplied through Configure remain errors.
+The harness's existing source resolver treats blank file/environment values as
+absence. Present credentials authenticate; authentication rejection never
+switches that provider to anonymous mode. Older harnesses without optional
+absence metadata retain strict missing-reference rejection.
+Selecting Brave, Tavily, or Firecrawl without a credential reference still
 rejects configuration. Tau does not watch configuration or secret files:
-restart Tau (or explicitly restart the extension through its supervisor) after
-changing them.
+restart the harness after changing them. An extension-only supervisor respawn
+retains the harness's startup configuration, secret values, and optional-absence
+snapshot.
 
 Provider lists must be non-empty and contain no duplicates. Search and fetch
 have independent extension-process cursors. Successful configuration resets

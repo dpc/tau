@@ -1108,6 +1108,7 @@ impl Harness {
         let name = entry.name.clone();
         let kind = entry.kind.clone();
         let secrets = entry.secrets.clone();
+        let absent_optional_secrets = entry.absent_optional_secrets.clone();
         let tool_prefix = entry.tool_prefix.clone();
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
@@ -1171,6 +1172,7 @@ impl Harness {
                 in_process_thread: None,
                 supervised_config: Some(config),
                 secrets,
+                absent_optional_secrets,
                 restart_attempt: attempt,
                 state: ExtensionState::Spawning,
                 protocol_io: spawned.protocol_io,
@@ -1645,6 +1647,7 @@ impl Harness {
             .map(|cfg| cfg.config.clone())
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
         let secrets = entry.secrets.clone();
+        let absent_optional_secrets = entry.absent_optional_secrets.clone();
         let tool_prefix = entry.tool_prefix.clone();
         let state_dir = if self.session_runtime.storage_mode.is_memory_only() {
             None
@@ -1706,6 +1709,7 @@ impl Harness {
             tool_prefix,
             state_dir,
             secrets,
+            absent_optional_secrets,
             settings_files,
         });
         let configure_fits = tau_proto::encode_harness_output_to_vec(&configure)

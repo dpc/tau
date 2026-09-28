@@ -306,6 +306,7 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -323,6 +324,7 @@ fn typed_image_config() -> HarnessOutputMessage {
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -340,6 +342,7 @@ fn provider_context_raw_message_config() -> HarnessOutputMessage {
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -387,6 +390,7 @@ fn release_config(socket_path: &std::path::Path, nonce: &str) -> HarnessOutputMe
         ]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -410,6 +414,7 @@ fn exit_once_config(marker_path: &std::path::Path) -> HarnessOutputMessage {
         ]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -500,6 +505,7 @@ fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
                 config: CborValue::Map(Vec::new()),
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 settings_files: Default::default(),
             }))
             .expect("write initial configure");
@@ -1048,6 +1054,7 @@ fn exit_once_mode_configuration_fails_closed() {
         ]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let extra_marker_path = unique_marker_path("exit-extra");
@@ -1063,6 +1070,7 @@ fn exit_once_mode_configuration_fails_closed() {
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let release_extra = HarnessOutputMessage::Configure(Configure {
@@ -1077,6 +1085,7 @@ fn exit_once_mode_configuration_fails_closed() {
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let directory_marker_path = unique_marker_path("exit-directory");
@@ -1289,6 +1298,7 @@ fn release_mode_requires_complete_configuration() {
                 config,
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 settings_files: Default::default(),
             })],
             1,
@@ -2126,6 +2136,7 @@ fn run_intercept(
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("write initial configure");

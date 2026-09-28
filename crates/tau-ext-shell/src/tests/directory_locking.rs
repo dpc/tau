@@ -37,6 +37,7 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");
@@ -1083,6 +1084,7 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
             )]),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("enable dir_lock");
@@ -1386,6 +1388,7 @@ fn initial_dir_lock_override_is_final_before_ready() {
             )]),
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");

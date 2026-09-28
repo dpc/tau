@@ -63,6 +63,14 @@ extensions:
 ```
 
 All general preferences are optional and providers omit unsupported controls.
+Named secret declarations may use `optional: true`: successfully absent sources
+use existing anonymous Exa/Parallel/You modes and omit credential-required
+Brave/Tavily/Firecrawl entries, preserving pool order. Both search and fetch must
+retain a provider or the whole extension rejects configuration. Unknown/required
+references and source errors remain errors; blank source file/environment values
+retain the harness's existing absence semantics. Present keys authenticate and
+rejected keys never downgrade to anonymous requests. This needs harness
+optional-absence metadata (protocol 10.2); older harnesses remain strict.
 Firecrawl `fetch_pdf_parsing: disabled` sends `parsers: []`, still costs one flat
 provider credit for that PDF attempt, and never projects `rawBase64`; it is not
 a global spend cap because other providers and failover attempts can still parse

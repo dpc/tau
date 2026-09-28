@@ -73,6 +73,12 @@ Credentialed adapters resolve API keys from named Tau secrets rather than
 ordinary extension configuration. Provider requests carry credentials only in
 the documented authentication header. Model-visible and logged diagnostics
 redact both endpoint material and credential values.
+Only harness-declared optional absence permits a configured missing reference
+to use an existing anonymous adapter or omit a credential-required adapter.
+Missing metadata remains strict; authentication rejection never removes a
+supplied key or retries that adapter anonymously. The harness retains source
+resolution authority under
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
 
 Provider-side content budgets and cache ages remain request hints. Unsupported
 controls are omitted rather than emulated locally. Firecrawl PDF parsing

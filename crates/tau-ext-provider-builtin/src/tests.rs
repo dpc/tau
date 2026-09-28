@@ -1171,6 +1171,7 @@ fn run_provider_purpose(
                         .expect("extension name"),
                     state_dir: None,
                     secrets: BTreeMap::new(),
+                    absent_optional_secrets: Default::default(),
                     settings_files,
                 },
             ))
@@ -1287,6 +1288,7 @@ fn run_production_credential_scenario_with(
                     .expect("extension name"),
                 state_dir: None,
                 secrets: BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 settings_files: BTreeMap::from([(settings_file, settings)]),
             },
         ))
@@ -1489,6 +1491,7 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
                     .expect("extension name"),
                 state_dir: None,
                 secrets: BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 settings_files: BTreeMap::from([(
                     "deepseek.json".to_owned(),
                     configured_chat_completions_settings("deepseek", serde_json::json!({})),
@@ -5502,6 +5505,7 @@ fn provider_prompt_trace_omits_model_visible_content() {
                         .expect("extension name"),
                     state_dir: None,
                     secrets: BTreeMap::new(),
+                    absent_optional_secrets: Default::default(),
                     settings_files: BTreeMap::new(),
                 },
             ))
@@ -5662,6 +5666,7 @@ fn receipt_trace_observes_real_worker_slot_queue() {
                         .expect("extension name"),
                     state_dir: None,
                     secrets: BTreeMap::new(),
+                    absent_optional_secrets: Default::default(),
                     settings_files: BTreeMap::new(),
                 },
             ))

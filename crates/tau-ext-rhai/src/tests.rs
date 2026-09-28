@@ -234,6 +234,7 @@ fn configure_with_script(path: &Path) -> HarnessOutputMessage {
         )]),
         state_dir: None,
         secrets: BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -248,6 +249,7 @@ fn empty_configure() -> HarnessOutputMessage {
         config: CborValue::Map(Vec::new()),
         state_dir: None,
         secrets: BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -270,6 +272,7 @@ fn configure_with_script_and_extra(
         config: CborValue::Map(config),
         state_dir: None,
         secrets: BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -725,6 +728,7 @@ fn start_runs_after_ready_with_host_functions() {
         ]),
         state_dir: None,
         secrets: BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
 

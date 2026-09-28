@@ -16,6 +16,14 @@ Compare-and-swap names the BLAKE3 generation of the complete current contents. T
 
 ## Diagnostics and launch boundary
 
+Configure carries resolved values and a separate `absent_optional_secrets` set
+for this instance's explicitly declared optional sources successfully resolved
+as absent. Provider-bound declarations appear in neither surface. Unknown names
+and omitted metadata do not grant optional fallback. Source resolution retains
+its existing treatment of blank file/environment values as absence; invalid
+names, invalid UTF-8, and source I/O failures remain errors. Supervised respawns
+retain the same startup value/absence snapshot.
+
 Secret request and result payloads remain absent from events, journals, logs, generic debug formatting, errors, and OAuth diagnostics. Diagnostics may expose operation kind, byte count, sanitized relative identity, and typed failure only; they never expose credential bytes or host secret paths.
 
 Every supervised extension starts inside a harness-owned outer Linux user and mount namespace. The launcher makes propagation private, masks the whole Tau secret root before applying configured cwd, closes setup authority, and then executes the complete configured prefix, command, and suffix. `tau_state_access` defaults to `read_only`, which presents the real state tree recursively read-only; `hidden` presents an empty read-only state tree. In both modes the exact persistent `<state>/ext/<instance>` tree is restored read-write. A Provider additionally receives its selected settings tree read-only. Provider debug captures cross a dedicated bounded non-journaled protocol message as opaque zstd bytes; the harness derives and writes the durable session/instance path without exposing another writable mount. Tool instances receive no Provider exception. Secrets remain masked in every mode. Any namespace, mapping, mount, cwd, or exec failure fails extension startup. Non-Linux systems have no unmasked fallback.

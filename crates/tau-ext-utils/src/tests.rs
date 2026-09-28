@@ -131,6 +131,7 @@ fn configured_frames_with_config(
         config,
         state_dir: None,
         secrets: BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let mut input = Vec::new();
@@ -1596,6 +1597,7 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
             )]),
             state_dir: None,
             secrets: BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");

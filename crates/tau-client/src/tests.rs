@@ -1236,6 +1236,7 @@ fn config_with_unknown_field() -> HarnessOutputMessage {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }
@@ -1297,8 +1298,63 @@ fn configure_message() -> HarnessOutputMessage {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
+}
+
+/// Both configuration APIs expose the exact retained optional-absence set;
+/// neither treats an arbitrary missing map entry as optional.
+#[test]
+fn configuration_contexts_expose_optional_absence_metadata() {
+    /// Minimal extension exercising typed and raw configuration accessors.
+    struct OptionalMetadataExtension;
+    impl TauExtension for OptionalMetadataExtension {
+        type State = usize;
+
+        fn name(&self) -> &'static str {
+            "optional-metadata"
+        }
+
+        fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+            builder.configure::<DemoConfig>(|cx| {
+                assert_eq!(
+                    cx.absent_optional_secrets(),
+                    &["optional_key".to_owned()].into()
+                );
+                assert!(!cx.absent_optional_secrets().contains("unknown"));
+                assert!(cx.secrets().is_empty());
+                *cx.state += 1;
+                Ok(())
+            });
+            builder.configure_raw(|cx| {
+                assert_eq!(
+                    cx.absent_optional_secrets(),
+                    &["optional_key".to_owned()].into()
+                );
+                *cx.state += 1;
+                Ok(())
+            });
+        }
+    }
+    let mut configure = configure_message();
+    let HarnessOutputMessage::Configure(frame) = &mut configure else {
+        unreachable!()
+    };
+    frame
+        .absent_optional_secrets
+        .insert("optional_key".to_owned());
+    let (count, frames) = run_messages(
+        OptionalMetadataExtension,
+        0,
+        &[configure, disconnect("done")],
+    );
+    assert_eq!(count, 2);
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
 }
 
 fn disconnect(reason: &str) -> HarnessOutputMessage {
@@ -1583,6 +1639,7 @@ fn configure_application_failure_sends_config_error() {
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 settings_files: Default::default(),
             }),
             HarnessOutputMessage::deliver_live(UnixMicros::new(13), notice("after-error")),
@@ -1633,6 +1690,7 @@ fn configure_application_failure_runs_error_hook() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         })],
     );
@@ -1669,6 +1727,7 @@ fn raw_configure_error_emits_config_error_and_continues() {
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                absent_optional_secrets: Default::default(),
                 settings_files: Default::default(),
             }),
             config_with_unknown_field(),
@@ -3576,6 +3635,7 @@ fn manual_loop_dispatch_config_error_continues() {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let mut runtime = TauExtensionRunner::new(RawConfigureExtension)
@@ -3986,6 +4046,7 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let (state, frames) = run_messages(
@@ -4079,6 +4140,7 @@ fn manual_loop_uses_configured_tool_scope() {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     });
     let input = encode_output_messages(&[configure, tool_started("work_owned_tool")]);
@@ -4111,6 +4173,7 @@ fn manual_loop_recv_rejects_changed_prefix_and_preserves_scope() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         })
     };
@@ -4156,6 +4219,7 @@ fn manual_loop_try_recv_rejects_changed_prefix_and_preserves_scope() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         })
     };
@@ -4208,6 +4272,7 @@ fn changed_tool_prefix_is_rejected_without_reconfiguring() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         })
     };
@@ -4237,6 +4302,7 @@ fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         })
     };
@@ -4278,6 +4344,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("install scope");

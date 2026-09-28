@@ -191,6 +191,13 @@ impl<'a, State> RawConfigureContext<'a, State> {
         &self.configure.secrets
     }
 
+    /// Returns this instance's declared optional secrets resolved as absent.
+    /// An unlisted missing reference must not be treated as optional.
+    #[must_use]
+    pub fn absent_optional_secrets(&self) -> &std::collections::BTreeSet<String> {
+        &self.configure.absent_optional_secrets
+    }
+
     /// Returns a cloneable handle for sending frames to the harness.
     #[must_use]
     pub fn handle(&self) -> ClientHandle {
@@ -247,6 +254,13 @@ impl<'a, State, Config> ConfigureContext<'a, State, Config> {
     #[must_use]
     pub fn secrets(&self) -> &BTreeMap<String, tau_proto::SecretValue> {
         &self.configure.secrets
+    }
+
+    /// Returns this instance's declared optional secrets resolved as absent.
+    /// An unlisted missing reference must not be treated as optional.
+    #[must_use]
+    pub fn absent_optional_secrets(&self) -> &std::collections::BTreeSet<String> {
+        &self.configure.absent_optional_secrets
     }
 
     /// Returns a cloneable handle for sending frames to the harness.

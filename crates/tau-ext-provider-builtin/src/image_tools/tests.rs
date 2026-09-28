@@ -38,6 +38,7 @@ fn with_transport(
             tool_prefix: None,
             state_dir: None,
             secrets: Default::default(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure");

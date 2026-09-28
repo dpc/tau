@@ -28,6 +28,27 @@ pub(super) struct ProviderPool {
 }
 
 impl ProviderPool {
+    /// Remove credential-unavailable adapters without changing configured
+    /// order. Each operation must retain at least one usable provider.
+    pub(super) fn retain_available(
+        &mut self,
+        name: &str,
+        available: impl Fn(WebAdapter) -> bool,
+    ) -> Result<(), String> {
+        self.providers = self
+            .providers
+            .iter()
+            .copied()
+            .filter(|provider| available(*provider))
+            .collect();
+        if self.providers.is_empty() {
+            return Err(format!(
+                "`{name}` has no usable providers: optional credentials are unavailable"
+            ));
+        }
+        Ok(())
+    }
+
     /// Return the configured number of providers.
     pub(super) fn len(&self) -> usize {
         self.providers.len()

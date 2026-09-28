@@ -174,6 +174,7 @@ fn optional_extension_invalid_secret_name_is_skipped_with_diagnostic() {
     assert!(!resolved.diagnostics[0].message.contains("../bad"));
 }
 
+/// Optional absence is explicit metadata, never an invented secret value.
 #[test]
 fn missing_optional_secret_is_omitted() {
     let td = TempDir::new().expect("tempdir");
@@ -184,6 +185,69 @@ fn missing_optional_secret_is_omitted() {
     )
     .expect("optional missing secret resolves");
     assert!(resolved.secrets["std-email"].is_empty());
+    assert_eq!(
+        resolved.absent_optional_secrets["std-email"],
+        BTreeSet::from(["mail_password".to_owned()])
+    );
+}
+
+/// Metadata remains instance-scoped, excludes provider bindings, and preserves
+/// the canonical source resolver's blank-as-absent and error classifications.
+#[test]
+fn optional_absence_metadata_preserves_scope_and_source_semantics() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path().join("secrets");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut config = config_with_secret(true);
+    let mut other = config.extensions["std-email"].clone();
+    other.name = "other".to_owned();
+    other.secrets = BTreeMap::from([(
+        "other_key".to_owned(),
+        ExtensionSecretEntry { optional: true },
+    )]);
+    config.extensions.insert("other".to_owned(), other);
+    let sources = SecretSources::default();
+    for bytes in [b" \n ".as_slice(), b"value".as_slice()] {
+        std::fs::write(dir.join("mail_password.yaml"), bytes).expect("write");
+        let resolved = resolve_extension_secrets(&config, td.path(), &sources).expect("resolve");
+        assert_eq!(
+            resolved.absent_optional_secrets["std-email"].contains("mail_password"),
+            bytes != b"value"
+        );
+        assert!(!resolved.absent_optional_secrets["std-email"].contains("other_key"));
+        assert_eq!(
+            resolved.absent_optional_secrets["other"],
+            BTreeSet::from(["other_key".to_owned()])
+        );
+        let bound = BTreeMap::from([(
+            "std-email".to_owned(),
+            BTreeSet::from(["mail_password".to_owned()]),
+        )]);
+        let excluded = resolve_extension_secrets_excluding(&config, td.path(), &sources, &bound)
+            .expect("bound");
+        assert!(excluded.secrets["std-email"].is_empty());
+        assert!(excluded.absent_optional_secrets["std-email"].is_empty());
+    }
+    std::fs::write(dir.join("mail_password.yaml"), [0xff]).expect("invalid UTF-8");
+    assert!(resolve_extension_secrets(&config, td.path(), &sources).is_err());
+    std::fs::remove_file(dir.join("mail_password.yaml")).expect("remove");
+    std::fs::create_dir(dir.join("mail_password.yaml")).expect("source I/O failure");
+    assert!(resolve_extension_secrets(&config, td.path(), &sources).is_err());
+    config
+        .extensions
+        .get_mut("std-email")
+        .expect("extension")
+        .require = false;
+    let skipped = resolve_extension_secrets(&config, td.path(), &sources).expect("skip");
+    assert!(!skipped.absent_optional_secrets.contains_key("std-email"));
+    assert!(skipped.skipped_extensions.contains("std-email"));
+    config
+        .extensions
+        .get_mut("other")
+        .expect("other")
+        .secrets
+        .insert("../bad".to_owned(), ExtensionSecretEntry { optional: true });
+    assert!(resolve_extension_secrets(&config, td.path(), &sources).is_err());
 }
 
 #[test]

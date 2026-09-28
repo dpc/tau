@@ -23,6 +23,8 @@ pub fn load_secret_sources() -> Result<SecretSources, SecretsError> {
 pub struct ResolvedExtensionSecrets {
     /// Per-extension secrets authorized for Configure messages.
     pub secrets: BTreeMap<String, BTreeMap<String, SecretValue>>,
+    /// Per-extension optional declarations successfully resolved as absent.
+    pub absent_optional_secrets: BTreeMap<String, BTreeSet<String>>,
     /// Optional extensions skipped because their secret declarations could not
     /// resolve safely.
     pub skipped_extensions: BTreeSet<String>,
@@ -50,10 +52,12 @@ pub fn resolve_extension_secrets_excluding(
     provider_bound_names: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<ResolvedExtensionSecrets, SecretsError> {
     let mut out = BTreeMap::new();
+    let mut absent_optional_secrets = BTreeMap::new();
     let mut skipped_extensions = BTreeSet::new();
     let mut diagnostics = Vec::new();
     for (extension, extension_config) in &config.extensions {
         let mut secrets = BTreeMap::new();
+        let mut absent = BTreeSet::new();
         for (name, declaration) in &extension_config.secrets {
             if provider_bound_names
                 .get(extension)
@@ -65,7 +69,9 @@ pub fn resolve_extension_secrets_excluding(
                 Ok(Some(value)) => {
                     secrets.insert(name.clone(), value);
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    absent.insert(name.clone());
+                }
                 Err(error) if !extension_config.require => {
                     tracing::warn!(
                         target: "tau_harness::startup",
@@ -90,10 +96,12 @@ pub fn resolve_extension_secrets_excluding(
         }
         if !skipped_extensions.contains(extension) {
             out.insert(extension.clone(), secrets);
+            absent_optional_secrets.insert(extension.clone(), absent);
         }
     }
     Ok(ResolvedExtensionSecrets {
         secrets: out,
+        absent_optional_secrets,
         skipped_extensions,
         diagnostics,
     })

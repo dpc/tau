@@ -1314,7 +1314,9 @@ fn provider_list_configuration_distinguishes_single_and_invalid_modes() {
         "fetch_providers": ["exa"]
     }))
     .expect("deserialize");
-    let mut single = single.validate(&BTreeMap::new()).expect("single mode");
+    let mut single = single
+        .validate(&BTreeMap::new(), &Default::default())
+        .expect("single mode");
     assert_eq!(
         single.search_pool.reserve().as_ref(),
         [WebAdapter::Parallel]
@@ -1326,7 +1328,11 @@ fn provider_list_configuration_distinguishes_single_and_invalid_modes() {
         serde_json::json!({"fetch_providers": ["exa", "exa"]}),
     ] {
         let config: ExtConfig = serde_json::from_value(invalid).expect("deserialize invalid");
-        assert!(config.validate(&BTreeMap::new()).is_err());
+        assert!(
+            config
+                .validate(&BTreeMap::new(), &Default::default())
+                .is_err()
+        );
     }
 }
 
@@ -1348,7 +1354,9 @@ fn provider_options_validate_and_normalize() {
         "fetch_cache_max_age_seconds": 7200,
     }))
     .expect("deserialize options");
-    let validated = config.validate(&BTreeMap::new()).expect("validate options");
+    let validated = config
+        .validate(&BTreeMap::new(), &Default::default())
+        .expect("validate options");
     assert_eq!(
         validated.options.fetch_pdf_parsing,
         Some(options::PdfParsing::Auto)
@@ -1416,7 +1424,7 @@ fn provider_options_reject_invalid_values() {
         ),
     ] {
         let config: ExtConfig = serde_json::from_value(config).expect("deserialize invalid option");
-        let Err(error) = config.validate(&BTreeMap::new()) else {
+        let Err(error) = config.validate(&BTreeMap::new(), &Default::default()) else {
             panic!("invalid option unexpectedly validated");
         };
         assert!(error.contains(expected), "error: {error}");
@@ -1477,7 +1485,7 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
     }))
     .expect("credentialed provider config");
     let mut validated = config
-        .validate(&secrets)
+        .validate(&secrets, &Default::default())
         .expect("validated credentialed config");
     assert_eq!(
         validated.exa_api_key.as_ref(),
@@ -1536,7 +1544,7 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
             "brave_api_key_secret": "brave",
         }))
         .expect(name);
-        let Err(error) = config.validate(&secrets) else {
+        let Err(error) = config.validate(&secrets, &Default::default()) else {
             panic!("{name} unexpectedly validated");
         };
         assert!(error.contains(expected), "{name}: {error}");
@@ -1549,7 +1557,7 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
             "brave_api_key_secret": "brave",
         }))
         .expect("unsupported capability config");
-        let Err(error) = config.validate(&secrets) else {
+        let Err(error) = config.validate(&secrets, &Default::default()) else {
             panic!("unsupported fetch provider {provider} unexpectedly validated");
         };
         assert!(
@@ -1572,7 +1580,7 @@ fn optional_mcp_credentials_reject_missing_secret_references() {
             (field): "missing",
         }))
         .expect("optional MCP credential config");
-        let Err(error) = config.validate(&BTreeMap::new()) else {
+        let Err(error) = config.validate(&BTreeMap::new(), &Default::default()) else {
             panic!("missing named secret unexpectedly validated");
         };
         assert!(
@@ -1582,6 +1590,189 @@ fn optional_mcp_credentials_reject_missing_secret_references() {
             "{field}: {error}"
         );
     }
+}
+
+/// Optional absence must select existing anonymous modes without inventing keys
+/// or overriding explicit endpoints; values must take precedence over metadata.
+#[test]
+fn declared_optional_mcp_credentials_use_anonymous_or_present_values() {
+    let config = serde_json::json!({
+        "exa_api_key_secret": "exa",
+        "parallel_api_key_secret": "parallel",
+        "you_api_key_secret": "you",
+    });
+    let absent = ["exa", "parallel", "you"].map(str::to_owned).into();
+    let anonymous: ExtConfig = serde_json::from_value(config.clone()).expect("config");
+    let anonymous = anonymous
+        .validate(&BTreeMap::new(), &absent)
+        .expect("anonymous");
+    assert!(anonymous.exa_api_key.is_none());
+    assert!(anonymous.parallel_api_key.is_none());
+    assert!(anonymous.hosted.you_api_key.is_none());
+    assert_eq!(anonymous.hosted.you_endpoint, DEFAULT_YOU_ENDPOINT);
+    let secrets = ["exa", "parallel", "you"]
+        .map(|name| (name.to_owned(), tau_proto::SecretValue::new("present-key")))
+        .into();
+    let authenticated: ExtConfig = serde_json::from_value(config.clone()).expect("config");
+    let authenticated = authenticated.validate(&secrets, &absent).expect("present");
+    assert!(authenticated.exa_api_key.is_some());
+    assert!(authenticated.parallel_api_key.is_some());
+    assert!(authenticated.hosted.you_api_key.is_some());
+    assert_eq!(
+        authenticated.hosted.you_endpoint,
+        DEFAULT_AUTHENTICATED_YOU_ENDPOINT
+    );
+    let mut explicit = config;
+    explicit["you_endpoint"] = "https://example.test/custom".into();
+    let explicit: ExtConfig = serde_json::from_value(explicit).expect("config");
+    assert_eq!(
+        explicit
+            .validate(&BTreeMap::new(), &absent)
+            .expect("explicit")
+            .hosted
+            .you_endpoint,
+        "https://example.test/custom"
+    );
+}
+
+/// Pruning credential-required adapters preserves relative order and never
+/// silently enables another adapter or discards a supplied credential.
+#[test]
+fn declared_optional_credentials_prune_only_unavailable_adapters() {
+    let config = serde_json::json!({
+        "search_providers": ["brave", "you", "firecrawl", "tavily", "parallel", "exa"],
+        "fetch_providers": ["firecrawl", "exa", "tavily", "parallel"],
+        "brave_api_key_secret": "brave",
+        "tavily_api_key_secret": "tavily",
+        "firecrawl_api_key_secret": "firecrawl",
+    });
+    let absent = ["brave", "tavily", "firecrawl"].map(str::to_owned).into();
+    let parsed: ExtConfig = serde_json::from_value(config.clone()).expect("config");
+    let mut anonymous = parsed.validate(&BTreeMap::new(), &absent).expect("mixed");
+    assert_eq!(
+        anonymous.search_pool.reserve().as_ref(),
+        [WebAdapter::You, WebAdapter::Parallel, WebAdapter::Exa]
+    );
+    assert_eq!(
+        anonymous.fetch_pool.reserve().as_ref(),
+        [WebAdapter::Exa, WebAdapter::Parallel]
+    );
+    let parsed: ExtConfig = serde_json::from_value(config).expect("config");
+    let secrets = [("tavily".to_owned(), tau_proto::SecretValue::new("key"))].into();
+    let mut present = parsed.validate(&secrets, &absent).expect("mixed present");
+    assert_eq!(
+        present.search_pool.reserve().as_ref(),
+        [WebAdapter::You, WebAdapter::Tavily, WebAdapter::Parallel]
+    );
+    assert_eq!(
+        present.fetch_pool.reserve().as_ref(),
+        [WebAdapter::Exa, WebAdapter::Tavily, WebAdapter::Parallel]
+    );
+}
+
+/// Each configured capability needs a usable adapter, even if the other pool
+/// works; malformed or unknown references cannot be hidden by optional
+/// metadata.
+#[test]
+fn optional_credentials_keep_empty_pool_and_invalid_reference_errors() {
+    let absent = ["key", " ", "other"].map(str::to_owned).into();
+    for (config, secrets, expected) in [
+        (
+            serde_json::json!({"search_providers":["brave"], "brave_api_key_secret":"key"}),
+            BTreeMap::new(),
+            "`search_providers` has no usable providers",
+        ),
+        (
+            serde_json::json!({"fetch_providers":["tavily"], "tavily_api_key_secret":"key"}),
+            BTreeMap::new(),
+            "`fetch_providers` has no usable providers",
+        ),
+        (
+            serde_json::json!({"exa_api_key_secret":"unknown"}),
+            BTreeMap::new(),
+            "references unavailable secret `unknown`",
+        ),
+        (
+            serde_json::json!({"exa_api_key_secret":" "}),
+            BTreeMap::new(),
+            "must name a non-empty",
+        ),
+        (
+            serde_json::json!({"exa_api_key_secret":"key"}),
+            [("key".to_owned(), tau_proto::SecretValue::new("  "))].into(),
+            "is empty",
+        ),
+        (
+            serde_json::json!({"search_providers":["brave"]}),
+            BTreeMap::new(),
+            "is required",
+        ),
+        (
+            serde_json::json!({"search_providers":["brave","brave"], "brave_api_key_secret":"key"}),
+            BTreeMap::new(),
+            "duplicate",
+        ),
+        (
+            serde_json::json!({"fetch_providers":["brave"], "brave_api_key_secret":"key"}),
+            BTreeMap::new(),
+            "search-only",
+        ),
+    ] {
+        let parsed: ExtConfig = serde_json::from_value(config).expect("config");
+        let Err(error) = parsed.validate(&secrets, &absent) else {
+            panic!("expected {expected}")
+        };
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+/// Initial Configure must carry optional-absence metadata through the SDK
+/// before Ready; an anonymous hybrid request then uses the surviving configured
+/// pool.
+#[test]
+fn initial_optional_credentials_configure_reaches_ready_and_dispatches() {
+    let searcher = StubSearcher::ok("anonymous result");
+    let (extension, harness) = UnixStream::pair().expect("pair");
+    let input = extension.try_clone().expect("clone");
+    let worker_searcher = searcher.clone();
+    let runner = thread::spawn(move || {
+        run_with_clients(
+            input,
+            extension,
+            worker_searcher,
+            StubParallelClient::ok("unused"),
+        )
+        .map_err(|error| error.to_string())
+    });
+    let mut reader = EventReader::new(BufReader::new(harness.try_clone().expect("clone")));
+    let mut writer = EventWriter::new(BufWriter::new(harness));
+    let mut configure = configure_message(serde_json::json!({
+        "exa_api_key_secret": "exa",
+        "brave_api_key_secret": "brave",
+        "search_providers": ["brave", "exa"],
+        "fetch_providers": ["exa"],
+    }));
+    let HarnessOutputMessage::Configure(frame) = &mut configure else {
+        unreachable!()
+    };
+    frame.absent_optional_secrets = ["exa", "brave"].map(str::to_owned).into();
+    writer.write_message(&configure).expect("configure");
+    writer.flush().expect("flush");
+    drain_startup(&mut reader);
+    writer
+        .write_event(&hybrid_search_started("optional-call", "query"))
+        .expect("invoke");
+    writer.flush().expect("flush");
+    let event = reader.read_event().expect("read").expect("result");
+    assert!(matches!(event, Event::ToolResultReported(_)), "{event:?}");
+    assert_eq!(searcher.calls.lock().expect("calls").len(), 1);
+    writer
+        .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: None,
+        }))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+    runner.join().expect("join").expect("clean shutdown");
 }
 
 /// Ensures an explicit You.com endpoint remains authoritative when optional
@@ -1600,7 +1791,9 @@ fn you_api_key_preserves_explicit_endpoint_override() {
         "you_api_key_secret": "you",
     }))
     .expect("You.com endpoint override config");
-    let validated = config.validate(&secrets).expect("validated You.com config");
+    let validated = config
+        .validate(&secrets, &Default::default())
+        .expect("validated You.com config");
     assert_eq!(
         validated.hosted.you_endpoint,
         "https://example.test/custom-mcp"
@@ -2072,6 +2265,7 @@ fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files: Default::default(),
     })
 }

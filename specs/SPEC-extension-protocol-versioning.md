@@ -8,6 +8,12 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 10.2 adds extension-scoped optional-secret absence metadata to
+Configure. Omission preserves strict missing-reference handling; older
+extensions ignore the field and retain their previous behavior. No credential
+values, discovery authority, or handshake phase are added. See
+[SPEC-extension-secret-storage](SPEC-extension-secret-storage.md).
+
 Protocol 10.1 adds User-scope, reporter-file-only locked papercut snapshot
 reading and conditional archival. An optional Configure revision advertisement
 lets an updated utility extension refuse all three history operations locally

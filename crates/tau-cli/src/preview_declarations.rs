@@ -316,6 +316,7 @@ fn inspect_connection<R: Read, W: Write>(
         tool_prefix: extension.tool_prefix.clone(),
         state_dir: None,
         secrets: BTreeMap::new(),
+        absent_optional_secrets: Default::default(),
         settings_files,
     };
     let mut writer = tau_proto::HarnessOutputWriter::new(Vec::new());

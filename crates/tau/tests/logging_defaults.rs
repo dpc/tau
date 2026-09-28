@@ -29,6 +29,7 @@ fn dummy_stderr(filter: Option<&str>) -> String {
             instance_name: tau_proto::ExtensionName::parse("test-dummy").expect("extension name"),
             state_dir: None,
             secrets: BTreeMap::new(),
+            absent_optional_secrets: Default::default(),
             settings_files: Default::default(),
         }))
         .expect("configure dummy component");

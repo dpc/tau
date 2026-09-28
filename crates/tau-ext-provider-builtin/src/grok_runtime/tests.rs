@@ -127,6 +127,7 @@ fn grok_worker_secret_callbacks_suppress_exchanged_generation_not_readback() {
                     tool_prefix: None,
                     state_dir: None,
                     secrets: Default::default(),
+                    absent_optional_secrets: Default::default(),
                     settings_files: Default::default(),
                 }))
                 .expect("configure");

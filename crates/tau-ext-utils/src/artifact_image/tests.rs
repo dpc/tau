@@ -117,6 +117,7 @@ fn queued_cancellation_precedes_ready_decoder_completion() {
                 )]),
                 state_dir: None,
                 secrets: Default::default(),
+                absent_optional_secrets: Default::default(),
                 settings_files: Default::default(),
             }))
             .expect("configure");
