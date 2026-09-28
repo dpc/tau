@@ -3443,7 +3443,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     let mut h = echo_harness(&sp).expect("start");
     h.config.selected_model = Some("test/model".into());
 
-    let _ = connect_test_tool(&mut h, "conn-delegate");
+    let delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
@@ -3539,6 +3539,11 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.handle_start_agent_request(&crate::test_connection_id("conn-delegate"), query)
         .expect("side query");
     let side_cid = ext_query_cid(&h, "q-bg").expect("side conversation");
+    let side_agent_id = durable_agent_id_for_conversation(&h, &side_cid);
+    let side_originator = h.agent_runtime.agent_registry.agents[&side_cid]
+        .identity
+        .originator
+        .clone();
     let side_spid = h
         .prompt_coordination
         .prompt_runtime
@@ -3569,10 +3574,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
-        originator: tau_proto::PromptOriginator::Extension {
-            name: crate::test_extension_name("core-subagents"),
-            query_id: "q-bg".to_owned(),
-        },
+        originator: side_originator.clone(),
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
         backend: None,
@@ -3643,7 +3645,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: followup_spid,
+        agent_prompt_id: followup_spid.clone(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
@@ -3660,10 +3662,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
-        originator: tau_proto::PromptOriginator::Extension {
-            name: crate::test_extension_name("core-subagents"),
-            query_id: "q-bg".to_owned(),
-        },
+        originator: side_originator,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
         backend: None,
@@ -3683,14 +3682,37 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         h.tool_routing.tool_runtime.tool_agents.get("slow-call"),
         Some(&side_cid)
     );
-    assert!(
-        matches!(
-            h.agent_runtime.agent_registry.agents[&side_cid]
-                .turn
-                .turn_state,
-            AgentTurnState::Idle
-        ),
-        "an old background tool must not strand the completed delegate's turn"
+    assert_settled_delegate_owner(&h, &side_cid, None);
+    let results = delegate_events
+        .lock()
+        .expect("delegate events")
+        .iter()
+        .filter_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == "q-bg" => {
+                Some((result.text.clone(), result.error.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results, vec![("side answer".to_owned(), None)]);
+    assert!(matches!(
+        h.submit_prompt_to_agent(
+            test_session_id("s1"),
+            side_agent_id.as_str(),
+            "follow-up while slow-call runs".to_owned()
+        )
+        .expect("follow-up input"),
+        PromptSubmission::Dispatched
+    ));
+    assert_ne!(
+        active_prompt_for(&h, &side_cid),
+        followup_spid,
+        "the follow-up must own a new provider dispatch"
+    );
+    assert_eq!(
+        h.tool_routing.tool_runtime.tool_agents.get("slow-call"),
+        Some(&side_cid),
+        "the old background tool remains routed during the new inference"
     );
 
     h.handle_extension_event_inner(
@@ -3811,20 +3833,7 @@ fn completed_internal_delegate_with_background_tool_accepts_followup_input() {
     terminal.originator = originator;
     h.handle_provider_response_finished(terminal)
         .expect("finish delegate");
-    assert!(
-        h.agent_runtime.agent_registry.agents[&cid]
-            .identity
-            .originator
-            .is_user(),
-        "completed delegate is detached"
-    );
-    assert!(
-        matches!(
-            h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
-            AgentTurnState::Idle
-        ),
-        "the old preview must not strand the completed delegate as thinking"
-    );
+    assert_settled_delegate_owner(&h, &cid, None);
     assert!(matches!(
         h.submit_prompt_to_agent(
             test_session_id("s1"),

@@ -2364,6 +2364,66 @@ fn active_prompt_for(h: &Harness, cid: &AgentId) -> AgentPromptId {
         .expect("active prompt")
 }
 
+/// Check a completed delegate at a settled boundary against the owner expected
+/// from the test's transition, rather than inferring ownership from tool
+/// routes. Only ordinary completion and a known reentrant inference are
+/// supported here.
+fn assert_settled_delegate_owner(
+    h: &Harness,
+    cid: &AgentId,
+    replacement_prompt: Option<&AgentPromptId>,
+) {
+    let agent = &h.agent_runtime.agent_registry.agents[cid];
+    let background_calls = h
+        .tool_routing
+        .tool_runtime
+        .tool_agents
+        .iter()
+        .filter(|(_, owner)| *owner == cid)
+        .map(|(call, _)| {
+            (
+                call.clone(),
+                h.tool_routing.tool_runtime.tool_turn.is_backgrounded(call),
+            )
+        })
+        .collect::<Vec<_>>();
+    let foreground_round = h.agent_has_open_foreground_tool_round(cid);
+    let retained = h
+        .prompt_coordination
+        .prompt_runtime
+        .pending_publish_completions
+        .get(cid);
+    let retained_owner = retained.map(|completion| match completion {
+        AgentPublishCompletion::ToolTerminal { call_id, .. } => {
+            format!("tool terminal {call_id:?}")
+        }
+        AgentPublishCompletion::UncertainSupersession {
+            agent_prompt_id, ..
+        } => format!("uncertain prompt {agent_prompt_id:?}"),
+        _ => "other retained publication".to_owned(),
+    });
+    let valid = agent.identity.originator.is_user()
+        && !foreground_round
+        && retained.is_none()
+        && match replacement_prompt {
+            Some(prompt) => {
+                agent.dispatch.in_flight_prompt.as_ref() == Some(prompt)
+                    && matches!(agent.turn.turn_state, AgentTurnState::AgentThinking { .. })
+            }
+            None => {
+                agent.dispatch.in_flight_prompt.is_none()
+                    && matches!(agent.turn.turn_state, AgentTurnState::Idle)
+            }
+        };
+    assert!(
+        valid,
+        "settled delegate {cid:?}: expected replacement={replacement_prompt:?}, \
+         turn={:?}, current_prompt={:?}, foreground_round={foreground_round}, \
+         background_calls={background_calls:?}, ready_input={:?}, retained_completion={retained_owner:?}",
+        agent.turn.turn_state, agent.dispatch.in_flight_prompt, agent.dispatch.pending_prompts,
+    );
+}
+
 fn start_background_tool_and_finish_placeholder_turn(
     h: &mut Harness,
     cid: &AgentId,
@@ -2486,6 +2546,62 @@ impl crate::InternalToolHandler for ReentrantDelegateCompletionPrompt {
             &agent_id,
             background_completion_prompt(&ToolCallId::from("canceled-shell")),
         )
+    }
+}
+
+/// Drive a real foreground tool call in the replacement prompt before the
+/// original delegate completion returns to its caller.
+struct ReentrantDelegateForegroundTool {
+    /// Agent selected by the test for the replacement foreground owner.
+    target_agent_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl crate::InternalToolHandler for ReentrantDelegateForegroundTool {
+    fn tool_specs(&self) -> Vec<ToolSpec> {
+        Vec::new()
+    }
+
+    fn handles(&self, _internal_tool_name: &ToolName) -> bool {
+        false
+    }
+
+    fn handle_event(
+        &self,
+        host: &mut crate::InternalToolHost<'_>,
+        event: &Event,
+    ) -> Result<(), HarnessError> {
+        let Event::StartAgentResult(result) = event else {
+            return Ok(());
+        };
+        if result.query_id != "q-reentrant-foreground" {
+            return Ok(());
+        }
+        let agent_id = self
+            .target_agent_id
+            .lock()
+            .expect("target agent id")
+            .clone()
+            .expect("target agent configured");
+        host.dispatch_test_background_completion(&agent_id, "replacement tool".to_owned())?;
+        host.with_test_harness(|h| {
+            let cid = h.agent_runtime.agent_registry.agent_routes[agent_id.as_str()].clone();
+            let prompt_id = active_prompt_for(h, &cid);
+            let prompt = event_log_events(h)
+                .into_iter()
+                .find_map(|event| match event {
+                    Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == prompt_id => {
+                        Some(prompt)
+                    }
+                    _ => None,
+                })
+                .expect("replacement prompt was created");
+            h.handle_provider_response_finished(provider_tool_response(
+                &prompt,
+                "replacement-foreground",
+                "slow",
+                CborValue::Map(Vec::new()),
+            ))
+        })
     }
 }
 

@@ -1019,6 +1019,17 @@ impl<'a> InternalToolHost<'a> {
         )
     }
 
+    /// Let a lifecycle test drive a provider response during synchronous
+    /// internal result delivery, before its enclosing delegate-finalization
+    /// frame returns.
+    #[cfg(test)]
+    pub(crate) fn with_test_harness(
+        &mut self,
+        drive: impl FnOnce(&mut Harness) -> Result<(), HarnessError>,
+    ) -> Result<(), HarnessError> {
+        drive(self.harness)
+    }
+
     /// Ensure the harness tracks an internal tool call before it completes.
     pub fn ensure_internal_tool_tracking(
         &mut self,

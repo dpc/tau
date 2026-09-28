@@ -4425,12 +4425,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
         .in_flight_prompt
         .clone()
         .expect("reentrant completion prompt remains owned");
-    assert!(matches!(
-        h.agent_runtime.agent_registry.agents[&side_cid]
-            .turn
-            .turn_state,
-        AgentTurnState::AgentThinking { .. }
-    ));
+    assert_settled_delegate_owner(&h, &side_cid, Some(&replacement_spid));
     assert!(h.dispatch_blocked_for(&side_cid));
     assert!(matches!(
         h.submit_prompt_to_agent(test_session_id("s1"), &side_agent_id, "overlap".to_owned())
@@ -4444,15 +4439,6 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
             .as_ref(),
         Some(&replacement_spid)
     );
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&side_cid)
-        .expect("side conversation")
-        .dispatch
-        .pending_prompts
-        .clear();
-
     let mut late_response =
         provider_text_response(&replacement_spid, crate::parse_agent_id(&side_agent_id), "");
     late_response.originator = tau_proto::PromptOriginator::Extension {
@@ -4469,12 +4455,20 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
             .contains_key(side_agent_id.as_str()),
         "a stale extension originator must not tear down the detached delegate"
     );
-    assert!(matches!(
-        h.agent_runtime.agent_registry.agents[&side_cid]
-            .turn
-            .turn_state,
-        AgentTurnState::Idle
-    ));
+    assert_ne!(
+        active_prompt_for(&h, &side_cid),
+        replacement_spid,
+        "queued input must dispatch after the replacement completes"
+    );
+    assert!(
+        event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentPromptSubmitted(prompt) if prompt.text == "overlap"
+        )) || event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentPromptSteered(prompt) if prompt.text == "overlap"
+        ))
+    );
     let result_count = event_log_count(&h, |event| {
         matches!(
             event,
@@ -4491,6 +4485,138 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
             if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
                 && notice.message.contains("had no source connection")
     )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A replacement foreground terminal opened while publishing the old delegate
+/// result must keep ownership across detachment. Queued input may dispatch only
+/// after that exact foreground tool result resolves.
+#[test]
+fn detached_delegate_preserves_reentrant_foreground_terminal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-replacement",
+        "configured-conn-replacement",
+        tau_proto::ClientKind::Tool,
+    );
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("conn-replacement"),
+        shared_test_tool_spec("slow"),
+    );
+    let target_agent_id = path_std_sync::Arc::new(path_std_sync::Mutex::new(None));
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(ReentrantDelegateForegroundTool {
+        target_agent_id: target_agent_id.clone(),
+    })]);
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert("delegate-foreground".into(), parent);
+    let mut query = ext_query("q-reentrant-foreground");
+    query.tool_call_id = Some("delegate-foreground".into());
+    h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
+        .expect("start delegate");
+    let cid = ext_query_cid(&h, "q-reentrant-foreground").expect("delegate");
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    *target_agent_id.lock().expect("target agent id") = Some(agent_id.to_string());
+    let original = active_prompt_for(&h, &cid);
+    let originator = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .originator
+        .clone();
+    let mut terminal = provider_text_response(&original, agent_id.clone(), "done");
+    terminal.originator = originator;
+    h.handle_provider_response_finished(terminal)
+        .expect("complete delegate and open replacement foreground tool");
+
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .originator
+            .is_user(),
+        "delegate detached without dropping the replacement"
+    );
+    assert!(h.agent_has_open_foreground_tool_round(&cid));
+    let created_before = event_log_count(&h, |event| matches!(event, Event::AgentPromptCreated(_)));
+    assert!(matches!(
+        h.submit_prompt_to_agent(
+            test_session_id("s1"),
+            agent_id.as_str(),
+            "after wait".to_owned()
+        )
+        .expect("enqueue input"),
+        PromptSubmission::Queued
+    ));
+    assert_eq!(
+        event_log_count(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
+        created_before,
+        "new input cannot overlap the foreground terminal"
+    );
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::StartAgentResult(result) if result.query_id == "q-reentrant-foreground"
+        )),
+        1
+    );
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("conn-replacement"),
+        Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
+            call_id: "replacement-foreground".into(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("ready".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            originator: tau_proto::PromptOriginator::User,
+            display: None,
+        }),
+    )
+    .expect("release replacement foreground terminal");
+    assert!(!h.agent_has_open_foreground_tool_round(&cid));
+    let replacement_continuation = active_prompt_for(&h, &cid);
+    h.handle_provider_response_finished(provider_text_response(
+        &replacement_continuation,
+        agent_id.clone(),
+        "wait resolved",
+    ))
+    .expect("finish replacement continuation");
+    assert!(
+        event_log_events(&h)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::AgentPromptCreated(prompt) => Some(prompt),
+                _ => None,
+            })
+            .skip(created_before)
+            .any(|prompt| {
+                prompt.agent_id == agent_id && context_text_count(&prompt, "after wait") > 0
+            }),
+        "a provider prompt after foreground release must contain queued input: pending={:?}, turn={:?}, prompts={:?}",
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts,
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptSubmitted(_)
+                    | Event::AgentPromptSteered(_)
+                    | Event::AgentPromptCreated(_)
+            ))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid),
+        "no retained terminal should block the queued input"
+    );
     h.shutdown().expect("shutdown");
 }
 
