@@ -59,11 +59,11 @@ resume.
 
 ### Native Linux packages
 
-[Tau v0.2.0](https://github.com/dpc/tau/releases/tag/v0.2.0) provides DEB, RPM,
+[Tau v0.2.1](https://github.com/dpc/tau/releases/tag/v0.2.1) provides DEB, RPM,
 and tar.gz downloads for **amd64 and arm64**. Choose individual components or
 `tau-full`: its tarball bundles all nine binaries, while its DEB/RPM is an
 exact-dependency metapackage. Verify downloads with the release's
-[SHA256SUMS](https://github.com/dpc/tau/releases/download/v0.2.0/SHA256SUMS).
+[SHA256SUMS](https://github.com/dpc/tau/releases/download/v0.2.1/SHA256SUMS).
 See the [installation guide](docs/getting-started.md#1-install-tau) for exact
 downloads and commands. Packages require glibc 2.34 or later; default restricted
 extension startup requires Linux 5.12 or later. Package checks do not establish
@@ -71,7 +71,7 @@ broad distro, CPU/kernel, or service-lifecycle qualification.
 
 ### via Nix
 
-Run the tagged release with `nix run github:dpc/tau/v0.2.0`. You can also import
+Run the tagged release with `nix run github:dpc/tau/v0.2.1`. You can also import
 that reference as a flake input. Installing or updating a flake input does not
 by itself activate a NixOS configuration or restart Tau.
 
@@ -80,12 +80,12 @@ by itself activate a NixOS configuration or restart Tau.
 With Rust 1.97 or newer and the native build tools required by dependencies:
 
 ```sh
-cargo install --locked dpc-tau --version '=0.2.0'
+cargo install --locked dpc-tau --version '=0.2.1'
 ```
 
 The registry installation includes Tau's built-in extensions, not the separately
 maintained external integration binaries. See the
-[release notes](docs/releases/v0.2.0.md) before upgrading existing state.
+[release notes](docs/releases/v0.2.1.md) before upgrading existing state.
 
 
 ## Extensions

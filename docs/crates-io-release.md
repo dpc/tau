@@ -3,7 +3,7 @@
 Publishing `dpc-tau` requires publishing its internal Rust crate closure first.
 Package preparation does not authorize uploads, tags, or GitHub releases.
 
-## Tau 0.2.1 preparation
+## Tau 0.2.1 release record
 
 The application and CLI advance together to **0.2.1** to ship GPT-6.1 Sol support.
 The recomputed runtime and package-verification closure remains 34 crates:
@@ -21,9 +21,24 @@ The native asset verifier now requires core SDK 0.10.0 and external SDK 0.8.0.
 
 Fresh official sparse-index checks on September 29, 2026 found all 29 planned new
 versions explicitly absent. The five reused archives matched their index
-checksums and recorded source provenance. This is preparation evidence, not
-publication evidence; registry uploads, consumer installation, immutable tag and
-native publication remain separate release gates.
+checksums and recorded source provenance. All 29 new versions were subsequently
+published from `009b3c3f0cc60435402ba6146d20943980f3f048` on September 29.
+Each locked verified dry-run passed; every registry archive matched its checksum
+and clean source provenance. The registry-only SDK consumer passed on Rust 1.91,
+and a fresh isolated locked `dpc-tau =0.2.1` installation passed. Its version probe
+reports `tau 0.2.1 (unknown)`; source identity comes from archive provenance.
+
+The immutable `v0.2.1` tag identifies that same source on Radicle and GitHub.
+The [GitHub release](https://github.com/dpc/tau/releases/tag/v0.2.1) became public
+on September 29, 2026, with all 67 expected assets verified against their public
+digests, sizes, aggregate checksums and source/build/toolchain manifests.
+Both native builds passed. The publisher initially stopped after creating an
+empty draft that was not immediately visible; independent inspection confirmed
+its exact identity before a failed-only retry reused the unexpired build artifacts.
+The curated [release notes](releases/v0.2.1.md) were published and read back
+exactly, preserving the release identity marker and all asset identities.
+Runtime qualification remains limited as described in those notes; publication
+does not activate a Nix configuration, replace a running binary or restart Tau.
 
 ## Tau 0.2.0 release record
 
@@ -128,7 +143,7 @@ unpublished dependency exists in the registry.
 
 The dependencies-first order is checked by `check-crates-io-packages.py`.
 For 0.2.1, retain the order below but substitute the versions described in the
-preparation section above; the versions in this table record the 0.2.0 release:
+release record above; the versions in this table record the 0.2.0 release:
 
 ```text
 dpc-tau-actions                  0.1.0
@@ -206,7 +221,7 @@ After all crates resolve, run:
 
 ```console
 ./.config/selfci/check-sdk-packages.sh --registry
-cargo install --locked dpc-tau --version '=0.2.0' --root /path/to/isolated/install
+cargo install --locked dpc-tau --version '=0.2.1' --root /path/to/isolated/install
 ```
 
 The public `v0.1.0` tag and GitHub release already identify the original
@@ -214,6 +229,6 @@ prepared source commit `79463b83114722bde95423014c58c39c416b70da`. Never move,
 force, recreate, or push that tag. The approved recovery published the remaining
 0.1.0 archives from later archive/README repair commits; those commits must stay
 ancestors of the new release. Never move the existing `v0.1.1` tag either.
-The `v0.2.0` tag now also exists and must not move. Future releases need their own
+The `v0.2.0` and `v0.2.1` tags also exist and must not move. Future releases need their own
 new version/tag after source and registry gates pass. Never promote manual
 candidate artifacts or represent older assets as a new release.

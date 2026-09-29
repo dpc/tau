@@ -15,7 +15,7 @@ Choose a native package, Nix, or Cargo. For an existing installation, read
 
 ### Native Linux packages
 
-[Tau v0.2.0](https://github.com/dpc/tau/releases/tag/v0.2.0) includes DEB, RPM,
+[Tau v0.2.1](https://github.com/dpc/tau/releases/tag/v0.2.1) includes DEB, RPM,
 and tar.gz packages for **amd64** (x86-64) and **arm64** (AArch64).
 The packages require glibc 2.34 or later. Default restricted extension startup
 requires Linux 5.12 or later. Archive, ELF, license and checksum checks passed;
@@ -27,8 +27,8 @@ For a user-local Tau-only tarball installation, select your architecture:
 
 ```sh
 arch=amd64 # use arm64 for AArch64
-base=https://github.com/dpc/tau/releases/download/v0.2.0
-archive="tau-0.2.0-${arch}.tar.gz"
+base=https://github.com/dpc/tau/releases/download/v0.2.1
+archive="tau-0.2.1-${arch}.tar.gz"
 curl --fail --location --output "$archive" "$base/$archive" &&
 curl --fail --location --output SHA256SUMS "$base/SHA256SUMS" &&
 grep -F "  $archive" SHA256SUMS | sha256sum --check --strict &&
@@ -40,13 +40,13 @@ tau --version
 
 Keep `$HOME/.local/bin` on your shell's `PATH`. For all nine binaries (Tau,
 seven external extension projects, and the Telegram gateway), use
-`tau-full-0.2.0-${arch}.tar.gz` instead. Installing those binaries does not
+`tau-full-0.2.1-${arch}.tar.gz` instead. Installing those binaries does not
 configure accounts or enable services.
 
 For DEB/RPM, download the matching architecture's files from the release and
 verify each against `SHA256SUMS` before using your package manager. For example,
-install the Tau-only package with `sudo apt install ./tau-0.2.0-amd64.deb` or
-`sudo dnf install ./tau-0.2.0-amd64.rpm`. The `tau-full` DEB/RPM is a metapackage,
+install the Tau-only package with `sudo apt install ./tau-0.2.1-amd64.deb` or
+`sudo dnf install ./tau-0.2.1-amd64.rpm`. The `tau-full` DEB/RPM is a metapackage,
 not a bundle: download its nine matching individual component packages too and
 pass all ten local package files to the package manager in one transaction.
 There is no Tau package repository configured by these commands.
@@ -56,12 +56,12 @@ There is no Tau package repository configured by these commands.
 With a Nix installation that has flakes and the `nix` command enabled:
 
 ```sh
-nix run github:dpc/tau/v0.2.0 -- --version
+nix run github:dpc/tau/v0.2.1 -- --version
 ```
 
 This runs Tau through its flake; it does not install a persistent `tau` command.
 In the remaining examples, replace `tau` with
-`nix run github:dpc/tau/v0.2.0 --` if you use this route.
+`nix run github:dpc/tau/v0.2.1 --` if you use this route.
 
 ### Install with Cargo
 
@@ -69,7 +69,7 @@ This route requires Rust 1.97 and the native build tools needed by the
 dependencies:
 
 ```sh
-cargo install --locked dpc-tau --version '=0.2.0'
+cargo install --locked dpc-tau --version '=0.2.1'
 tau --version
 ```
 
@@ -77,7 +77,7 @@ The installed binary includes the CLI, harness, built-in providers, and standard
 extensions. NixOS is not required, but Tau is Unix-first and the default
 restricted extension startup requires Linux 5.12 or later. Cargo does not install
 the separately maintained external integration binaries. See the
-[v0.2.0 release notes](releases/v0.2.0.md) for SDK/protocol compatibility and
+[v0.2.1 release notes](releases/v0.2.1.md) for SDK/protocol compatibility and
 the limits of native runtime qualification.
 
 ## 2. Create the starter configuration

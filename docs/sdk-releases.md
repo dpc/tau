@@ -20,14 +20,17 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-Protocol **10.2** is prepared as `dpc-tau-proto` and `dpc-tau-client` **0.10.0**,
+Protocol **10.2** uses published `dpc-tau-proto` and `dpc-tau-client` **0.10.0**,
 with their unchanged leaf dependencies at 0.1.0. Configure's default-empty
 optional-secret absence metadata adds a public Rust field, so constructing it
 requires a source update and a new pre-1.0 minor SDK line. Client pins exact proto
 `=0.10.0`. Older protocol-10 extensions ignore the additional field and retain
 their previous strict missing-reference behavior; the seven native external
 projects retain SDK 0.8.0 / protocol 10.0 and existing best-effort admission.
-Preparation does not establish registry publication.
+Both packages were published on September 29, 2026 from
+`009b3c3f0cc60435402ba6146d20943980f3f048`; their exact registry checksums and
+clean archive provenance were verified, and a registry-only consumer passed
+on Rust 1.91.
 
 The protocol `10.1` SDK release uses `dpc-tau-proto` and `dpc-tau-client`
 `0.9.0`; both leaf dependencies remain `0.1.0`. The optional Configure harness
