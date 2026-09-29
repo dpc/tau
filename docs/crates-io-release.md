@@ -3,6 +3,28 @@
 Publishing `dpc-tau` requires publishing its internal Rust crate closure first.
 Package preparation does not authorize uploads, tags, or GitHub releases.
 
+## Tau 0.2.1 preparation
+
+The application and CLI advance together to **0.2.1** to ship GPT-6.1 Sol support.
+The recomputed runtime and package-verification closure remains 34 crates:
+27 application/internal crates at 0.2.1, proto/client at independently versioned
+**0.10.0**, and five reused packages: `actions`, `blocking-notify-channel` and
+`util-fs-err` at 0.1.0, plus `themes` and `vcr` at 0.2.0. Unrelated evaluation and
+supervisor packages and the workspace default remain 0.1.0.
+
+Protocol **10.2** adds default-empty optional-secret absence metadata to Configure.
+Its public Rust field addition requires the new SDK minor line. All seven locked
+external projects retain their verified SDK **0.8.0** / protocol **10.0** sources,
+admitted with the existing same-major warning and best-effort operation. They
+do not require this new metadata API; upstream Cargo versions stay 0.1.0.
+The native asset verifier now requires core SDK 0.10.0 and external SDK 0.8.0.
+
+Fresh official sparse-index checks on September 29, 2026 found all 29 planned new
+versions explicitly absent. The five reused archives matched their index
+checksums and recorded source provenance. This is preparation evidence, not
+publication evidence; registry uploads, consumer installation, immutable tag and
+native publication remain separate release gates.
+
 ## Tau 0.2.0 release record
 
 The application and CLI advance together to **0.2.0**. The current runtime and
@@ -102,10 +124,11 @@ the corresponding archive, and release-owned resource snapshots must match
 their canonical workspace sources byte for byte. It does not claim that an
 unpublished dependency exists in the registry.
 
-## Publication order
+## Historical 0.2.0 publication versions
 
-The current dependencies-first order is also checked by
-`check-crates-io-packages.py`:
+The dependencies-first order is checked by `check-crates-io-packages.py`.
+For 0.2.1, retain the order below but substitute the versions described in the
+preparation section above; the versions in this table record the 0.2.0 release:
 
 ```text
 dpc-tau-actions                  0.1.0

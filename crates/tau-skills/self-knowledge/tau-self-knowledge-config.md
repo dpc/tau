@@ -53,6 +53,8 @@ For a more complete, annotated configuration to learn from, see the
 It illustrates one person's setup, not required defaults: adapt model names,
 roles, paths, and extensions to your installation. Never copy another person's
 credentials or private drop-ins into your own config.
+Project paths in that example are fictional placeholders; its GPT-6.1 Sol role
+selections are example choices, not shipped defaults.
 
 ## Provider and model aliases
 

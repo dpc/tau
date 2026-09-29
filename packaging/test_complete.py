@@ -189,7 +189,7 @@ class PublicationTests(SourceFixture, unittest.TestCase):
                     "runtime_qualification": "not-performed",
                 }, "source": source, "source_file_sha256": dict.fromkeys(files, "a" * 64),
                     "third_party_notices_sha256": "b" * 64,
-                    "sdk_lock_versions": {n: ["0.9.0" if core else "0.8.0"]
+                    "sdk_lock_versions": {n: ["0.10.0" if core else "0.8.0"]
                                           for n in ("dpc-tau-client", "dpc-tau-proto")},
                                    "package_version": version, "package_revision": revision})
             prefix = f"tau-1.2.3-{arch}"
@@ -253,7 +253,7 @@ class PublicationTests(SourceFixture, unittest.TestCase):
         original = sourcefile.read_bytes()
         build = json.loads(buildfile.read_text())
         for component, versions in (
-            (0, ["0.8.0"]),
+            (0, ["0.9.0"]),
             (1, ["0.6.0"]),
             (1, ["0.8.0", "0.6.0"]),
         ):

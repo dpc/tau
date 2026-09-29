@@ -1,7 +1,7 @@
 [package]
 name = "dpc-tau-cli-picker"
 description = "Synchronous single-select terminal list picker used by Tau CLIs."
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

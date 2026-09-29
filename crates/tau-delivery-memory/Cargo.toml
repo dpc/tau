@@ -1,6 +1,6 @@
 [package]
 name = "dpc-tau-delivery-memory"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 description = "Process-local content-free decoded delivery memory estimates."
 repository.workspace = true

@@ -506,12 +506,12 @@ agents:
 
                 {{#if (and
                   (or
-                    (eq session.cwd "/home/dpc/lab")
-                    (starts_with session.cwd "/home/dpc/lab/"))
+                    (eq session.cwd "/home/example/projects")
+                    (starts_with session.cwd "/home/example/projects/"))
                   (not
                     (or
-                      (eq session.cwd "/home/dpc/lab/fedi")
-                      (starts_with session.cwd "/home/dpc/lab/fedi/"))))}}
+                      (eq session.cwd "/home/example/projects/example-project")
+                      (starts_with session.cwd "/home/example/projects/example-project/"))))}}
                 ## External Zulip bridge
 
                 The separate `tau-agent-zulip-bot` session handles external Zulip communication.
@@ -726,11 +726,11 @@ profiles:
         engineer:
           roles:
             engineer-junior:
-              model: codex/gpt-6-sol
+              model: codex/gpt-6.1-sol
               effort: 0.25
 
             engineer:
-              model: codex/gpt-6-sol
+              model: codex/gpt-6.1-sol
               effort: 0.5
 
             engineer-senior:
@@ -740,7 +740,7 @@ profiles:
         support:
           roles:
             researcher:
-              model: codex/gpt-6-sol
+              model: codex/gpt-6.1-sol
               effort: 0.5
 
             researcher-senior:
@@ -752,7 +752,7 @@ profiles:
               effort: 0.75
 
             reviewer:
-              model: codex/gpt-6-sol
+              model: codex/gpt-6.1-sol
               effort: 0.5
 
   # Isolate selects this only for dev-sandbox at the canonical Tau checkout.
