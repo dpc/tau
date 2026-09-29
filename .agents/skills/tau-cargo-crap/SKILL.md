@@ -25,12 +25,44 @@ sed -n '1,120p' result-crap-report/cargo-crap.md
 the blocking gate; `.#ci.crap` preserves the aggregate entry point used by
 selfci.
 
+## Duplicate inventory
+
+```bash
+nix build -L .#ci.crapDuplicates -o result-crap-duplicates
+sed -n '1,100p' result-crap-duplicates/duplicates.txt
+```
+
+SelfCI builds this source-only report even without `TAU_CI_FULL=true`. Its
+`duplicates.txt` and `duplicates.json` contain candidate pairs, not a
+duplicate-count gate. The Nix build fails if analysis fails, but a nonzero pair
+count does not fail CI. Report paths are relative to the repository root.
+For a local run without Nix output, use the pinned
+`cargo crap --workspace --duplicates --top 0 --format human` with the same
+`--exclude` patterns as `flake.nix`; `--top 0` hides meaningless CRAP scores
+when no LCOV is supplied, without filtering duplicate pairs. The human
+report's `No functions found.` refers to that suppressed CRAP table; read the
+separate `duplicate candidates` section below it.
+
+The inventory skips root-level Cargo test/bench/example directories and
+`src/**/tests/`, `src/**/tests.rs`, and `src/**/*_tests.rs` files. It keeps
+production files, including their ordinary helpers; `#[cfg(test)]` modules
+are skipped by cargo-crap itself. Treat matches as leads for inspecting both
+functions and their callers, not refactoring instructions: renamed enum
+accessors, trait implementations, and macro-heavy bodies often share structure
+without sharing behavior. To investigate one area, rerun
+`cargo crap -p <crate> --duplicates --top 0` with the same exclusions. Do not enable
+`[duplicates]` globally: the Markdown debt report and GitHub gate cannot
+display pairs. Do not enable TypeSafe triage; it would send function bodies
+outside the project.
+
 ## Current CI model
 
 - The blocking gates use LCOV from the Nix coverage derivation, not a local `cargo llvm-cov` run.
 - `.#ci.crapAbsolute` fails current entries above the severe threshold with `--fail-above`.
 - `.#ci.crap` is the aggregate/selfci compatibility output for the absolute gate.
 - The absolute gate uses `.cargo-crap.toml`'s threshold of 400 with `--min 100`.
+- The Markdown debt report shows uncovered instrumented line ranges; they
+  suggest where to add tests but do not measure assertion quality.
 - Do not “fix” failures by raising the threshold. Refactor/decompose flagged code or add meaningful coverage.
 
 ## cargo-crap pitfalls

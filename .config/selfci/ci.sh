@@ -78,6 +78,13 @@ function job_cargo() {
     selfci step fail
   fi
 
+  # Source-only duplicate inventory; candidate counts are advisory, but a
+  # failed analysis must fail the job rather than silently drop the report.
+  selfci step start "Nix cargo-crap duplicate inventory"
+  if ! nix build -L --no-link .#ci.crapDuplicates; then
+    selfci step fail
+  fi
+
   if [[ "${TAU_CI_FULL:-false}" == "true" ]]; then
     # The report inventories current debt while the aggregate applies the
     # blocking absolute CRAP gate.

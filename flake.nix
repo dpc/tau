@@ -450,6 +450,35 @@
               doCheck = false;
             };
 
+            # Duplicate detection is a separate, coverage-free inventory. Exclude
+            # test-only source files under src/ in addition to Cargo's top-level
+            # tests/ exclusion; neither invocation changes the blocking CRAP gate.
+            crapDuplicates = craneLib.mkCargoDerivation {
+              pname = "${projectName}-cargo-crap-duplicates";
+              cargoArtifacts = null;
+              buildPhaseCargoCommand = ''
+                mkdir -p $out
+                args=(
+                  --workspace
+                  --duplicates
+                  --exclude '**/tests/**'
+                  --exclude '**/tests.rs'
+                  --exclude '**/*_tests.rs'
+                  --top 0
+                )
+                ${cargoCrap}/bin/cargo-crap "''${args[@]}" \
+                  --format human --output $out/duplicates.txt
+                ${cargoCrap}/bin/cargo-crap "''${args[@]}" \
+                  --format json --output $out/duplicates.json
+                # Workspace locations are absolute; /build/source disappears
+                # after Nix finishes. Make both reports navigable from repo root.
+                sed -i "s|$PWD/||g" $out/duplicates.txt $out/duplicates.json
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [ cargoCrap ];
+              doCheck = false;
+            };
+
             crapAbsolute = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov-absolute";
               cargoArtifacts = null;
@@ -567,6 +596,7 @@
             workspaceCcov
             testsCcov
             crapReport
+            crapDuplicates
             crapAbsolute
             crap
             ;

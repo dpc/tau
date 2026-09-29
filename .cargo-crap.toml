@@ -9,3 +9,6 @@ epsilon = 0.01
 missing = "pessimistic"
 sort = "crap"
 threshold = 400
+# Show uncovered instrumented line ranges in the human/Markdown debt reports.
+# This does not change scores or the GitHub-format blocking gate.
+uncovered-hints = true

@@ -8,6 +8,16 @@ check, so docs can reuse check-mode external dependencies. The actual-source
 build produces the artifact consumed by tests, while rustdoc with warning denial
 and Clippy remain independent required gates.
 
+The cargo-crap duplicate inventory runs separately in regular SelfCI without
+coverage: `nix build .#ci.crapDuplicates -o result-crap-duplicates` produces
+`duplicates.txt` for reading and `duplicates.json` for sorting candidate
+pairs. It excludes test-only source files, not ordinary production helpers;
+similarity alone is not evidence that two functions should be merged. A
+nonzero candidate count is advisory, while a failed analysis fails CI. The
+blocking CRAP gate still uses the coverage run under `TAU_CI_FULL=true`; its
+separate Markdown debt report now shows uncovered instrumented line ranges.
+See `.agents/skills/tau-cargo-crap/SKILL.md` for scope and triage guidance.
+
 ## Durable Rostra notification worker
 
 The separately maintained `tau-ext-rostra` project owns `std-rostra`
