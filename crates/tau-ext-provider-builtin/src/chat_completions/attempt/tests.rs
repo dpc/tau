@@ -4,6 +4,98 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use super::*;
 
+/// Exact public Sol selection must omit tool wire controls even when a profile
+/// enables them, while proxies and other models retain their own contracts.
+#[test]
+fn sol_toolless_compat_is_exact_and_omits_selectors() {
+    for (endpoint, model_id, supported) in [
+        ("https://api.openai.com/v1", "gpt-6.1-sol", false),
+        ("https://api.openai.com/v1/", "gpt-6.1-sol", false),
+        ("https://proxy.example/v1", "gpt-6.1-sol", true),
+        ("https://api.openai.com/v1", "gpt-6-sol", true),
+    ] {
+        let provider = ChatCompletionsProvider {
+            base_url: endpoint.into(),
+            ..ChatCompletionsProvider::default()
+        };
+        let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+            "id": model_id,
+            "compat": {"tool_choice": true, "parallel_tool_calls": true}
+        }))
+        .expect("model");
+        let compat = model_compat(&provider, &model);
+        assert_eq!(compat.tool_choice, supported);
+        assert_eq!(compat.parallel_tool_calls, supported);
+    }
+}
+
+/// A model switch must reject historical tool traffic locally, rather than
+/// submit unsupported history or silently lose it on the text-only endpoint.
+#[test]
+fn sol_toolless_route_rejects_history_before_dispatch() {
+    let provider = ChatCompletionsProvider {
+        base_url: "https://api.openai.com/v1".into(),
+        ..ChatCompletionsProvider::default()
+    };
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "gpt-6.1-sol"
+    }))
+    .expect("model");
+    let mut prompt = crate::openai_tests::prompt();
+    assert!(!has_tool_traffic(&prompt));
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::AssistantResponse(
+            tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+                    call_id: "old-call".into(),
+                    name: tau_proto::ToolName::new("old_tool"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: tau_proto::CborValue::Null,
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                usage: None,
+            },
+        ));
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    let outcome = run_prompt_attempt(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &provider,
+        &model,
+        false,
+        &mut writer,
+        &mut || false,
+        &crate::test_network_policy(),
+        tau_proto::ProviderAttempt::ONE,
+    );
+    let PromptAttemptOutcome::Terminal { finished, progress } = outcome else {
+        panic!("unsupported history must terminalize locally");
+    };
+    assert_eq!(
+        progress,
+        tau_provider_chat_completions::SemanticProgress::None
+    );
+    assert_eq!(
+        finished.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert!(finished.backend.is_none());
+    assert!(finished.usage.is_none());
+    assert!(
+        finished
+            .error
+            .expect("actionable error")
+            .contains("Responses profile")
+    );
+    assert!(bytes.is_empty());
+}
+
 /// Preserve whitespace and split words across several allowances, allow an
 /// empty successful last fragment, and reject accumulated channel overflows.
 #[test]

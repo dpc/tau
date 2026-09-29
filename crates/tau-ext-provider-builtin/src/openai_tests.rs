@@ -3100,6 +3100,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
         model_ids(&models),
         vec![
             "chatgpt/gpt-6-sol",
+            "chatgpt/gpt-6.1-sol",
             "chatgpt/gpt-6-luna",
             "chatgpt/gpt-5.6-sol",
             "chatgpt/gpt-5.6-terra",
@@ -3117,6 +3118,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             .filter(|model| {
                 model.id.model.as_str().starts_with("gpt-5.6-")
                     || model.id.model.as_str().starts_with("gpt-6-")
+                    || model.id.model.as_str() == "gpt-6.1-sol"
             })
             .all(|model| !model.supports_compaction)
     );
@@ -3126,6 +3128,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             .filter(|model| {
                 model.id.model.as_str().starts_with("gpt-5.6-")
                     || model.id.model.as_str().starts_with("gpt-6-")
+                    || model.id.model.as_str() == "gpt-6.1-sol"
             })
             .all(|model| model.supports_standalone_compaction)
     );
@@ -3135,6 +3138,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             .filter(|model| {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
                     && !model.id.model.as_str().starts_with("gpt-6-")
+                    && model.id.model.as_str() != "gpt-6.1-sol"
             })
             .all(|model| model.supports_compaction)
     );
@@ -3210,6 +3214,7 @@ fn xhigh_metadata_is_model_specific() {
         ids_with_xhigh,
         vec![
             "chatgpt/gpt-6-sol",
+            "chatgpt/gpt-6.1-sol",
             "chatgpt/gpt-6-luna",
             "chatgpt/gpt-5.6-sol",
             "chatgpt/gpt-5.6-terra",

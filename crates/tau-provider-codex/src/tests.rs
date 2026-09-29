@@ -436,6 +436,7 @@ fn gpt_6_aliases_publish_all_standard_short_context_prices() {
                 (10_000_000, 1_000_000, 12_500_000, 50_000_000),
             ),
             ("gpt-6-sol", (2_000_000, 200_000, 2_500_000, 10_000_000)),
+            ("gpt-6.1-sol", (2_000_000, 100_000, 2_500_000, 10_000_000)),
             ("gpt-6-luna", (100_000, 10_000, 125_000, 500_000)),
         ] {
             let model = models
@@ -1309,10 +1310,14 @@ fn native_unavailable_respects_semantic_progress_and_event_ordering() {
 /// once.
 #[test]
 fn codex_local_summary_preserves_ordinary_prefix_and_usage() {
-    for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+    for (model, mode) in [
+        ("gpt-5.3-codex", CodexMode::Standard),
+        ("gpt-5.3-codex", CodexMode::LiteCompatibility),
+        ("gpt-6.1-sol", CodexMode::Standard),
+    ] {
         let server = spawn_loopback_server(LoopbackResponseMode::LocalSummarySuccess);
         let mut config = resolved_config_for_model(
-            &ModelName::new("gpt-5.3-codex"),
+            &ModelName::new(model),
             ResolvedCredentials::new("token".to_owned(), None),
             mode,
         );
@@ -2281,6 +2286,58 @@ fn cache_diagnostics_pre_dispatch_cancel_is_zero() {
     assert!(rows[0]["successful_dispatch_index"].is_null());
 }
 
+/// Sol 6.1 must retain coding tools and local-summary compaction without
+/// claiming unverified private-route native compaction, images, phase, or Lite.
+#[test]
+fn gpt_6_1_sol_publishes_conservative_private_capabilities() {
+    let models = models_for_provider(&ProviderName::new("chatgpt"));
+    let model = models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-6.1-sol")
+        .expect("Sol 6.1");
+    assert_eq!(model.context_window.get(), 1_050_000);
+    assert_eq!(
+        model.max_input_tokens.map(|tokens| tokens.get()),
+        Some(997_500)
+    );
+    assert_eq!(
+        model.max_output_tokens.map(|tokens| tokens.get()),
+        Some(128_000)
+    );
+    for level in [
+        NativeReasoningEffort::Low,
+        NativeReasoningEffort::Medium,
+        NativeReasoningEffort::High,
+        NativeReasoningEffort::XHigh,
+        NativeReasoningEffort::Max,
+    ] {
+        assert!(model.efforts.contains(level));
+    }
+    assert!(!model.efforts.contains(NativeReasoningEffort::None));
+    assert!(!model.efforts.contains(NativeReasoningEffort::Minimal));
+    assert_eq!(
+        model.supported_tool_types,
+        vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom]
+    );
+    assert!(model.supports_parallel_tool_calls);
+    assert!(model.supports_standalone_compaction);
+    assert!(!model.supports_compaction);
+    assert!(model.standalone_compaction_threshold.is_none());
+    assert!(!supports_native_standalone_compaction("gpt-6.1-sol"));
+    assert_eq!(model.input_modalities, vec![tau_proto::InputModality::Text]);
+    assert_eq!(
+        model.tool_result_modalities,
+        vec![tau_proto::InputModality::Text]
+    );
+    for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+        let config = config_for_model_mode(&model.id.model, "token".into(), None, mode);
+        assert_eq!(config.mode, CodexMode::Standard);
+        assert!(!config.supports_phase);
+        assert!(!config.supports_verbosity);
+        assert!(!config.supports_compaction);
+    }
+}
+
 /// Ensures the provider publishes the complete hardcoded ChatGPT model list
 /// with model-specific capabilities and effective context limits.
 #[test]
@@ -2297,6 +2354,7 @@ fn publishes_chatgpt_model_metadata() {
         ids,
         vec![
             "work-chatgpt/gpt-6-sol",
+            "work-chatgpt/gpt-6.1-sol",
             "work-chatgpt/gpt-6-luna",
             "work-chatgpt/gpt-5.6-sol",
             "work-chatgpt/gpt-5.6-terra",

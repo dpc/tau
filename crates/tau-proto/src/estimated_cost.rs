@@ -238,7 +238,8 @@ pub struct EstimatedApiCostRates {
     pub storage_per_million_token_hour: Option<EstimatedUsdPerMillionTokenHours>,
 }
 
-/// GPT-5.6-equivalent fallback used when model metadata omits explicit pricing.
+/// GPT-5.5-equivalent fallback used when model metadata omits explicit pricing.
+/// This comparison is not a verified price for an unknown model.
 pub const ESTIMATED_API_COST_FALLBACK: EstimatedApiCostRates = EstimatedApiCostRates {
     uncached_input: EstimatedUsdPerMillion::from_micro_usd(5_000_000),
     cached_input: EstimatedUsdPerMillion::from_micro_usd(500_000),

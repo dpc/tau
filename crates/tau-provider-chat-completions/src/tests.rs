@@ -3670,6 +3670,26 @@ fn parallel_tool_request_field_follows_compatibility_and_tool_presence() {
     }
 }
 
+/// Text-only routes omit all tool fields with both ordinary automatic choice
+/// and the disabled choice used by harness text prompts and local summaries.
+#[test]
+fn text_only_request_omits_tool_fields_for_both_choices() {
+    let mut provider = provider();
+    provider.compat.tool_choice = false;
+    provider.compat.parallel_tool_calls = false;
+    let config = resolved_provider(&provider);
+    for choice in [ToolChoice::Auto, ToolChoice::None] {
+        let mut created = prompt();
+        created.tools.clear();
+        created.tool_choice = choice;
+        let request = build_request(&config, &provider.models[0], &created);
+        let body = serde_json::to_value(request).expect("text request");
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(body.get(key).is_none(), "{key} must be absent");
+        }
+    }
+}
+
 /// Routes without native `tool_choice` keep automatic tools enabled by the
 /// documented default, while `None` removes the tools that could permit a call.
 #[test]

@@ -1,0 +1,18 @@
+{
+  "id": "gpt-6.1-sol",
+  "context_window": 1050000,
+  "max_output_tokens": 128000,
+  "reasoning_effort": {
+    "mapping": [
+      {"from": "0.0", "level": "low"},
+      {"from": "0.35", "level": "medium"},
+      {"from": "0.65", "level": "high"},
+      {"from": "0.8", "level": "xhigh"},
+      {"from": "0.9", "level": "max"}
+    ]
+  },
+  "est_uncached_input_cost_1m_usd": "2",
+  "est_cached_input_cost_1m_usd": "0.10",
+  "est_cache_write_input_cost_1m_usd": "2.50",
+  "est_output_cost_1m_usd": "10"
+}

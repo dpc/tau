@@ -646,19 +646,18 @@ fn build_request_includes_prompt_cache_key_when_supported() {
     assert!(uuid::Uuid::parse_str(prompt_cache_key).is_ok());
 }
 
-/// A configured Astra catalog selection must reach the provider request under
+/// A configured catalog selection must reach the provider request under
 /// the exact subscription model slug without changing the existing default.
 #[test]
-fn build_request_lowers_astra_model_id_verbatim() {
-    let config = crate::config_for_model(
-        &tau_proto::ModelName::new("gpt-6-astra"),
-        "token".to_owned(),
-        None,
-    );
-    let body = serde_json::to_value(build_request(&config, &basic_prompt_payload(), None))
-        .expect("serialize Astra request");
+fn build_request_lowers_new_model_ids_verbatim() {
+    for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+        let config =
+            crate::config_for_model(&tau_proto::ModelName::new(model), "token".to_owned(), None);
+        let body = serde_json::to_value(build_request(&config, &basic_prompt_payload(), None))
+            .expect("serialize Astra request");
 
-    assert_eq!(body["model"], "gpt-6-astra");
+        assert_eq!(body["model"], model);
+    }
 }
 
 /// Astra's real resolved config must send the complete native compact window,

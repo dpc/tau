@@ -6,6 +6,59 @@ use std::{
 use super::sampling::ResponsesResponseSampler;
 use super::*;
 
+/// Keep the documented Sol 6.1 public model entry usable with Function tools,
+/// legal effort levels, output limits, and all four base estimate categories.
+#[test]
+fn documented_gpt_6_1_sol_responses_model_is_usable() {
+    let model: ResponsesModel = serde_json::from_str(include_str!(
+        "../../fixtures/provider-models/gpt-6.1-sol.json"
+    ))
+    .expect("documented Sol model");
+    let provider = ResponsesProvider {
+        base_url: "https://api.openai.com/v1".into(),
+        models: vec![model],
+        ..ResponsesProvider::default()
+    };
+    provider
+        .validate_reasoning_effort()
+        .expect("legal effort map");
+    provider
+        .validate_local_summary_compaction()
+        .expect("legal summary limits");
+    let models = models_for_provider(&ProviderName::new("openai"), &provider);
+    let model = &models[0];
+    assert_eq!(model.id.model.as_str(), "gpt-6.1-sol");
+    assert_eq!(model.context_window.get(), 1_050_000);
+    assert_eq!(
+        model.max_output_tokens.map(|tokens| tokens.get()),
+        Some(128_000)
+    );
+    assert_eq!(
+        model.supported_tool_types,
+        vec![tau_proto::ToolType::Function]
+    );
+    assert!(model.supports_standalone_compaction);
+    assert!(!model.efforts.contains(NativeReasoningEffort::None));
+    assert!(!model.efforts.contains(NativeReasoningEffort::Minimal));
+    for level in [
+        NativeReasoningEffort::Low,
+        NativeReasoningEffort::Medium,
+        NativeReasoningEffort::High,
+        NativeReasoningEffort::XHigh,
+        NativeReasoningEffort::Max,
+    ] {
+        assert!(model.efforts.contains(level));
+    }
+    let rates = model.estimated_api_cost_rates();
+    assert_eq!(rates.uncached_input.as_micro_usd(), 2_000_000);
+    assert_eq!(rates.cached_input.as_micro_usd(), 100_000);
+    assert_eq!(
+        rates.cache_write_input.expect("write rate").as_micro_usd(),
+        2_500_000
+    );
+    assert_eq!(rates.output.as_micro_usd(), 10_000_000);
+}
+
 /// Maximum header bytes accepted by the local HTTP fixture.
 const LOOPBACK_REQUEST_HEADER_LIMIT: usize = 64 * 1024;
 /// Maximum body bytes accepted by the local HTTP fixture.

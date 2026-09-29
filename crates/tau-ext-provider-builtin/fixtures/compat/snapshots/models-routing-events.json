@@ -409,6 +409,67 @@
         }
       },
       "context_window": 1050000,
+      "default_affinity": 850,
+      "efforts": {
+        "control": {
+          "kind": "mapped",
+          "mapping": [
+            {"from": "0.0", "level": "low"},
+            {"from": "0.35", "level": "medium"},
+            {"from": "0.65", "level": "high"},
+            {"from": "0.8", "level": "xhigh"},
+            {"from": "0.9", "level": "max"}
+          ]
+        }
+      },
+      "est_cache_write_input_cost_1m_usd": "2.5",
+      "est_cached_input_cost_1m_usd": "0.1",
+      "est_output_cost_1m_usd": "10",
+      "est_uncached_input_cost_1m_usd": "2",
+      "hosted_tool_capabilities": [
+        {
+          "access_modes": ["cached", "live"],
+          "kind": "web_search",
+          "supports_allowed_domains": true,
+          "supports_context_size": true
+        }
+      ],
+      "id": "chatgpt/gpt-6.1-sol",
+      "input_modalities": ["text"],
+      "max_input_tokens": 997500,
+      "max_output_tokens": 128000,
+      "supported_tool_types": ["function", "custom"],
+      "supports_compaction": false,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": true,
+      "tags": ["shell:chatgpt", "tools:custom-text"],
+      "thinking_summaries": ["off", "auto", "concise", "detailed"],
+      "tool_result_modalities": ["text"],
+      "verbosities": ["medium"]
+    },
+    {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
+      "context_window": 1050000,
       "default_affinity": 800,
       "efforts": {
         "control": {

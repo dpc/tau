@@ -342,17 +342,31 @@ non-negative decimal USD prices per million tokens. They may set
 `est_cache_storage_cost_1m_token_hour_usd` per million token-hours. Use quoted
 decimal strings for fractional prices; integer JSON numbers
 are also accepted. Missing values resolve built-in default prices for known
-compatible model ids (currently `deepseek-v4-flash` from DeepSeek's standard API
-pricing) and otherwise use the central GPT-5.6-equivalent `$5`/`$.50`/`$30`
+compatible model ids (`deepseek-v4-flash`, now a retired alias for V4.1 Flash,
+uses conservative **peak** estimates `$0.30`/`$0.006`/`$1.20`, not exact
+time-of-day billing) and otherwise use the central GPT-5.5-equivalent `$5`/`$.50`/`$30`
 fallback, including local and free models; explicit profile prices always take
 precedence. Hardcoded ChatGPT ordinary-input/output values follow OpenAI's basic
-public API pricing table, while private-route cache prices remain absent and use
-only the non-authoritative central display fallback. A missing write price uses
+public API pricing table. GPT-6 models, including `gpt-6.1-sol`, publish all four
+standard short-context API-equivalent rates; other private models omit cache
+prices and use the non-authoritative central display fallback. Long-context,
+service-tier, regional, and tool fees are excluded. A missing write price uses
 ordinary input; missing storage usage
 or price contributes no storage charge. The harness accumulates ordinary input,
 cache reads, cache writes, output, and reported token-time storage into this
 deliberately rough equivalent-API estimate per agent for the current runtime
 only.
+
+`chatgpt/gpt-6.1-sol` is selectable without changing the `gpt-6-sol` default.
+It offers Function/Custom tools and local-summary standalone compaction, a
+1,050,000-token window, and low/medium/high/xhigh/max efforts. Private native
+compaction, Lite, images, phase, and verbosity remain unadvertised without
+exact route evidence. For public API coding use a `responses` profile and the
+tested `crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-sol.json`
+model entry. The public Responses
+adapter remains text/Function-only; public Chat Completions has no Sol 6.1
+tool calling. See `docs/providers.md` and `docs/provider-price-audit.md` for
+pricing and capability limits.
 
 Chat Completions cache counters are ignored by default. Set
 `compat.cache_usage` to `open_ai` or `deep_seek` only when the exact route uses

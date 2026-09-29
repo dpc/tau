@@ -45,6 +45,7 @@ const STANDALONE_COMPACTION_CONTEXT_WINDOW_PERCENT: u64 = 90;
 const EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const CHATGPT_MODELS: &[&str] = &[
     "gpt-6-sol",
+    "gpt-6.1-sol",
     "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -1877,6 +1878,7 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
     use tau_proto::{EstimatedApiCostRates, EstimatedUsdPerMillion as Price};
 
     let (uncached, cached, output) = match model {
+        "gpt-6.1-sol" => (2_000_000, 100_000, 10_000_000),
         "gpt-6-astra" => (10_000_000, 1_000_000, 50_000_000),
         "gpt-6-sol" => (2_000_000, 200_000, 10_000_000),
         "gpt-6-luna" => (100_000, 10_000, 500_000),
@@ -1907,6 +1909,8 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
 fn default_affinity_for_model(model: &str) -> i32 {
     match model {
         "gpt-6-sol" => 900,
+        // Adding a model must not silently change the default selection.
+        "gpt-6.1-sol" => 850,
         "gpt-6-luna" => 800,
         "gpt-5.6-sol" => 700,
         "gpt-5.6-terra" => 600,
@@ -1952,7 +1956,7 @@ fn is_gpt_5_6(model: &str) -> bool {
 }
 
 fn is_gpt_6_sol_or_luna(model: &str) -> bool {
-    matches!(model, "gpt-6-sol" | "gpt-6-luna")
+    matches!(model, "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna")
 }
 
 fn is_gpt_6(model: &str) -> bool {
@@ -1971,7 +1975,7 @@ fn supports_inline_compaction(model: &str) -> bool {
 }
 
 fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {
-    if model == "gpt-6-astra" {
+    if matches!(model, "gpt-6-astra" | "gpt-6.1-sol") {
         return vec![
             NativeReasoningEffort::Low,
             NativeReasoningEffort::Medium,

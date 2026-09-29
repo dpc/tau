@@ -1207,8 +1207,32 @@ fn partially_priced_model_uses_per_category_fallbacks() {
     assert_eq!(rates.output, tau_proto::ESTIMATED_API_COST_FALLBACK.output);
 }
 
+/// Public Sol 6.1 Chat Completions must not advertise its default Function
+/// tools; Responses is the supported tool route. Proxies retain their contract.
+#[test]
+fn gpt_6_1_sol_public_chat_completions_has_no_tools() {
+    for (base_url, tools_supported) in [
+        ("https://api.openai.com/v1", false),
+        ("https://api.openai.com/v1/", false),
+        ("https://proxy.example/v1", true),
+    ] {
+        let model =
+            serde_json::from_value(serde_json::json!({"id": "gpt-6.1-sol"})).expect("Sol model");
+        let provider = ChatCompletionsProvider {
+            base_url: base_url.into(),
+            models: vec![model],
+            ..ChatCompletionsProvider::default()
+        };
+        let models = models_for_provider(&tau_proto::ProviderName::new("openai"), &provider);
+        assert_eq!(!models[0].supported_tool_types.is_empty(), tools_supported);
+        assert_eq!(models[0].supports_parallel_tool_calls, tools_supported);
+        assert!(models[0].hosted_tool_capabilities.is_empty());
+    }
+}
+
 /// Known compatible model ids without explicit profile prices resolve the
-/// built-in default pricing instead of the central GPT-5.6-equivalent fallback.
+/// conservative peak pricing instead of the central GPT-5.5-equivalent
+/// fallback.
 #[test]
 fn known_model_without_explicit_prices_uses_builtin_default() {
     let provider = ChatCompletionsProvider {
@@ -1239,9 +1263,9 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
     let published = models_for_provider(&tau_proto::ProviderName::new("deepseek"), &provider);
     let rates = published[0].estimated_api_cost_rates();
 
-    assert_eq!(rates.uncached_input.as_micro_usd(), 140_000);
-    assert_eq!(rates.cached_input.as_micro_usd(), 2_800);
-    assert_eq!(rates.output.as_micro_usd(), 280_000);
+    assert_eq!(rates.uncached_input.as_micro_usd(), 300_000);
+    assert_eq!(rates.cached_input.as_micro_usd(), 6_000);
+    assert_eq!(rates.output.as_micro_usd(), 1_200_000);
 }
 
 /// Explicit profile prices override the built-in default pricing for the same
@@ -1270,7 +1294,7 @@ fn explicit_profile_prices_override_builtin_defaults() {
 }
 
 /// Omitted profile categories on a known model id fall back to the built-in
-/// default per category, never to the central GPT-5.6-equivalent fallback.
+/// default per category, never to the central GPT-5.5-equivalent fallback.
 #[test]
 fn partial_profile_prices_keep_builtin_defaults_for_omitted_categories() {
     let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
@@ -1287,8 +1311,8 @@ fn partial_profile_prices_keep_builtin_defaults_for_omitted_categories() {
     let published = models_for_provider(&tau_proto::ProviderName::new("deepseek"), &provider);
     let rates = published[0].estimated_api_cost_rates();
 
-    assert_eq!(rates.uncached_input.as_micro_usd(), 140_000);
-    assert_eq!(rates.cached_input.as_micro_usd(), 2_800);
+    assert_eq!(rates.uncached_input.as_micro_usd(), 300_000);
+    assert_eq!(rates.cached_input.as_micro_usd(), 6_000);
     assert_eq!(rates.output.as_micro_usd(), 9_000_000);
 }
 

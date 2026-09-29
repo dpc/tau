@@ -199,7 +199,7 @@ fn resolved_local_summary_compaction(
 ///
 /// This mirrors how the ChatGPT/Codex provider special-cases its own model
 /// names: a known id publishes provider pricing even without profile fields,
-/// while unknown ids keep the central GPT-5.6-equivalent fallback. Explicit
+/// while unknown ids keep the central GPT-5.5-equivalent fallback. Explicit
 /// profile `est_*` fields always take precedence over this table.
 fn builtin_estimated_prices(
     model: &ModelName,
@@ -209,10 +209,10 @@ fn builtin_estimated_prices(
     tau_proto::EstimatedUsdPerMillion,
 )> {
     let (uncached, cached, output) = match model.as_str() {
-        // DeepSeek standard API prices from
-        // <https://api-docs.deepseek.com/quick_start/pricing>: $0.14 uncached
-        // input, $0.0028 cached input, $0.28 output per million tokens.
-        "deepseek-v4-flash" => (140_000, 2_800, 280_000),
+        // Audited 2026-09-29: the retired V4 alias routes to V4.1 Flash.
+        // Conservative PEAK estimates, not time-of-day billing:
+        // <https://api-docs.deepseek.com/quick_start/pricing>.
+        "deepseek-v4-flash" => (300_000, 6_000, 1_200_000),
         _ => return None,
     };
     Some((

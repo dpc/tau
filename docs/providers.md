@@ -471,7 +471,7 @@ JSON numbers. Fractional configured prices must use decimal strings with at most
 six fractional digits so validation never rounds through binary floating point.
 Missing fields resolve built-in default prices for known compatible model ids
 (documented below for the built-in Chat Completions provider) and otherwise use
-the central GPT-5.6-equivalent fallback: `$5`
+the central GPT-5.5-equivalent fallback: `$5`
 uncached input, `$.50` cached input, and `$30` output per million tokens. This
 fallback intentionally applies to local and free models too.
 
@@ -712,10 +712,18 @@ Other private ChatGPT models continue to omit cache rates. Configured compatible
 providers own their explicit values; refresh those profile fields from that
 provider's basic public pricing table. The built-in Chat Completions
 provider ships default prices for known compatible model ids without explicit
-profile fields: `deepseek-v4-flash` uses DeepSeek's
-[standard API prices](https://api-docs.deepseek.com/quick_start/pricing)
-(`$0.14` uncached input, `$0.0028` cached input, `$0.28` output per million
-tokens).
+profile fields: the retired `deepseek-v4-flash` alias now routes to V4.1 Flash.
+Tau uses a **conservative peak estimate** from DeepSeek's
+[pricing table](https://api-docs.deepseek.com/quick_start/pricing)
+(`$0.30` uncached input, `$0.006` cached input, `$1.20` output per million
+tokens), not exact time-of-day billing. Off-peak rates are half those values;
+Tau does not select them based on local wall-clock time. Explicit profile
+overrides still win per category.
+
+The [September 29, 2026 shipped-price audit](provider-price-audit.md) records
+all hard-coded rates and their limits. Unknown models, including unpriced
+OpenRouter routes, still use the non-authoritative fallback. Dynamic discovery
+and user overrides are not a verified fixed tariff catalog.
 
 The harness records which extension sent the snapshot and uses that as routing state.
 If multiple snapshots advertise the same provider-qualified `ModelId`, the
@@ -1295,6 +1303,43 @@ The backend preserves assistant-message, reasoning-item, and Function-call
 replay sidecars. It deliberately omits `previous_response_id`, `store`,
 hosted/custom tools, image/file inputs, and public compaction. Existing
 `openrouter` profiles remain Chat Completions profiles.
+
+### GPT-6.1 Sol
+
+Select `chatgpt/gpt-6.1-sol` (or your ChatGPT namespace) for Tau's existing
+private coding-agent workflow: Function/Custom tools, parallel calls, and
+standalone local-summary compaction. Adding Sol 6.1 does **not** change the
+default `gpt-6-sol` selection. Its advertised window is 1,050,000 tokens
+(997,500 effective input ceiling), maximum output 128,000, and effort choices
+are `low`, `medium`, `high`, `xhigh`, `max`—not `none` or `minimal`.
+The private route stays Standard even if the profile requests Lite. Native
+and inline compaction, image tool results, phase, and verbosity controls
+remain unadvertised for this exact model pending private-route evidence.
+Tau currently has no ordinary user-image message carrier: binary images use
+tool-result blocks, whose private acceptance is not established by public
+image-input support. Ordinary tools and local-summary compaction remain available.
+
+For the public API, create a `responses` profile pointing at
+`https://api.openai.com/v1` and use the tested
+[Sol 6.1 model entry](../crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-sol.json)
+in its `models` array.
+This supplies the window, output cap, legal effort mapping, and four standard
+short-context estimate rates. Keep credentials in the existing Secret flow.
+The generic Responses adapter supports text and Function tools, not the
+upstream model's full image/hosted-tool surface. Public Chat Completions does
+**not** support Sol 6.1 tool calling; Tau suppresses tool publication for this
+exact model on the official endpoint, omits tool-control fields, and rejects
+tool declarations or historical tool traffic locally rather than dropping
+history. Use Responses for coding-agent tools.
+
+Sol 6.1 estimates use `$2` ordinary input, `$0.10` cached input, `$2.50`
+cache writes, and `$10` output per million tokens. These are not invoice
+predictions: requests above 272,000 input tokens charge double input/cache
+rates and 1.5× output rates for the **whole request**, and service tiers and
+regional processing can also change prices. Tau's scalar base-rate estimate
+does not apply those adjustments or infer missing cache-write counters.
+
+### Public Responses transport and effort controls
 
 WebSocket mode opens a fresh connection for each finite attempt and sends one
 `response.create` envelope without SSE-only fields. A retry reconnects and

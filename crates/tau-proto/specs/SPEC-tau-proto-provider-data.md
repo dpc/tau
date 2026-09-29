@@ -243,7 +243,7 @@ standalone behavior available.
 `ProviderModelInfo` also carries optional fixed-point estimated USD prices per
 million ordinary input, provider-reported cached reads, cache writes, output
 tokens, and cache token-hours. Omitted ordinary/read/output categories resolve
-independently to the central GPT-5.6-equivalent fallback. An omitted cache-write
+independently to the central GPT-5.5-equivalent fallback. An omitted cache-write
 rate uses ordinary input; omitted storage has no charge. These values are basic
 equivalent-API comparison metadata, not billing facts; provider declarations
 must reject negative, malformed, or over-precise decimals.
