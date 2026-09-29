@@ -13,6 +13,7 @@ use tau_proto::{
     ToolCallRef, ToolSourcePhase, ToolWaitMode, ToolWaitOutcome, UnixMicros,
 };
 
+use super::super::wait_outcome::wait_mode_allows_outcome;
 use super::{observe_clock, projection_error};
 use crate::InspectError;
 
@@ -626,105 +627,6 @@ fn validate_wait_settlement(
         _ => {}
     }
     Ok(())
-}
-
-/// Returns whether one settlement is valid for its parsed mode and
-/// registration.
-fn wait_mode_allows_outcome(
-    mode: &ToolWaitMode,
-    settlement: &tau_proto::AgentToolWaitSettled,
-) -> bool {
-    use tau_proto::{
-        ToolOutputEnvelope as Envelope, ToolWaitMode as Mode, ToolWaitOutcome as Outcome,
-        WaitRejectionReason as Reject,
-    };
-    let registered = settlement.registration.is_some();
-    match (mode, &settlement.outcome) {
-        (
-            Mode::Exact { target },
-            Outcome::CompletionDelivered {
-                source_call,
-                envelope,
-                ..
-            },
-        ) => target == source_call && *envelope == Envelope::Identity,
-        (Mode::ExactAll { targets }, Outcome::CompletionsDelivered { sources }) => {
-            targets.len() == sources.len()
-                && targets.iter().zip(sources).all(|(target, source)| {
-                    target == &source.source_call && source.envelope == Envelope::Identity
-                })
-        }
-        (
-            Mode::NextBackground,
-            Outcome::CompletionDelivered {
-                source_phase,
-                envelope,
-                ..
-            },
-        ) => {
-            *source_phase == ToolSourcePhase::Background
-                && *envelope == Envelope::OriginalToolCallIdHeader
-        }
-        (
-            Mode::Exact { .. } | Mode::ExactAll { .. } | Mode::NextBackground,
-            Outcome::InterruptedByActivation { .. },
-        )
-        | (Mode::ActivatingInput { .. }, Outcome::InputAvailable { .. }) => true,
-        (Mode::ActivatingInput { .. }, Outcome::TimedOut)
-        | (
-            Mode::Exact { .. }
-            | Mode::ExactAll { .. }
-            | Mode::NextBackground
-            | Mode::ActivatingInput { .. },
-            Outcome::Cancelled | Outcome::LifecycleAborted,
-        ) => registered,
-        (
-            Mode::Exact { .. } | Mode::ExactAll { .. },
-            Outcome::Rejected {
-                reason:
-                    Reject::DuplicateExactWait
-                    | Reject::TargetReturnedForegroundBeforeWait
-                    | Reject::ResultAlreadyConsumed,
-            },
-        )
-        | (
-            Mode::NextBackground,
-            Outcome::Rejected {
-                reason: Reject::DuplicateAnyWait,
-            },
-        )
-        | (
-            Mode::ActivatingInput { .. },
-            Outcome::Rejected {
-                reason: Reject::DuplicateInputWait,
-            },
-        )
-        | (
-            Mode::ExactUnresolved,
-            Outcome::Rejected {
-                reason: Reject::UnknownTarget,
-            },
-        )
-        | (
-            Mode::ExactAllUnresolved,
-            Outcome::Rejected {
-                reason: Reject::UnknownTarget,
-            },
-        )
-        | (
-            Mode::InvalidArguments,
-            Outcome::Rejected {
-                reason: Reject::InvalidArguments,
-            },
-        ) => !registered,
-        (
-            Mode::NextBackground,
-            Outcome::Rejected {
-                reason: Reject::NoBackgroundCandidate,
-            },
-        ) => true,
-        _ => false,
-    }
 }
 
 /// Projects typed wait registration, settlement, and referenced timing.

@@ -32,7 +32,7 @@ pub use retention::SessionRetentionReferences;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, Event, SessionId, UnixMicros};
 
-use crate::record_log::MAX_RECORD_BYTES;
+use crate::record_log::{MAX_RECORD_BYTES, encoded_size_with_limit};
 use crate::semantic_persistence::{RetentionCharge, StagedFrame};
 use crate::session::{PersistedEventSource, SessionMeta};
 use crate::{
@@ -1711,37 +1711,6 @@ fn load_session_events_from_file(
         }
     }
     Ok(events)
-}
-
-fn encoded_size_with_limit<T: Serialize>(value: &T, limit: u64) -> Option<u64> {
-    /// Non-retaining serialized-size counter.
-    struct Counter {
-        /// Bytes accepted so far.
-        written: u64,
-        /// Largest accepted total.
-        limit: u64,
-    }
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            if self.written.saturating_add(length) > self.limit {
-                return Err(io::Error::new(
-                    io::ErrorKind::FileTooLarge,
-                    "encoded value exceeds bound",
-                ));
-            }
-            self.written += length;
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter { written: 0, limit };
-    tau_proto::encode_message(&mut counter, value)
-        .ok()
-        .map(|()| counter.written)
 }
 
 fn managed_session_projection_charge(

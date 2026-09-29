@@ -1,6 +1,8 @@
 //! Shared helpers for length-prefixed durable record logs.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+
+use serde::Serialize;
 
 /// Largest individual CBOR record that durable journal readers allocate.
 ///
@@ -26,3 +28,38 @@ pub(crate) fn read_record_length(reader: &mut impl Read) -> io::Result<Option<u6
     }
     Ok(Some(u64::from_le_bytes(length_bytes)))
 }
+
+pub(crate) fn encoded_size_with_limit<T: Serialize>(value: &T, limit: u64) -> Option<u64> {
+    /// Non-retaining serialized-size counter.
+    struct Counter {
+        /// Bytes accepted so far.
+        written: u64,
+        /// Largest accepted total.
+        limit: u64,
+    }
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if self.written.saturating_add(length) > self.limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::FileTooLarge,
+                    "encoded value exceeds bound",
+                ));
+            }
+            self.written += length;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { written: 0, limit };
+    tau_proto::encode_message(&mut counter, value)
+        .ok()
+        .map(|()| counter.written)
+}
+
+#[cfg(test)]
+#[path = "record_log_tests.rs"]
+mod tests;

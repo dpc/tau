@@ -8,6 +8,7 @@ mod otlp;
 mod performance;
 #[cfg(test)]
 mod tests;
+mod wait_outcome;
 
 use std::collections::BTreeSet;
 use std::io::Seek as _;

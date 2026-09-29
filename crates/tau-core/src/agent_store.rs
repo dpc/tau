@@ -16,7 +16,9 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-persistence"))]
@@ -24,7 +26,7 @@ use std::time::Duration;
 
 use fs2::FileExt;
 use loaded_tool_call_ids::LoadedToolCallIds;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 pub use snapshot::{
     AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot, read_agent_creation_record,
 };
@@ -35,7 +37,7 @@ use tau_proto::{
 #[cfg(test)]
 use crate::agent_checkpoint::read_checkpoint;
 use crate::agent_checkpoint::{AgentSummary, read_journal_bound_checkpoint};
-use crate::record_log::MAX_RECORD_BYTES;
+use crate::record_log::{MAX_RECORD_BYTES, encoded_size_with_limit};
 use crate::semantic_persistence::{AgentCheckpointCandidate, RetentionCharge, StagedFrame};
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics, AgentTree,
@@ -1967,37 +1969,6 @@ fn agent_creation_facts_from_record(
         display_name,
         bytes_read,
     }
-}
-
-fn encoded_size_with_limit<T: Serialize>(value: &T, limit: u64) -> Option<u64> {
-    /// Non-retaining serialized-size counter.
-    struct Counter {
-        /// Bytes accepted so far.
-        written: u64,
-        /// Largest accepted total.
-        limit: u64,
-    }
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            if self.written.saturating_add(length) > self.limit {
-                return Err(io::Error::new(
-                    io::ErrorKind::FileTooLarge,
-                    "encoded value exceeds bound",
-                ));
-            }
-            self.written += length;
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter { written: 0, limit };
-    tau_proto::encode_message(&mut counter, value)
-        .ok()
-        .map(|()| counter.written)
 }
 
 fn managed_agent_projection_charge(
