@@ -40,7 +40,9 @@ selfci.
 - `--min` filters which current entries cargo-crap evaluates and reports; keep it
   low enough that every function capable of exceeding the absolute limit is
   included.
-- cargo-crap v0.3.0 excludes root-level `tests/**`, `benches/**`, and `examples/**` by default. This is intentional for Tau's production-code CRAP gates; pass `--no-default-excludes` only for one-off investigation where test/bench/example code must be included.
+- Tau configures `tests/**`, `benches/**`, and `examples/**` as default
+  exclusions for production-code CRAP gates. Pass `--no-default-excludes`
+  only for one-off investigations that need those directories.
 
 ## Refactoring flagged code
 
