@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::{borrow as path_std_borrow, collections as path_std_collections, time as path_std_time};
 
+use tau_config::settings::HarnessSettings;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolError,
     ToolResultStatus,
@@ -1644,6 +1645,46 @@ fn capability_helpers_render_membership_without_absence_errors() {
         )
         .expect("valid capability helpers render");
     assert_eq!(rendered, "true false true false");
+}
+
+/// Built-in web guidance appears only when both logical tools are in the
+/// effective turn surface; a search-only route must not advertise fetch.
+#[test]
+fn built_in_web_guidance_requires_both_tools() {
+    let settings = HarnessSettings::built_in();
+    let fragment = settings
+        .roles
+        .get("engineer")
+        .expect("built-in engineer")
+        .prompt_fragments
+        .iter()
+        .find(|fragment| fragment.name == "agent.web-tools")
+        .expect("web guidance");
+    let renderer = prompt_template_renderer();
+    for (tools, visible) in [
+        (vec![], false),
+        (vec!["web_search"], false),
+        (vec!["web_fetch"], false),
+        (vec!["web_search", "web_fetch"], true),
+    ] {
+        let rendered = renderer
+            .render_template(
+                &fragment.text,
+                &serde_json::json!({
+                    "capabilities": PromptCapabilities::new(
+                        tools.into_iter().map(str::to_owned),
+                        std::iter::empty::<String>(),
+                        std::iter::empty::<String>(),
+                    ),
+                }),
+            )
+            .expect("render web guidance");
+        assert_eq!(rendered.contains("## Web tools"), visible);
+        if visible {
+            assert!(rendered.contains("you need not call `web_fetch`"));
+            assert!(rendered.contains("live access depends on configured policy"));
+        }
+    }
 }
 
 /// Capability helpers reject malformed identifiers, bad types, missing

@@ -9561,34 +9561,36 @@ impl RateLimitedResponseUpdateEmitter {
         let response_stats = self.response_stats_at(state, now);
         let first_non_empty_sample =
             !self.emitted_non_empty_sample && response_stats.current.response_bytes_received > 0;
-        let native_tool = state
-            .web_search_lifecycle()
-            .and_then(|(revision, call_id, active)| {
-                (self.web_search_lifecycle_revision < revision).then(|| {
-                    tau_proto::ProviderNativeToolStatusUpdate {
-                        call_id: call_id.to_owned(),
-                        tool_name: tau_proto::ToolName::new("web_search"),
-                        display: tau_proto::ToolUseState {
-                            status: if active {
-                                tau_proto::ToolUseStatus::InProgress
-                            } else {
-                                tau_proto::ToolUseStatus::Success
+        let native_tool =
+            state
+                .web_search_lifecycle()
+                .and_then(|(revision, call_id, active, action)| {
+                    (self.web_search_lifecycle_revision < revision).then(|| {
+                        tau_proto::ProviderNativeToolStatusUpdate {
+                            call_id: call_id.to_owned(),
+                            tool_name: tau_proto::ToolName::new("web_search"),
+                            display: tau_proto::ToolUseState {
+                                status: if active {
+                                    tau_proto::ToolUseStatus::InProgress
+                                } else {
+                                    tau_proto::ToolUseStatus::Success
+                                },
+                                status_text: if active {
+                                    "pending".to_owned()
+                                } else {
+                                    "ok".to_owned()
+                                },
+                                info_chips: action.into_iter().map(str::to_owned).collect(),
+                                ..Default::default()
                             },
-                            status_text: if active {
-                                "pending".to_owned()
+                            phase: if active {
+                                tau_proto::ProviderNativeToolPhase::Started
                             } else {
-                                "ok".to_owned()
+                                tau_proto::ProviderNativeToolPhase::Completed
                             },
-                            ..Default::default()
-                        },
-                        phase: if active {
-                            tau_proto::ProviderNativeToolPhase::Started
-                        } else {
-                            tau_proto::ProviderNativeToolPhase::Completed
-                        },
-                    }
-                })
-            });
+                        }
+                    })
+                });
         if !terminal_flush
             && !first_non_empty_sample
             && native_tool.is_none()
@@ -9635,7 +9637,7 @@ impl RateLimitedResponseUpdateEmitter {
                 self.web_search_active = Some(active);
             }
             if native_tool.is_some()
-                && let Some((revision, _, _)) = state.web_search_lifecycle()
+                && let Some((revision, _, _, _)) = state.web_search_lifecycle()
             {
                 self.web_search_lifecycle_revision = revision;
             }

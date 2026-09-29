@@ -1357,6 +1357,13 @@ selected profiles. Named candidates merge by name and select once, in
 Standard Responses routes default to cached hosted `web_search`; Lite and exact
 routes without that capability select `websearch_hybrid_search`.
 `websearch_hybrid_fetch` remains external.
+Hosted `web_search` may search, open a page, or find text within an open page.
+Its transient native activity shows the recognized action when supplied by the
+provider; an unspecified action stays generic. This does not make it an
+arbitrary-URL extraction tool. `web_fetch` uses a separate external extractor
+pool and is useful when native page access is unavailable, stale, or incomplete,
+not a required second fetch after every search result. Neither path guarantees
+complete page extraction.
 
 `access: cached` means provider index/cache access, not local, offline, private,
 or free search. `access: live` permits current external pages.

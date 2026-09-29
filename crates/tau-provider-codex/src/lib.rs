@@ -142,7 +142,19 @@ pub fn test_set_web_search_active(
     call_id: &str,
     active: bool,
 ) {
-    state.set_web_search_active(output_index, call_id.to_owned(), active);
+    state.set_web_search_active(output_index, call_id.to_owned(), active, None);
+}
+
+/// Sets a recognized hosted action for typed native-status projection tests.
+#[cfg(feature = "test-support")]
+pub fn test_set_web_search_action(
+    state: &mut StreamState,
+    output_index: usize,
+    call_id: &str,
+    active: bool,
+    action: &'static str,
+) {
+    state.set_web_search_active(output_index, call_id.to_owned(), active, Some(action));
 }
 
 /// Startup-resolved ChatGPT credentials used by one backend configuration.

@@ -2133,6 +2133,14 @@ fn apply_output_item_unknown(
         return false;
     }
     let hosted_web_search = item_type == "web_search_call";
+    // Only project known action names. The raw item stays in opaque provider
+    // replay; never expose a query, URL, pattern, or arbitrary provider string.
+    let web_action = match item["action"]["type"].as_str() {
+        Some("search") => Some("search"),
+        Some("open_page") => Some("open page"),
+        Some("find_in_page") => Some("find in page"),
+        _ => None,
+    };
     let hosted_web_search_call_id = hosted_web_search.then(|| {
         item["id"]
             .as_str()
@@ -2143,14 +2151,14 @@ fn apply_output_item_unknown(
         OutputItemEventKind::Added => {
             state.reserve_output_item_at(output_index);
             if let Some(call_id) = hosted_web_search_call_id {
-                state.set_web_search_active(output_index, call_id, true);
+                state.set_web_search_active(output_index, call_id, true, web_action);
             }
         }
         OutputItemEventKind::Done => {
             let item_json = raw_item_json.expect("completed opaque item raw JSON checked above");
             state.set_unknown_provider_item_at(output_index, item, item_json.to_owned());
             if let Some(call_id) = hosted_web_search_call_id {
-                state.set_web_search_active(output_index, call_id, false);
+                state.set_web_search_active(output_index, call_id, false, web_action);
             }
         }
     }

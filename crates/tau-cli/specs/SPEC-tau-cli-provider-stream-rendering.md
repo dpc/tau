@@ -12,6 +12,9 @@ labels the row `<name> (native)`, with the qualifier visually subdued. A started
 phase creates a live row and a completed phase settles it into current-session
 history. These rows are transient UI projection: they do not enter Tau tool
 state or counters and cannot be reconstructed after cold restart.
+For hosted web activity the provider may include a recognized action label
+(search, open page, find in page) as a generic info chip; missing or unknown
+actions remain unlabeled. URLs, queries, and find patterns are not projected.
 
 At renderer dequeue, the CLI may fold a contiguous, already-admitted run of
 ordinary `provider.response_updated` facts for the same agent, prompt, and

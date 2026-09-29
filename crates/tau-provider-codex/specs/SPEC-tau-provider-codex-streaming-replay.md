@@ -36,6 +36,8 @@ interval to publish typed transient provider-native started/completed status
 with the upstream call id and generic display state. Their completed upstream
 item remains an opaque replay sidecar; the native lifecycle does not become a
 Tau tool call or durable transcript fact.
+Known provider action types may be projected as bounded display labels; unknown
+actions and action arguments are not surfaced through the transient status.
 
 The response sampler also captures first semantic output against the backend's
 single finite-attempt dispatch instant before rate limiting. Assistant text,

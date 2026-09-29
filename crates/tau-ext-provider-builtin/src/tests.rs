@@ -5982,9 +5982,9 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
-        tau_provider_codex::test_set_web_search_active(&mut state, 0, "ws_1", true);
+        tau_provider_codex::test_set_web_search_action(&mut state, 0, "ws_1", true, "open page");
         emitter.emit_at(&target, &state, &mut writer, start, false);
-        tau_provider_codex::test_set_web_search_active(&mut state, 0, "ws_1", false);
+        tau_provider_codex::test_set_web_search_action(&mut state, 0, "ws_1", false, "open page");
         emitter.emit_at(
             &target,
             &state,
@@ -6026,6 +6026,7 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
         assert_eq!(native.tool_name.as_str(), "web_search");
         assert_eq!(native.phase, phase);
         assert_eq!(native.display.status, status);
+        assert_eq!(native.display.info_chips, ["open page"]);
     }
 }
 

@@ -82,6 +82,16 @@ agents:
   # including role-derived names written by older versions, remain authoritative.
   display_name_template: "{{#if task_name_present}}{{task_name}}{{/if}}"
   prompt_fragments:
+    - name: agent.web-tools
+      priority: 790
+      text: |-
+        {{#if (tool_available capabilities.tools "web_search")~}}
+        {{#if (tool_available capabilities.tools "web_fetch")~}}
+        ## Web tools
+
+        `web_search` may be provider-hosted or use an external search service, depending on the selected model and policy. Hosted search can also open pages and find text within them where supported; you need not call `web_fetch` just because a search returned a URL. Use `web_fetch` selectively when a supplied page is unavailable, stale, unreadable, or needs a different extraction. The built-in fetch tool uses an external provider pool and may submit the URL to more than one service. Hosted cached/index access is not guaranteed to show current pages; live access depends on configured policy. Neither path guarantees complete extraction.
+        {{/if~}}
+        {{/if~}}
     - name: agent.available-roles
       priority: 800
       text: |-

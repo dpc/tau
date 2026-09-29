@@ -3414,6 +3414,41 @@ fn hosted_web_search_activity_is_transient_and_completion_stays_opaque() {
     assert_eq!(item.raw_json(), raw);
 }
 
+/// Recognized hosted actions are bounded labels; unknown action names and
+/// potentially sensitive action arguments must not reach transient activity.
+#[test]
+fn hosted_web_search_actions_project_only_known_labels() {
+    for (action, label) in [
+        ("search", Some("search")),
+        ("open_page", Some("open page")),
+        ("find_in_page", Some("find in page")),
+        ("future_action", None),
+    ] {
+        let mut state = StreamState::new();
+        for (kind, event_type) in [
+            ("in_progress", "response.output_item.added"),
+            ("completed", "response.output_item.done"),
+        ] {
+            let item = serde_json::json!({
+                "type": "web_search_call",
+                "id": "ws_1",
+                "status": kind,
+                "action": {"type": action, "url": "https://private.example", "query": "secret"}
+            });
+            let raw = serde_json::to_string(&item).expect("encode opaque test item");
+            apply_parsed_json_event(
+                &mut state,
+                &serde_json::json!({"type": event_type, "output_index": 0, "item": item}),
+                Some(&raw),
+                &mut |_| {},
+            )
+            .expect("hosted web event");
+            let (_, _, _, observed) = state.web_search_lifecycle().expect("lifecycle");
+            assert_eq!(observed, label);
+        }
+    }
+}
+
 /// Ensures private Responses appends the newest context after its existing
 /// provider-visible context while retaining stable declarations.
 #[test]

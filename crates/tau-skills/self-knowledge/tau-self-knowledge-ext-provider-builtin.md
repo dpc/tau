@@ -81,9 +81,17 @@ cached search by default. Lite never advertises hosted search. Hosted calls stay
 inside provider inference and never become Tau tool requests; an ambiguous
 transport retry may repeat billable search.
 During a hosted call, the terminal shows a transient `web_search (native)` row
-and retains its completed row for the current UI session. This presentation is
+and retains its completed row for the current UI session. Recognized upstream
+actions show a short `search`, `open page`, or `find in page` chip; unknown or
+missing actions remain generic. The row contains no search query or page URL.
+This presentation is
 not a Tau tool fact, does not affect tool counters, and cannot be reconstructed
 after a cold restart.
+Hosted search may read and navigate accessible pages without a second fetch.
+Use the separate external `web_fetch` selectively for missing, stale, or
+unreadable pages or a different extraction; it is not required after each
+search. Cached/index access may be stale, live access requires explicit policy,
+and neither extraction path guarantees complete page text.
 
 ## Provider retries
 
