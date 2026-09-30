@@ -594,6 +594,7 @@ enum LoopbackResponseMode {
     CloseWithoutResponse,
     ContextWindowExceeded,
     DirectContextWindowExceeded,
+    DirectRequestRejected(&'static str),
     SemanticThenClose,
     CompactErrorWithEmbeddedItem,
     CompactItemThenClose,
@@ -657,6 +658,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     | LoopbackResponseMode::RepairThenUpgradeFailure
                     | LoopbackResponseMode::ContextWindowExceeded
                     | LoopbackResponseMode::DirectContextWindowExceeded
+                    | LoopbackResponseMode::DirectRequestRejected(_)
                     | LoopbackResponseMode::SemanticThenClose
                     | LoopbackResponseMode::CompactErrorWithEmbeddedItem
                     | LoopbackResponseMode::CompactItemThenClose
@@ -770,6 +772,17 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                             "type": "error",
                             "code": "context_length_exceeded",
                             "message": "maximum context reached"
+                        })
+                        .to_string()
+                        .into(),
+                    ));
+                    continue;
+                }
+                if let LoopbackResponseMode::DirectRequestRejected(code) = mode {
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({
+                            "type": "error",
+                            "error": {"code": code, "message": "private backend detail canary"}
                         })
                         .to_string()
                         .into(),
@@ -936,6 +949,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 | LoopbackResponseMode::RepairThenSuccess
                 | LoopbackResponseMode::RepairThenUpgradeFailure
                 | LoopbackResponseMode::DirectContextWindowExceeded
+                | LoopbackResponseMode::DirectRequestRejected(_)
                 | LoopbackResponseMode::SemanticThenClose
                 | LoopbackResponseMode::CompactErrorWithEmbeddedItem
                 | LoopbackResponseMode::CompactItemThenClose
@@ -2706,6 +2720,77 @@ fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
     assert!(older.supports_compaction);
     assert!(!lite_sol.supports_parallel_tool_calls);
     assert!(older_info.supports_parallel_tool_calls);
+}
+
+/// A streaming policy rejection must leave the finite attempt as a typed
+/// terminal error, never a scheduled retry or transparent socket repair.
+#[test]
+fn websocket_policy_error_terminalizes_after_one_dispatch() {
+    for code in ["cyber_policy", "invalid_prompt", "bio_policy"] {
+        let server = spawn_loopback_server(LoopbackResponseMode::DirectRequestRejected(code));
+        let config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session_id = tau_proto::SessionId::parse("session-policy-error").expect("session");
+        let agent_id = tau_proto::AgentId::parse("agent-policy-error").expect("agent");
+        let context = tau_proto::PromptContext::default();
+        let request = test_prompt_payload(&session_id, &agent_id, &context);
+        let outcome = runtime.run_attempt(
+            "ap-policy-error",
+            &config,
+            &request,
+            &mut NeverAbort,
+            &mut |_| {},
+        );
+        let AttemptOutcome::Terminal {
+            error,
+            progress,
+            backend_reached,
+        } = outcome
+        else {
+            panic!("{code} must terminalize the attempt");
+        };
+        assert!(backend_reached);
+        assert_eq!(progress, SemanticProgress::None);
+        assert_eq!(error.retry_decision(), None);
+        assert_eq!(
+            error.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::RequestRejected)
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("provider rejected the request ({code})")
+        );
+        assert_eq!(
+            server
+                .counts()
+                .ws_upgrade_requests
+                .load(path_std_sync_atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            server
+                .counts()
+                .http_post_requests
+                .load(path_std_sync_atomic::Ordering::SeqCst),
+            0
+        );
+    }
+}
+
+/// A generic terminal rejection must not infer a public reason from its private
+/// detail, even when that detail contains a recognized policy-code lookalike.
+#[test]
+fn codex_generic_rejection_display_keeps_backend_detail_private() {
+    let error = CodexError(common::LlmError::ProviderFailure(
+        tau_proto::ProviderFailureKind::RequestRejected,
+        "cyber_policy private backend detail canary".to_owned(),
+    ));
+    assert_eq!(
+        error.to_string(),
+        "provider rejected the request (RequestRejected)"
+    );
 }
 
 /// A WebSocket capability rejection surfaces after one upgrade and never

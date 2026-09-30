@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::attempt_failure as path_crate_attempt_failure;
 use crate::canonical_identifier::CanonicalIdentifierFamily;
+use crate::request_rejection_reason::RequestRejectionReason;
 
 /// The parts of a prompt needed by an LLM backend client.
 pub struct PromptPayload<'a> {
@@ -124,6 +125,13 @@ pub enum LlmError {
     /// A canonical provider envelope proved that replaying the request is
     /// futile.
     ProviderFailure(ProviderFailureKind, String),
+    /// An explicit terminal rejection with a closed user-visible reason.
+    RequestRejected {
+        /// Fixed reason selected from the canonical provider code.
+        reason: RequestRejectionReason,
+        /// Bounded backend detail retained only for private diagnostics.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for LlmError {
@@ -146,6 +154,7 @@ impl std::fmt::Display for LlmError {
                 f.write_str("Codex requires WebSocket; Tau has no HTTP/SSE fallback")
             }
             Self::ProviderFailure(_, detail) => write!(f, "{detail}"),
+            Self::RequestRejected { detail, .. } => write!(f, "{detail}"),
         }
     }
 }
@@ -161,6 +170,7 @@ impl std::error::Error for LlmError {
             Self::RepetitionDetected(_)
             | Self::WsUpgradeRequired
             | Self::ProviderFailure(_, _)
+            | Self::RequestRejected { .. }
             | Self::Canceled
             | Self::InvalidResponse(_)
             | Self::ReloadableConfig(_)
@@ -234,6 +244,7 @@ impl LlmError {
             | Self::RepetitionDetected(_)
             | Self::WsUpgradeRequired
             | Self::ProviderFailure(_, _)
+            | Self::RequestRejected { .. }
             | Self::Canceled => None,
             Self::ReloadableConfig(_) => Some(RetryDecision::new(RetryClass::Auth)),
             Self::InvalidResponse(_) => None,
@@ -269,6 +280,7 @@ impl LlmError {
         match self {
             Self::Observed { source, .. } => source.failure_kind(),
             Self::WsUpgradeRequired => Some(ProviderFailureKind::RequestRejected),
+            Self::RequestRejected { .. } => Some(ProviderFailureKind::RequestRejected),
             Self::ProviderFailure(kind, _) => Some(*kind),
             Self::HttpStatus(status, body) | Self::HttpStatusRetryAfter(status, body, _) => {
                 http_failure_kind(*status, body)

@@ -34,6 +34,7 @@ use crate::common::{
     citation_retained_payload_bytes, effort_wire, json_to_cbor, output_item_retained_payload_bytes,
 };
 use crate::decoded_event::DecodedEvent;
+use crate::request_rejection_reason::RequestRejectionReason;
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
 #[cfg(test)]
@@ -2229,12 +2230,6 @@ fn response_incomplete_error(
     .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
-/// Returns whether the direct Responses error code proves an unchanged request
-/// cannot succeed.
-fn is_terminal_request_rejection_code(code: Option<&str>) -> bool {
-    matches!(code, Some("cyber_policy" | "invalid_prompt" | "bio_policy"))
-}
-
 fn response_failed_error(
     event: &serde_json::Value,
     mode: crate::attempt_failure::ProviderEvidenceMode,
@@ -2266,11 +2261,14 @@ fn response_failed_error(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
         );
     }
-    if is_terminal_request_rejection_code(code.as_deref()) {
-        return LlmError::ProviderFailure(tau_proto::ProviderFailureKind::RequestRejected, body)
-            .observed(
-                path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
-            );
+    if let Some(reason) = RequestRejectionReason::from_code(code.as_deref()) {
+        return LlmError::RequestRejected {
+            reason,
+            detail: body,
+        }
+        .observed(
+            path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+        );
     }
     LlmError::StreamError {
         body,
@@ -2310,6 +2308,15 @@ fn stream_error_event(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
         )
+        .observed(
+            path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+        );
+    }
+    if let Some(reason) = RequestRejectionReason::from_code(error_code.as_deref()) {
+        return LlmError::RequestRejected {
+            reason,
+            detail: body,
+        }
         .observed(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
         );

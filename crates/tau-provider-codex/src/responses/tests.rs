@@ -4,6 +4,7 @@ use std::{
     time as path_std_time,
 };
 
+use tau_provider::retry_policy::RetryClass;
 use tokio::sync as path_tokio_sync;
 
 use crate::common::LlmError;
@@ -5266,6 +5267,91 @@ fn apply_event_error_nested_type_fallback_is_propagated() {
     }
 }
 
+/// Streaming policy rejections must follow the same terminal path as
+/// `response.failed`, including the nested code shape seen in the incident.
+#[test]
+fn apply_event_error_policy_codes_are_typed_terminal_rejections() {
+    for code in ["cyber_policy", "invalid_prompt", "bio_policy"] {
+        for detail in [
+            serde_json::json!({"code": code}),
+            serde_json::json!({"error": {"code": code}}),
+            serde_json::json!({"error": {"type": code}}),
+        ] {
+            let mut event = detail;
+            event["type"] = serde_json::json!("error");
+            event["message"] = serde_json::json!("private backend detail canary");
+            let error = apply_event(
+                &mut path_crate_common::StreamState::new(),
+                &event,
+                &mut |_| {},
+            )
+            .expect_err("policy rejection");
+
+            assert_eq!(error.retry_decision(), None, "{event}");
+            assert_eq!(
+                error.failure_kind(),
+                Some(tau_proto::ProviderFailureKind::RequestRejected),
+                "{event}"
+            );
+            assert!(error.to_string().contains(code));
+            assert_eq!(
+                crate::CodexError(error).to_string(),
+                format!("provider rejected the request ({code})")
+            );
+        }
+    }
+}
+
+/// Policy-looking prose, nested echoes, and conflicting fallback types must
+/// not turn opaque failures or known transient codes into terminal rejections.
+#[test]
+fn apply_event_error_policy_rejection_requires_canonical_identifier() {
+    for (detail, expected_class) in [
+        (
+            serde_json::json!({"message": "cyber_policy"}),
+            RetryClass::Unknown,
+        ),
+        (
+            serde_json::json!({"error": {
+                "code": "unrecognized_failure", "type": "cyber_policy",
+                "metadata": {"code": "bio_policy"}
+            }}),
+            RetryClass::Unknown,
+        ),
+        (
+            serde_json::json!({"error": {
+                "code": "rate_limit_exceeded", "message": "cyber_policy"
+            }}),
+            RetryClass::Throttle,
+        ),
+        (
+            serde_json::json!({"error": {
+                "code": "server_is_overloaded", "type": "bio_policy"
+            }}),
+            RetryClass::Overload,
+        ),
+    ] {
+        let mut event = detail;
+        event["type"] = serde_json::json!("error");
+        let error = apply_event(
+            &mut path_crate_common::StreamState::new(),
+            &event,
+            &mut |_| {},
+        )
+        .expect_err("remote failure");
+        assert_eq!(
+            error.retry_decision().map(|decision| decision.class),
+            Some(expected_class),
+            "{event}"
+        );
+        assert_eq!(error.failure_kind(), None, "{event}");
+        assert_eq!(
+            crate::CodexError(error).to_string(),
+            "provider WebSocket stream failed"
+        );
+    }
+}
+
 /// No code/type anywhere: body still produced, just without the
 /// `(type=...)` suffix. The outer retry layer keeps retrying (we
 /// can't safely classify), but we don't crash or drop the message.
@@ -5561,6 +5647,10 @@ fn response_failed_canonical_policy_codes_are_typed_terminal_rejections() {
             error.failure_kind(),
             Some(tau_proto::ProviderFailureKind::RequestRejected),
             "{code} must be a typed rejection"
+        );
+        assert_eq!(
+            crate::CodexError(error).to_string(),
+            format!("provider rejected the request ({code})")
         );
     }
 }

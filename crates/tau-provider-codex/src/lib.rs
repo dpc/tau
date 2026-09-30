@@ -64,6 +64,7 @@ mod canonical_identifier;
 pub(crate) mod common;
 pub mod oauth;
 pub(crate) mod quota;
+mod request_rejection_reason;
 pub(crate) mod responses;
 
 pub use attempt_failure::{LogicalAttempt, RedactedProviderDetail};
@@ -460,6 +461,13 @@ impl std::fmt::Display for CodexError {
             }
             common::LlmError::ProviderFailure(kind, _) => {
                 write!(formatter, "provider rejected the request ({kind:?})")
+            }
+            common::LlmError::RequestRejected { reason, .. } => {
+                write!(
+                    formatter,
+                    "provider rejected the request ({})",
+                    reason.as_str()
+                )
             }
         }
     }
