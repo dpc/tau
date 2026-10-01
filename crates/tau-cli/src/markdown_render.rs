@@ -14,8 +14,8 @@
 //! strikethrough uses its own semantic style; this remains
 //! delimiter-preserving Markdown-lite, not a general CommonMark parser. Most
 //! constructs preserve exact source characters; tables may receive bounded
-//! display-only padding spaces so cells align while the result remains valid
-//! Markdown table syntax.
+//! display-only padding and cell-aware line breaks at the pane's content width.
+//! The resulting visible rows need not remain pasteable Markdown.
 //!
 //! Inline backtick spans, fenced code blocks, and indented code-like lines use
 //! code styling and suppress nested Markdown-lite styling. Escaped marker
@@ -37,6 +37,9 @@
 use std::sync as path_std_sync;
 
 use tau_themes::{SpanTree, StyleIdx, StyleName, ThemedText, names};
+
+mod table;
+use table::MarkdownTable;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FenceKind {
@@ -60,8 +63,6 @@ struct TableCell<'line> {
     source: &'line str,
     /// Inline runs retained for width measurement and final emission.
     runs: Vec<MarkdownRun>,
-    /// Terminal display width of `runs` under the configured link projection.
-    visible_width: usize,
 }
 
 /// Structurally parsed leading-pipe row before inline cell projection.
@@ -95,16 +96,8 @@ struct TableRow<'line> {
 struct TableProjection<'line> {
     /// Parsed header, delimiter, and body rows in source order.
     rows: Vec<TableRow<'line>>,
-    /// Final terminal display width selected for each cell column.
-    widths: Vec<usize>,
     /// Placement and delimiter marker selected by the delimiter row.
     alignments: Vec<TableAlignment>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TableRowKind {
-    Body,
-    Separator,
 }
 
 /// Horizontal placement selected by one delimiter-row cell.
@@ -117,54 +110,37 @@ enum TableAlignment {
 }
 
 const TABLE_MAX_COLUMNS: usize = 12;
-const TABLE_MAX_EXTRA_PADDING_BYTES: usize = 4096;
-const TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH: usize = 240;
+/// Bounds retained logical rows before parsing more inline cells.
+const TABLE_MAX_ROWS: usize = 1024;
+/// Bounds retained cell parsing independently of the eventual viewport width.
+const TABLE_MAX_SOURCE_BYTES: usize = 64 * 1024;
+/// Bounds generated borders, padding, and wrapped text for one table.
+const TABLE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 impl<'line> TableRow<'line> {
     /// Projects each cell of one structurally validated row exactly once.
-    fn from_source(
-        source_row: TableRowSource<'line>,
-        osc8_links: bool,
-        work: &mut TableProjectionWork,
-    ) -> Self {
+    fn from_source(source_row: TableRowSource<'line>, work: &mut TableProjectionWork) -> Self {
         let cells = source_row
             .cells
             .into_iter()
-            .map(|source| project_table_cell(source, osc8_links, work))
+            .map(|source| project_table_cell(source, work))
             .collect();
         Self {
             indent: source_row.indent,
             cells,
         }
     }
-
-    /// Returns this row's final terminal display width after table projection.
-    fn logical_display_width(&self, widths: &[usize]) -> Option<usize> {
-        let cells_width = widths
-            .iter()
-            .try_fold(0usize, |total, width| total.checked_add(*width))?;
-        let separators_and_cell_margins = widths.len().checked_mul(3)?.checked_add(1)?;
-        tau_term_screen::display_width(self.indent)
-            .checked_add(cells_width)?
-            .checked_add(separators_and_cell_margins)
-    }
 }
 
 /// Parses one table cell into the retained inline projection counted by tests.
 fn project_table_cell<'line>(
     source: &'line str,
-    osc8_links: bool,
     work: &mut TableProjectionWork,
 ) -> TableCell<'line> {
     work.record_cell();
     let mut runs = Vec::new();
     parse_inline(source, &mut runs);
-    let visible_width = inline_runs_display_width(&runs, osc8_links);
-    TableCell {
-        source,
-        runs,
-        visible_width,
-    }
+    TableCell { source, runs }
 }
 
 impl<'line> TableRowSource<'line> {
@@ -199,8 +175,6 @@ struct TableProjectionWork {
     parsed_rows: usize,
     /// Accepted row cells parsed into inline runs.
     parsed_cells: usize,
-    /// Retained non-delimiter cell projections consumed by emission.
-    emitted_cells: usize,
 }
 
 impl TableProjectionWork {
@@ -212,11 +186,6 @@ impl TableProjectionWork {
     /// Records one accepted cell's inline parse.
     fn record_cell(&mut self) {
         self.parsed_cells = self.parsed_cells.saturating_add(1);
-    }
-
-    /// Records emission of one retained non-delimiter cell projection.
-    fn record_emitted_cell(&mut self) {
-        self.emitted_cells = self.emitted_cells.saturating_add(1);
     }
 }
 
@@ -237,37 +206,6 @@ impl TableAlignment {
             (false, true) => Self::Right,
             (false, false) => Self::Left,
         })
-    }
-
-    /// Returns the minimum width which preserves this marker and three dashes.
-    fn minimum_width(self) -> usize {
-        3 + match self {
-            Self::Left => 0,
-            Self::LeftMarked | Self::Right => 1,
-            Self::Center => 2,
-        }
-    }
-
-    /// Splits unused cell columns according to this alignment.
-    fn padding(self, spare: usize) -> (usize, usize) {
-        match self {
-            Self::Left | Self::LeftMarked => (0, spare),
-            Self::Right => (spare, 0),
-            // Keep odd padding deterministic: the left gets floor(spare / 2).
-            Self::Center => (spare / 2, spare - (spare / 2)),
-        }
-    }
-
-    /// Preserves delimiter colons while expanding the dash run to `width`.
-    fn render_separator_cell(self, width: usize) -> String {
-        let (left, right) = match self {
-            Self::Left => ("", ""),
-            Self::LeftMarked => (":", ""),
-            Self::Right => ("", ":"),
-            Self::Center => (":", ":"),
-        };
-        let dash_count = width - left.len() - right.len();
-        format!("{left}{}{right}", "-".repeat(dash_count))
     }
 }
 
@@ -290,6 +228,9 @@ struct MarkdownRun {
     text: String,
     style: MarkdownStyle,
     hyperlink: Option<String>,
+    /// Semantic table retained until terminal layout supplies the content
+    /// width.
+    table: Option<path_std_sync::Arc<MarkdownTable>>,
 }
 
 /// Borrowed semantic projections used to construct one styled block.
@@ -314,9 +255,8 @@ struct RenderRuns<'run> {
 /// whose later rows can revise all column widths. The incomplete line after
 /// `complete_until` is borrowed directly from the caller while constructing
 /// themed spans and is never copied into this cache.
-/// `osc8_links` records the visible-link projection used to derive cached table
-/// widths, so changing that setting invalidates the cache rather than retaining
-/// stale alignment spaces.
+/// Table cells remain semantic and width-independent here. Terminal layout
+/// selects column widths later, so resizing does not invalidate cached parsing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MarkdownStreamCache {
     source_len: usize,
@@ -325,7 +265,6 @@ pub(crate) struct MarkdownStreamCache {
     stable_fence: Option<FenceKind>,
     complete_until: usize,
     live_runs: Vec<MarkdownRun>,
-    osc8_links: Option<bool>,
     #[cfg(test)]
     work_bytes: usize,
     #[cfg(test)]
@@ -340,25 +279,19 @@ impl MarkdownStreamCache {
         self.stable_fence = None;
         self.complete_until = 0;
         self.live_runs.clear();
-        self.osc8_links = None;
         #[cfg(test)]
         self.test_source.clear();
     }
 
-    fn parse_counted(
-        &mut self,
-        text: &str,
-        in_fence: &mut Option<FenceKind>,
-        osc8_links: bool,
-    ) -> Vec<MarkdownRun> {
+    fn parse_counted(&mut self, text: &str, in_fence: &mut Option<FenceKind>) -> Vec<MarkdownRun> {
         #[cfg(test)]
         {
             self.work_bytes += text.len();
         }
-        parse_markdown_with_state(text, in_fence, osc8_links)
+        parse_markdown_with_state(text, in_fence)
     }
 
-    fn advance_append(&mut self, text: &str, osc8_links: bool) {
+    fn advance_append(&mut self, text: &str) {
         let appended = &text[self.source_len..];
         #[cfg(test)]
         {
@@ -382,14 +315,14 @@ impl MarkdownStreamCache {
         if 0 < retain_at {
             let stable = &pending[..retain_at];
             let mut fence = self.stable_fence;
-            let runs = self.parse_counted(stable, &mut fence, osc8_links);
+            let runs = self.parse_counted(stable, &mut fence);
             self.stable_runs.extend(runs);
             self.stable_until += retain_at;
             self.stable_fence = fence;
         }
         let live = &text[self.stable_until..self.complete_until];
         let mut live_fence = self.stable_fence;
-        self.live_runs = self.parse_counted(live, &mut live_fence, osc8_links);
+        self.live_runs = self.parse_counted(live, &mut live_fence);
     }
 }
 
@@ -493,6 +426,7 @@ pub(crate) fn markdown_prefixed_block_with_osc8(
         text: prefix_text.to_owned(),
         style: MarkdownStyle::Base,
         hyperlink: None,
+        table: None,
     }];
     let mut in_fence = None;
     styled_block_from_runs(
@@ -500,7 +434,7 @@ pub(crate) fn markdown_prefixed_block_with_osc8(
         base_style_name,
         &prefix,
         RenderRuns {
-            stable: &parse_markdown_with_state(text, &mut in_fence, osc8_links),
+            stable: &parse_markdown_with_state(text, &mut in_fence),
             live: &[],
             incomplete: "",
         },
@@ -522,6 +456,7 @@ pub(crate) fn markdown_prompt_block_with_osc8(
         text: marker_text,
         style: MarkdownStyle::PromptMarker,
         hyperlink: None,
+        table: None,
     }];
     let mut in_fence = None;
     styled_block_from_runs(
@@ -529,7 +464,7 @@ pub(crate) fn markdown_prompt_block_with_osc8(
         base_style_name,
         &prefix,
         RenderRuns {
-            stable: &parse_markdown_with_state(text, &mut in_fence, osc8_links),
+            stable: &parse_markdown_with_state(text, &mut in_fence),
             live: &[],
             incomplete: "",
         },
@@ -570,20 +505,16 @@ pub(crate) fn markdown_prefixed_streaming_block_with_osc8(
     update: MarkdownStreamUpdate,
     osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
-    if cache.osc8_links.is_some_and(|cached| cached != osc8_links) {
-        cache.reset_for_replacement();
-    }
-    cache.osc8_links = Some(osc8_links);
     if update == MarkdownStreamUpdate::Replace || text.len() < cache.source_len {
         cache.reset_for_replacement();
-        cache.osc8_links = Some(osc8_links);
     }
-    cache.advance_append(text, osc8_links);
+    cache.advance_append(text);
 
     let prefix = [MarkdownRun {
         text: prefix_text.to_owned(),
         style: MarkdownStyle::Base,
         hyperlink: None,
+        table: None,
     }];
     styled_block_from_runs(
         theme,
@@ -667,18 +598,26 @@ fn styled_block_from_runs(
 
     let body_ts = theme.resolve_style(&StyleName::new(base_style_name));
     let mut rendered = themed_text(theme, &themed);
-    let targets = prefix
+    let source_runs = prefix
         .iter()
         .chain(runs.stable)
         .chain(runs.live)
-        .filter(|run| !run.text.is_empty())
-        .map(|run| run.hyperlink.as_deref())
-        .chain((!runs.incomplete.is_empty()).then_some(None));
-    for (span, target) in rendered.spans_mut().iter_mut().zip(targets) {
+        .filter(|run| !run.text.is_empty());
+    for (span, run) in rendered.spans_mut().iter_mut().zip(source_runs) {
         if osc8_links {
-            span.hyperlink = target
+            span.hyperlink = run
+                .hyperlink
+                .as_deref()
                 .and_then(tau_cli_term::sanitize_hyperlink_target)
                 .map(path_std_sync::Arc::from);
+        }
+        if let Some(table) = &run.table {
+            span.table = Some(path_std_sync::Arc::new(table.resolve(
+                theme,
+                base_style_name,
+                osc8_links,
+                span.style,
+            )));
         }
     }
     let mut block = tau_cli_term::StyledBlock::new(rendered);
@@ -831,11 +770,7 @@ fn unstable_suffix_start(text: &str, initial_fence: Option<FenceKind>) -> usize 
     offset
 }
 
-fn parse_markdown_with_state(
-    text: &str,
-    in_fence: &mut Option<FenceKind>,
-    osc8_links: bool,
-) -> Vec<MarkdownRun> {
+fn parse_markdown_with_state(text: &str, in_fence: &mut Option<FenceKind>) -> Vec<MarkdownRun> {
     let mut runs = Vec::new();
     let lines = text
         .split_inclusive('\n')
@@ -864,19 +799,40 @@ fn parse_markdown_with_state(
             index += 1;
             continue;
         }
-        if let Some((table_end, table, mut table_work)) = project_table(&lines, index, osc8_links) {
-            for (row_index, row) in table.rows.into_iter().enumerate() {
-                append_table_row_runs(
-                    row,
-                    &table.widths,
-                    &table.alignments,
-                    table_row_kind(row_index),
-                    &mut runs,
-                    &mut table_work,
-                );
-                let (_, newline) = lines[index + row_index];
-                push_run(&mut runs, newline, MarkdownStyle::Base);
+        if let Some((table_end, table, _)) = project_table(&lines, index) {
+            let delimiter_widths = table.rows[1]
+                .cells
+                .iter()
+                .map(|cell| tau_term_screen::display_width(cell.source))
+                .collect();
+            let indents = table.rows.iter().map(|row| row.indent.to_owned()).collect();
+            let mut fallback = Vec::new();
+            let mut source = String::new();
+            for (body, newline) in &lines[index..table_end] {
+                parse_inline(body, &mut fallback);
+                push_run(&mut fallback, newline, MarkdownStyle::Base);
+                source.push_str(body);
+                source.push_str(newline);
             }
+            runs.push(MarkdownRun {
+                text: source,
+                style: MarkdownStyle::Base,
+                hyperlink: None,
+                table: Some(path_std_sync::Arc::new(MarkdownTable {
+                    rows: table
+                        .rows
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(index, _)| *index != 1)
+                        .map(|(_, row)| row.cells.into_iter().map(|cell| cell.runs).collect())
+                        .collect(),
+                    indents,
+                    alignments: table.alignments,
+                    delimiter_widths,
+                    fallback,
+                    trailing_newline: !lines[table_end - 1].1.is_empty(),
+                })),
+            });
             index = table_end;
             continue;
         }
@@ -995,13 +951,12 @@ fn ends_with_unescaped_pipe(text: &str) -> bool {
 fn project_table<'line>(
     lines: &[(&'line str, &str)],
     start: usize,
-    osc8_links: bool,
 ) -> Option<(usize, TableProjection<'line>, TableProjectionWork)> {
     if start + 1 >= lines.len() || is_indented_code(lines[start].0) {
         return None;
     }
     let mut work = TableProjectionWork::default();
-    let (end, table) = project_table_counted(lines, start, osc8_links, &mut work)?;
+    let (end, table) = project_table_counted(lines, start, &mut work)?;
     Some((end, table, work))
 }
 
@@ -1010,7 +965,6 @@ fn project_table<'line>(
 fn project_table_counted<'line>(
     lines: &[(&'line str, &str)],
     start: usize,
-    osc8_links: bool,
     work: &mut TableProjectionWork,
 ) -> Option<(usize, TableProjection<'line>)> {
     work.record_row();
@@ -1026,11 +980,12 @@ fn project_table_counted<'line>(
         .iter()
         .map(|cell| TableAlignment::parse(cell))
         .collect::<Option<Vec<_>>>()?;
-    if table_minimum_padding_exceeds_bound(2, columns)? {
+    let mut source_bytes = lines[start].0.len().checked_add(lines[start + 1].0.len())?;
+    if TABLE_MAX_SOURCE_BYTES < source_bytes {
         return None;
     }
-    let header = TableRow::from_source(header_source, osc8_links, work);
-    let separator = TableRow::from_source(separator_source, osc8_links, work);
+    let header = TableRow::from_source(header_source, work);
+    let separator = TableRow::from_source(separator_source, work);
     let mut rows = vec![header, separator];
     let mut end = start + 2;
     while let Some((line, _)) = lines.get(end) {
@@ -1041,112 +996,22 @@ fn project_table_counted<'line>(
         if row_source.cells.len() != columns {
             break;
         }
-        if table_minimum_padding_exceeds_bound(rows.len().checked_add(1)?, columns)? {
+        if TABLE_MAX_ROWS <= rows.len() {
             return None;
         }
-        rows.push(TableRow::from_source(row_source, osc8_links, work));
+        source_bytes = source_bytes.checked_add(line.len())?;
+        if TABLE_MAX_SOURCE_BYTES < source_bytes {
+            return None;
+        }
+        rows.push(TableRow::from_source(row_source, work));
         end += 1;
     }
-    let mut widths = alignments
-        .iter()
-        .zip(&rows[1].cells)
-        .map(|(alignment, cell)| {
-            alignment
-                .minimum_width()
-                .max(tau_term_screen::display_width(cell.source))
-        })
-        .collect::<Vec<_>>();
-    for (row_index, row) in rows.iter().enumerate() {
-        if row_index == 1 {
-            continue;
-        }
-        for (index, cell) in row.cells.iter().enumerate() {
-            widths[index] = widths[index].max(cell.visible_width);
-        }
-    }
-
-    let mut extra_padding = 0usize;
-    for (row_index, row) in rows.iter().enumerate() {
-        if TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH < row.logical_display_width(&widths)? {
-            return None;
-        }
-        let row_kind = if row_index == 1 {
-            TableRowKind::Separator
-        } else {
-            TableRowKind::Body
-        };
-        let row_extra = table_row_extra_padding(row, &widths, row_kind)?;
-        extra_padding = extra_padding.checked_add(row_extra)?;
-        if TABLE_MAX_EXTRA_PADDING_BYTES < extra_padding {
-            return None;
-        }
-    }
-    Some((
-        end,
-        TableProjection {
-            rows,
-            widths,
-            alignments,
-        },
-    ))
-}
-
-/// Reports when canonical two-sided cell margins alone make projection
-/// impossible, before retaining more inline cell runs.
-fn table_minimum_padding_exceeds_bound(rows: usize, columns: usize) -> Option<bool> {
-    let canonical_margins = rows.checked_mul(columns)?.checked_mul(2)?;
-    Some(TABLE_MAX_EXTRA_PADDING_BYTES < canonical_margins)
-}
-
-/// Projects and emits one complete test table while exposing deterministic
-/// production-path parse counts.
-#[cfg(test)]
-fn projected_table_runs_and_work(
-    text: &str,
-    osc8_links: bool,
-) -> Option<(Vec<MarkdownRun>, Vec<MarkdownRun>, TableProjectionWork)> {
-    let lines = text
-        .split_inclusive('\n')
-        .map(|line| {
-            line.strip_suffix('\n')
-                .map_or((line, ""), |body| (body, "\n"))
-        })
-        .collect::<Vec<_>>();
-    let mut work = TableProjectionWork::default();
-    let (end, table) = project_table_counted(&lines, 0, osc8_links, &mut work)?;
-    if end != lines.len() {
-        return None;
-    }
-    let reference_rows = table.rows.clone();
-    let mut runs = Vec::new();
-    for (row_index, row) in table.rows.into_iter().enumerate() {
-        append_table_row_runs(
-            row,
-            &table.widths,
-            &table.alignments,
-            table_row_kind(row_index),
-            &mut runs,
-            &mut work,
-        );
-        push_run(&mut runs, lines[row_index].1, MarkdownStyle::Base);
-    }
-    let mut reparsed_runs = Vec::new();
-    for (row_index, row) in reference_rows.iter().enumerate() {
-        append_table_row_runs_reparsed(
-            row,
-            &table.widths,
-            &table.alignments,
-            table_row_kind(row_index),
-            &mut reparsed_runs,
-        );
-        push_run(&mut reparsed_runs, lines[row_index].1, MarkdownStyle::Base);
-    }
-    Some((runs, reparsed_runs, work))
+    Some((end, TableProjection { rows, alignments }))
 }
 
 /// Counts projection work even when a complete test table hits a fallback.
 #[cfg(test)]
-fn table_projection_work(text: &str, osc8_links: bool) -> TableProjectionWork {
+fn table_projection_work(text: &str) -> TableProjectionWork {
     let lines = text
         .split_inclusive('\n')
         .map(|line| {
@@ -1155,144 +1020,8 @@ fn table_projection_work(text: &str, osc8_links: bool) -> TableProjectionWork {
         })
         .collect::<Vec<_>>();
     let mut work = TableProjectionWork::default();
-    let _ = project_table_counted(&lines, 0, osc8_links, &mut work);
+    let _ = project_table_counted(&lines, 0, &mut work);
     work
-}
-
-/// Appends one validated table row from its retained inline projections.
-fn append_table_row_runs(
-    row: TableRow<'_>,
-    widths: &[usize],
-    alignments: &[TableAlignment],
-    row_kind: TableRowKind,
-    runs: &mut Vec<MarkdownRun>,
-    work: &mut TableProjectionWork,
-) {
-    push_run(runs, row.indent, MarkdownStyle::Base);
-    push_run(runs, "|", MarkdownStyle::Base);
-    for (index, cell) in row.cells.into_iter().enumerate() {
-        if index != 0 {
-            push_run(runs, "|", MarkdownStyle::Base);
-        }
-        push_run(runs, " ", MarkdownStyle::Base);
-        match row_kind {
-            TableRowKind::Separator => {
-                let separator = alignments[index].render_separator_cell(widths[index]);
-                push_run(runs, &separator, MarkdownStyle::Base);
-            }
-            TableRowKind::Body => {
-                let spare = widths[index].saturating_sub(cell.visible_width);
-                let (left, right) = alignments[index].padding(spare);
-                push_table_spaces(runs, left);
-                append_markdown_runs(runs, cell.runs, work);
-                push_table_spaces(runs, right);
-            }
-        }
-        push_run(runs, " ", MarkdownStyle::Base);
-    }
-    push_run(runs, "|", MarkdownStyle::Base);
-}
-
-/// Recreates the previous emission-time cell parsing as an independent
-/// equivalence oracle for retained runs.
-#[cfg(test)]
-fn append_table_row_runs_reparsed(
-    row: &TableRow<'_>,
-    widths: &[usize],
-    alignments: &[TableAlignment],
-    row_kind: TableRowKind,
-    runs: &mut Vec<MarkdownRun>,
-) {
-    push_run(runs, row.indent, MarkdownStyle::Base);
-    push_run(runs, "|", MarkdownStyle::Base);
-    for (index, cell) in row.cells.iter().enumerate() {
-        if index != 0 {
-            push_run(runs, "|", MarkdownStyle::Base);
-        }
-        push_run(runs, " ", MarkdownStyle::Base);
-        match row_kind {
-            TableRowKind::Separator => {
-                let separator = alignments[index].render_separator_cell(widths[index]);
-                push_run(runs, &separator, MarkdownStyle::Base);
-            }
-            TableRowKind::Body => {
-                let spare = widths[index].saturating_sub(cell.visible_width);
-                let (left, right) = alignments[index].padding(spare);
-                push_table_spaces(runs, left);
-                parse_inline(cell.source, runs);
-                push_table_spaces(runs, right);
-            }
-        }
-        push_run(runs, " ", MarkdownStyle::Base);
-    }
-    push_run(runs, "|", MarkdownStyle::Base);
-}
-
-/// Appends a bounded run of table-alignment spaces.
-fn push_table_spaces(runs: &mut Vec<MarkdownRun>, count: usize) {
-    if count != 0 {
-        push_run(runs, &" ".repeat(count), MarkdownStyle::Base);
-    }
-}
-
-/// Moves retained cell runs into the row output while preserving the same
-/// adjacent-base-run coalescing as direct inline parsing.
-fn append_markdown_runs(
-    runs: &mut Vec<MarkdownRun>,
-    retained: Vec<MarkdownRun>,
-    work: &mut TableProjectionWork,
-) {
-    work.record_emitted_cell();
-    for run in retained {
-        if run.hyperlink.is_none() {
-            push_run(runs, &run.text, run.style);
-        } else {
-            runs.push(run);
-        }
-    }
-}
-
-/// Identifies the delimiter row in a table projection.
-fn table_row_kind(row_index: usize) -> TableRowKind {
-    if row_index == 1 {
-        TableRowKind::Separator
-    } else {
-        TableRowKind::Body
-    }
-}
-
-/// Measures retained inline runs after the configured visible-link projection.
-fn inline_runs_display_width(runs: &[MarkdownRun], osc8_links: bool) -> usize {
-    let visible = runs
-        .iter()
-        .map(|run| visible_run_text(run, !osc8_links))
-        .collect::<String>();
-    tau_term_screen::display_width(&visible)
-}
-
-/// Counts canonical cell margins, alignment spaces, and delimiter dashes
-/// without comparing rendered bytes to source bytes, because visible OSC 8 link
-/// text may be shorter than its raw Markdown source.
-fn table_row_extra_padding(
-    row: &TableRow<'_>,
-    widths: &[usize],
-    row_kind: TableRowKind,
-) -> Option<usize> {
-    row.cells
-        .iter()
-        .enumerate()
-        .try_fold(0usize, |total, (index, cell)| {
-            let alignment_padding = match row_kind {
-                TableRowKind::Body => widths[index].checked_sub(cell.visible_width)?,
-                TableRowKind::Separator => {
-                    widths[index].checked_sub(tau_term_screen::display_width(cell.source))?
-                }
-            };
-            // The projection canonicalizes one ASCII space on both sides of
-            // every cell, so account for them even when the source already had
-            // matching whitespace. This keeps row count bounded conservatively.
-            total.checked_add(2)?.checked_add(alignment_padding)
-        })
 }
 
 fn is_heading(line: &str) -> bool {
@@ -1854,6 +1583,7 @@ fn push_run(runs: &mut Vec<MarkdownRun>, text: &str, style: MarkdownStyle) {
     if let Some(last) = runs.last_mut()
         && last.style == style
         && last.hyperlink.is_none()
+        && last.table.is_none()
     {
         last.text.push_str(text);
         return;
@@ -1862,6 +1592,7 @@ fn push_run(runs: &mut Vec<MarkdownRun>, text: &str, style: MarkdownStyle) {
         text: text.to_owned(),
         style,
         hyperlink: None,
+        table: None,
     });
 }
 
@@ -1870,6 +1601,7 @@ fn push_link_run(runs: &mut Vec<MarkdownRun>, text: &str, target: &str, style: M
         text: text.to_owned(),
         style,
         hyperlink: Some(target.to_owned()),
+        table: None,
     });
 }
 

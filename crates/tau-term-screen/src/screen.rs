@@ -640,6 +640,14 @@ pub fn layout_lines(
 ) -> Vec<Vec<Cell>> {
     let width = width.max(1);
 
+    let projected;
+    let content = if content.spans().iter().any(|span| span.table.is_some()) {
+        projected = crate::styled_table::project_tables(content, width);
+        &projected
+    } else {
+        content
+    };
+
     // Split into logical lines at newlines.
     let mut logical_lines: Vec<Vec<Cell>> = vec![Vec::new()];
     visit_styled_graphemes(content.spans(), |grapheme, style, hyperlink| {

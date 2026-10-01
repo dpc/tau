@@ -16,20 +16,29 @@ while strikethrough uses its own semantic style; this does not introduce a
 general CommonMark parser. Most
 constructs are style-only and preserve exact source characters rather than
 stripping delimiters or rewriting list/header prefixes. Tables are the exception:
-the UI may add bounded display-only padding spaces so cells align while the
-visible text remains valid Markdown table syntax. Inline backticks, fenced code
+the UI may add bounded display-only padding and wrap individual cells, including
+headers, to fit the containing pane's content width. Visible wrapped rows need
+not remain pasteable Markdown; raw-source copy/export paths retain the original
+source. Inline backticks, fenced code
 blocks, and indented code-like lines get code styling and suppress nested
 Markdown-lite styling; escaped marker sequences get escape styling. This keeps
 live terminal wrapping, scrollback, and copy/paste behavior stable outside
-intentional table padding.
+intentional table layout.
 
 Table bounds and alignment use terminal display columns, including the visible
 OSC 8 link-label projection (or the label plus target fallback when OSC 8 is
 disabled), rather than source bytes or Unicode scalar counts. The delimiter row
 selects left (`---`/`:---`), right (`---:`), or centered (`:---:`) placement for
 header and body cells; centered odd spare columns put the smaller share on the
-left. Tau preserves the delimiter colons and bounds the final logical row width
-and aggregate inserted padding before creating the display projection.
+left. Tau preserves delimiter colons, shrinks the widest columns first without
+expanding small tables, and wraps on word or grapheme boundaries without
+truncating non-whitespace cell content or losing styles/structured links.
+Whitespace selected as a wrap separator becomes a physical line break; other
+interior whitespace remains visible. Source and generated
+output bounds remain independent of pane width. When the minimum grid cannot
+fit, or projection exceeds those bounds, ordinary unpadded source rendering
+remains the fallback. Finalized, streaming, and restored blocks retain semantic
+cells so resizing reprojects the table rather than wrapping stale padded rows.
 
 Inline links (`[label](target)`), HTTP(S) autolinks (`<url>`), and recognized
 bare HTTP(S) URLs are the other intentional text transformation. With

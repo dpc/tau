@@ -294,6 +294,10 @@ pub struct Span {
     pub style: Style,
     /// Sanitized OSC 8 target for this span, when present.
     pub hyperlink: Option<Arc<str>>,
+    /// Optional width-adaptive table replacing this span during line layout.
+    ///
+    /// `text` remains its width-independent fallback for plain-text consumers.
+    pub table: Option<Arc<crate::StyledTable>>,
 }
 
 impl Span {
@@ -303,6 +307,7 @@ impl Span {
             text: text.into(),
             style,
             hyperlink: None,
+            table: None,
         }
     }
 
@@ -312,6 +317,7 @@ impl Span {
             text: text.into(),
             style: Style::default(),
             hyperlink: None,
+            table: None,
         }
     }
 

@@ -40,6 +40,15 @@ compact. Layout uses the current width to emit at most two rows without retainin
 or scanning the caller's full source text. Callers must bound every supplied
 value; layout work scales with those values.
 
+`StyledText` may retain display-only `StyledTable` metadata on a span. Ordinary
+line layout projects those styled cells after block margins determine actual
+content width, reserving any preceding marker and aligning continuation rows.
+The span's text remains a width-independent fallback for plain-text consumers.
+This keeps width-sensitive layout in the terminal library and lets snapshots
+and finalized blocks reflow on resize without reparsing Markdown. Callers bound
+retained source and supply the generated-output budget; impossible grids fall
+back to ordinary styled source instead of clipping or truncating.
+
 ## Terminal output trust boundary
 
 Caller-provided text is untrusted with respect to terminal control sequences.

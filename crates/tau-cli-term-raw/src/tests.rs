@@ -5392,6 +5392,61 @@ fn resize_resampling_uses_actual_size_without_hiding_zero() {
     assert_eq!(resample_resize_dimension(0, 0), 0);
 }
 
+/// Finalized tables created in a detached model retain their semantic cells
+/// through selection, history caching, snapshot restore, and A→B→A resize.
+/// VT100 output must match the fresh width-dependent layout, not stale padding.
+#[test]
+fn restored_finalized_table_reflows_on_virtual_terminal_resize() {
+    use tau_term_screen::{StyledTable, TableColumnAlignment};
+
+    let table = StyledTable {
+        rows: vec![
+            vec!["Candidate".into(), "Explanation".into()],
+            vec!["DNS".into(), "Compare several ordinary words in a long paragraph with the resolver configuration.".into()],
+        ],
+        indents: vec![String::new(); 3],
+        alignments: vec![TableColumnAlignment::Left, TableColumnAlignment::Left],
+        delimiter_widths: vec![3, 3],
+        fallback: "| Candidate | Explanation |\n| --- | --- |\n| DNS | Compare configuration. |".into(),
+        style: Style::default(),
+        trailing_newline: false,
+        max_output_bytes: 8192,
+    };
+    let mut span = Span::plain("raw table source");
+    span.table = Some(Arc::new(table));
+    let block = StyledBlock::new(span).margins(1, 2);
+    let mut detached = OutputSnapshot::default();
+    detached.print_output("detached-table", block.clone());
+
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(8, 80, 100);
+    let (term, handle, input_tx) =
+        Term::new_virtual(80, 8, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    handle.replace_output_snapshot(detached);
+    flush_redraws(&handle, &buf, &mut parser);
+    let restored = handle.output_snapshot();
+
+    for width in [32, 80, 32] {
+        parser.screen_mut().set_size(8, width);
+        input_tx
+            .send(RawEvent::Resize(width, 8))
+            .expect("send resize");
+        assert!(matches!(
+            term.get_next_event().expect("resize"),
+            Event::Resize { .. }
+        ));
+        handle.replace_output_snapshot(restored.clone());
+        flush_redraws(&handle, &buf, &mut parser);
+        let mut expected = layout_block(&block, width as usize)
+            .iter()
+            .map(|row| line_text(row))
+            .collect::<Vec<_>>();
+        expected.push("> ".to_owned());
+        let expected = expected.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_terminal_rows_match(&mut parser, width, 8, &expected);
+    }
+}
+
 /// Transient zero-sized resize reports from terminals/tmux are ignored so the
 /// prompt does not get stuck wrapping every character as its own row.
 #[test]

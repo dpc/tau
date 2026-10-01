@@ -1,4 +1,5 @@
 use std::env::VarError;
+use std::fmt::Write as _;
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
@@ -611,8 +612,153 @@ fn rendered_text(block: &tau_cli_term::StyledBlock) -> String {
         .content
         .spans()
         .iter()
-        .map(|span| span.text.as_str())
+        .map(|span| {
+            span.table.as_ref().map_or_else(
+                || span.text.clone(),
+                |table| {
+                    table
+                        .project(65535, 0)
+                        .unwrap_or_else(|| table.fallback.clone())
+                        .spans()
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>()
+                },
+            )
+        })
         .collect()
+}
+
+/// Long prose tables exceed the old logical-width cutoff but fit their pane,
+/// including headers, styled text, Unicode, and hard-wrapped hyperlink labels.
+#[test]
+fn prose_tables_wrap_at_pane_width_without_changing_source() {
+    let theme = markdown_test_theme();
+    let mut source = "| Candidate external variable | Why investigate it | Useful distinguishing test |\n| --- | --- | --- |\n".to_owned();
+    for candidate in [
+        "DNS resolver/filtering",
+        "VPN/filter/profile/proxy",
+        "Network switching/stale state",
+        "Discovery service/peer publication",
+        "App/OS/resolver",
+        "IPv6/NAT64",
+    ] {
+        writeln!(&mut source,
+            "| **{candidate}** | A long explanation containing several ordinary words repeated to exercise the wide prose column and its whitespace boundaries. [clickable-label-with-more-than-one-fragment](https://example.test/long?query=value) | Try switching the network and compare results with 中 👨‍👩‍👧‍👦 e\u{301} plus https://example.test/an-extremely-long-token-with-query?first=one&second=two |"
+        ).expect("write source fixture");
+    }
+    for osc8 in [false, true] {
+        let block = markdown_block_with_osc8(&theme, names::AGENT_RESPONSE, &source, osc8);
+        // Plain-text consumers still see the exact stored source, not the grid.
+        assert_eq!(
+            block
+                .content
+                .spans()
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>(),
+            source
+        );
+        let table = block.content.spans()[0]
+            .table
+            .as_ref()
+            .expect("semantic table");
+        for width in [120, 80, 48, 20] {
+            let projected = table.project(width, 0).expect("minimum grid fits");
+            let visible = projected
+                .spans()
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>();
+            assert!(
+                visible
+                    .lines()
+                    .all(|line| tau_term_screen::display_width(line) <= width)
+            );
+            assert_table_pipe_columns_align(&visible);
+            assert!(visible.lines().count() > 8, "headers and cells must wrap");
+            let cells = tau_term_screen::layout_block(&block, width);
+            let linked_label = cells
+                .iter()
+                .flatten()
+                .filter(|cell| {
+                    cell.hyperlink.as_deref() == Some("https://example.test/long?query=value")
+                })
+                .map(|cell| cell.ch)
+                .collect::<String>();
+            if osc8 {
+                assert_eq!(
+                    linked_label,
+                    "clickable-label-with-more-than-one-fragment".repeat(6)
+                );
+            } else {
+                assert!(linked_label.is_empty());
+                assert!(cells.iter().flatten().all(|cell| cell.hyperlink.is_none()));
+            }
+            let bold = cells
+                .iter()
+                .flatten()
+                .filter(|cell| cell.style.underline)
+                .count();
+            assert!(bold > 6, "strong cells preserve their composite style");
+        }
+        assert!(table.project(18, 0).is_none());
+    }
+}
+
+/// Sealed streaming tables retain semantic cells, so A→B→A pane changes produce
+/// the same static rows without reparsing settled prose or cached table source.
+#[test]
+fn streamed_and_finalized_tables_reflow_without_cache_invalidation() {
+    let theme = markdown_test_theme();
+    let source = "prose\n\n| Long header words | Other header |\n| --- | ---: |\n| **a longer paragraph of words** | [a-long-clickable-label](https://example.test) |\n\n";
+    let mut cache = MarkdownStreamCache::default();
+    for end in source
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(source.len()))
+    {
+        let _ = markdown_streaming_block(&theme, names::AGENT_RESPONSE, &source[..end], &mut cache);
+    }
+    let finalized = markdown_block(&theme, names::AGENT_RESPONSE, source);
+    let work = cache.work_bytes;
+    for width in [80, 32, 80] {
+        let mut streamed =
+            markdown_streaming_block(&theme, names::AGENT_RESPONSE, source, &mut cache);
+        let mut spans = streamed.content.spans().to_vec();
+        assert_eq!(
+            spans.pop().expect("progress span").text,
+            tau_proto::PROGRESS_INDICATOR_TEXT
+        );
+        streamed.content = tau_cli_term::StyledText::from(spans);
+        assert_eq!(
+            tau_term_screen::layout_block(&streamed, width),
+            tau_term_screen::layout_block(&finalized, width)
+        );
+        assert_eq!(cache.work_bytes, work, "resize must not reparse Markdown");
+    }
+}
+
+/// The intrinsic source-byte ceiling prevents inline work on giant cells,
+/// independently of pane width, and preserves source rather than truncating it.
+#[test]
+fn giant_table_cell_stops_inline_projection_before_retention() {
+    let source = format!(
+        "| A | B |\n| --- | --- |\n| {} | y |\n",
+        "x".repeat(TABLE_MAX_SOURCE_BYTES)
+    );
+    let work = table_projection_work(&source);
+    assert_eq!(work.parsed_rows, 3);
+    assert_eq!(work.parsed_cells, 4);
+    let block = markdown_block(&markdown_test_theme(), names::SHELL_OUTPUT, &source);
+    assert!(
+        block
+            .content
+            .spans()
+            .iter()
+            .all(|span| span.table.is_none())
+    );
+    assert_eq!(rendered_text(&block), source);
 }
 
 /// Ensures non-table Markdown-lite syntax is style-only and preserves source
@@ -986,11 +1132,10 @@ fn markdown_table_links_measure_visible_osc8_projection() {
     assert!(enabled_text.contains("| label |"));
     assert!(disabled_text.contains("| label (https://example.test/target) |"));
     assert!(
-        enabled
-            .content
-            .spans()
+        tau_term_screen::layout_block(&enabled, 100)
             .iter()
-            .any(|span| span.hyperlink.as_deref() == Some("https://example.test/target"))
+            .flatten()
+            .any(|cell| cell.hyperlink.as_deref() == Some("https://example.test/target"))
     );
     assert!(
         disabled
@@ -1022,25 +1167,23 @@ fn markdown_table_does_not_parse_links_across_structural_pipes() {
     );
 }
 
-/// Ensures the retained cell projections emit exactly the same runs as the
-/// complete Markdown path across pipes, code, Unicode, links, and both OSC 8
-/// projections.
+/// Ensures semantic cells retain independent inline parsing across structural
+/// pipes, code, Unicode, and links, without reparsing cells at terminal resize.
 #[test]
 fn markdown_table_retained_cell_runs_match_complete_rendering() {
     let source = "| A | Link | Code |\n| :--- | ---: | :---: |\n| x\\|y | [中](https://example.test) | `a|b` |\n";
 
-    for osc8_links in [false, true] {
-        let (projected, reparsed, work) =
-            projected_table_runs_and_work(source, osc8_links).expect("valid table projection");
-        let mut fence = None;
-        let complete = parse_markdown_with_state(source, &mut fence, osc8_links);
-
-        assert_eq!(projected, reparsed);
-        assert_eq!(projected, complete);
-        assert_eq!(work.parsed_rows, 3);
-        assert_eq!(work.parsed_cells, 9);
-        assert_eq!(work.emitted_cells, 6);
+    let lines = source.lines().map(|line| (line, "\n")).collect::<Vec<_>>();
+    let (_, projected, work) = project_table(&lines, 0).expect("valid table");
+    for row in projected.rows {
+        for cell in row.cells {
+            let mut reparsed = Vec::new();
+            parse_inline(cell.source, &mut reparsed);
+            assert_eq!(cell.runs, reparsed);
+        }
     }
+    assert_eq!(work.parsed_rows, 3);
+    assert_eq!(work.parsed_cells, 9);
 }
 
 /// Proves a large accepted table performs exactly one structural and inline
@@ -1049,7 +1192,7 @@ fn markdown_table_retained_cell_runs_match_complete_rendering() {
 fn markdown_large_table_projects_each_cell_once() {
     // Each one-column-wide body cell contributes two canonical margins and two
     // alignment spaces. Stay just below the aggregate padding limit.
-    const BODY_ROWS: usize = TABLE_MAX_EXTRA_PADDING_BYTES / (TABLE_MAX_COLUMNS * 4) - 5;
+    const BODY_ROWS: usize = 80;
     let header = format!(
         "| {} |\n",
         (0..TABLE_MAX_COLUMNS)
@@ -1073,33 +1216,24 @@ fn markdown_large_table_projects_each_cell_once() {
     );
     let source = format!("{header}{separator}{}", body.repeat(BODY_ROWS));
 
-    let (projected, reparsed, work) =
-        projected_table_runs_and_work(&source, true).expect("bounded large table projection");
-    let mut fence = None;
-    assert_eq!(projected, reparsed);
-    assert_eq!(
-        projected,
-        parse_markdown_with_state(&source, &mut fence, true)
-    );
+    let work = table_projection_work(&source);
     assert_eq!(work.parsed_rows, BODY_ROWS + 2);
     assert_eq!(work.parsed_cells, (BODY_ROWS + 2) * TABLE_MAX_COLUMNS);
-    assert_eq!(work.emitted_cells, (BODY_ROWS + 1) * TABLE_MAX_COLUMNS);
 }
 
-/// Ensures the canonical-margin lower bound stops cell projection at a fixed
-/// count for a far-over-bound table while preserving exact raw fallback text.
+/// Ensures the logical-row bound stops inline projection at a fixed count,
+/// independent of terminal width, while preserving raw fallback text.
 #[test]
 fn markdown_over_bound_table_stops_projection_work_early() {
     const COLUMNS: usize = 2;
-    const RETAINED_ROWS: usize = TABLE_MAX_EXTRA_PADDING_BYTES / (COLUMNS * 2);
+    const RETAINED_ROWS: usize = TABLE_MAX_ROWS;
     const BODY_ROWS: usize = RETAINED_ROWS * 2;
     let mut source = "| A | B |\n| --- | --- |\n".to_owned();
     source.push_str(&"| x | y |\n".repeat(BODY_ROWS));
 
-    let work = table_projection_work(&source, true);
+    let work = table_projection_work(&source);
     assert_eq!(work.parsed_rows, RETAINED_ROWS + 1);
     assert_eq!(work.parsed_cells, RETAINED_ROWS * COLUMNS);
-    assert_eq!(work.emitted_cells, 0);
 
     let theme = markdown_test_theme();
     let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
@@ -1178,67 +1312,100 @@ fn too_many_table_columns_are_not_padded() {
     assert_eq!(rendered_text(&block), source);
 }
 
-/// Ensures a final logical row above the terminal display-column bound remains
-/// raw Markdown rather than allocating alignment padding.
+/// Ensures the old 240-column cutoff no longer prevents table projection.
 #[test]
-fn table_rows_above_display_width_bound_are_not_padded() {
+fn table_rows_above_old_width_cutoff_wrap_in_grid() {
     let theme = markdown_test_theme();
-    let wide = "x".repeat(TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH);
+    let wide = "x".repeat(240);
     let source = format!("| A | B |\n| --- | --- |\n| {wide} | y |\n");
     let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
 
-    assert_eq!(rendered_text(&block), source);
+    let rows = tau_term_screen::layout_block(&block, 80);
+    assert!(rows.len() > 3);
+    assert!(
+        rows.iter()
+            .all(|row| row.last().is_some_and(|cell| cell.ch == '|'))
+    );
 }
 
-/// Ensures a growing syntactic table that exceeds either padding bound stays
-/// live until its blank-line seal, so streaming and final rendering both use
-/// the raw-Markdown fallback.
+/// Ensures wide and over-row-bound tables share static and streamed rendering
+/// after their seal, whether the chosen layout is a wrapped grid or fallback.
 #[test]
-fn live_stream_unpadded_tables_match_static_after_seal() {
+fn live_stream_wide_and_over_bound_tables_match_static_after_seal() {
     let theme = markdown_test_theme();
-    let row_too_wide = "x".repeat(TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH);
+    let row_too_wide = "x".repeat(240);
     let width_bound_source = format!("| A | B |\n| --- | --- |\n| {row_too_wide} | y |\n\n");
     let wide_cell = "x".repeat(110);
     let mut padding_bound_source = format!("| {wide_cell} | {wide_cell} |\n| --- | --- |\n");
-    let padding_per_short_row = 2 * (wide_cell.len() - 1);
-    let short_rows = (TABLE_MAX_EXTRA_PADDING_BYTES / padding_per_short_row) + 1;
+    let short_rows = TABLE_MAX_ROWS;
     for _ in 0..short_rows {
         padding_bound_source.push_str("| a | b |\n");
     }
     padding_bound_source.push('\n');
 
     for source in [width_bound_source, padding_bound_source] {
-        let static_block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
-        assert_eq!(rendered_text(&static_block), source);
-        assert_markdown_rendering_property(&theme, &source)
-            .expect("sealed unpadded table must retain its static projection");
+        let split = source.rfind("\n\n").expect("table seal");
+        let mut cache = MarkdownStreamCache::default();
+        let _ = markdown_streaming_block(
+            &theme,
+            names::SHELL_OUTPUT,
+            &source[..split + 1],
+            &mut cache,
+        );
+        let streamed = markdown_streaming_block(&theme, names::SHELL_OUTPUT, &source, &mut cache);
+        let finalized = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+        for width in [40, 80, 120] {
+            let mut streamed = streamed.clone();
+            let mut spans = streamed.content.spans().to_vec();
+            assert_eq!(
+                spans.pop().expect("progress span").text,
+                tau_proto::PROGRESS_INDICATOR_TEXT
+            );
+            streamed.content = tau_cli_term::StyledText::from(spans);
+            assert_eq!(
+                tau_term_screen::layout_block(&streamed, width),
+                tau_term_screen::layout_block(&finalized, width)
+            );
+        }
     }
 }
 
-/// Ensures aggregate padding limits fall back even when each rendered line is
-/// individually within bounds.
+/// Ensures the generated-output ceiling falls back even when each physical
+/// line can fit, without dropping or truncating source text.
 #[test]
 fn too_much_total_table_padding_is_not_padded() {
     let theme = markdown_test_theme();
     let wide = "x".repeat(110);
     let mut source = format!("| {wide} | {wide} |\n| --- | --- |\n");
-    let padding_per_short_row = 2 * (wide.len() - 1);
-    let short_rows = (TABLE_MAX_EXTRA_PADDING_BYTES / padding_per_short_row) + 1;
+    let short_rows = 100;
     for _ in 0..short_rows {
         source.push_str("| a | b |\n");
     }
     let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
-
-    assert_eq!(rendered_text(&block), source);
+    let table = block.content.spans()[0]
+        .table
+        .as_ref()
+        .expect("retained table");
+    let mut table = (**table).clone();
+    table.max_output_bytes = 4096;
+    assert!(table.project(240, 0).is_none());
+    assert_eq!(
+        table
+            .fallback
+            .spans()
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>(),
+        source
+    );
 }
 
-/// Ensures canonical cell margins count toward the padding budget even when
-/// rows need no additional alignment spaces.
+/// Ensures too many logical rows fall back before generating a grid.
 #[test]
 fn too_many_canonical_table_margins_are_not_padded() {
     let theme = markdown_test_theme();
     let mut source = "|abc|def|\n|---|---|\n".to_owned();
-    for _ in 0..=(TABLE_MAX_EXTRA_PADDING_BYTES / 4) {
+    for _ in 0..=TABLE_MAX_ROWS {
         source.push_str("|abc|def|\n");
     }
 

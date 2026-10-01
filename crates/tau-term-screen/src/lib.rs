@@ -12,6 +12,8 @@ mod priority_line;
 pub mod screen;
 /// Styled text, block, and cell data model.
 pub mod style;
+/// Styled table layout at the containing pane's content width.
+mod styled_table;
 /// Width-adaptive two-row excerpt layout.
 mod two_line_elision;
 
@@ -25,4 +27,5 @@ pub use style::{
     next_grapheme_boundary, previous_grapheme_boundary, sanitize_hyperlink_target,
     truncate_to_width,
 };
+pub use styled_table::{StyledTable, TableColumnAlignment};
 pub use two_line_elision::TwoLineElision;
