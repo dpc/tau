@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// Keeps default artifact transfers independent of shell-read filtering while
+/// preserving artifact direction and turn data-fetch classification.
+#[test]
+fn artifact_transfer_declarations_are_not_shell_read_tools() {
+    let tools = registered_tool_specs(false);
+    for (name, direction) in [
+        (EXPORT_TOOL_NAME, "artifact:write"),
+        (IMPORT_TOOL_NAME, "artifact:read"),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_str() == name)
+            .expect("transfer tool");
+        assert!(tool.enabled_by_default, "{name}");
+        assert_eq!(
+            tool.tags,
+            tool_tags(&[direction, tau_proto::TURN_DATA_FETCH_TOOL_TAG]),
+            "{name}"
+        );
+    }
+}
+
 /// Drives one fake Artifact RPC operation and returns the request payload.
 fn next_artifact_request(reader: &mut TestExtensionReader) -> tau_proto::ArtifactRequest {
     loop {

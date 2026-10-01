@@ -1193,6 +1193,47 @@ fn chatgpt_model_gets_promoted_shell_alternatives() {
     assert!(!tools.contains(&"shell".to_owned()));
 }
 
+/// ChatGPT and Codex share `shell:chatgpt`: their default policy must expose
+/// artifact transfers without reopening the restricted shell-read family.
+/// Actual transfer declarations are pinned by ext-shell's
+/// `artifact_transfer_declarations_are_not_shell_read_tools` regression.
+#[test]
+fn chatgpt_codex_default_policy_keeps_artifact_transfers_available() {
+    let mut policy = policy_harness(&["shell:chatgpt"], AgentRole::default());
+    for (name, tags) in [
+        (
+            "export",
+            vec!["artifact:write", tau_proto::TURN_DATA_FETCH_TOOL_TAG],
+        ),
+        (
+            "import",
+            vec!["artifact:read", tau_proto::TURN_DATA_FETCH_TOOL_TAG],
+        ),
+        ("grep", vec!["shell:read"]),
+        ("find", vec!["shell:read"]),
+        ("ls", vec!["shell:read"]),
+    ] {
+        policy.harness.tool_routing.registry.register(
+            &crate::test_connection_id("tools"),
+            tagged_tool(name, true, &tags),
+        );
+    }
+    let tools = policy.harness.gather_effective_tool_specs_for_role_model(
+        ROLE,
+        policy.harness.config.selected_model.as_ref(),
+    );
+    let names: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    for name in ["import", "export"] {
+        assert!(
+            names.contains(name),
+            "{name} must remain available by default"
+        );
+    }
+    for name in ["read", "grep", "find", "ls"] {
+        assert!(!names.contains(name), "{name} must remain filtered");
+    }
+}
+
 /// Ensures an explicit `tools` allow-list is treated as the role-visible set
 /// after global policy.
 #[test]

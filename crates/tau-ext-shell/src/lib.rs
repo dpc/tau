@@ -540,11 +540,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&[
-            "shell:read",
-            "artifact:write",
-            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
-        ]),
+        tags: tool_tags(&["artifact:write", tau_proto::TURN_DATA_FETCH_TOOL_TAG]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -583,11 +579,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&[
-            "shell:read",
-            "artifact:read",
-            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
-        ]),
+        tags: tool_tags(&["artifact:read", tau_proto::TURN_DATA_FETCH_TOOL_TAG]),
         enabled_by_default: true,
         background_support: None,
         examples: Vec::new(),
