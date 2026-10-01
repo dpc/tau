@@ -2514,6 +2514,126 @@ fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
     assert!(!renderer.watched_agent_is_running(&agent_id("worker")));
 }
 
+/// Catch-up ordering must converge on the same Done row membership, retain
+/// the watch edge, and use prompt activity only until complete stats arrive.
+#[test]
+fn done_watched_agent_visibility_converges_with_runtime_catch_up() {
+    let worker = agent_id("worker");
+    let manager = agent_id("manager");
+    let session = tau_proto::SessionId::parse("s1").expect("valid session ID");
+    let watch = tau_proto::Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
+        session_id: session.clone(),
+        watcher_id: manager.clone(),
+        watched_agent_ids: vec![worker.clone()],
+        changed_agent_id: Some(worker.clone()),
+        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    });
+    let done = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("done-status").expect("valid message ID"),
+        sender_id: worker.clone(),
+        sender_session_id: None,
+        recipient_id: manager.clone(),
+        kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+        watch_provider_status: None,
+        watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+            session_id: session.clone(),
+            subscription_id: "watch-1".to_owned(),
+            status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
+            phase: tau_proto::AgentWorkStatusPhase::Done,
+            title: Some("Finished review".to_owned()),
+            initial: true,
+        }),
+        watch_long_wait: None,
+        watch_lifecycle: None,
+        sender_notice: None,
+        recipient_notice: None,
+        message: String::new(),
+    });
+    let stats = |runtime_state| {
+        tau_proto::Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+            session_id: session.clone(),
+            agent_id: worker.clone(),
+            work_status: Default::default(),
+            navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+            runtime_state,
+            turn_activity: tau_proto::AgentTurnActivity::Idle,
+            tools: Default::default(),
+            context: Default::default(),
+            inner_turns_total: None,
+            estimated_api_cost: Default::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
+        })
+    };
+    let running = stats(tau_proto::AgentRuntimeState::Running);
+    for events in [
+        [&watch, &done, &running],
+        [&running, &watch, &done],
+        [&done, &running, &watch],
+    ] {
+        let mut renderer = renderer_for_agent_id_tests();
+        renderer.session.current_session_id = Some(session.clone());
+        renderer.selection.current_agent_id = Some(manager.clone());
+        for event in events {
+            renderer.handle(event);
+        }
+        assert!(renderer.watched_agent_is_visible(&worker));
+        assert!(
+            renderer
+                .transcript
+                .runtime
+                .watched_agent_blocks
+                .contains_key(&worker)
+        );
+        assert_eq!(renderer.active_side_agent_count(), 1);
+        renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
+        assert!(!renderer.watched_agent_is_visible(&worker));
+        assert!(
+            !renderer
+                .transcript
+                .runtime
+                .watched_agent_blocks
+                .contains_key(&worker)
+        );
+        assert_eq!(renderer.active_side_agent_count(), 0);
+        assert_eq!(
+            renderer.watches.watched_agents[&manager],
+            vec![worker.clone()]
+        );
+    }
+
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.session.current_session_id = Some(session.clone());
+    renderer.selection.current_agent_id = Some(manager);
+    renderer.handle(&watch);
+    renderer.handle(&done);
+    let prompt = tau_proto::AgentPromptId::parse("worker-prompt").expect("valid prompt ID");
+    renderer.mark_agent_prompt_active(&worker, &prompt);
+    assert!(
+        renderer
+            .transcript
+            .runtime
+            .watched_agent_blocks
+            .contains_key(&worker)
+    );
+    assert_eq!(renderer.active_side_agent_count(), 1);
+    renderer.mark_agent_prompt_inactive(&prompt);
+    assert!(
+        !renderer
+            .transcript
+            .runtime
+            .watched_agent_blocks
+            .contains_key(&worker)
+    );
+    assert_eq!(renderer.active_side_agent_count(), 0);
+    renderer.mark_agent_prompt_active(
+        &worker,
+        &tau_proto::AgentPromptId::parse("next-prompt").expect("valid prompt ID"),
+    );
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
+    assert!(!renderer.watched_agent_is_visible(&worker));
+    assert_eq!(renderer.active_side_agent_count(), 0);
+}
+
 /// The global side-agent count must include intermediate watched ancestors in a
 /// recursive chain while retaining unique target counting.
 #[test]

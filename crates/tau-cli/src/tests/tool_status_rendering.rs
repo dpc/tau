@@ -1723,12 +1723,14 @@ fn watched_agent_response_finished_keeps_status_row() {
     );
 }
 
-/// A direct watched row must use the canonical task-status phase for lifetime.
+/// A direct watched row hides only after both task completion and runtime idle.
 ///
 /// Missing status is unreported; working and blocked preserve the same row
-/// through turn start and stop, while done is the only phase that removes it.
+/// through turn start and stop. Done remains visible through final response
+/// delivery, hides on idle, and reappears on runtime resume without a new
+/// status.
 #[test]
-fn watched_agent_status_row_survives_turn_transitions_until_done() {
+fn watched_agent_status_row_hides_only_when_done_and_idle() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1846,17 +1848,60 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         "unknown status must retain the watched-agent activity row: {rows:?}"
     );
 
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
     renderer.handle(&watch_status(
         "status-done",
         tau_proto::AgentWorkStatusPhase::Done,
         Some("finished"),
     ));
     sync(&handle);
+    assert!(vt.screen_contains(100, "✅💤 @engineer_1 finished"));
+    assert_eq!(renderer.active_side_agent_count_for_test(), 1);
+
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("final-watch-response")
+                .expect("valid message ID"),
+            sender_id: agent_id("engineer_1"),
+            sender_session_id: None,
+            recipient_id: agent_id("parent_1"),
+            kind: tau_proto::AgentMessageKind::WatchResponse,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
+            message: "Finished implementation".to_owned(),
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "✅💤 @engineer_1 finished"));
+    assert_eq!(renderer.active_side_agent_count_for_test(), 1);
+
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
+    sync(&handle);
     let rows = vt.screen_text(100);
     assert!(
         !rows.iter().any(|row| is_engineer_row(row)),
-        "done must remove the watched-agent activity row: {rows:?}"
+        "done and idle must remove the watched-agent activity row: {rows:?}"
     );
+    assert_eq!(renderer.active_side_agent_count_for_test(), 0);
+
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "✅💤 @engineer_1 finished"));
+    assert_eq!(renderer.active_side_agent_count_for_test(), 1);
+
+    renderer.switch_agent(agent_id("other"));
+    renderer.switch_agent(agent_id("parent_1"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "✅💤 @engineer_1 finished"));
+
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
+    sync(&handle);
+    assert!(!vt.screen_text(100).iter().any(|row| is_engineer_row(row)));
+    assert_eq!(renderer.active_side_agent_count_for_test(), 0);
 }
 
 /// Provider response updates use their explicit agent id as the active prompt

@@ -2186,12 +2186,11 @@ impl EventRenderer {
     }
 
     /// Returns whether a selected watched target remains visible for its
-    /// current self-reported task status.
+    /// current self-reported task status and runtime activity.
     ///
-    /// A missing snapshot is the canonical unreported state. Work status,
-    /// rather than transient turn activity, owns row lifetime so running
-    /// and idle transitions can only redraw the existing row. A `Done`
-    /// report is the one terminal status that removes the row.
+    /// A missing status snapshot is canonically unreported. Only a `Done`
+    /// target that is idle hides its row; a running target stays visible even
+    /// after reporting completion and reappears if it resumes running.
     fn watched_agent_is_visible(&self, agent_id: &tau_proto::AgentId) -> bool {
         !matches!(
             self.watches
@@ -2199,7 +2198,7 @@ impl EventRenderer {
                 .get(agent_id)
                 .map(|status| status.phase),
             Some(tau_proto::AgentWorkStatusPhase::Done)
-        )
+        ) || self.watched_agent_is_running(agent_id)
     }
 
     fn agent_has_active_prompt(&self, agent_id: &tau_proto::AgentId) -> bool {
