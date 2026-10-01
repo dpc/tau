@@ -83,9 +83,10 @@ the CLI cache.
 Current CLI watched status rows come from the current-session semantic
 `WorkStatus` snapshot for each selected target. Absent, unreported, and unknown
 status renders as `❓`; working, waiting, blocked, and done render as `🚀`, `⏳`,
-`⛔️`, and `✅`; unreported, working, waiting, blocked, and unknown remain visible.
-Done hides the row only while the target is idle; a running Done target remains
-visible and reappears when it resumes running. Complete generic agent-stats
+`⛔️`, and `✅`; working, waiting, blocked, and unknown remain visible.
+Done and unreported (including absent status) hide the row only while the target
+is idle; every running target remains visible and reappears when it resumes
+running. Complete generic agent-stats
 runtime state owns running activity, with active-prompt fallback before the first
 stats snapshot. The target's detailed turn activity controls
 activity decoration. Before the first stats snapshot, active
@@ -95,8 +96,8 @@ The CLI independently selects rows and derives recursive activity over the
 current watch graph. Row selection starts from the agent whose UI is viewed,
 traverses forward edges cycle-safely, excludes the root, and deduplicates each
 target onto a shortest path with lexicographic path ties. It traverses through
-idle Done targets while hiding their rows and retains topology targets that lack
-stats or status. Up to eight visible targets produce the complete closure; a
+idle Done or unreported targets while hiding their rows, without removing
+topology targets that lack stats or status. Up to eight visible targets produce the complete closure; a
 ninth switches atomically to all visible direct watches, without truncating the
 direct set. Expanded rows use `(depth, agent-id)` order. Each indirect row
 attributes its deterministic immediate predecessor before its watched target as

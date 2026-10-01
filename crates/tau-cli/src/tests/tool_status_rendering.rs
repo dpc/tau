@@ -1375,8 +1375,8 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
 
 /// Ensures idle watched status rows repaint with self-reported work and stats.
 ///
-/// The initial unreported row must appear before model activity, then update in
-/// place when the agent reports working and its counters change.
+/// The initial idle unreported row stays hidden until model activity, then
+/// updates in place when the agent reports working and its counters change.
 #[test]
 fn watched_agent_stats_redraws_status_row() {
     let (_term, handle, vt) = setup(100, 24);
@@ -1401,7 +1401,7 @@ fn watched_agent_stats_redraws_status_row() {
         },
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓💤 @engineer_1"));
+    assert!(!vt.screen_contains(100, "❓💤 @engineer_1"));
 
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         model_params: Some(tau_proto::ModelParams::default()),
@@ -1723,14 +1723,14 @@ fn watched_agent_response_finished_keeps_status_row() {
     );
 }
 
-/// A direct watched row hides only after both task completion and runtime idle.
+/// A direct watched row hides when idle and either done or unreported.
 ///
 /// Missing status is unreported; working and blocked preserve the same row
 /// through turn start and stop. Done remains visible through final response
 /// delivery, hides on idle, and reappears on runtime resume without a new
 /// status.
 #[test]
-fn watched_agent_status_row_hides_only_when_done_and_idle() {
+fn watched_agent_status_row_hides_when_done_or_unreported_and_idle() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1794,8 +1794,8 @@ fn watched_agent_status_row_hides_only_when_done_and_idle() {
 
     sync(&handle);
     assert!(
-        vt.screen_contains(100, "❓💤 @engineer_1"),
-        "an absent status snapshot is canonically unreported"
+        !vt.screen_text(100).iter().any(|row| is_engineer_row(row)),
+        "an absent status snapshot is canonically unreported and idle"
     );
 
     renderer.handle(&watch_status(
@@ -1808,8 +1808,8 @@ fn watched_agent_status_row_hides_only_when_done_and_idle() {
     assert!(vt.screen_contains(100, "❓💤 @engineer_1"));
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓💤 @engineer_1"));
-    assert!(vt.screen_contains(100, "❓💤 @engineer_1"));
+    assert!(!vt.screen_text(100).iter().any(|row| is_engineer_row(row)));
+    assert_eq!(renderer.active_side_agent_count_for_test(), 0);
 
     renderer.handle(&watch_status(
         "status-working",
@@ -1905,14 +1905,13 @@ fn watched_agent_status_row_hides_only_when_done_and_idle() {
 }
 
 /// Provider response updates use their explicit agent id as the active prompt
-/// owner, then terminal cleanup clears activity without removing its status
-/// row.
+/// owner, then terminal cleanup hides its idle unreported row.
 ///
 /// This prevents a provider-update-only path from accidentally marking the
 /// current/originator agent active and leaving the watched response owner stale
 /// after `provider.response_finished`.
 #[test]
-fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
+fn watched_agent_provider_response_update_hides_unreported_row_after_terminal() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1978,8 +1977,8 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "❓💤 @engineer_1"),
-        "terminal prompt id should clear activity but retain the status row: {:?}",
+        !vt.screen_contains(100, "❓💤 @engineer_1"),
+        "terminal prompt id should hide the idle unreported row: {:?}",
         vt.screen_text(100)
     );
 }
@@ -3001,13 +3000,13 @@ fn hidden_compaction_continuation_repaints_owning_detached_transcript() {
     assert!(!attached.contains("#2.2k"), "{attached}");
 }
 
-/// Provider-prompt fallback must clear activity on terminal without removing
-/// the watched row.
+/// Provider-prompt fallback must clear activity and hide an unreported row on
+/// terminal without changing its task status.
 ///
 /// This covers backends or replay paths that omit `agent.prompt_started` before
 /// provider work, preventing their terminal event from looking like task done.
 #[test]
-fn watched_agent_provider_prompt_terminal_keeps_status_row() {
+fn watched_agent_provider_prompt_terminal_hides_unreported_row() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3075,8 +3074,8 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "❓💤 @engineer_1"),
-        "provider-fallback terminal should retain the watched status row: {:?}",
+        !vt.screen_contains(100, "❓💤 @engineer_1"),
+        "provider-fallback terminal should hide the idle unreported row: {:?}",
         vt.screen_text(100)
     );
 }

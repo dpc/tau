@@ -2247,6 +2247,7 @@ fn pending_agent_response_stays_above_watched_agent_rows() {
             render_watch(&mut renderer);
             render_response(&mut renderer);
         }
+        apply_test_running_watch(&mut renderer, "engineer_1");
         sync(&handle);
 
         let screen = vt.screen_text(100);
@@ -2265,12 +2266,12 @@ fn pending_agent_response_stays_above_watched_agent_rows() {
     }
 }
 
-/// Recursive watched rows must include topology-only descendants before any
-/// stats arrive, place their deterministic parent before the descendant, and
+/// Recursive watched rows must traverse hidden idle unreported ancestors,
+/// place their deterministic parent before the descendant, and
 /// retain distinct descendant-witness activity on direct rows.
 ///
-/// This prevents a parent row from flickering out between child model rounds or
-/// losing the reason an indirect child appears in the selected transcript.
+/// This prevents a hidden parent from suppressing an active indirect child or
+/// losing that child's attribution in the selected transcript.
 #[test]
 fn watched_agent_recursive_rows_keep_attribution_and_distinct_witness_context() {
     let (_term, handle, vt) = setup(100, 24);
@@ -2296,10 +2297,10 @@ fn watched_agent_recursive_rows_keep_attribution_and_distinct_witness_context() 
         ));
     }
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓💤 @reviewer"));
+    assert!(!vt.screen_contains(100, "❓💤 @reviewer"));
     assert!(
-        vt.screen_contains(100, "❓💤 @reviewer -> @worker"),
-        "topology-only indirect rows must remain visible without stats"
+        !vt.screen_contains(100, "❓💤 @reviewer -> @worker"),
+        "idle unreported topology-only rows must stay hidden"
     );
     let prompt_started = |agent: &str| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
@@ -2318,7 +2319,7 @@ fn watched_agent_recursive_rows_keep_attribution_and_distinct_witness_context() 
 
     renderer.handle(&prompt_started("worker"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓💤 @reviewer watching -> @worker"));
+    assert!(!vt.screen_contains(100, "❓💤 @reviewer watching -> @worker"));
     assert!(
         vt.screen_contains(100, "❓✨ @reviewer -> @worker"),
         "parent-first attribution and direct running state must coexist"

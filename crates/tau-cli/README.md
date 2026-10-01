@@ -27,15 +27,17 @@ UI code must render tool calls through generic `ToolUseState`, `ToolUsePayload`,
 
 Harness sub-agent activity is rendered from generic events, not
 delegation-specific UI paths. `agent.watches_updated` identifies which agents
-are observed; current-session structured work status keeps a watched row
-visible while it is unreported, working, waiting, blocked, or unknown, and removes it
-only after done. The complete `agent.stats_updated` detailed activity decides its turn emoji,
-while binary runtime remains navigation authority. Individual provider invocations are
+are observed; current-session structured work status hides a watched row only
+when idle and done or unreported (including missing status). Running targets
+remain visible regardless of status; idle working, waiting, blocked, and unknown
+targets also remain visible. The complete `agent.stats_updated` detailed activity decides its turn emoji,
+while binary runtime remains runtime and navigation authority. Individual provider invocations are
 inner model rounds, and prompt/provider events are only a pre-stats
 compatibility fallback. `agent.stats_updated` also provides generic counters
 and provider response stats provide live response throughput details for that
-running turn. An idle watched target retains its status row, and one that
-watches an active descendant adds `watching -> @descendant`. This recursive
+running turn. A visible idle watched target that
+watches an active descendant adds `watching -> @descendant`. Hidden rows do not
+stop traversal to their descendants. This recursive
 projection is exact over the live watch graph. It shows the full visible
 deduplicated closure through eight rows, then falls back to every direct watch
 without truncating that direct set. Indirect rows attribute their chosen

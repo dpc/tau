@@ -342,9 +342,9 @@ session-wide side-agent count. A separate cycle-safe graph projection selects
 the visible deduplicated closure from the viewed agent through eight rows and
 falls back to every direct watch on overflow. Current-session semantic
 `WorkStatus` snapshots and runtime activity jointly own watched-row lifetime: absent or
-`unreported`, `working`, `waiting`, `blocked`, and `unknown` statuses remain visible, and
-only `done` while idle hides the row without stopping traversal to its descendants.
-A Done target remains visible while running and reappears when it resumes running.
+`unreported` hides like `done` while idle; `working`, `waiting`, `blocked`, and
+`unknown` statuses remain visible. Hidden rows do not stop traversal to descendants.
+Every target remains visible while running and reappears when it resumes running.
 Agent-stats runtime state remains the running-activity authority, with the same
 pre-stats active-prompt fallback for row visibility.
 This projection must not create protocol facts,

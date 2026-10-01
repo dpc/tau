@@ -2188,16 +2188,18 @@ impl EventRenderer {
     /// Returns whether a selected watched target remains visible for its
     /// current self-reported task status and runtime activity.
     ///
-    /// A missing status snapshot is canonically unreported. Only a `Done`
-    /// target that is idle hides its row; a running target stays visible even
-    /// after reporting completion and reappears if it resumes running.
+    /// A missing status snapshot is canonically unreported. Idle `Done` and
+    /// `Unreported` targets hide their rows; running targets stay visible
+    /// regardless of status and reappear when they resume running.
     fn watched_agent_is_visible(&self, agent_id: &tau_proto::AgentId) -> bool {
         !matches!(
             self.watches
                 .watched_agent_work_statuses
                 .get(agent_id)
                 .map(|status| status.phase),
-            Some(tau_proto::AgentWorkStatusPhase::Done)
+            None | Some(
+                tau_proto::AgentWorkStatusPhase::Done | tau_proto::AgentWorkStatusPhase::Unreported
+            )
         ) || self.watched_agent_is_running(agent_id)
     }
 

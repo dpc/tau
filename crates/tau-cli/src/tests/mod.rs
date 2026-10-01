@@ -816,6 +816,23 @@ fn apply_test_navigation_mode(renderer: &mut EventRenderer, mode: tau_proto::Age
 }
 
 mod agent_navigation;
+/// Keeps an unreported watch visible in layout tests using authoritative
+/// runtime.
+fn apply_test_running_watch(renderer: &mut EventRenderer, agent: &str) {
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent_id(agent),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+        inner_turns_total: None,
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+        work_status: Default::default(),
+    }));
+}
 mod cli_parsing;
 mod event_projection;
 mod prompt_input;

@@ -1619,7 +1619,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
     }));
     sync(&handle);
     assert_eq!(renderer.active_side_agent_count_for_test(), 0);
-    assert!(vt.screen_contains(100, "❓💤 @engineer"));
+    assert!(!vt.screen_contains(100, "❓💤 @engineer"));
     assert!(!vt.screen_contains(100, "@1"));
 
     let mut started = standalone_compaction_started("ct-side-failed", "ap-side-failed");
@@ -1648,7 +1648,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
     ));
     sync(&handle);
     assert_eq!(renderer.active_side_agent_count_for_test(), 0);
-    assert!(vt.screen_contains(100, "❓💤 @engineer"));
+    assert!(!vt.screen_contains(100, "❓💤 @engineer"));
     assert!(!vt.screen_contains(100, "@1"));
 }
 
@@ -3217,6 +3217,8 @@ fn mixed_live_activity_blocks_keep_category_and_internal_order() {
                 cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
             },
         ));
+        apply_test_running_watch(&mut renderer, "engineer_a");
+        apply_test_running_watch(&mut renderer, "engineer_b");
         sync(&handle);
 
         let screen = vt.screen_text(100);
@@ -4500,8 +4502,8 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "❓💤 @engineer_1"),
-        "delayed start/create must retain, not reactivate, the status row: {:?}",
+        !vt.screen_contains(100, "❓💤 @engineer_1"),
+        "delayed start/create must not reactivate the idle unreported row: {:?}",
         vt.screen_text(100)
     );
 }
