@@ -61,10 +61,13 @@ arrive and preserves parser context across chunks. An incomplete streamed line
 remains base-styled until a newline or final rendering supplies a complete parse.
 Final and static blocks parse the complete string immediately.
 
-Formatting is scoped to submitted user prompts, assistant response text, and
-reasoning/thinking text. Tool calls, tool payloads/results, shell output,
-status/progress lines, and agent-to-agent message debug displays must stay on
-their existing renderers unless there is a separate product decision.
+Formatting is scoped to submitted and queued user prompts, assistant response
+text, reasoning/thinking text, and agent-to-agent prose message bodies (including
+watched prompts and responses). Message headers retain literal metadata and
+identity styling; only their bodies enter the Markdown renderer. Tool calls,
+tool payloads/results, shell output, structured watch records, status/progress
+lines, external message facts and source-aware prompts, and internal
+notices/diagnostics stay on their existing renderers.
 
 Transcript state markers distinguish message lifecycle at a glance. By default,
 submitted user prompts use `⬤`, while queued prompts and the currently composed

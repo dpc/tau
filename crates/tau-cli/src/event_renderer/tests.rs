@@ -598,6 +598,7 @@ fn submitted_prompt_parsing_borrows_raw_text_without_changing_styled_output() {
         "",
         "plain prompt",
         "# heading\n*strong* and `code`",
+        "- **list**\n```rust\nlet literal = \"**code**\";\n```\n| a | b |\n| --- | --- |\n| x | longer |",
         "Zażółć gęślą jaźń 👋",
         "[Tau](https://tau-agent.dev/guide)",
     ];
@@ -3965,6 +3966,107 @@ fn selected_agent_messages_show_only_the_remote_endpoint() {
             crate::transcript_markers::MESSAGE
         )
     );
+}
+
+/// Sent, received, and watched prose share the static Markdown renderer and its
+/// OSC 8 policy without parsing endpoint metadata or changing semantic
+/// payloads.
+#[test]
+fn agent_message_prose_uses_markdown_only_in_the_body() {
+    use tau_proto::AgentMessageKind;
+
+    let body = "# Heading\n- **strong** _emphasis_ and `code`\n[link](https://example.com)\n\
+                ```rust\nlet literal = \"**code**\";\n```\n\
+                | a | b |\n| --- | ---: |\n| x | longer |";
+    for osc8_links in [false, true] {
+        let mut renderer = renderer_for_agent_id_tests();
+        renderer.presentation.osc8_links = osc8_links;
+        renderer.presentation.verbose_mode = true;
+        renderer.presentation.show_messages = path_tau_config_settings::ShowMessages::AllFull;
+        renderer.remember_agent_display_name(
+            &agent_id("worker"),
+            "**literal** [name](https://metadata.example)",
+        );
+        let expected_body = crate::markdown_render::markdown_block_with_osc8(
+            &renderer.resources.theme,
+            tau_themes::names::SYSTEM_INFO,
+            body,
+            osc8_links,
+        );
+        for kind in [
+            AgentMessageKind::Message,
+            AgentMessageKind::WatchPrompt,
+            AgentMessageKind::WatchResponse,
+        ] {
+            for mut event in [
+                agent_message("worker", "manager", body),
+                received_agent_message("worker", None, "manager", body),
+                received_agent_message("worker", Some("remote-session"), "manager", body),
+            ] {
+                match &mut event {
+                    tau_proto::Event::AgentMessageSent(message) => message.kind = kind,
+                    tau_proto::Event::AgentMessageReceived(message) => message.kind = kind,
+                    _ => unreachable!(),
+                }
+                let original = event.clone();
+                let header = renderer.submitted_agent_message_block(&event, true, false);
+                let actual = renderer.render_agent_message_block(&event);
+                let mut expected_header = header.content.spans().to_vec();
+                let mut separator = expected_header.last().expect("plain header span").clone();
+                separator.text = ":\n".to_owned();
+                expected_header.push(separator);
+                let header_len = expected_header.len();
+                assert_eq!(&actual.content.spans()[..header_len], expected_header);
+                assert_eq!(
+                    &actual.content.spans()[header_len..],
+                    expected_body.content.spans(),
+                    "kind={kind:?}, osc8_links={osc8_links}"
+                );
+                assert_eq!(event, original);
+
+                renderer.presentation.show_messages =
+                    path_tau_config_settings::ShowMessages::AllSummary;
+                assert_eq!(renderer.render_agent_message_block(&event), header);
+                renderer.presentation.show_messages = path_tau_config_settings::ShowMessages::None;
+                assert!(renderer.render_agent_message_block(&event).is_empty());
+                renderer.presentation.show_messages =
+                    path_tau_config_settings::ShowMessages::AllFull;
+                if kind != AgentMessageKind::WatchPrompt {
+                    renderer.presentation.verbose_mode = false;
+                    assert_eq!(renderer.render_agent_message_block(&event), header);
+                    renderer.presentation.verbose_mode = true;
+                }
+            }
+        }
+    }
+}
+
+/// Prose-looking external facts and internal notices remain literal, so this
+/// feature cannot accidentally reinterpret their diagnostic payload or
+/// metadata.
+#[test]
+fn external_facts_and_internal_notices_keep_literal_markdown() {
+    let renderer = renderer_for_agent_id_tests();
+    let body = "**literal** [link](https://example.com)";
+    for block in [
+        renderer.submitted_message_fact_block(format!("External `bridge` message:\n{body}")),
+        renderer.render_source_aware_prompt_block(
+            &tau_proto::PromptSubmissionSource::Extension {
+                name: tau_proto::ExtensionName::parse("bridge").expect("valid extension name"),
+            },
+            body,
+        ),
+        renderer.internal_notice_block(body),
+    ] {
+        assert!(block_text(&block).contains(body));
+        assert!(
+            block
+                .content
+                .spans()
+                .iter()
+                .all(|span| span.hyperlink.is_none())
+        );
+    }
 }
 
 /// External message facts use the message marker without changing their

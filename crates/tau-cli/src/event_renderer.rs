@@ -6236,60 +6236,6 @@ impl EventRenderer {
         ))
     }
 
-    /// Renders routing identities brightly while leaving surrounding header
-    /// wording, task-name context, and message content in the base style.
-    fn submitted_agent_message_block(
-        &self,
-        event: &Event,
-        use_local_names: bool,
-        include_body: bool,
-    ) -> tau_cli_term::StyledBlock {
-        use tau_cli_term::resolve::{convert_color, themed_text};
-        use tau_themes::{SpanTree, StyleName, ThemedText, names};
-
-        let mut themed = ThemedText::new();
-        let body_style = themed.add_style(names::SYSTEM_INFO);
-        let marker_style = themed.add_style(names::PROMPT_MARKER_SUBMITTED);
-        let identity_style = themed.add_style(names::AGENT_MESSAGE_IDENTITY);
-        let mut content = self
-            .agent_message_header_parts(event, use_local_names)
-            .into_iter()
-            .map(|(text, bright)| {
-                if bright {
-                    SpanTree::span(identity_style, vec![SpanTree::text(text)])
-                } else {
-                    SpanTree::text(text)
-                }
-            })
-            .collect::<Vec<_>>();
-        if include_body {
-            content.push(SpanTree::text(format!(
-                ":\n{}",
-                Self::agent_message_body(event)
-            )));
-        }
-        themed.push_tree(SpanTree::span(
-            body_style,
-            vec![
-                SpanTree::span(
-                    marker_style,
-                    vec![SpanTree::text(crate::transcript_markers::MESSAGE)],
-                ),
-                SpanTree::span(body_style, content),
-            ],
-        ));
-
-        let body_ts = self
-            .resources
-            .theme
-            .resolve_style(&StyleName::new(names::SYSTEM_INFO));
-        let mut block = tau_cli_term::StyledBlock::new(themed_text(&self.resources.theme, &themed));
-        if let Some(bg) = body_ts.bg {
-            block = block.bg(convert_color(bg));
-        }
-        block
-    }
-
     /// Builds a header from semantic endpoint pieces so task-name text that
     /// happens to contain another routing id cannot acquire identity styling.
     fn agent_message_header_parts(
@@ -9961,6 +9907,7 @@ impl EventRenderer {
     }
 }
 
+mod agent_message_block;
 mod agent_status;
 mod attach_presentation;
 mod compaction_presentation;

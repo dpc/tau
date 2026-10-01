@@ -480,10 +480,11 @@ response into the shared editor context.
 Transcript Markdown-lite formatting is a presentation-only terminal UI feature.
 It must not change protocol events, persisted logs, model context, or non-UI
 clients, and it must produce only Tau styled text spans rather than raw terminal
-escape sequences. Keep its scope narrow to submitted user prompts, assistant
-responses, and thinking text; do not accidentally run it over tool output, shell
-output, or other machine-generated blocks where styling could obscure exact
-results. Markdown table padding is also display-only: it may add spacing around
+escape sequences. Keep its prose scope as defined by
+[SPEC-tau-cli-transcript-styling](SPEC-tau-cli-transcript-styling.md); do not
+accidentally run it over tool output, shell output, or other machine-generated
+blocks where styling could obscure exact results. Markdown table padding is also
+display-only: it may add spacing around
 cell contents for readability, but must preserve the cell text, avoid code
 contexts, and keep bounded output amplification. Its width and alignment
 projection uses the terminal's grapheme display-column rules and the same
