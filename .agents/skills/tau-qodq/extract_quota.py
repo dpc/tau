@@ -33,6 +33,7 @@ QUOTA_CSV_FIELDS = [
 CSV_FIELDS = QUOTA_CSV_FIELDS
 TOKEN_CSV_FIELDS = [
     "hour_start", "hour_start_unix_ms", "hour_end", "profile_label", "provider",
+    "interval_start", "interval_end", "elapsed_seconds", "partial_bucket",
     "cached_input_tokens", "uncached_input_tokens", "output_tokens",
     "cached_input_tokens_per_second", "uncached_input_tokens_per_second",
     "output_tokens_per_second", "accepted_terminal_observations",
@@ -501,6 +502,7 @@ def svg_frame(title, y_label, lower_ms, upper_ms, y_ticks, y_position):
         '<rect width="100%" height="100%" fill="white"/>',
         '<style>text{font:13px monospace}.grid{stroke:#ddd}.axis{fill:#222}.series{fill:none;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}</style>',
         f'<text x="{left}" y="22" font-weight="bold">{html.escape(title)}</text>',
+        f'<text x="{left}" y="66">UTC [{iso_from_unix(lower_ms, 1000)}, {iso_from_unix(upper_ms, 1000)})</text>',
         f'<text class="axis" text-anchor="middle" x="22" y="{(top + height - bottom) / 2:.1f}" transform="rotate(-90 22 {(top + height - bottom) / 2:.1f})">{html.escape(y_label)}</text>',
     ]
     for label, value in y_ticks:
@@ -513,10 +515,11 @@ def svg_frame(title, y_label, lower_ms, upper_ms, y_ticks, y_position):
     while midnight < upper_ms:
         guide = max(midnight, lower_ms)
         day_end = min(midnight + DAY_MS, upper_ms)
-        svg.append(
-            f'<line class="grid" stroke-dasharray="3 3" x1="{x(guide):.1f}" '
-            f'x2="{x(guide):.1f}" y1="{top}" y2="{height-bottom}"/>'
-        )
+        if midnight >= lower_ms:
+            svg.append(
+                f'<line class="grid" stroke-dasharray="3 3" x1="{x(midnight):.1f}" '
+                f'x2="{x(midnight):.1f}" y1="{top}" y2="{height-bottom}"/>'
+            )
         svg.append(
             f'<text text-anchor="middle" x="{x((guide + day_end) // 2):.1f}" '
             f'y="{height - 14}">{day_label(midnight)}</text>'
@@ -613,7 +616,7 @@ def render_svg(path, rows, profiles, lower_ms, upper_ms):
     for label, _ in profiles:
         rendered += append_daily_series(
             svg, groups.get(label, []), "display_hour_start_unix_ms", HOUR_MS,
-            lambda row: x(row["display_hour_start_unix_ms"] + HOUR_MS // 2),
+            lambda row: x(interval_midpoint(row["display_hour_start_unix_ms"], HOUR_MS, lower_ms, upper_ms)),
             lambda row: (
                 x(max(lower_ms, row["display_hour_start_unix_ms"])),
                 x(min(upper_ms, row["display_hour_start_unix_ms"] + HOUR_MS)),
@@ -640,7 +643,24 @@ def log1p_ticks(maximum):
     return ticks, maximum
 
 
-def aggregate_token_six_hour_buckets(rows):
+def bucket_interval(start, duration, lower_ms=None, upper_ms=None):
+    """Describe the range intersection, not the span between observations."""
+    end = start + duration
+    interval_start = max(start, lower_ms) if lower_ms is not None else start
+    interval_end = min(end, upper_ms) if upper_ms is not None else end
+    return {
+        "interval_start": iso_from_unix(interval_start, 1000),
+        "interval_end": iso_from_unix(interval_end, 1000),
+        "elapsed_seconds": (interval_end - interval_start) / 1000,
+        "partial_bucket": interval_start != start or interval_end != end,
+    }
+
+
+def interval_midpoint(start, duration, lower_ms, upper_ms):
+    return (max(start, lower_ms) + min(start + duration, upper_ms)) / 2
+
+
+def aggregate_token_six_hour_buckets(rows, lower_ms=None, upper_ms=None):
     """Reduce hourly CSV evidence to UTC-aligned six-hour presentation buckets."""
     buckets = {}
     for row in rows:
@@ -653,18 +673,19 @@ def aggregate_token_six_hour_buckets(rows):
         for field in ("cached_input_tokens", "uncached_input_tokens", "output_tokens"):
             bucket[field] += row[field]
         bucket["accepted_terminal_observations"] += row["accepted_terminal_observations"]
-    return [
-        {
+    result = []
+    for (bucket_start, label, provider), bucket in sorted(buckets.items()):
+        interval = bucket_interval(bucket_start, SIX_HOURS_MS, lower_ms, upper_ms)
+        result.append({
             "bucket_start_unix_ms": bucket_start,
             "profile_label": label,
             "provider": provider,
             **bucket,
-            "cached_input_tokens_per_second": bucket["cached_input_tokens"] / 21_600,
-            "uncached_input_tokens_per_second": bucket["uncached_input_tokens"] / 21_600,
-            "output_tokens_per_second": bucket["output_tokens"] / 21_600,
-        }
-        for (bucket_start, label, provider), bucket in sorted(buckets.items())
-    ]
+            **interval,
+            **{f"{field}_per_second": bucket[field] / interval["elapsed_seconds"]
+               for field in ("cached_input_tokens", "uncached_input_tokens", "output_tokens")},
+        })
+    return result
 
 
 def render_token_svg(path, rows, profiles, lower_ms, upper_ms):
@@ -678,11 +699,12 @@ def render_token_svg(path, rows, profiles, lower_ms, upper_ms):
     ticks, ceiling = log1p_ticks(maximum)
     y = lambda value: 74 + (math.log1p(ceiling) - math.log1p(value)) * (560 - 74 - 58) / math.log1p(ceiling)
     svg, x, _, _, _, _, _, _ = svg_frame(
-        "Accepted token usage", "six-hour total / 21,600 tokens/s (log1p scale; 0 preserved)",
+        "Accepted token usage", "six-hour total / elapsed seconds: tokens/s (log1p; 0 preserved)",
         lower_ms, upper_ms, ticks, y,
     )
     append_legend(svg, "subscription:", [(label, colors[label], "") for label, _ in profiles], 600, 22)
     append_legend(svg, "metric:", [(label, "#222", dash) for _, label, dash in categories], 600, 46)
+    svg.append('<text x="130" y="526">Partial boundary buckets use range-overlap seconds (full bucket: 21,600 s).</text>')
     groups = {}
     for row in rows:
         groups.setdefault(row["profile_label"], []).append(row)
@@ -691,7 +713,7 @@ def render_token_svg(path, rows, profiles, lower_ms, upper_ms):
         for subscription, _ in profiles:
             rendered += append_daily_series(
                 svg, groups.get(subscription, []), "bucket_start_unix_ms", SIX_HOURS_MS,
-                lambda row: x(row["bucket_start_unix_ms"] + SIX_HOURS_MS // 2),
+                lambda row: x(interval_midpoint(row["bucket_start_unix_ms"], SIX_HOURS_MS, lower_ms, upper_ms)),
                 lambda row: (
                     x(max(lower_ms, row["bucket_start_unix_ms"])),
                     x(min(upper_ms, row["bucket_start_unix_ms"] + SIX_HOURS_MS)),
@@ -703,7 +725,7 @@ def render_token_svg(path, rows, profiles, lower_ms, upper_ms):
     return rendered
 
 
-def aggregate_tokens(observations):
+def aggregate_tokens(observations, lower_ms=None, upper_ms=None):
     windows = {}
     for observation in observations:
         hour = observation["recorded_at_unix_ms"] // HOUR_MS * HOUR_MS
@@ -717,13 +739,14 @@ def aggregate_tokens(observations):
         bucket["accepted_terminal_observations"] += 1
     rows = []
     for (hour, label, provider), bucket in sorted(windows.items()):
+        interval = bucket_interval(hour, HOUR_MS, lower_ms, upper_ms)
         rows.append({
             "hour_start": iso_from_unix(hour, 1000), "hour_start_unix_ms": hour,
             "hour_end": iso_from_unix(hour + HOUR_MS, 1000),
             "profile_label": label, "provider": provider, **bucket,
-            "cached_input_tokens_per_second": bucket["cached_input_tokens"] / 3600,
-            "uncached_input_tokens_per_second": bucket["uncached_input_tokens"] / 3600,
-            "output_tokens_per_second": bucket["output_tokens"] / 3600,
+            **interval,
+            **{f"{field}_per_second": bucket[field] / interval["elapsed_seconds"]
+               for field in ("cached_input_tokens", "uncached_input_tokens", "output_tokens")},
         })
     return rows
 
@@ -836,7 +859,7 @@ def scan(files, profiles, lower_ms, upper_ms):
     counters["token_conflicting_duplicates"] = sum(
         len(variants) > 1 for variants in token_usage_variants.values()
     )
-    token_rows = aggregate_tokens(token_observations)
+    token_rows = aggregate_tokens(token_observations, lower_ms, upper_ms)
     counters["sessions_with_quota_observations"] = len(sessions)
     counters["quota_emitted_rows"] = len(quota_rows)
     counters["quota_omitted_unchanged_rows"] = sum(
@@ -892,7 +915,12 @@ Selected configured subscriptions: {selected}.
   that evidence to UTC-aligned six-hour buckets on one shared logarithmic `log1p` Y axis:
   Cache hits (`prompt_cached_tokens`), Cache misses
   (`prompt_sent_tokens - prompt_cached_tokens`), and Output tokens
-  (`response_received_tokens`). Each six-hour total divides by 21,600 for tokens/s.
+  (`response_received_tokens`). Rates divide by the bucket's intersection with the
+  selected range in seconds (3,600 for a full hour; 21,600 for a full six hours).
+  CSV `interval_start`, `interval_end`, `elapsed_seconds`, and `partial_bucket`
+  explicitly identify clipped hourly rows. Partial boundary six-hour buckets use
+  the same normalization; points sit at the clipped interval midpoint, never beyond the range.
+  The axis ends at the exact selected endpoint, without fabricated observations.
   Subscription color identifies the selected profile and line style identifies the
   metric. The chart maps each actual rate as `log(1 + rate) / log(1 + maximum
   displayed rate)`, so an observed zero stays at the baseline without inventing a
@@ -919,7 +947,7 @@ def main(argv=None, now=None):
         upper = (
             parse_instant(args.until)
             if args.until
-            else clock.replace(hour=0, minute=0, second=0, microsecond=0)
+            else clock
         )
         lower = parse_instant(args.since) if args.since else upper - dt.timedelta(days=14)
         lower_ms, upper_ms = unix_ms(lower), unix_ms(upper)
@@ -927,8 +955,6 @@ def main(argv=None, now=None):
             parser.error("--since must be before --until")
         if MAX_RANGE_MS < upper_ms - lower_ms:
             parser.error("time range must not exceed 366 days")
-        if lower_ms % DAY_MS or upper_ms % DAY_MS:
-            parser.error("--since and --until must be aligned to UTC days for daily guides")
         files = selected_event_files(pathlib.Path(args.sessions_root))
     except (ValueError, OverflowError) as error:
         parser.error(str(error))
@@ -943,7 +969,7 @@ def main(argv=None, now=None):
         quota_points = render_svg(
             output / "quota.svg", quota_display, profiles, lower_ms, upper_ms
         )
-        token_buckets = aggregate_token_six_hour_buckets(token_rows)
+        token_buckets = aggregate_token_six_hour_buckets(token_rows, lower_ms, upper_ms)
         token_points = render_token_svg(output / "tokens.svg", token_buckets, profiles, lower_ms, upper_ms)
         write_artifact_readme(output / "README.md", profiles, lower_ms, upper_ms)
     except ValueError as error:
@@ -956,7 +982,10 @@ def main(argv=None, now=None):
         "quota SVG guides: every UTC day boundary",
         "token SVG display selection: UTC six-hour Cache hits (prompt_cached_tokens), Cache misses "
         "(prompt_sent_tokens - prompt_cached_tokens), and Output tokens "
-        "(response_received_tokens); each six-hour total divides by 21,600",
+        "(response_received_tokens); totals divide by range-overlap seconds "
+        "(full six-hour bucket: 21,600)",
+        f"partial hourly token rows: {sum(row['partial_bucket'] for row in token_rows)}",
+        f"partial six-hour token display rows: {sum(row['partial_bucket'] for row in token_buckets)}",
         "token SVG encoding: one shared log1p Y axis with observed zero at the baseline; "
         "subscription color; metric line style; missing UTC six-hour buckets are line breaks",
         f"selected canonical files: {counters['files']}",

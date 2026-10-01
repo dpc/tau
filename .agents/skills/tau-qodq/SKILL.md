@@ -17,8 +17,8 @@ do not change provider, journal, or runtime semantics for it.
 Select each configured subscription explicitly. `LABEL` is presentation-only;
 `PROVIDER` exactly selects canonical quota `payload.provider` and the
 `PROVIDER/` prefix of canonical token-usage `usage.model`. This checked-in
-extractor invocation is the complete reproducible generator template; change
-only its bounded UTC range and output directory.
+extractor invocation is the generator template. By default it includes the
+current day through the UTC instant captured once when generation starts.
 
 ```bash
 cd "$(jj workspace root)"
@@ -27,14 +27,17 @@ skill_dir=.agents/skills/tau-qodq
   --sessions-root "$HOME/.local/state/tau/sessions" \
   --profile chatgpt=chatgpt \
   --profile chatgpt-fedi=chatgpt-fedi \
-  --since 2026-08-07T00:00:00Z --until 2026-08-21T00:00:00Z \
-  --out /tmp/public/tau-qodq-chatgpt-chatgpt-fedi
+  --out tmp/tau-qodq-chatgpt-chatgpt-fedi
 ```
 
-The exact range is `[since, until)` in UTC and must start/end on UTC-day
-boundaries, so token-chart buckets align at 00:00/06:00/12:00/18:00 and both
-charts can guide every UTC midnight. The default is the fourteen complete UTC
-days ending at the current UTC midnight.
+The exact range is `[since, until)` in UTC, with millisecond precision.
+The default is the trailing fourteen days ending at the current UTC instant,
+not the previous midnight. The endpoint is fixed before scanning, so a long scan
+does not move it. For reproducible bounded historical diagnostics, pass explicit
+`--since` and `--until` RFC3339 instants; neither needs to be a day boundary.
+An omitted `--since` means fourteen days before the selected endpoint.
+Token buckets remain UTC-aligned at 00:00/06:00/12:00/18:00 and both charts guide
+every UTC midnight in range, including when the endpoints fall within a day.
 Ranges over 366 days are rejected. The
 compatibility `--provider NAME` selection remains equivalent to
 `--profile NAME=NAME`; prefer repeatable `--profile`.
@@ -98,6 +101,16 @@ Cache hits    = Σ prompt_cached_tokens / 21,600 tokens/s
 Cache misses  = Σ (prompt_sent_tokens - prompt_cached_tokens) / 21,600 tokens/s
 Output tokens = Σ response_received_tokens / 21,600 tokens/s
 ```
+
+Those denominators apply to full buckets. At either range boundary, hourly CSV
+and six-hour display rates divide by the seconds in the bucket's intersection
+with `[since, until)`, not by a full hour/six hours or the span between observations.
+CSV `interval_start`, `interval_end`, `elapsed_seconds`, and `partial_bucket`
+label partial hourly rows; the SVG labels boundary normalization and the exact
+range, and `summary.txt` counts partial hourly/six-hour rows. Bucket points use
+the clipped interval midpoint, so current partial buckets stay within the axis.
+The axis reaches the selected endpoint; the charts do not fabricate observations
+there, extend evidence to it, or connect across missing evidence.
 
 Subscription color identifies the selected profile; line style identifies the
 metric. The chart contains exactly those six profile/metric lines. Its

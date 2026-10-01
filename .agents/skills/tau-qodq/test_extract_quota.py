@@ -10,6 +10,8 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
+import xml.etree.ElementTree as ET
 
 SCRIPT = pathlib.Path(__file__).with_name("extract_quota.py")
 SPEC = importlib.util.spec_from_file_location("extract_quota", SCRIPT)
@@ -231,7 +233,7 @@ class ExtractQuotaTests(unittest.TestCase):
         self.assertIn("Output tokens", token_svg)
         self.assertNotIn("all input", token_svg)
         self.assertNotIn("all tokens", token_svg)
-        self.assertIn("six-hour total / 21,600", token_svg)
+        self.assertIn("six-hour total / elapsed seconds", token_svg)
 
     def test_quota_svg_selects_hourly_maximum_default_pool_observation(self):
         lower, upper = 1_700_006_400_000, 1_700_006_400_000 + quota.DAY_MS
@@ -281,7 +283,7 @@ class ExtractQuotaTests(unittest.TestCase):
         self.assertNotIn("<circle", svg)
         self.assertNotIn("all input", svg)
         self.assertNotIn("all tokens", svg)
-        self.assertEqual(svg.count("six-hour total / 21,600 tokens/s (log1p scale; 0 preserved)"), 1)
+        self.assertEqual(svg.count("six-hour total / elapsed seconds: tokens/s (log1p; 0 preserved)"), 1)
         self.assertIn('stroke-dasharray="8 5"', svg)
         self.assertIn('stroke-dasharray="2 4"', svg)
 
@@ -427,9 +429,73 @@ class ExtractQuotaTests(unittest.TestCase):
             quota.parse_profiles(["no-equals"])
         with self.assertRaises(SystemExit):
             quota.main([
-                "--sessions-root", str(self.root), "--since", "2026-07-27T23:30:00Z",
+                "--sessions-root", str(self.root), "--since", "2025-07-25T23:30:00Z",
                 "--until", "2026-07-28T00:00:00Z", "--out", str(output),
             ])
+
+    def test_default_captures_now_once_and_keeps_current_day(self):
+        now = dt.datetime(2026, 7, 28, 13, 25, 12, 123456, tzinfo=UTC)
+        upper = quota.unix_ms(now)
+        self.write_session("current", [
+            canonical(upper - 1), canonical(upper),
+            token(upper - 1), token(upper, prompt="excluded"),
+        ])
+        output = pathlib.Path(self.temp.name) / "out"
+        with mock.patch.object(quota.dt, "datetime", wraps=dt.datetime) as clock:
+            clock.now.return_value = now
+            quota.main(["--sessions-root", str(self.root), "--profile", "personal=chatgpt",
+                        "--out", str(output)])
+            clock.now.assert_called_once_with(UTC)
+        summary = (output / "summary.txt").read_text()
+        self.assertIn("time filter: [2026-07-14T13:25:12.123Z, 2026-07-28T13:25:12.123Z)", summary)
+        self.assertIn("unique token terminal observations: 1", summary)
+        self.assertIn("partial hourly token rows: 1", summary)
+        with (output / "tokens.csv").open() as source:
+            row = next(csv.DictReader(source))
+        self.assertEqual(row["interval_end"], "2026-07-28T13:25:12.123Z")
+        self.assertEqual(row["partial_bucket"], "True")
+        with (output / "quota.csv").open() as source:
+            self.assertEqual(len(list(csv.DictReader(source))), 1)
+
+    def test_partial_intervals_rates_guides_and_points_stay_inside_range(self):
+        day = quota.unix_ms(dt.datetime(2026, 7, 28, tzinfo=UTC))
+        lower, upper = day + quota.HOUR_MS // 2, day + 7 * quota.HOUR_MS + quota.HOUR_MS // 4
+        self.write_session("partial", [
+            token(lower - 1, prompt="before"), token(lower, prompt="first", sent=1800, cached=900, output=0),
+            token(upper - 1, prompt="last", sent=1800, cached=900, output=0),
+            token(upper, prompt="after"),
+            canonical(lower), canonical(upper - 1),
+        ])
+        _, observations, hours, counters = quota.scan(
+            quota.selected_event_files(self.root), PROFILES, lower, upper)
+        self.assertEqual(counters["token_events_out_of_range"], 2)
+        self.assertEqual([row["elapsed_seconds"] for row in hours], [1800, 900])
+        self.assertEqual([row["cached_input_tokens_per_second"] for row in hours], [0.5, 1])
+        self.assertTrue(all(row["partial_bucket"] for row in hours))
+        buckets = quota.aggregate_token_six_hour_buckets(hours, lower, upper)
+        self.assertEqual([row["elapsed_seconds"] for row in buckets], [19800, 4500])
+        self.assertEqual([row["cached_input_tokens_per_second"] for row in buckets], [900 / 19800, 900 / 4500])
+        output = pathlib.Path(self.temp.name)
+        quota.render_token_svg(output / "tokens.svg", buckets, PROFILES, lower, upper)
+        quota.render_svg(output / "quota.svg", observations, PROFILES, lower, upper)
+        for name in ("tokens.svg", "quota.svg"):
+            svg = (output / name).read_text()
+            self.assertNotIn('stroke-dasharray="3 3"', svg)  # No midnight inside this range.
+            root = ET.fromstring(svg)
+            for element in root:
+                if element.attrib.get("class") == "series" and "d" in element.attrib:
+                    for point in element.attrib["d"].split():
+                        self.assertTrue(130 <= float(point[1:].split(",")[0]) <= 1175)
+
+    def test_explicit_historical_partial_range_overrides_now(self):
+        self.write_session("empty", [])
+        output = pathlib.Path(self.temp.name) / "out"
+        quota.main(["--sessions-root", str(self.root), "--profile", "personal=chatgpt",
+                    "--since", "2026-07-27T23:30:00Z", "--until", "2026-07-28T00:15:00Z",
+                    "--out", str(output)], now=dt.datetime(2026, 8, 1, tzinfo=UTC))
+        self.assertIn("time filter: [2026-07-27T23:30:00.000Z, 2026-07-28T00:15:00.000Z)",
+                      (output / "summary.txt").read_text())
+        self.assertEqual((output / "tokens.svg").read_text().count('stroke-dasharray="3 3"'), 1)
 
     def test_log1p_scale_ticks_label_actual_rates_and_preserve_zero(self):
         ticks, ceiling = quota.log1p_ticks(16_500)
