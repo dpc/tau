@@ -981,6 +981,14 @@ fn message_tool_schema_does_not_advertise_user_recipient() {
     ] {
         assert!(description.contains(form), "missing address form {form:?}");
     }
+    for help in [
+        description.as_str(),
+        parameters["properties"]["recipient_id"]["description"]
+            .as_str()
+            .expect("recipient description"),
+    ] {
+        assert!(help.contains("`&` and `@` are independently optional"));
+    }
     assert!(!description.contains("user"));
     assert!(
         !parameters["properties"]["recipient_id"]["description"]
@@ -990,8 +998,8 @@ fn message_tool_schema_does_not_advertise_user_recipient() {
     );
 }
 
-/// Ensures bare agent ids and `<current-session>/<agent>` remain local
-/// recipients, so removing `user` does not redirect existing agent workflows.
+/// Every optional-marker spelling of an exact current-session address must
+/// remain local, while plain ids must not become ambiguous session addresses.
 #[test]
 fn message_recipient_parser_recognizes_local_and_current_session_agents() {
     let current: tau_proto::SessionId = "session-a"
@@ -1002,9 +1010,23 @@ fn message_recipient_parser_recognizes_local_and_current_session_agents() {
         parse_message_recipient("agent_a", &current),
         Ok(MessageRecipientAddress::LocalAgent(agent)) if agent.as_str() == "agent_a"
     ));
+    for address in [
+        "session-a/agent_b",
+        "session-a/@agent_b",
+        "&session-a/agent_b",
+        "&session-a/@agent_b",
+    ] {
+        assert!(
+            matches!(
+                parse_message_recipient(address, &current),
+                Ok(MessageRecipientAddress::LocalAgent(agent)) if agent.as_str() == "agent_b"
+            ),
+            "{address}"
+        );
+    }
     assert!(matches!(
-        parse_message_recipient("session-a/agent_b", &current),
-        Ok(MessageRecipientAddress::LocalAgent(agent)) if agent.as_str() == "agent_b"
+        parse_message_recipient("session-b", &current),
+        Ok(MessageRecipientAddress::LocalAgent(agent)) if agent.as_str() == "session-b"
     ));
 }
 
@@ -1016,21 +1038,27 @@ fn message_recipient_parser_validates_external_address_grammar() {
         .parse::<tau_proto::SessionId>()
         .expect("known-safe SessionId must be valid");
 
-    match parse_message_recipient("session-b/agent_b", &current)
-        .expect("valid other-session recipient")
-    {
-        MessageRecipientAddress::OtherSession {
-            session_id,
-            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(agent_id),
-        } => {
-            assert_eq!(session_id.as_str(), "session-b");
-            assert_eq!(agent_id.as_str(), "agent_b");
+    for address in [
+        "session-b/agent_b",
+        "session-b/@agent_b",
+        "&session-b/agent_b",
+        "&session-b/@agent_b",
+        "&tau-h20vjn/coordinator-Qvba",
+    ] {
+        let expected = address.strip_prefix('&').unwrap_or(address);
+        let (session, agent) = expected.split_once('/').expect("exact address");
+        let agent = agent.strip_prefix('@').unwrap_or(agent);
+        match parse_message_recipient(address, &current).expect("valid other-session recipient") {
+            MessageRecipientAddress::OtherSession {
+                session_id,
+                recipient: tau_proto::ExternalAgentMessageRecipient::Exact(agent_id),
+            } => {
+                assert_eq!(session_id.as_str(), session);
+                assert_eq!(agent_id.as_str(), agent);
+            }
+            _ => panic!("expected other-session recipient for {address}"),
         }
-        _ => panic!("expected other-session recipient"),
     }
-    assert!(parse_message_recipient("session-b/agent/extra", &current).is_err());
-    assert!(parse_message_recipient("session-b/", &current).is_err());
-    assert!(parse_message_recipient("session-b/bad/agent", &current).is_err());
     assert!(matches!(
         parse_message_recipient("&session-b", &current),
         Ok(MessageRecipientAddress::OtherSession {
@@ -1049,8 +1077,32 @@ fn message_recipient_parser_validates_external_address_grammar() {
         parse_message_recipient("&session-a", &current),
         Ok(MessageRecipientAddress::LocalSession)
     ));
-    assert!(parse_message_recipient("&session-b/agent_b", &current).is_err());
-    assert!(parse_message_recipient("&bad session", &current).is_err());
+    for session_prefix in ["", "&"] {
+        for agent_prefix in ["", "@"] {
+            for (session, agent) in [
+                ("", "agent_b"),
+                ("bad session", "agent_b"),
+                ("&&session-b", "agent_b"),
+                ("session-b", ""),
+                ("session-b", "@@agent_b"),
+                ("session-b", "bad agent"),
+                ("session-b", "agent/extra"),
+                ("session-b/extra", "agent_b"),
+            ] {
+                let address = format!("{session_prefix}{session}/{agent_prefix}{agent}");
+                assert!(
+                    parse_message_recipient(&address, &current).is_err(),
+                    "{address}"
+                );
+            }
+        }
+    }
+    for address in ["&", "&&session-b", "&bad session", "@agent_b"] {
+        assert!(
+            parse_message_recipient(address, &current).is_err(),
+            "{address}"
+        );
+    }
 }
 
 #[test]

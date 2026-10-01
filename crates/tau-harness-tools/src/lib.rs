@@ -1747,10 +1747,11 @@ fn parse_message_recipient(
     if raw == "user" {
         return Err("unsupported message recipient: `user`".to_owned());
     }
-    if let Some(session_address) = raw.strip_prefix('&') {
-        let slash_count = session_address.matches('/').count();
-        if slash_count == 0 {
-            let session_id = parse_recipient_session_id(session_address)?;
+    let address = raw.strip_prefix('&').unwrap_or(raw);
+    let slash_count = address.matches('/').count();
+    if slash_count == 0 {
+        if raw.starts_with('&') {
+            let session_id = parse_recipient_session_id(address)?;
             return Ok(if &session_id == current_session_id {
                 MessageRecipientAddress::LocalSession
             } else {
@@ -1760,26 +1761,6 @@ fn parse_message_recipient(
                 }
             });
         }
-        if slash_count != 1 {
-            return Err("session recipient must have at most one `/`".to_owned());
-        }
-        let (session, agent) = session_address.split_once("/@").ok_or_else(|| {
-            "exact inter-session recipient must be `&<session-id>/@<agent-id>`".to_owned()
-        })?;
-        let session_id = parse_recipient_session_id(session)?;
-        let agent_id = tau_proto::AgentId::parse(agent)
-            .map_err(|err| format!("invalid inter-session agent id `{agent}`: {err}"))?;
-        return Ok(if &session_id == current_session_id {
-            MessageRecipientAddress::LocalAgent(agent_id)
-        } else {
-            MessageRecipientAddress::OtherSession {
-                session_id,
-                recipient: tau_proto::ExternalAgentMessageRecipient::Exact(agent_id),
-            }
-        });
-    }
-    let slash_count = raw.matches('/').count();
-    if slash_count == 0 {
         return tau_proto::AgentId::parse(raw)
             .map(MessageRecipientAddress::LocalAgent)
             .map_err(|err| format!("invalid message recipient agent id `{raw}`: {err}"));
@@ -1787,11 +1768,12 @@ fn parse_message_recipient(
     if slash_count != 1 {
         return Err("inter-session recipient must have exactly one `/`".to_owned());
     }
-    let (session, agent) = raw
+    let (session, agent) = address
         .split_once('/')
         .expect("one slash checked before split_once");
+    let agent = agent.strip_prefix('@').unwrap_or(agent);
     if session.is_empty() || agent.is_empty() {
-        return Err("inter-session recipient must be `<session-id>/<agent_id>`".to_owned());
+        return Err("inter-session recipient must be `[&]<session-id>/[@]<agent-id>`".to_owned());
     }
     let agent_id = tau_proto::AgentId::parse(agent)
         .map_err(|err| format!("invalid inter-session agent id `{agent}`: {err}"))?;
@@ -2075,7 +2057,7 @@ fn agent_start_tool_spec() -> ToolSpec {
 }
 
 fn message_tool_spec() -> ToolSpec {
-    ToolSpec { provider_scope: None, name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Commit an async message to another agent or another session. Success returns the stable message id and confirms acceptance, not recipient inference, reply, or completion. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { provider_scope: None, name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Commit an async message to another agent or another session. Success returns the stable message id and confirms acceptance, not recipient inference, reply, or completion. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. In exact session/agent addresses, `&` and `@` are independently optional. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`; in exact session/agent addresses, `&` and `@` are independently optional."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {

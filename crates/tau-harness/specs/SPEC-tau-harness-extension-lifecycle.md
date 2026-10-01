@@ -148,8 +148,8 @@ and `ConfigError` retains its separate mandatory replayable diagnostic path. See
 
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses bare
-`&<session-id>` plus the exact-agent forms `&<session-id>/@<agent-id>` and
-`<session-id>/<agent-id>`, treats the current session as local, mints a
+`&<session-id>` plus the exact-agent form `[&]<session-id>/[@]<agent-id>`,
+where `&` and `@` are independently optional, treats the current session as local, mints a
 per-message bearer capability bound to sender identity, recipient, message body,
 and message/watch-response kind, and performs runtime-dir lookup plus socket
 round-trip on a helper thread. Completion returns to the event loop as a

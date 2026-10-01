@@ -35,8 +35,9 @@ agent may require a fresh watch after reload.
   configured `inter_session.receiver.role` selects the receiver, and
   `auto_start` can create one if necessary.
 - `message({"recipient_id":"&<session-id>/@<agent-id>","message":"..."})`
-  (or `<session-id>/<agent-id>`) targets a known agent directly, independently
-  of the receiver setting.
+  targets a known agent directly, independently of the receiver setting.
+  The `&` and `@` markers are independently optional in exact session/agent
+  addresses: `&session/agent`, `session/@agent`, and `session/agent` also work.
 - A plain agent ID addresses an agent in the current session.
 
 Cross-session messaging is best-effort at-least-once: a crash after receive

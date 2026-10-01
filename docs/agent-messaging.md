@@ -148,7 +148,9 @@ created endpoint.
 
 Use `&<session-id>/@<agent-id>` or `<session-id>/<agent-id>` to send to a
 specific agent in another session. This known-address behavior works regardless
-of the target session's receiver configuration.
+of the target session's receiver configuration. The `&` and `@` markers are
+independently optional: `&<session-id>/<agent-id>` and
+`<session-id>/@<agent-id>` also work.
 
 Use `<session-id>/<agent_id>` as `recipient_id` to address an agent owned by
 another running harness daemon:

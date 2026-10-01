@@ -5,7 +5,8 @@
 Peer delivery spans runtime discovery, typed socket RPC and callback authentication, target admission and auto-start, durable receive/sender projections, post-commit acknowledgement, and crash cleanup, so no single owning module can state the complete best-effort routing contract coherently.
 
 The harness-owned `message` tool accepts bare `&<session-id>` and the exact-agent
-forms `&<session-id>/@<agent-id>` and `<session-id>/<agent-id>`. A bare address
+form `[&]<session-id>/[@]<agent-id>`, where `&` and `@` are independently optional.
+A plain agent id remains local; a session-only address requires `&`. A bare address
 sends to the session, whose harness selects exactly one eligible loaded or
 pending receiving agent. Bare and exact authority are distinct protocol values.
 Session selection considers only live or pending instances of the single
