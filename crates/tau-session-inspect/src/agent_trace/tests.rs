@@ -101,6 +101,106 @@ fn native_occurrence_exposes_canonical_observation_id() {
     );
 }
 
+/// Store-backed native and OTLP exports must retain the journal's nondefault
+/// inference-placement marker without adding a field to commit-order records.
+#[test]
+fn native_and_otlp_occurrences_preserve_persisted_fold_semantics() {
+    let (root, _native) = prepare_fixture();
+    let agent_id = AgentId::parse("agent-stage").expect("agent id");
+    let mut store = AgentStore::open_fixture(root.path()).expect("store");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "inference input".to_owned(),
+                inference_activation: true,
+                message_class: Default::default(),
+            }),
+        )
+        .expect("seed transcript head");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::Under(tau_proto::NodeId::new(0)),
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: None,
+                agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-fold").expect("prompt id"),
+                through: tau_proto::AgentHead::Node(tau_proto::NodeId::new(0)),
+                model: "provider/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: tau_proto::AgentHead::Root,
+                output_length_continuation: None,
+            }),
+            UnixMicros::new(3),
+        )
+        .expect("marked inference checkpoint");
+    drop(store);
+    let persisted = AgentStore::open(root.path())
+        .expect("reload durable store")
+        .agent_events(agent_id.as_str())
+        .expect("durable records");
+    assert_eq!(
+        persisted[0].fold_semantics,
+        tau_core::AgentJournalFoldSemantics::CommitOrder
+    );
+    assert_eq!(
+        persisted[2].fold_semantics,
+        tau_core::AgentJournalFoldSemantics::InferenceDeferredInputV1
+    );
+
+    for format in [AgentTraceFormat::TauJsonl, AgentTraceFormat::OtlpJson] {
+        let mut trace = prepare_agent_trace(
+            root.path(),
+            &agent_id,
+            DescendantSelection::RootOnly,
+            format,
+        )
+        .expect("prepare trace");
+        let mut bytes = Vec::new();
+        trace.copy_to(&mut bytes).expect("copy trace");
+        let occurrences: Vec<serde_json::Value> = match format {
+            AgentTraceFormat::TauJsonl => std::str::from_utf8(&bytes)
+                .expect("UTF-8")
+                .lines()
+                .skip(1)
+                .map(|line| serde_json::from_str(line).expect("native occurrence"))
+                .collect(),
+            AgentTraceFormat::OtlpJson => {
+                let otlp: serde_json::Value = serde_json::from_slice(&bytes).expect("OTLP JSON");
+                otlp["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["events"]
+                    .as_array()
+                    .expect("agent span events")
+                    .iter()
+                    .map(|event| {
+                        let raw = event["attributes"]
+                            .as_array()
+                            .expect("event attributes")
+                            .iter()
+                            .find(|attribute| attribute["key"] == "tau.event.raw")
+                            .expect("raw occurrence");
+                        serde_json::from_str(
+                            raw["value"]["stringValue"].as_str().expect("raw JSON"),
+                        )
+                        .expect("OTLP occurrence")
+                    })
+                    .collect()
+            }
+            _ => unreachable!("only native and OTLP formats"),
+        };
+        assert_eq!(occurrences.len(), persisted.len());
+        assert!(occurrences[0].get("fold_semantics").is_none());
+        assert!(occurrences[1].get("fold_semantics").is_none());
+        assert_eq!(
+            occurrences[2]["fold_semantics"],
+            "inference_deferred_input_v1"
+        );
+    }
+}
+
 /// Public store-backed JSONL and TOON exports must decode persisted
 /// observation identities, preserve qualified timing, and represent terminal
 /// output in lite mode, with whole-document JSONL/TOON semantic parity across

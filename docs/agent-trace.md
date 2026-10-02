@@ -74,8 +74,8 @@ and the final staged artifact remains delete-on-close.
 `tau.agent_trace` and its internal schema version is `0`. The first line is a
 header; later lines preserve every journal occurrence grouped lexically by
 agent and ordered by authoritative `seq`. Each occurrence retains agent ID,
-sequence, observation ID, wall-clock append time, source, branch parent, and
-complete typed event payload.
+sequence, observation ID, wall-clock append time, source, branch parent,
+nondefault fold semantics, and complete typed event payload.
 
 The header fields are:
 
@@ -100,8 +100,16 @@ observation_id:            string, 32 lowercase hexadecimal digits
 recorded_at_unix_micros:   integer
 source:                    string|null
 parent:                    AgentEventParent JSON
+fold_semantics:            optional string, "inference_deferred_input_v1"
 event:                     {event: string, payload: TaggedCbor}
 ```
+
+`fold_semantics` uses the journal's existing encoding: commit-order semantics
+(`legacy`) are the default and omitted; `inference_deferred_input_v1` marks an
+ordinary inference checkpoint that defers same-branch inputs until its response
+or tool round closes. This preserves the distinction needed to explain transcript
+placement from a trace. OTLP raw occurrences carry the same field. Export does
+not change journal storage or replay behavior.
 
 `AgentEventParent` has these exact forms:
 

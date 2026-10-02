@@ -48,6 +48,10 @@ struct Occurrence<'a> {
     source: &'a Option<tau_core::PersistedEventSource>,
     /// Explicit transcript fold parent.
     parent: &'a tau_core::AgentEventParent,
+    /// Durable fold discriminator, omitted for the journal's commit-order
+    /// default.
+    #[serde(skip_serializing_if = "tau_core::AgentJournalFoldSemantics::is_commit_order")]
+    fold_semantics: tau_core::AgentJournalFoldSemantics,
     /// Complete typed durable event in lossless tagged-CBOR JSON form.
     event: Value,
 }
@@ -96,6 +100,7 @@ pub(super) fn occurrence_json(
         recorded_at_unix_micros: record.recorded_at,
         source: &record.source,
         parent: &record.parent,
+        fold_semantics: record.fold_semantics,
         event: event_json(&record.event)?,
     })
     .map_err(json_error)
