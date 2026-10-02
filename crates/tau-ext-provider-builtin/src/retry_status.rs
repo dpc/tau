@@ -72,6 +72,7 @@ pub(super) fn retry_status_text(
         )
         | (PromptBackend::Responses(_), _)
         | (PromptBackend::Grok { .. }, _)
+        | (PromptBackend::ChatGptPlan { .. }, _)
         | (PromptBackend::ChatCompletions { .. }, _)
         | (PromptBackend::PublicResponses { .. }, _) => live_detail
             .map(|detail| format!("{}: {detail}", class.public_reason()))

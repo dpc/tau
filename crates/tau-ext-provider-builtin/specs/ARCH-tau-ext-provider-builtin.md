@@ -14,6 +14,18 @@ credential acceptance before publishing usable models. See
 
 ## Ownership boundaries
 
+Public `chatgpt_plan` profiles use `tau-provider-chatgpt` for independently
+issued OIDC registrations, scoped rotating credentials, account model discovery
+and restricted public Responses lowering. They never reuse legacy Codex auth.
+Finite prompt workers coordinate renewal with crash-released locks under the
+existing Configure instance-state root; all credential bytes still pass through
+main-loop Secret RPC. The lock and Secret roots have the same state/instance
+ownership, and aliases of one credential share a lock. The extension publishes
+complete replacements with CAS and retains workers through accepted rotation.
+The shared SSE adapter validates output, but the plan route requires canonical
+completion and terminalizes inference failures without automatic replay or
+billing fallback. Other providers retain their existing policies.
+
 Native `grok` profiles use `tau-provider-grok` for device OAuth, typed rotating
 credentials, setup-time language catalog discovery and xAI request policy.
 The extension retains same-generation refresh workers and mediates their

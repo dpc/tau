@@ -1,5 +1,83 @@
 # Providers
 
+## Sign in with ChatGPT: public plan-sharing route
+
+Use `tau provider add chatgpt-plan` for the public **Continue with ChatGPT**
+flow. This is a separate provider from `chatgpt` (legacy Codex) and `responses`
+(generic API-key inference). It never imports Codex credentials, changes an
+existing provider's transport, or falls back to API billing.
+
+Setup starts a real `127.0.0.1` callback listener and prints the authorization
+URL. Open it in a browser on the same machine. Tau verifies state, PKCE, the
+issued client registration, and the ID token's signature, issuer, audience,
+expiry and nonce. The separate `chatgpt.tokens.use.direct` granted scope is
+required for catalog/inference access. Select one model from that account's
+ordered catalog. If the catalog omits a context limit, setup requires you to
+supply it; Tau does not guess it from the model name. The profile is a setup-time
+snapshot, so restart after changing model settings.
+Validated registration is saved before catalog retrieval or model selection;
+failure or cancelation of those steps does not discard the issued client.
+This route requires a persistent `--state` or `--config` profile and does not
+support `--output -`.
+
+Each provider name selects one account/workspace registration. Add another name
+for another account; ordinary model selection chooses between them. `tau
+provider login NAME` reauthorizes the saved issued client and verifies the same
+subject before replacing credentials, without changing settings. `tau provider
+logout NAME` attempts remote refresh-token revocation, clears local tokens, and
+retains the account/client mapping for later login. If remote revocation is not
+confirmed, Tau says so; disconnect the app in ChatGPT Settings if necessary.
+`remove` instead deletes the local profile and credential record.
+
+If sign-in succeeds without plan permission, add retains the disabled
+registration without publishing models. Repeat `tau provider add chatgpt-plan`
+with that same name to request permission and choose a model. The saved
+registration is reused rather than silently allocating another client. A stable
+opaque host identifier lives in the provider extension's non-secret state;
+tokens and verified identity live only in its separate `chatgpt_plan` Secret
+slot (`chatgpt-plan.json`).
+An identity-only grant without offline access is retained even when no refresh
+token is issued; it cannot authorize plan inference.
+
+Before inference, an expiring access token is renewed using its issued client
+ID and the public API resource. A per-credential OS lock coordinates refresh
+across processes sharing the same instance/Secret scope; read, exchange and
+publication happen while holding it. Waiting is bounded and cancelable. Once
+exchange starts, the retained worker saves the replacement even if its prompt
+is canceled. CAS prevents a stale worker from overwriting a competing removal.
+A process crash releases the lock, but cannot prove whether an unsaved refresh
+was consumed: the next owner reloads and lets the server validate the saved
+token. A terminal refresh rejection clears tokens, retaining registration;
+an ambiguous failure preserves credentials and suppresses that generation in
+the running process. Sign in again to recover; there is no exactly-once claim.
+
+Inference uses only public `/v1/responses` over HTTP/SSE, `store:false`,
+`stream:true`, and complete local history. Local Function tools appear in a
+developer `additional_tools` input item. System-role history becomes developer
+history; admitted opaque replay keeps its exact JSON. This initial adapter
+supports text, reasoning and local Function tools, not hosted/custom tools,
+image/file inputs, private Codex image generation, WebSocket continuation, or
+native provider compaction. Standalone compaction uses Tau's local-summary
+route. Unsupported output-limit, cache-retention and sampling controls are not
+sent.
+
+Only `response.completed` succeeds. Incomplete responses, streamed failures,
+`response.done`, `[DONE]` and premature EOF do not count as successful inference.
+**This provider does not automatically replay failed inference requests.**
+Explicit later user requests remain possible. This differs from the existing
+providers' retry scheduler; token renewal before inference is not an inference
+replay. Tau neither switches accounts nor silently chooses another billing path.
+ChatGPT plan/account/workspace policy and shared usage limits still apply;
+catalog visibility is not proof of entitlement or unlimited usage. Review usage
+and any separately enabled credits in ChatGPT Settings → Usage.
+
+The implementation follows OpenAI's [registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in),
+[accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions),
+[models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations),
+checked October 2, 2026. Validation is offline and loopback-only; no live account
+sign-in, subscription entitlement or live inference has been verified.
+
 ## Native Grok
 
 `tau provider add grok` runs device authorization with the public xAI issuer,

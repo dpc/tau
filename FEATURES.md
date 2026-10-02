@@ -177,6 +177,11 @@ and [external-message architecture](specs/ARCH-external-message-boundary.md).
 ## Providers and model controls
 
 The bundled provider extension supports ChatGPT/Codex accounts,
+and a separate `chatgpt-plan` Sign in with ChatGPT route using issued OAuth
+registrations, account-specific model selection and public Responses/SSE.
+The plan route keeps complete client history and never silently replays failed
+inference or falls back to API billing. Legacy Codex behavior is unchanged.
+It also supports
 OpenAI-compatible Chat Completions endpoints, generic public Responses
 endpoints, OpenRouter profiles, and native Grok device-OAuth profiles. Grok uses
 public xAI Responses with a setup-time model snapshot, process-local refresh and

@@ -367,6 +367,23 @@ fn run_loopback_selected_attempt_with_cancel(
     response: &str,
     is_canceled: &mut impl FnMut() -> bool,
 ) -> (PromptAttemptOutcome, serde_json::Value) {
+    run_loopback_route(
+        prompt,
+        model,
+        grok.map_or(Route::Generic, Route::Grok),
+        response,
+        is_canceled,
+    )
+}
+
+/// Exercise an exact provider policy over one finite loopback response.
+fn run_loopback_route(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &ResponsesModel,
+    route: Route<'_>,
+    response: &str,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> (PromptAttemptOutcome, serde_json::Value) {
     use path_std_io::Write as _;
 
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -399,7 +416,7 @@ fn run_loopback_selected_attempt_with_cancel(
         prompt,
         &provider,
         model,
-        grok,
+        route,
         false,
         &mut writer,
         is_canceled,
@@ -407,6 +424,62 @@ fn run_loopback_selected_attempt_with_cancel(
         tau_proto::ProviderAttempt::ONE,
     );
     (outcome, server.join().expect("loopback server"))
+}
+
+/// A plan-sharing response must reach canonical completion; EOF, streamed
+/// failures and incomplete output never authorize retry, fallback or success.
+#[test]
+fn chatgpt_plan_requires_completed_and_never_returns_inference_retry() {
+    let prompt = crate::openai_tests::prompt();
+    let model: ResponsesModel =
+        serde_json::from_value(serde_json::json!({"id":"test-model"})).expect("model");
+    for terminal in [
+        "response.completed",
+        "response.done",
+        "response.incomplete",
+        "response.failed",
+        "eof",
+        "done-sentinel",
+    ] {
+        let body = if terminal == "done-sentinel" {
+            "data: [DONE]\n\n".to_owned()
+        } else if terminal == "eof" {
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\n".to_owned()
+        } else {
+            format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "type":terminal,
+                    "response":{"id":"r","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}],
+                        "incomplete_details":{"reason":"max_output_tokens"},
+                        "error":{"code":"subscription_sharing_usage_limit_exceeded"}}
+                })
+            )
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (outcome, wire) =
+            run_loopback_route(&prompt, &model, Route::ChatGptPlan, &response, &mut || {
+                false
+            });
+        assert_eq!(wire["store"], false);
+        assert!(wire.get("max_output_tokens").is_none());
+        let finished = match outcome {
+            PromptAttemptOutcome::Finished(finished)
+            | PromptAttemptOutcome::Terminal { finished, .. } => finished,
+            _ => panic!("{terminal} must finish exactly this attempt without retry"),
+        };
+        assert_eq!(
+            finished.stop_reason == tau_proto::ProviderStopReason::EndTurn,
+            terminal == "response.completed",
+            "{terminal}"
+        );
+        if terminal != "response.completed" {
+            assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
+        }
+    }
 }
 
 /// Consume the finite Content-Length request shape emitted by the loopback

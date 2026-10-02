@@ -12,6 +12,42 @@ use tau_config::provider_settings::ProviderCredentialReference;
 use super::*;
 use crate::credential_record::ApiKeyCredential;
 
+/// Authentication may not replace a profile added or edited during the browser
+/// wait, nor publish its new Secret before detecting that settings race.
+#[test]
+fn setup_snapshot_publication_rejects_changed_or_new_profile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let absent = store.snapshot(&extension()).expect("empty snapshot");
+    store.apply(&plan()).expect("concurrent addition");
+    assert!(
+        store
+            .apply_to_snapshot(&replacement_plan(), ProfileTarget::State, &absent)
+            .is_err()
+    );
+    let original = store.snapshot(&extension()).expect("initial snapshot");
+    store
+        .apply(&replacement_plan())
+        .expect("concurrent replacement");
+    let changed = store.snapshot(&extension()).expect("changed snapshot");
+    assert!(
+        store
+            .apply_to_snapshot(&plan(), ProfileTarget::State, &original)
+            .is_err()
+    );
+    let final_state = store
+        .snapshot(&extension())
+        .expect("unchanged after rejection");
+    assert_eq!(
+        final_state.profiles[0].contents,
+        changed.profiles[0].contents
+    );
+    assert_eq!(final_state.credentials, changed.credentials);
+    store
+        .apply_to_snapshot(&replacement_plan(), ProfileTarget::State, &changed)
+        .expect("unchanged candidate allowed");
+}
+
 /// Native logout removes only the stable Grok Secret; rename and a config
 /// symlink keep their bytes and identity, and later login can republish
 /// locally.

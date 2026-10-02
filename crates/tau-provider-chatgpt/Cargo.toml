@@ -1,0 +1,32 @@
+[package]
+name = "dpc-tau-provider-chatgpt"
+version = "0.2.1"
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "tau_provider_chatgpt"
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+jsonwebtoken.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tau-proto.workspace = true
+tau-provider.workspace = true
+tau-provider-responses.workspace = true
+tokio.workspace = true
+url.workspace = true

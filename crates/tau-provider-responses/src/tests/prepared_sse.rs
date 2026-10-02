@@ -1,9 +1,71 @@
 //! Oracles for the provider-neutral pre-lowered SSE boundary.
 
+use serde_json::value::RawValue;
 use tokio::net::TcpListener as AsyncTcpListener;
 
 use super::*;
 use crate::cache_diagnostic::tests::collect;
+
+/// Account-bound adapters can disable hidden transport replay while ordinary
+/// generic and other prepared routes retain their previous client policy.
+#[test]
+fn prepared_transport_retry_policy_is_explicit_and_not_sent() {
+    let raw = RawValue::from_string(r#"{"model":"fixture","input":[],"stream":true}"#.into())
+        .expect("raw");
+    let ordinary = PreparedSseRequest::from_json(raw.clone()).expect("ordinary");
+    assert!(!ordinary.without_transport_retries);
+    let restricted = PreparedSseRequest::from_json(raw)
+        .expect("restricted")
+        .without_transport_retries()
+        .with_required_completed_event();
+    assert!(restricted.without_transport_retries);
+    assert!(restricted.require_response_completed);
+    assert_eq!(ordinary.json().get(), restricted.json().get());
+}
+
+/// Restricted plan routes must not confuse done aliases or partial output with
+/// canonical success, while generic Responses retains its existing behavior.
+#[test]
+fn required_completed_event_rejects_done_and_error_terminals() {
+    for terminal in [
+        "response.completed",
+        "response.done",
+        "response.failed",
+        "response.incomplete",
+    ] {
+        let mut state = State {
+            require_response_completed: true,
+            non_retryable_incomplete_reasons: &["max_output_tokens"],
+            ..Default::default()
+        };
+        let event = serde_json::json!({
+            "type":terminal,
+            "response":{"id":"response-fixture","output":[],
+                "incomplete_details":{"reason":"max_output_tokens"},
+                "error":{"code":"subscription_sharing_usage_limit_exceeded"}}
+        });
+        let result = state.apply_event(&event.to_string());
+        match terminal {
+            "response.completed" => assert_eq!(state.terminal, Some(TerminalKind::Completed)),
+            "response.incomplete" => {
+                assert!(result.is_ok());
+                assert_eq!(
+                    state.terminal,
+                    Some(TerminalKind::NonRetryableIncomplete("max_output_tokens"))
+                );
+            }
+            _ => {
+                assert!(result.is_err());
+                assert_eq!(state.terminal, None);
+            }
+        }
+    }
+    let mut generic = State::default();
+    generic
+        .apply_event(r#"{"type":"response.done","response":{"output":[]}}"#)
+        .expect("legacy generic alias");
+    assert_eq!(generic.terminal, Some(TerminalKind::Completed));
+}
 
 /// Grok's prepared-only limit policy never changes ordinary generic attempts.
 #[test]

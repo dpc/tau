@@ -173,6 +173,14 @@ pub(crate) struct SetupStore {
 }
 
 impl SetupStore {
+    /// Resolve the same non-secret per-instance root supplied by Configure.
+    pub(crate) fn extension_runtime_root(
+        &self,
+        instance: &tau_proto::ExtensionName,
+    ) -> path_std_io::Result<PathBuf> {
+        tau_config::settings::extension_state_dir_of(&self.state_dir, instance.as_str())
+            .map_err(path_std_io::Error::other)
+    }
     /// Opens the default user-state setup store.
     pub(crate) fn open_default() -> path_std_io::Result<Self> {
         let dirs = TauDirs::default();
@@ -291,6 +299,28 @@ impl SetupStore {
         plan: &ProviderSetupPlan,
         target: ProfileTarget,
     ) -> path_std_io::Result<Option<PathBuf>> {
+        self.apply_to_inner(plan, target, None)
+    }
+
+    /// Publish an interactive registration only while its original profile
+    /// selection remains unchanged, including an originally absent profile.
+    pub(crate) fn apply_to_snapshot(
+        &self,
+        plan: &ProviderSetupPlan,
+        target: ProfileTarget,
+        snapshot: &SetupSnapshot,
+    ) -> path_std_io::Result<Option<PathBuf>> {
+        self.apply_to_inner(plan, target, Some(snapshot))
+    }
+
+    /// Common transaction; optional snapshot comparison occurs under the same
+    /// settings lock as Secret and profile publication.
+    fn apply_to_inner(
+        &self,
+        plan: &ProviderSetupPlan,
+        target: ProfileTarget,
+        expected: Option<&SetupSnapshot>,
+    ) -> path_std_io::Result<Option<PathBuf>> {
         let settings_root = tau_config::settings::extension_provider_settings_dir_of(
             &self.state_dir,
             plan.extension_instance.as_str(),
@@ -311,6 +341,28 @@ impl SetupStore {
                     "provider settings directory disappeared before locking",
                 )
             })?;
+        if let Some(expected) = expected {
+            let current = self.settings_files_unlocked(&plan.extension_instance)?;
+            let previous = expected
+                .profiles
+                .iter()
+                .find(|profile| profile.provider == plan.provider);
+            let current = current
+                .iter()
+                .find(|profile| profile.provider == plan.provider);
+            let unchanged = match (previous, current) {
+                (None, None) => true,
+                (Some(previous), Some(current)) => {
+                    previous.source == current.source && previous.contents == current.contents
+                }
+                _ => false,
+            };
+            if !unchanged {
+                return Err(path_std_io::Error::other(
+                    "provider profile changed during authentication; nothing was replaced",
+                ));
+            }
+        }
         let settings_rel = PathBuf::from(format!("{}.json", plan.provider));
         let config_root = tau_config::settings::extension_provider_config_dir_of(
             &self.config_dir,

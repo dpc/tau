@@ -1942,7 +1942,9 @@ fn local_summary_compaction_omission_and_empty_object_match_for_all_provider_kin
             BuiltinProviderProfile::Responses(provider) => {
                 responses::models_for_provider(&provider_name, &provider)
             }
-            BuiltinProviderProfile::Chatgpt(_) | BuiltinProviderProfile::Grok(_) => {
+            BuiltinProviderProfile::Chatgpt(_)
+            | BuiltinProviderProfile::Grok(_)
+            | BuiltinProviderProfile::ChatgptPlan(_) => {
                 panic!("unexpected profile kind")
             }
         };
@@ -2793,6 +2795,7 @@ fn provider_kind_catalog_has_exact_canonical_tokens() {
             .collect::<Vec<_>>(),
         [
             "chatgpt",
+            "chatgpt-plan",
             "grok",
             "chat-completions",
             "responses",

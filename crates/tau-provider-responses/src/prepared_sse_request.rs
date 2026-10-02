@@ -33,6 +33,13 @@ pub struct PreparedSseRequest {
     /// Adapter-selected terminal limits that must never enter automatic retry.
     #[serde(skip)]
     pub(super) non_retryable_incomplete_reasons: &'static [&'static str],
+    /// Reject legacy `response.done` success for routes requiring the canonical
+    /// `response.completed` terminal.
+    #[serde(skip)]
+    pub(super) require_response_completed: bool,
+    /// Disable hidden HTTP transport replay for account-bound paid requests.
+    #[serde(skip)]
+    pub(super) without_transport_retries: bool,
 }
 
 /// Content-free failure to construct a supported full-replay SSE request.
@@ -48,6 +55,18 @@ impl std::fmt::Display for PrepareSseRequestError {
 impl std::error::Error for PrepareSseRequestError {}
 
 impl PreparedSseRequest {
+    /// Disable reqwest transport retries without changing other adapters.
+    #[must_use]
+    pub fn without_transport_retries(mut self) -> Self {
+        self.without_transport_retries = true;
+        self
+    }
+    /// Require the canonical completed event without altering other adapters.
+    #[must_use]
+    pub fn with_required_completed_event(mut self) -> Self {
+        self.require_response_completed = true;
+        self
+    }
     /// Lower the ordinary generic request without changing its wire policy.
     ///
     /// Adapters can read the exact JSON, transform only their owned fields
@@ -130,6 +149,8 @@ impl PreparedSseRequest {
             input_items: input.len(),
             reasoning_selector,
             non_retryable_incomplete_reasons: &[],
+            require_response_completed: false,
+            without_transport_retries: false,
             body,
         })
     }

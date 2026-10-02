@@ -1650,6 +1650,9 @@ fn slot_repetition_text(slot: &Slot) -> (StreamRepetitionKey, String) {
 
 #[derive(Debug, Default)]
 struct State {
+    /// Selected adapters require canonical completion rather than the legacy
+    /// done alias; generic Responses preserves its existing acceptance.
+    require_response_completed: bool,
     /// Exact adapter-owned limit reasons with nonretryable partial-prose
     /// policy.
     non_retryable_incomplete_reasons: &'static [&'static str],
@@ -2078,6 +2081,9 @@ impl State {
     ) -> Result<bool, Error> {
         let event = decoded.value();
         self.debug_capture.record_event(event, data);
+        if self.require_response_completed && event["type"].as_str() == Some("response.done") {
+            return Err(Error::UnsupportedOutput);
+        }
         let qualifying_progress = match event["type"].as_str().unwrap_or("") {
             "response.output_item.added" => {
                 let index = output_index(event)?;
@@ -2384,6 +2390,9 @@ fn process_active_sse_lines(
         }
         if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
             if data == "[DONE]" {
+                if state.require_response_completed {
+                    return Err(Error::UnsupportedOutput);
+                }
                 state.terminalize(TerminalKind::Completed)?;
                 if let Some(trace) = private_trace.as_mut() {
                     trace.terminal();
@@ -2433,8 +2442,12 @@ async fn stream_sse(
     private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<State, (Error, AttemptProgress)> {
     let url = format!("{}/responses", config.base_url.trim_end_matches('/'));
-    let client = network
-        .client_for(&url)
+    let client =
+        if matches!(body, AttemptRequest::Prepared(request) if request.without_transport_retries) {
+            network.client_for_without_retries(&url)
+        } else {
+            network.client_for(&url)
+        }
         .map_err(|error| (Error::Outbound(error), State::default().progress()))?;
     let serialization_started = private_trace::started(private_trace);
     let serialized =
@@ -2520,6 +2533,10 @@ async fn stream_sse(
     }
     let mut response = response;
     let mut state = State {
+        require_response_completed: match body {
+            AttemptRequest::Standard(_) => false,
+            AttemptRequest::Prepared(request) => request.require_response_completed,
+        },
         non_retryable_incomplete_reasons: match body {
             AttemptRequest::Standard(_) => &[],
             AttemptRequest::Prepared(request) => request.non_retryable_incomplete_reasons,

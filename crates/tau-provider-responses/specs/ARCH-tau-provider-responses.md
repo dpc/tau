@@ -46,6 +46,14 @@ The seam rejects model/transport mismatches and response-id chaining. It reuses
 the ordinary finite SSE transport, parser, terminal classification, capture and
 accounting without changing generic or private Codex defaults.
 
+A prepared ChatGPT plan-sharing request additionally requires
+`response.completed`: legacy `response.done` and `[DONE]` aliases reject.
+It also disables transport-level HTTP retries through an explicit prepared
+request policy, without changing other adapters' client defaults.
+The owning extension treats all plan-route failures as Error terminals, while
+generic Responses and other prepared adapters retain their existing terminal
+and retry behavior.
+
 A prepared-request adapter may additionally select exact nested incomplete
 reasons that terminate with `Error`, retaining only validated assistant prose,
 terminal usage and response identity. This policy never retains ToolCall,

@@ -5,14 +5,11 @@ use std::error::Error;
 use crate::chat_completions::{
     PromptAttemptOutcome as ChatCompletionsAttemptOutcome, run_prompt_attempt,
 };
-use crate::responses::{
-    self, PromptAttemptOutcome as ResponsesAttemptOutcome,
-    run_prompt_attempt as run_responses_prompt_attempt,
-};
+use crate::responses::{self, PromptAttemptOutcome as ResponsesAttemptOutcome};
 use crate::{
     CancellationFinishPolicy, ChatCompletionsModel, ChatCompletionsProvider,
-    ChatGptPromptExecutionContext, GrokModel, PromptAttemptRetry, ProviderReportSink,
-    ResponsesModel, ResponsesProvider, TurnAbort, chat_completions_backend, finish_backend_attempt,
+    ChatGptPromptExecutionContext, PromptAttemptRetry, ProviderReportSink, ResponsesModel,
+    ResponsesProvider, TurnAbort, chat_completions_backend, finish_backend_attempt,
     finish_canceled_attempt, finish_retry_attempt, finish_terminal_attempt, observed_backend,
     responses_backend,
 };
@@ -115,7 +112,7 @@ pub(crate) fn handle_public_responses_backend<R, S: ProviderReportSink>(
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,
     model: &ResponsesModel,
-    grok: Option<&GrokModel>,
+    route: responses::Route<'_>,
     writer: &mut S,
     retry_ctx: &mut R,
     context: ChatGptPromptExecutionContext<'_>,
@@ -133,8 +130,19 @@ where
             context.logical_attempt.provider_attempt(),
         );
     }
-    let outcome = if let Some(grok) = grok {
-        responses::run_grok_prompt_attempt(
+    let outcome = match route {
+        responses::Route::Generic => responses::run_prompt_attempt(
+            agent_prompt_id,
+            prompt,
+            provider,
+            model,
+            context.debug_provider_requests,
+            writer,
+            &mut || TurnAbort::is_aborted(retry_ctx),
+            context.runtime.network(),
+            context.logical_attempt.provider_attempt(),
+        ),
+        responses::Route::Grok(grok) => responses::run_grok_prompt_attempt(
             agent_prompt_id,
             prompt,
             provider,
@@ -145,19 +153,19 @@ where
             &mut || TurnAbort::is_aborted(retry_ctx),
             context.runtime.network(),
             context.logical_attempt.provider_attempt(),
-        )
-    } else {
-        run_responses_prompt_attempt(
+        ),
+        responses::Route::ChatGptPlan => responses::run_selected_prompt_attempt(
             agent_prompt_id,
             prompt,
             provider,
             model,
+            route,
             context.debug_provider_requests,
             writer,
             &mut || TurnAbort::is_aborted(retry_ctx),
             context.runtime.network(),
             context.logical_attempt.provider_attempt(),
-        )
+        ),
     };
     match outcome {
         ResponsesAttemptOutcome::Finished(finished) => finish_backend_attempt(
@@ -203,7 +211,8 @@ where
                 ),
             )?;
             if let Some(retry) = retry.as_mut() {
-                retry.canonical_unauthorized = grok.is_some() && canonical_unauthorized;
+                retry.canonical_unauthorized =
+                    matches!(route, responses::Route::Grok(_)) && canonical_unauthorized;
             }
             Ok(retry)
         }
@@ -222,4 +231,40 @@ where
             context.logical_attempt.provider_attempt(),
         ),
     }
+}
+
+/// Credential failures stop the selected ChatGPT request rather than entering
+/// a generic retry loop or changing accounts/billing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finish_chatgpt_credential_failure<R: TurnAbort, S: ProviderReportSink>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ResponsesProvider,
+    reason: &str,
+    writer: &mut S,
+    retry_ctx: &mut R,
+    context: ChatGptPromptExecutionContext<'_>,
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
+    if TurnAbort::is_aborted(retry_ctx) {
+        return finish_canceled_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            false,
+            context.prior_backend.cloned(),
+            context.logical_attempt.provider_attempt(),
+        );
+    }
+    let ResponsesAttemptOutcome::Terminal { mut finished, .. } = responses::invalid_compaction(
+        agent_prompt_id,
+        prompt,
+        provider,
+        reason,
+        false,
+        context.logical_attempt.provider_attempt(),
+    ) else {
+        unreachable!("explicit request rejection is terminal")
+    };
+    finished.backend = observed_backend(finished.backend.take(), context.prior_backend);
+    finish_terminal_attempt(agent_prompt_id, prompt, writer, *finished, false)
 }

@@ -187,6 +187,9 @@ fn compatibility_route_snapshot(
         Some(PromptBackend::Grok { .. }) => {
             panic!("Grok is outside the generic compatibility fixture")
         }
+        Some(PromptBackend::ChatGptPlan { .. }) => {
+            panic!("ChatGPT plan is outside generic compatibility fixture")
+        }
         Some(PromptBackend::Unavailable { .. }) => serde_json::json!({
             "requested": requested,
             "backend": "unavailable",

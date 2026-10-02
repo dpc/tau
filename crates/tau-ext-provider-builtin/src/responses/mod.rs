@@ -25,6 +25,17 @@ use tau_provider_grok::request::Request as GrokRequest;
 use self::sampling::ResponsesResponseSampler;
 use crate::OpenAiPromptCacheKey;
 
+/// Disjoint request policy selected by the owning provider family.
+#[derive(Clone, Copy)]
+pub(crate) enum Route<'a> {
+    /// Existing generic API-key Responses behavior.
+    Generic,
+    /// Native xAI route with its own model capabilities.
+    Grok(&'a crate::GrokModel),
+    /// Restricted public ChatGPT plan-sharing route.
+    ChatGptPlan,
+}
+
 #[cfg(test)]
 thread_local! {
     /// Values observed at the actual adapter call seam in the current test.
@@ -280,7 +291,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
         prompt,
         provider,
         model,
-        None,
+        Route::Generic,
         debug_provider_requests,
         writer,
         is_canceled,
@@ -308,7 +319,7 @@ pub(crate) fn run_grok_prompt_attempt<S: ProviderReportSink>(
         prompt,
         provider,
         model,
-        Some(grok),
+        Route::Grok(grok),
         debug_provider_requests,
         writer,
         is_canceled,
@@ -320,18 +331,23 @@ pub(crate) fn run_grok_prompt_attempt<S: ProviderReportSink>(
 /// Lower once for the selected owner while sharing finite transport and output
 /// validation.
 #[allow(clippy::too_many_arguments)]
-fn run_selected_prompt_attempt<S: ProviderReportSink>(
+pub(crate) fn run_selected_prompt_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,
     model: &ResponsesModel,
-    grok: Option<&crate::GrokModel>,
+    route: Route<'_>,
     debug_provider_requests: bool,
     writer: &mut S,
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
+    let grok = match route {
+        Route::Grok(model) => Some(model),
+        _ => None,
+    };
+    let chatgpt_plan = matches!(route, Route::ChatGptPlan);
     if let Some(grok) = grok
         && prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
     {
@@ -380,11 +396,15 @@ fn run_selected_prompt_attempt<S: ProviderReportSink>(
     let config = tau_provider_responses::AttemptConfig {
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
-        max_output_tokens: attempt_output_tokens(
-            model.requested_output_tokens(provider.max_output_tokens),
-            summary_config,
-            compact_prompt.is_some(),
-        ),
+        max_output_tokens: if matches!(route, Route::ChatGptPlan) {
+            0
+        } else {
+            attempt_output_tokens(
+                model.requested_output_tokens(provider.max_output_tokens),
+                summary_config,
+                compact_prompt.is_some(),
+            )
+        },
         transport: provider.transport,
         prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
             OpenAiPromptCacheKey::Agent => match cache.options {
@@ -449,6 +469,23 @@ fn run_selected_prompt_attempt<S: ProviderReportSink>(
     } else {
         None
     };
+    let plan_prepared = if chatgpt_plan {
+        match tau_provider_chatgpt::request::lower(effective_prompt, &model) {
+            Ok(request) => Some(request),
+            Err(_) => {
+                return invalid_compaction(
+                    agent_prompt_id,
+                    prompt,
+                    provider,
+                    "ChatGPT plan request contains unsupported capabilities",
+                    false,
+                    provider_attempt,
+                );
+            }
+        }
+    } else {
+        None
+    };
     let outcome =
         forward_debug_capture_policy(debug_provider_requests, |debug_provider_requests| {
             let mut on_update = |update: tau_provider_responses::AttemptUpdate<'_>| match update {
@@ -464,12 +501,15 @@ fn run_selected_prompt_attempt<S: ProviderReportSink>(
             FORWARDED_DIAGNOSTIC_OPERATION.with(|observed| {
                 observed.borrow_mut().push(effective_prompt.operation);
             });
-            if let Some(request) = &prepared {
+            if let Some(request) = plan_prepared
+                .as_ref()
+                .or_else(|| prepared.as_ref().map(GrokRequest::prepared))
+            {
                 tau_provider_responses::run_prepared_sse_attempt_with_diagnostics(
                     effective_prompt,
                     &config,
                     &model,
-                    request.prepared(),
+                    request,
                     debug_provider_requests,
                     provider.cache_diagnostics,
                     Some(provider_attempt),
@@ -549,6 +589,19 @@ fn run_selected_prompt_attempt<S: ProviderReportSink>(
             progress,
             canonical_unauthorized,
         } => {
+            if chatgpt_plan {
+                return invalid_compaction(
+                    agent_prompt_id,
+                    prompt,
+                    provider,
+                    &format!(
+                        "ChatGPT plan request stopped: {}. Check account permission and ChatGPT Settings > Usage; no billing fallback or automatic retry was used.",
+                        decision.class.public_reason()
+                    ),
+                    backend_reached,
+                    provider_attempt,
+                );
+            }
             if summary_retry_is_terminal(compact_prompt.is_some(), &progress) {
                 return invalid_compaction(
                     agent_prompt_id,
@@ -572,14 +625,19 @@ fn run_selected_prompt_attempt<S: ProviderReportSink>(
                 backend_reached,
             }
         }
-        tau_provider_responses::AttemptOutcome::Terminal(failure) => terminal_failure(
-            agent_prompt_id,
-            prompt,
-            provider,
-            failure,
-            backend_reached,
-            provider_attempt,
-        ),
+        tau_provider_responses::AttemptOutcome::Terminal(mut failure) => {
+            if chatgpt_plan {
+                failure.stop_reason = tau_proto::ProviderStopReason::Error;
+            }
+            terminal_failure(
+                agent_prompt_id,
+                prompt,
+                provider,
+                failure,
+                backend_reached,
+                provider_attempt,
+            )
+        }
     }
 }
 
@@ -780,7 +838,7 @@ fn validate_responses_narrative_output(
     )
 }
 
-fn invalid_compaction(
+pub(crate) fn invalid_compaction(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,

@@ -93,6 +93,8 @@ pub enum ProviderCredentialSlot {
     OAuth,
     /// Native Grok OAuth credential record.
     GrokOAuth,
+    /// Public Sign in with ChatGPT issued registration and renewable session.
+    ChatGptPlan,
     /// API-key credential record.
     ApiKey,
 }
@@ -100,8 +102,13 @@ pub enum ProviderCredentialSlot {
 impl ProviderCredentialSlot {
     /// Return every credential slot owned by the built-in provider schema.
     #[must_use]
-    pub fn all() -> [Self; 3] {
-        [Self::OAuth, Self::GrokOAuth, Self::ApiKey]
+    pub fn all() -> [Self; 4] {
+        [
+            Self::OAuth,
+            Self::GrokOAuth,
+            Self::ChatGptPlan,
+            Self::ApiKey,
+        ]
     }
 
     /// Returns the canonical Secret-scope path for this credential identity and
@@ -111,6 +118,7 @@ impl ProviderCredentialSlot {
         let file = match self {
             Self::OAuth => "oauth.json",
             Self::GrokOAuth => "grok-oauth.json",
+            Self::ChatGptPlan => "chatgpt-plan.json",
             Self::ApiKey => "api-key.json",
         };
         ExtensionDataPath::new(format!("providers/{identity}/{file}"))
@@ -120,6 +128,7 @@ impl ProviderCredentialSlot {
         match self {
             Self::OAuth => "oauth",
             Self::GrokOAuth => "grok_oauth",
+            Self::ChatGptPlan => "chatgpt_plan",
             Self::ApiKey => "api_key",
         }
     }
@@ -349,6 +358,7 @@ pub fn parse_provider_credential(
     let slot = match kind {
         "oauth" => ProviderCredentialSlot::OAuth,
         "grok_oauth" => ProviderCredentialSlot::GrokOAuth,
+        "chatgpt_plan" => ProviderCredentialSlot::ChatGptPlan,
         "api_key" => ProviderCredentialSlot::ApiKey,
         _ => {
             return Err(invalid(

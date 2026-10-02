@@ -34,6 +34,7 @@ PUBLICATION_ORDER = [
     "dpc-tau-provider-chat-completions",
     "dpc-tau-provider-codex",
     "dpc-tau-provider-responses",
+    "dpc-tau-provider-chatgpt",
     "dpc-tau-provider-grok",
     "dpc-tau-session-inspect",
     "dpc-tau-cli-term",

@@ -3644,7 +3644,7 @@ fn later_pre_egress_attempt_cancellation_retains_prior_backend() {
             &prompt,
             &provider,
             &model,
-            None,
+            responses::Route::Generic,
             &mut writer,
             &mut retry_ctx,
             ChatGptPromptExecutionContext {

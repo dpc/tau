@@ -6,6 +6,44 @@ advertise: false
 
 # Tau provider-builtin extension self-knowledge
 
+## Public Sign in with ChatGPT
+
+`tau provider add chatgpt-plan` is the separate public Responses/SSE plan-sharing
+route. It requires persistent `--state` or `--config` setup, not `--output -`,
+so a validated issued registration survives catalog failure or canceled model
+selection. It is
+not legacy `chatgpt`/Codex and not generic API-key `responses`. It opens a
+real loopback callback listener, validates OIDC signatures and transaction
+bindings, saves the issued account/workspace client, requires the returned direct
+plan scope, and lets the user choose an account-catalog model. Missing context
+limits require explicit entry. Credentials never migrate from Codex.
+
+Use separate provider names for accounts/workspaces. `login NAME` reauthorizes
+the same registration without changing settings. `logout NAME` attempts remote
+renewable-session revocation and clears local tokens while retaining the
+registration; unconfirmed revocation is reported. Disabled plan grants are
+retained without models; repeat add with the same name to grant permission and
+choose models. Restart after model-settings changes.
+
+Refresh runs in retained prompt workers under a per-credential crash-released OS
+lock plus main-loop Secret read/CAS/reload. The lock domain is the same state
+root/instance as Secret; profile aliases of one reference share it. Lock waits
+are bounded/cancelable, but accepted rotations are saved even after cancellation.
+An ambiguous exchange failure suppresses that generation in the running process:
+sign in again rather than expecting background retries. After a crash the next
+owner reloads and asks the server to validate the saved token; no exactly-once or
+crash-safe remote exchange guarantee exists.
+
+The initial surface is text/reasoning/local Function tools, full client history,
+`store:false`, `stream:true`, and developer `additional_tools`. No hosted/custom
+tools, image generation, WebSocket continuation, native compaction or paid-key
+fallback is exposed. Only `response.completed` succeeds. Inference failures are
+terminal, not automatically replayed; explicit later requests remain possible.
+This new-provider policy does not change existing provider retries. Local-summary
+compaction remains available. Model catalog visibility does not prove plan
+entitlement, available usage, or absence of separately enabled credits.
+See `docs/providers.md`; validation is offline/loopback, not live account testing.
+
 ## Native Grok
 
 Use `tau provider add grok` for native device OAuth and a setup-time catalog
@@ -174,8 +212,8 @@ replaces config symlinks, or creates a state shadow. For a renamed instance use
 for a config profile with absent or expired OAuth; noninteractive use and affected
 list rows show that exact command.
 
-`tau provider add [KIND]` accepts `chatgpt`, `chat-completions`, `responses`,
-or `openrouter`; no kind opens a picker. API-key setup explicitly selects masked
+`tau provider add [KIND]` accepts `chatgpt`, `chatgpt-plan`, `grok`,
+`chat-completions`, `responses`, or `openrouter`; no kind opens a picker. API-key setup explicitly selects masked
 direct entry, a configured named secret, or keyless mode where supported.
 Named-secret values are materialized only into the instance's canonical Secret
 record. Selecting an existing configured name remains eager: setup refuses an
@@ -194,6 +232,9 @@ snapshot.
 Supported profile kinds:
 
 - `chatgpt` — ChatGPT/Codex OAuth credentials for the Responses backend.
+- `chatgpt_plan` — separate public Responses/SSE plan-sharing registration; CLI
+  spelling `chatgpt-plan`, never legacy Codex credentials.
+- `grok` — native Grok subscription OAuth.
 - `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, typed API-key credential, model list, max output tokens, extra body, and compatibility options. The provider-kind picker labels it `OpenAI-compatible Chat Completions`.
 - `openrouter` — OpenRouter profile with a typed API-key credential and either explicit or fetched models.
 - `responses` — generic public Responses endpoint with base URL, optional API

@@ -24,6 +24,7 @@ members = [
   "crates/tau-proto",
   "crates/tau-provider",
   "crates/tau-provider-chat-completions",
+  "crates/tau-provider-chatgpt",
   "crates/tau-provider-codex",
   "crates/tau-provider-grok",
   "crates/tau-provider-responses",
@@ -89,6 +90,7 @@ tau-harness-tools = { package = "dpc-tau-harness-tools", path = "crates/tau-harn
 tau-proto = { package = "dpc-tau-proto", path = "crates/tau-proto", version = "=0.10.0" }
 tau-provider = { package = "dpc-tau-provider", path = "crates/tau-provider", version = "=0.2.1" }
 tau-provider-chat-completions = { package = "dpc-tau-provider-chat-completions", path = "crates/tau-provider-chat-completions", version = "=0.2.1" }
+tau-provider-chatgpt = { package = "dpc-tau-provider-chatgpt", path = "crates/tau-provider-chatgpt", version = "=0.2.1" }
 tau-provider-codex = { package = "dpc-tau-provider-codex", path = "crates/tau-provider-codex", version = "=0.2.1" }
 tau-provider-grok = { package = "dpc-tau-provider-grok", path = "crates/tau-provider-grok", version = "=0.2.1" }
 tau-provider-responses = { package = "dpc-tau-provider-responses", path = "crates/tau-provider-responses", version = "=0.2.1" }
@@ -155,6 +157,9 @@ indexmap = { version = "2", default-features = false, features = ["serde"] }
 ipnet = { version = "2", default-features = false, features = ["std"] }
 jiff = "0.2"
 json5 = { version = "0.4", default-features = false }
+jsonwebtoken = { version = "11.1", default-features = false, features = [
+  "aws_lc_rs",
+] }
 libc = { version = "0.2", default-features = false }
 listenfd = { version = "1.0.2", default-features = false }
 lru = { version = "0.18", default-features = false }

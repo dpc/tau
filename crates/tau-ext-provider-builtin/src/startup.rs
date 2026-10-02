@@ -14,7 +14,7 @@ use crate::{
     OAuthRefreshRejectionCache, PrewarmSupervisor, PromptCredentialAdmissionState,
     ProviderConfigurationState, ProviderDiagnosticsState, ProviderExtension, ProviderRuntime,
     QuotaCoordinator, RuntimeExecutors, RuntimeStartup, WorkerMessage, WorkerQueueState,
-    models_for_profiles, run_provider_loop, validate_configure_settings,
+    run_provider_loop, validate_configure_settings,
 };
 
 /// Runs the extension with injected executors and settings.
@@ -50,7 +50,7 @@ where
                 Ok(tau_proto::InspectionComplete {
                     tools: crate::image_tools::declarations(&profiles),
                     providers: vec![tau_proto::InspectionProviderModels {
-                        models: models_for_profiles(&profiles),
+                        models: crate::provider_catalog::models_for_inspection(&profiles),
                     }],
                     ..Default::default()
                 })
@@ -106,6 +106,7 @@ where
     let runtime = ProviderRuntime {
         images: ImageTools::default(),
         configuration: ProviderConfigurationState {
+            state_dir: None,
             extension_instance: None,
             startup_responses_modes,
         },
