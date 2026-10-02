@@ -1462,13 +1462,13 @@ fn built_in_prompts_place_payload_envelope_provenance_notice_between_tools_and_s
             BUILT_IN_SYSTEM_TEMPLATE_NAME,
             "## Tool calling",
             "## Skills and skill system",
-            "b8407a259b285d2b0da86c499dbd15a742f7638b47a217f13f4f9454540bbb2e",
+            "82f895606f78e2a4eb115c7885e84a122ec428bb65d96f1433ac69f38ecb96da",
         ),
         (
             BIG_SYSTEM_TEMPLATE_NAME,
             "## Tool Use",
             "## Skills",
-            "0bdda577bb0c43c0bfaead821209b3560d01adf9d43a88d12a565c770db50ca8",
+            "f0436c130d781435dcacbbe4482bb45ac21864982378d149e0112a5948e72357",
         ),
     ] {
         let prompt = build_system_prompt_with_tool_template_context(
@@ -1728,8 +1728,12 @@ fn prompt_capabilities_are_deterministic() {
 /// an explicit limit and neither template permits dependent calls to race.
 #[test]
 fn built_in_prompts_render_effective_parallel_tool_capability() {
-    const INDEPENDENT_CALLS: &str = "When you already know you need multiple independent tool calls, emit them in the same response so they run in parallel.";
-    const DEPENDENT_CALLS: &str = "Do not parallelize dependent calls";
+    const INDEPENDENT_CALLS: &str = "Batch independent tool calls in the same response by default";
+    const SAFETY_GUIDANCE: &[&str] = &[
+        "Group needed calls whose inputs are already known",
+        "including independent reads, status updates, and messages",
+        "Run dependent or conflicting operations sequentially, respecting tool-specific restrictions",
+    ];
     const ONE_CALL_LIMIT: &str = "at most one tool call per model response";
 
     for template in [BUILT_IN_SYSTEM_PROMPT_TEMPLATE, BIG_SYSTEM_PROMPT_TEMPLATE] {
@@ -1753,11 +1757,13 @@ fn built_in_prompts_render_effective_parallel_tool_capability() {
         );
 
         assert_eq!(parallel.matches(INDEPENDENT_CALLS).count(), 1);
-        assert!(parallel.contains(DEPENDENT_CALLS));
+        for guidance in SAFETY_GUIDANCE {
+            assert_eq!(parallel.matches(guidance).count(), 1);
+            assert!(!serial.contains(guidance));
+        }
         assert!(!parallel.contains(ONE_CALL_LIMIT));
         assert_eq!(serial.matches(INDEPENDENT_CALLS).count(), 0);
         assert!(serial.contains(ONE_CALL_LIMIT));
-        assert!(!serial.contains(DEPENDENT_CALLS));
     }
 }
 

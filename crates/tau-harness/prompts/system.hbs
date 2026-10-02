@@ -29,7 +29,7 @@ Tau uses the canonical Markdown autolink `<tau-artifact:FULL_KEY>` to refer to i
 ## Tool calling
 
 {{#if capabilities.tools.parallel_calls}}
-You can call multiple tools in a single response and they will execute in parallel. When you already know you need multiple independent tool calls, emit them in the same response so they run in parallel. Do not parallelize dependent calls.
+Batch independent tool calls in the same response by default; Tau executes them in parallel. Group needed calls whose inputs are already known, including independent reads, status updates, and messages. Run dependent or conflicting operations sequentially, respecting tool-specific restrictions.
 {{else}}
 This provider route permits at most one tool call per model response. Do not emit multiple tool calls in the same response.
 {{/if}}
