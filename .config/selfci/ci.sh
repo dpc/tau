@@ -46,6 +46,11 @@ function job_lint() {
     selfci step fail
   fi
 
+  selfci step start "agent performance chart fixtures"
+  if ! python3 .agents/skills/tau-agent-performance/test_chart_performance.py; then
+    selfci step fail
+  fi
+
   selfci step start "native packaging unit tests"
   if ! python3 packaging/test_native.py; then
     selfci step fail

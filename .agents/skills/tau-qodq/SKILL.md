@@ -32,7 +32,10 @@ skill_dir=.agents/skills/tau-qodq
 
 The exact range is `[since, until)` in UTC, with millisecond precision.
 The default is the trailing fourteen days ending at the current UTC instant,
-not the previous midnight. The endpoint is fixed before scanning, so a long scan
+not the previous midnight. “Last two weeks” includes today's partial day and
+current partial bucket; do not round the endpoint down to midnight. The
+`tau-agent-performance` workflow follows the same current-moment convention.
+The endpoint is fixed before scanning, so a long scan
 does not move it. For reproducible bounded historical diagnostics, pass explicit
 `--since` and `--until` RFC3339 instants; neither needs to be a day boundary.
 An omitted `--since` means fourteen days before the selected endpoint.
