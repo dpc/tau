@@ -513,10 +513,14 @@ fn user_shell_context_modes_enforce_the_same_allowlist() {
 }
 
 /// Ensures denial happens before RecordIfMissing can create an empty cassette
-/// and before ReplayOnly can report missing or malformed VCR state.
+/// and before ReplayOnly can report missing or malformed VCR state, even when
+/// the denial legitimately includes `vcr` in the workdir.
 #[test]
 fn shell_allowlist_denial_never_opens_vcr_state() {
-    let workdir = TempDir::new().expect("workdir");
+    let workdir = tempfile::Builder::new()
+        .prefix("vcr-workdir-")
+        .tempdir()
+        .expect("workdir");
     let config: path_crate_config::ShellConfig = serde_json::from_value(serde_json::json!({
         "allowlist": [{
             "workdir": workdir.path().display().to_string(),
@@ -540,6 +544,12 @@ fn shell_allowlist_denial_never_opens_vcr_state() {
         invoke.tool_name = tau_proto::ToolName::new(SHELL_TOOL_NAME);
         invoke
     };
+    let denial =
+        world_after_shell_authorization(&mut invoke(), &config, None, workdir.path().to_path_buf())
+            .err()
+            .expect("policy denial without VCR");
+    assert!(denial.message.contains("denied by configured allowlist"));
+    assert!(denial.message.contains("vcr-workdir-"));
 
     let record_dir = TempDir::new().expect("record dir");
     let error = world_after_shell_authorization(
@@ -553,7 +563,7 @@ fn shell_allowlist_denial_never_opens_vcr_state() {
     )
     .err()
     .expect("policy denial precedes recording");
-    assert!(error.message.contains("denied by configured allowlist"));
+    assert_eq!(error.message, denial.message);
     assert!(
         std::fs::read_dir(record_dir.path())
             .expect("read record dir")
@@ -619,8 +629,16 @@ fn shell_allowlist_denial_never_opens_vcr_state() {
         )
         .err()
         .expect("policy denial precedes replay state");
-        assert!(error.message.contains("denied by configured allowlist"));
-        assert!(!error.message.contains("vcr"));
+        assert_eq!(error.message, denial.message);
+        let cassette = replay_dir.path().join("deny-before-vcr.yaml");
+        if malformed {
+            assert_eq!(
+                std::fs::read_to_string(cassette).expect("read unchanged cassette"),
+                "not: [valid",
+            );
+        } else {
+            assert!(!cassette.exists(), "denial must not create a cassette");
+        }
     }
 }
 /// Ensures the default overlay bypasses a deterministic hostile pager, while
