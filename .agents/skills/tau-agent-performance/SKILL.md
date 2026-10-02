@@ -32,9 +32,11 @@ Keep that script with the private artifacts for reproducibility.
 
 * Build one exact-model color map and reuse it for latency and throughput,
   across all accounts. Give model families stable hues and versions
-  distinguishable shades. Starting palette: Luna 5.6 `#7c3aed`, Luna 6
-  `#a855f7`; Sol 5.6 `#d97706`, Sol 6 `#f59e0b`, Sol 6.1 `#92400e`;
-  Astra 6 `#2563eb`; Terra 5.6 `#15803d`; Grok `#db2777`; Qwen `#0e7490`.
+  distinguishable shades: **Astra red, Sol green, Luna blue, Terra yellow**.
+  Starting palette: Astra 6 `#dc2626`; Sol 5.6 `#15803d`, Sol 6 `#65a30d`,
+  Sol 6.1 `#166534`; Luna 5.6 `#1e40af`, Luna 6 `#0284c7`;
+  Terra 5.6 `#a16207` (dark golden yellow for readability on white);
+  Grok `#be185d`; Qwen `#7c3aed`.
   Bind these colors to the actual recorded model strings. For new versions,
   extend the family's shades; for new families, choose a distinct hue.
   Family styling is presentation only: keep exact model identities and
@@ -45,7 +47,11 @@ Keep that script with the private artifacts for reproducibility.
   of account identity; use account labels only when that mapping is known,
   otherwise label the shape legend **Provider**.
 * Use two compact legends: **Model** with colored samples and exact model
-  names, and **Account** (or **Provider**) with neutral marker shapes. Reserve
+  names, and **Account** (or **Provider**) with neutral marker shapes. Order
+  model families **Astra → Sol → Terra → Luna**, then other families in stable
+  alphabetical order; keep versions in stable ascending order within each
+  family (compare numeric version components numerically). Reuse this order
+  in both charts. Reserve
   enough space to keep legends and labels readable without covering data.
 * Prefer logarithmic y axes when positive values span a wide range. Label
   latency **seconds (log scale)** and throughput **tokens/wall-second
