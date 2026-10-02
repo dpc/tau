@@ -4,7 +4,16 @@
 # CI still supplies derivation-specific workspace selection, LCOV, output,
 # format, and per-job cutoffs via CLI arguments where those differ between
 # jobs. CLI arguments take precedence over this file.
-default-excludes = ["benches/**", "examples/**", "tests/**"]
+# External cfg(test) modules lose their parent attribute during per-file scans.
+# Keep the production gate, debt report, and duplicate inventory on one scope.
+default-excludes = [
+  "**/*_tests.rs",
+  "**/tests.rs",
+  "**/tests/**",
+  "benches/**",
+  "examples/**",
+  "tests/**",
+]
 epsilon = 0.01
 missing = "pessimistic"
 sort = "crap"

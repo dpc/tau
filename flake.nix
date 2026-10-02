@@ -477,20 +477,18 @@
               doCheck = false;
             };
 
-            # Duplicate detection is a separate, coverage-free inventory. Exclude
-            # test-only source files under src/ in addition to Cargo's top-level
-            # tests/ exclusion; neither invocation changes the blocking CRAP gate.
+            # Duplicate detection is a separate, coverage-free inventory. All
+            # lanes share production-only exclusions from .cargo-crap.toml.
             crapDuplicates = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-duplicates";
               cargoArtifacts = null;
               buildPhaseCargoCommand = ''
+                bash ${./.config/selfci/test-cargo-crap-exclusions.sh} \
+                  ${cargoCrap}/bin/cargo-crap "$PWD/.cargo-crap.toml"
                 mkdir -p $out
                 args=(
                   --workspace
                   --duplicates
-                  --exclude '**/tests/**'
-                  --exclude '**/tests.rs'
-                  --exclude '**/*_tests.rs'
                   --top 0
                 )
                 ${cargoCrap}/bin/cargo-crap "''${args[@]}" \

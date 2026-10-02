@@ -38,7 +38,7 @@ duplicate-count gate. The Nix build fails if analysis fails, but a nonzero pair
 count does not fail CI. Report paths are relative to the repository root.
 For a local run without Nix output, use the pinned
 `cargo crap --workspace --duplicates --top 0 --format human` with the same
-`--exclude` patterns as `flake.nix`; `--top 0` hides meaningless CRAP scores
+shared defaults in `.cargo-crap.toml`; `--top 0` hides meaningless CRAP scores
 when no LCOV is supplied, without filtering duplicate pairs. The human
 report's `No functions found.` refers to that suppressed CRAP table; read the
 separate `duplicate candidates` section below it.
@@ -72,8 +72,11 @@ outside the project.
 - `--min` filters which current entries cargo-crap evaluates and reports; keep it
   low enough that every function capable of exceeding the absolute limit is
   included.
-- Tau configures `tests/**`, `benches/**`, and `examples/**` as default
-  exclusions for production-code CRAP gates. Pass `--no-default-excludes`
+- Tau configures `tests/**`, `benches/**`, `examples/**`, `**/tests/**`,
+  `**/tests.rs`, and `**/*_tests.rs` as shared default exclusions for
+  production-code CRAP gates and inventories. External `#[cfg(test)]` modules
+  need path exclusions because the per-file scan cannot see parent attributes.
+  Pass `--no-default-excludes`
   only for one-off investigations that need those directories.
 
 ## Refactoring flagged code
