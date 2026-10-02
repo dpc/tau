@@ -22,6 +22,51 @@ The helper prints the summary and artifact path. It creates an owner-only
 directory, but the artifacts still reveal aggregate activity and model names.
 Inspect them before sharing.
 
+## Presentation defaults
+
+Deliver readable **PNG previews of both charts**, with the CSV, styled SVGs,
+and coverage summary available alongside them. The helper currently produces
+basic SVGs; it does **not** implement the styling below. Restyle from its CSV
+in a temporary script as needed, preserving the measurements and bucket gaps.
+Keep that script with the private artifacts for reproducibility.
+
+* Build one exact-model color map and reuse it for latency and throughput,
+  across all accounts. Give model families stable hues and versions
+  distinguishable shades. Starting palette: Luna 5.6 `#7c3aed`, Luna 6
+  `#a855f7`; Sol 5.6 `#d97706`, Sol 6 `#f59e0b`, Sol 6.1 `#92400e`;
+  Astra 6 `#2563eb`; Terra 5.6 `#15803d`; Grok `#db2777`; Qwen `#0e7490`.
+  Bind these colors to the actual recorded model strings. For new versions,
+  extend the family's shades; for new families, choose a distinct hue.
+  Family styling is presentation only: keep exact model identities and
+  measurements separate, without guessing aliases or merging versions.
+* Use account marker shapes consistently: `chatgpt` circle, `chatgpt-fedi`
+  square, `grok` diamond, `ren` triangle. Assign other recorded accounts
+  distinct shapes. The CSV's `provider` is the recorded series key, not proof
+  of account identity; use account labels only when that mapping is known,
+  otherwise label the shape legend **Provider**.
+* Use two compact legends: **Model** with colored samples and exact model
+  names, and **Account** (or **Provider**) with neutral marker shapes. Reserve
+  enough space to keep legends and labels readable without covering data.
+* Prefer logarithmic y axes when positive values span a wide range. Label
+  latency **seconds (log scale)** and throughput **tokens/wall-second
+  (log scale)** when using log scales. Choose ticks and limits from the data,
+  not fixed ranges that clip observations. Keep genuine zero rates visible
+  using a linear scale or a clearly labeled separate zero indication; never
+  turn missing values into zeros or substitute an epsilon on a log axis.
+* Show the UTC range and six-hour median bucketing. Preserve gaps, clipped
+  boundary buckets, and today's current partial bucket. Include a short
+  wall-time caveat and any material skipped-journal or sparse-coverage caveat
+  in the delivery, using `summary.txt`.
+
+Render styled SVGs to PNG at about 1600 pixels wide (for example,
+`rsvg-convert -w 1600 -o latency.png latency.svg`, then likewise for
+throughput). Inspect both PNGs at delivery size before sharing: confirm
+legible labels, unclipped legends, consistent colors/shapes, correct units,
+and honest zero/missing handling. Export the inspected PNGs through the
+artifact tool for inline previews; make the source artifacts available too.
+If no supported image viewer is available, report that visual inspection
+could not be completed rather than claiming it passed.
+
 **“Last two weeks” ends at the current moment, not the last midnight.** The
 default captures UTC now once before discovery/scanning, then selects the
 trailing fourteen days `[since, until)`. Today's current partial six-hour
