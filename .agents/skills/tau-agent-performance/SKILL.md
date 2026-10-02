@@ -6,18 +6,25 @@ description: Generate routine trailing-two-week provider/model latency and outpu
 # Routine agent performance charts
 
 Run the checked-in helper; do not reconstruct timing from captures or research
-the journal each time. It uses Python's standard library and Tau's built-in
-validated `agent-performance-jsonl` trace projection. It never contacts a
-provider or running harness.
+the journal each time. It uses a native Cargo single-file Rust script, gnuplot,
+and Tau's validated `agent-performance-jsonl` trace projection. It never contacts
+a provider or running harness. The Nix runner supplies the nightly toolchain
+already pinned through Flakebox/Fenix in `flake.lock`, gnuplot, and a linker;
+it does not change the workspace's stable toolchain. First use can download/build
+the toolchain and script dependencies.
 
 ```sh
 cd "$(jj workspace root)"
-python3 .agents/skills/tau-agent-performance/chart_performance.py \
+nix shell .#diagnostics -c tau-diagnostics-cargo \
+  .agents/skills/tau-agent-performance/chart_performance.rs \
   --out tmp/agent-performance-last14days
 ```
 
 The output directory must be new. Keep `performance.csv`, `latency.svg`,
-`throughput.svg`, `summary.txt`, and `README.md` together; do not commit them.
+`throughput.svg`, their PNG previews and `.gnuplot` programs, `summary.txt`,
+and `README.md` together; do not commit them. Re-render with `gnuplot latency.gnuplot`
+and `gnuplot throughput.gnuplot` from the artifact directory. Programs contain
+only the same aggregate chart evidence, not traces.
 The helper prints the summary and artifact path. It creates an owner-only
 directory, but the artifacts still reveal aggregate activity and model names.
 Inspect them before sharing.
@@ -25,10 +32,14 @@ Inspect them before sharing.
 ## Presentation defaults
 
 Deliver readable **PNG previews of both charts**, with the CSV, styled SVGs,
-and coverage summary available alongside them. The helper currently produces
-basic SVGs; it does **not** implement the styling below. Restyle from its CSV
-in a temporary script as needed, preserving the measurements and bucket gaps.
-Keep that script with the private artifacts for reproducibility.
+and coverage summary available alongside them. The helper produces styled SVGs
+and 1600-pixel-wide PNGs using gnuplot, applying the defaults below. It recognizes
+family names only from the recorded model strings; no alias mapping is inferred.
+It builds one deterministic color map for the report, reserves the fixed palette,
+and resolves new-family hue/version-shade collisions over the present inventory.
+The saved programs retain the exact color bindings for reproducibility.
+For presentation tweaks, edit the saved private `.gnuplot` programs, preserving
+measurements and bucket gaps, and retain them for reproducibility.
 
 * Build one exact-model color map and reuse it for latency and throughput,
   across all accounts. Give model families stable hues and versions
@@ -64,9 +75,8 @@ Keep that script with the private artifacts for reproducibility.
   wall-time caveat and any material skipped-journal or sparse-coverage caveat
   in the delivery, using `summary.txt`.
 
-Render styled SVGs to PNG at about 1600 pixels wide (for example,
-`rsvg-convert -w 1600 -o latency.png latency.svg`, then likewise for
-throughput). Inspect both PNGs at delivery size before sharing: confirm
+The helper renders SVG and PNG directly with the same gnuplot program.
+Inspect both PNGs at delivery size before sharing: confirm
 legible labels, unclipped legends, consistent colors/shapes, correct units,
 and honest zero/missing handling. Export the inspected PNGs through the
 artifact tool for inline previews; make the source artifacts available too.
@@ -83,7 +93,8 @@ boundaries. Neither workflow should round the endpoint down to midnight.
 For reproducible comparisons:
 
 ```sh
-python3 .agents/skills/tau-agent-performance/chart_performance.py \
+nix shell .#diagnostics -c tau-diagnostics-cargo \
+  .agents/skills/tau-agent-performance/chart_performance.rs \
   --agents-dir "$HOME/.local/state/tau/agents" \
   --since 2026-09-17T13:25:00Z --until 2026-10-01T13:25:00Z \
   --out tmp/agent-performance-fixed-range
@@ -100,7 +111,14 @@ maximum range is 366 days. The helper retains selected scalar samples for
 medians and deduplication identities for the current journal, so memory scales
 with selected completed prompts plus prompt identities in the largest scanned
 journal, not raw trace bytes.
-Temporary traces are anonymous private files and removed automatically.
+Temporary traces are anonymous private files and removed automatically. Cargo
+builds and script lockfiles live in `$XDG_CACHE_HOME/tau-diagnostics/target`
+(default `$HOME/.cache/tau-diagnostics/target`), outside the source tree.
+Direct dependencies are exact-version pinned in the embedded manifest; Cargo
+keeps resolved transitive versions in its cached script lockfile, not in the
+repository. This is a pinned toolchain, not a fully vendored/offline script build.
+From the repository root, the executable `.rs` shebang invokes the same Nix
+runner. Do not use the unrelated third-party `cargo-script` or `rust-script` tools.
 
 ## What the charts mean
 
@@ -146,6 +164,8 @@ add provider captures, prompts, errors, or agent IDs to exported artifacts.
 The canonical trace projector owns typed correlation and journal validation.
 
 ```sh
-python3 .agents/skills/tau-agent-performance/test_chart_performance.py
-python3 .agents/skills/tau-qodq/test_extract_quota.py
+nix shell .#diagnostics -c tau-diagnostics-cargo test \
+  --manifest-path .agents/skills/tau-agent-performance/chart_performance.rs
+nix shell .#diagnostics -c tau-diagnostics-cargo test \
+  --manifest-path .agents/skills/tau-qodq/extract_quota.rs
 ```

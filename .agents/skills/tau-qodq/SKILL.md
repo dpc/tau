@@ -7,9 +7,13 @@ description: >
 
 # Tau QODQ: offline quota and token-usage diagnostics
 
-Use `extract_quota.py` for bounded historical diagnostics from canonical Tau
-events. It uses only Python's standard library and writes redacted CSV, SVG,
-summary, and artifact README files. It is an offline aid, not a Tau command;
+Use `extract_quota.rs` for bounded historical diagnostics from canonical Tau
+events. This native Cargo single-file script writes redacted CSV, gnuplot SVG/PNG,
+summary, artifact README, and reproducible `.gnuplot` programs. The Nix runner
+supplies the nightly toolchain already pinned through Flakebox/Fenix in
+`flake.lock`, gnuplot, and a linker, without changing the workspace toolchain.
+First use can download/build these tools and script dependencies.
+It is an offline aid, not a Tau command;
 do not change provider, journal, or runtime semantics for it.
 
 ## Run
@@ -23,7 +27,7 @@ current day through the UTC instant captured once when generation starts.
 ```bash
 cd "$(jj workspace root)"
 skill_dir=.agents/skills/tau-qodq
-"$skill_dir/extract_quota.py" \
+nix shell .#diagnostics -c tau-diagnostics-cargo "$skill_dir/extract_quota.rs" \
   --sessions-root "$HOME/.local/state/tau/sessions" \
   --profile chatgpt=chatgpt \
   --profile chatgpt-fedi=chatgpt-fedi \
@@ -46,9 +50,20 @@ compatibility `--provider NAME` selection remains equivalent to
 `--profile NAME=NAME`; prefer repeatable `--profile`.
 
 Keep the generated `README.md`, `summary.txt`, `quota.csv`, `quota.svg`,
-`tokens.csv`, and `tokens.svg` together. Do not commit artifacts or session
+`tokens.csv`, `tokens.svg`, both PNG previews, and both `.gnuplot` programs
+together. Programs contain aggregate chart evidence only; re-render them with
+`gnuplot quota.gnuplot` and `gnuplot tokens.gnuplot` in the artifact directory.
+New artifact directories are owner-only. Inspect PNGs before sharing.
+Do not commit artifacts or session
 data. The extractor scans selected `events.jsonl` files without an index, so
-time bounds constrain output but may not reduce bytes scanned.
+time bounds constrain output but may not reduce bytes scanned. Cargo build
+outputs and script lockfiles live in `$XDG_CACHE_HOME/tau-diagnostics/target`
+(default `$HOME/.cache/tau-diagnostics/target`), not in the source tree. Direct
+dependencies are exact-version pinned in the embedded manifest; transitive
+resolution persists in Cargo's cached script lockfile, not the repository.
+This pins the toolchain, not a fully vendored/offline script build. From the
+repository root, the executable `.rs` shebang uses the same Nix runner.
+Do not use unrelated third-party `cargo-script` or `rust-script` tools.
 
 ## Inputs and privacy boundary
 
@@ -164,5 +179,6 @@ Remember:
 Run the focused oracle after changing the generator:
 
 ```bash
-python3 .agents/skills/tau-qodq/test_extract_quota.py
+nix shell .#diagnostics -c tau-diagnostics-cargo test \
+  --manifest-path .agents/skills/tau-qodq/extract_quota.rs
 ```

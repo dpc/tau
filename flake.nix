@@ -63,6 +63,31 @@
         cargoCrap = pkgs.callPackage ./nix/pkgs/cargo-crap.nix { };
         selfciPkg = selfci.packages.${system}.default;
         selfciMq = selfci.packages.${system}.mq;
+        # Reuse the locked Fenix nightly without changing the workspace toolchain.
+        diagnostics = pkgs.writeShellApplication {
+          name = "tau-diagnostics-cargo";
+          runtimeInputs = [
+            (flakebox.inputs.fenix.packages.${system}.combine (
+              with flakebox.inputs.fenix.packages.${system};
+              [
+                minimal.cargo
+                minimal.rustc
+                minimal.rust-std
+                complete.clippy
+                complete.rustfmt
+              ]
+            ))
+            pkgs.gnuplot
+            pkgs.stdenv.cc
+          ];
+          text = ''
+            export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/tau-diagnostics/target"
+            # cargo-clippy invokes Cargo again and must retain the script feature.
+            export CARGO_UNSTABLE_SCRIPT=true
+            unset CARGO RUSTC RUSTDOC
+            exec cargo -Zscript "$@"
+          '';
+        };
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
           config = {
@@ -572,6 +597,7 @@
           tau = tauPackage;
           site = site;
           "cargo-crap" = cargoCrap;
+          inherit diagnostics;
           inherit (tau-ext-pim.packages.${system}) tau-ext-pim;
           inherit (tau-ext-rostra.packages.${system}) tau-ext-rostra;
           inherit (tau-ext-slack.packages.${system}) tau-ext-slack;

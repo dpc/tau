@@ -42,12 +42,12 @@ function job_lint() {
   fi
 
   selfci step start "quota extractor fixtures"
-  if ! python3 .agents/skills/tau-qodq/test_extract_quota.py; then
+  if ! nix shell .#diagnostics -c tau-diagnostics-cargo test --manifest-path .agents/skills/tau-qodq/extract_quota.rs; then
     selfci step fail
   fi
 
   selfci step start "agent performance chart fixtures"
-  if ! python3 .agents/skills/tau-agent-performance/test_chart_performance.py; then
+  if ! nix shell .#diagnostics -c tau-diagnostics-cargo test --manifest-path .agents/skills/tau-agent-performance/chart_performance.rs; then
     selfci step fail
   fi
 
