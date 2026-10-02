@@ -82,12 +82,6 @@ clippy-fix *ARGS="--locked --offline --workspace --all-targets":
   cargo clippy {{ARGS}} --fix
 
 
-# run `semgrep`
-semgrep:
-  env SEMGREP_ENABLE_VERSION_CHECK=0 \
-    semgrep --error --no-rewrite-rule-ids --config .config/semgrep.yaml
-
-
 # check typos
 [no-exit-message]
 typos *PARAMS:
@@ -114,7 +108,7 @@ typos-fix-all:
 # lint prose with Vale
 [positional-arguments]
 vale *ARGS:
-  #!/nix/store/7a60q5dgnv6z96c279rc1nalyiw4mgqn-bash-interactive-5.3p15/bin/bash
+  #!/nix/store/1mv3qz005gkbalxfghk4y3s8ayv4d2dl-bash-interactive-5.3p15/bin/bash
   set -euo pipefail
   mapfile -d "" -t vale_paths < <(git ls-files -z -- '*.md')
   if [[ "${#vale_paths[@]}" -eq 0 ]]; then

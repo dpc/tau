@@ -42,12 +42,12 @@ if ! reject_counting_rule_suppressions crates; then
   exit 1
 fi
 
-# ast-grep 0.42.1 accepts rule-specific directive variants at line one followed
-# by whitespace-only line two as whole-file suppression. Prove that behavior,
-# then reject every accepted spelling under Tau's per-invocation policy.
+# ast-grep 0.45.3 accepts plain and rule-list directives at line one followed
+# by whitespace-only line two as whole-file suppression, but rejects a directive
+# prefixed by prose. Keep rejecting every spelling under Tau's per-invocation policy.
+expect_scan_fail "$fixtures/whole-file-prose.rs" "debug-assert-expression-must-not-mutate"
 whole_file_fixtures=(
   "$fixtures/whole-file.rs"
-  "$fixtures/whole-file-prose.rs"
   "$fixtures/whole-file-rule-list.rs"
 )
 for fixture in "${whole_file_fixtures[@]}"; do

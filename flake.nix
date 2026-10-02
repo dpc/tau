@@ -94,6 +94,8 @@
             # Tau's cargo-crap derivations use a locally pinned package and
             # project-specific CI gates rather than Flakebox's integration.
             cargo-crap.enable = false;
+            # Tau uses ast-grep and has no Semgrep configuration.
+            semgrep.enable = false;
             github.ci.buildOutputs = [
               ".#ci.workspace"
               ".#ci.workspaceDocs"
@@ -653,6 +655,7 @@
             selfciMq
             pkgs.cargo-nextest
             pkgs.taplo
+            pkgs.python3
             selfciPkg
           ];
           shellHook = ''
