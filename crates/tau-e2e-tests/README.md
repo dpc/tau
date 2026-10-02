@@ -48,7 +48,7 @@ cargo nextest run -p dpc-tau-e2e-tests --test deterministic_provider
 cargo nextest run -p dpc-tau-e2e-tests --test cancellation_liveness
 cargo build -p dpc-tau --bin tau
 cargo nextest run -p dpc-tau-e2e-tests --test core_resume
-TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p dpc-tau-e2e-tests --test core_shell_resume
+TAU_E2E_TAU_BIN="$PWD/target/debug/tau" cargo nextest run -p dpc-tau-e2e-tests --test core_shell_resume
 ```
 
 The acceptance cases cover streaming/final text, a successful tool round
