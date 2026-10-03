@@ -782,6 +782,77 @@ fn response_config_debug_preserves_profile_namespace_diagnostic() {
     );
 }
 
+/// Incremental gateways must see existing routing fields before large prompts,
+/// both in the shared body and its flattened WebSocket envelope, without any
+/// change to JSON contents or optional-field omissions.
+#[test]
+fn request_serializes_routing_fields_before_large_input() {
+    let config = chain_test_config();
+    let text = "x".repeat(2 * 1024 * 1024);
+    let items = [user_text(&text)];
+    let mut request = request_for_items(&items);
+    for tier in [None, Some(tau_proto::ServiceTier::Fast)] {
+        request.params.service_tier = tier;
+        let mut expected = serde_json::json!({
+            "model": "gpt-5-codex",
+            "instructions": "sys",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            }],
+            "store": false,
+            "parallel_tool_calls": true,
+        });
+        let routing_prefix = if tier.is_some() {
+            expected["service_tier"] = serde_json::json!("priority");
+            r#""model":"gpt-5-codex","service_tier":"priority","#
+        } else {
+            r#""model":"gpt-5-codex","#
+        };
+        let body = serde_json::to_string(&build_request(&config, &request, None))
+            .expect("serialize shared body");
+        assert!(body.starts_with(&format!(
+            "{{{routing_prefix}\"instructions\":\"sys\",\"input\":["
+        )));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).expect("parse body"),
+            expected,
+        );
+
+        let hint = if tier.is_some() {
+            "model=gpt-5-codex;tier=priority"
+        } else {
+            "model=gpt-5-codex"
+        };
+        expected["client_metadata"] = serde_json::json!({
+            "originator": "tau",
+            "x-codex-routing-hint": hint,
+        });
+        expected["type"] = serde_json::json!("response.create");
+        for generate in [None, Some(false), Some(true)] {
+            let mut expected_ws = expected.clone();
+            let generate_prefix = match generate {
+                None => "",
+                Some(false) => r#""generate":false,"#,
+                Some(true) => r#""generate":true,"#,
+            };
+            if let Some(generate) = generate {
+                expected_ws["generate"] = serde_json::json!(generate);
+            }
+            let envelope =
+                serde_json::to_string(&build_ws_envelope(&config, &request, None, generate))
+                    .expect("serialize WebSocket envelope");
+            assert!(envelope.starts_with(&format!(
+                "{{\"type\":\"response.create\",{generate_prefix}{routing_prefix}\"client_metadata\":{{\"originator\":\"tau\",\"x-codex-routing-hint\":\"{hint}\"}},\"instructions\":\"sys\",\"input\":["
+            )));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&envelope).expect("parse envelope"),
+                expected_ws,
+            );
+        }
+    }
+}
+
 #[test]
 fn build_request_includes_service_tier_when_configured() {
     let config = ResponsesConfig {

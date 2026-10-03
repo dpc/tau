@@ -2372,7 +2372,17 @@ fn bounded_remote_text(value: &str, max_chars: usize) -> String {
 
 #[derive(Serialize)]
 struct ResponsesRequest {
+    // Serde emits declaration order, including when flattened into response.create.
+    // Keep routing fields ahead of potentially multi-megabyte instructions/input
+    // so incremental gateways need not buffer the prompt before routing.
     model: String,
+    /// Optional upstream service tier (`fast` for Fast mode, `flex` for
+    /// lower-priority service).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'static str>,
+    /// Per-request transport metadata used by Responses-over-WebSocket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_metadata: Option<ResponsesClientMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     input: Vec<ResponsesInputItem>,
@@ -2406,10 +2416,6 @@ struct ResponsesRequest {
     include: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
-    /// Optional upstream service tier (`fast` for Fast mode, `flex` for
-    /// lower-priority service).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    service_tier: Option<&'static str>,
     /// Optional server-side context management controls.
     #[serde(skip_serializing_if = "Option::is_none")]
     context_management: Option<Vec<ContextManagementRequest>>,
@@ -2423,9 +2429,6 @@ struct ResponsesRequest {
     /// the public Responses API it requires `store: true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_response_id: Option<String>,
-    /// Per-request transport metadata used by Responses-over-WebSocket.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_metadata: Option<ResponsesClientMetadata>,
 }
 
 /// Exact `/codex/responses/compact` request shape, kept separate from ordinary
