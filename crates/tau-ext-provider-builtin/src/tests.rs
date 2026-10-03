@@ -112,6 +112,7 @@ fn compact_route_identity_discovery_preserves_mixed_family_catalogs() {
                     auth,
                     responses: Default::default(),
                     cache_diagnostics: Default::default(),
+                    ..Default::default()
                 }),
             ),
             (
@@ -121,6 +122,7 @@ fn compact_route_identity_discovery_preserves_mixed_family_catalogs() {
                     auth: other_auth,
                     responses: Default::default(),
                     cache_diagnostics: Default::default(),
+                    ..Default::default()
                 }),
             ),
             (
@@ -462,6 +464,7 @@ fn provider_list_shows_actionable_chatgpt_login_remediation() {
             },
             responses: Default::default(),
             cache_diagnostics: Default::default(),
+            ..Default::default()
         }),
         ProviderSetupInput::ProfileOAuth,
     )
@@ -555,6 +558,7 @@ fn provider_add_chatgpt_noninteractive_preflight_preserves_collision_safety() {
             },
             responses: Default::default(),
             cache_diagnostics: Default::default(),
+            ..Default::default()
         }),
         ProviderSetupInput::ProfileOAuth,
     )
@@ -897,6 +901,7 @@ fn chatgpt_setup_keeps_oauth_credential_publication() {
             },
             responses: Default::default(),
             cache_diagnostics: Default::default(),
+            ..Default::default()
         }),
         ProviderSetupInput::ProfileOAuth,
     )
@@ -2834,6 +2839,7 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
             responses_lite_compatibility: true,
         },
         cache_diagnostics: Default::default(),
+        ..Default::default()
     });
     let value = serde_json::to_value(&lite).expect("lite profile");
     assert_eq!(value["responses_lite_compatibility"], true);
@@ -2846,6 +2852,85 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
             ..
         })
     ));
+}
+
+/// Old profiles keep five minutes; explicit positive integer seconds propagate
+/// through profile resolution without changing credentials or route identity.
+#[test]
+fn chatgpt_application_idle_timeout_validation_and_resolution() {
+    let default = serde_json::to_value(ChatGptProfile::default()).expect("default profile");
+    assert!(default.get("application_idle_timeout_secs").is_none());
+    assert_eq!(
+        ChatGptProfile::default()
+            .application_idle_timeout_secs
+            .get(),
+        300
+    );
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!("900"),
+        serde_json::json!(null),
+        serde_json::json!(u64::from(u32::MAX) + 1),
+    ] {
+        assert!(
+            serde_json::from_value::<BuiltinProviderProfile>(serde_json::json!({
+                "kind": "chatgpt", "application_idle_timeout_secs": value
+            }))
+            .is_err()
+        );
+    }
+    for seconds in [1, 900, u32::MAX] {
+        let mut profile: ChatGptProfile = serde_json::from_value(serde_json::json!({
+            "application_idle_timeout_secs": seconds
+        }))
+        .expect("finite positive seconds");
+        profile.replace_auth(OpenAiAuth {
+            access_token: "fixture".to_owned(),
+            expires_at_ms: u64::MAX,
+            ..Default::default()
+        });
+        let provider = ProviderName::new("chatgpt");
+        let mut profiles = BuiltinProviderProfiles {
+            providers: BTreeMap::from([(
+                provider.clone(),
+                BuiltinProviderProfile::Chatgpt(profile),
+            )]),
+            credentials: BTreeMap::from([(
+                provider.clone(),
+                ProviderCredential::Stored(oauth_test_credential_reference()),
+            )]),
+            ..Default::default()
+        };
+        let config = resolve_responses_backend(
+            &ModelId::new(provider, ModelName::new("gpt-6-astra")),
+            &mut profiles,
+            &mut OAuthRefreshRejectionCache::default(),
+            &test_network_policy(),
+            None,
+        )
+        .expect("valid resolved credentials");
+        assert_eq!(
+            config.application_idle_timeout(),
+            Duration::from_secs(u64::from(seconds))
+        );
+        let backend = resolve_prompt_backend(
+            &ModelId::new(ProviderName::new("chatgpt"), ModelName::new("gpt-6-astra")),
+            &mut profiles,
+            &mut OAuthRefreshRejectionCache::default(),
+            &test_network_policy(),
+            None,
+        )
+        .expect("ordinary prompt backend");
+        let PromptBackend::Responses(config) = backend else {
+            panic!("private Codex backend");
+        };
+        assert_eq!(
+            config.application_idle_timeout(),
+            Duration::from_secs(u64::from(seconds))
+        );
+    }
 }
 
 /// ChatGPT image capability defaults on for missing and newly constructed
@@ -2925,6 +3010,7 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
             responses_lite_compatibility: true,
         },
         cache_diagnostics: Default::default(),
+        ..Default::default()
     };
     profile.replace_auth(OpenAiAuth {
         access_token: "fresh".to_owned(),
@@ -3338,6 +3424,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                     auth: expired.clone(),
                     responses: Default::default(),
                     cache_diagnostics: Default::default(),
+                    ..Default::default()
                 }),
             ),
             (
@@ -3347,6 +3434,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                     auth: expired,
                     responses: Default::default(),
                     cache_diagnostics: Default::default(),
+                    ..Default::default()
                 }),
             ),
             (
@@ -3533,6 +3621,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
                         responses_lite_compatibility: true,
                     },
                     cache_diagnostics: Default::default(),
+                    ..Default::default()
                 }),
             ),
         ]),

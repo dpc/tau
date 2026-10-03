@@ -3007,6 +3007,7 @@ fn run_shared_turn_with_abort(
 
 fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
     ResponsesConfig {
+        application_idle_timeout: super::super::DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: base_url.into(),

@@ -18,8 +18,12 @@ failures and never impersonate local cancellation.
 
 ## Deadlines
 
-The provider-stream watchdog is a five-minute idle deadline, not an absolute turn
-duration or a polling cadence. It resets only after an upstream WebSocket frame.
+The provider-stream watchdog defaults to a five-minute application-message idle
+deadline, not an absolute turn duration or a polling cadence. Ordinary inference
+may select a longer or shorter finite positive deadline from its startup profile;
+standalone compaction retains five minutes. Only owner consumption of a Text
+application message resets it, including metadata before semantic parsing.
+Received or sent WebSocket Ping/Pong never reset it.
 Tau currently imposes no separate absolute ChatGPT/Codex turn deadline.
 
 Fresh DNS, TCP, TLS, and WebSocket upgrade work has a separate 30-second

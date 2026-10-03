@@ -25,6 +25,8 @@ pub(super) enum ServerScript {
     },
     /// Keep the upgraded connection quiet until the client disconnects.
     Silent,
+    /// Keep sending protocol-only liveness until the application timeout wins.
+    ControlsOnly,
 }
 
 /// Captured production upgrade and request facts from one localhost peer.
@@ -200,6 +202,20 @@ fn serve_one(
                 if matches!(message, Message::Close(_)) {
                     break;
                 }
+            }
+        }
+        ServerScript::ControlsOnly => {
+            for _ in 0..40 {
+                if socket
+                    .send(Message::Ping(b"private-ping-payload".to_vec().into()))
+                    .is_err()
+                    || socket
+                        .send(Message::Pong(b"private-pong-payload".to_vec().into()))
+                        .is_err()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
             }
         }
     }

@@ -1602,6 +1602,7 @@ fn native_compact_test_config(base_url: String) -> responses::ResponsesConfig {
 
 pub(crate) fn test_config(base_url: String) -> responses::ResponsesConfig {
     responses::ResponsesConfig {
+        application_idle_timeout: super::responses::DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: responses::ResponsesMode::Standard,
         base_url,

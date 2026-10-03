@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::net::Shutdown;
+use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -120,6 +121,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
     providers.insert(
         ProviderName::new(CHATGPT_PROVIDER_NAME),
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            application_idle_timeout_secs: NonZeroU32::new(300).expect("positive"),
             image_generation: false,
             auth: OpenAiAuth {
                 access_token: "fixture-access".to_owned(),

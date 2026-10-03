@@ -1,6 +1,7 @@
 //! ChatGPT profile controls and their startup-only diagnostic projection.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 use tau_proto::ProviderName;
@@ -12,6 +13,14 @@ use super::{BuiltinProviderProfile, BuiltinProviderProfiles, CodexMode, OpenAiAu
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatGptProfile {
+    /// Ordinary inference application-message idle limit, in positive seconds.
+    /// Captured with the immutable startup settings; control frames do not
+    /// renew it.
+    #[serde(
+        default = "default_application_idle_timeout_secs",
+        skip_serializing_if = "is_default_application_idle_timeout"
+    )]
+    pub application_idle_timeout_secs: NonZeroU32,
     /// Startup-frozen scalar cache diagnostics; exact captures are independent.
     #[serde(default, skip_serializing_if = "CacheDiagnostics::is_metadata")]
     pub cache_diagnostics: CacheDiagnostics,
@@ -30,12 +39,23 @@ pub struct ChatGptProfile {
 impl Default for ChatGptProfile {
     fn default() -> Self {
         Self {
+            application_idle_timeout_secs: default_application_idle_timeout_secs(),
             cache_diagnostics: CacheDiagnostics::default(),
             auth: OpenAiAuth::default(),
             responses: Default::default(),
             image_generation: default_image_generation(),
         }
     }
+}
+
+/// Preserve the historical five-minute ordinary inference idle deadline.
+fn default_application_idle_timeout_secs() -> NonZeroU32 {
+    NonZeroU32::new(300).expect("positive default timeout")
+}
+
+/// Keep existing profiles' canonical serialization unchanged at the default.
+fn is_default_application_idle_timeout(seconds: &NonZeroU32) -> bool {
+    *seconds == default_application_idle_timeout_secs()
 }
 
 impl ChatGptProfile {

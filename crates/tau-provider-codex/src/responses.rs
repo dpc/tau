@@ -92,7 +92,7 @@ const RESPONSES_LITE_HEADER: &str = "X-OpenAI-Internal-Codex-Responses-Lite";
 /// producing WebSocket frames. Five minutes matches the operator
 /// guidance for stalled provider streams while leaving legitimate slow
 /// reasoning/generation room.
-const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub(crate) const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COMPACT_HTTP_THREADS: usize = 4;
@@ -274,6 +274,9 @@ pub(super) fn record_provider_raw_event_after(
 /// Config for the ChatGPT/Codex Responses API.
 #[derive(Clone)]
 pub struct ResponsesConfig {
+    /// Ordinary inference application-message idle limit; not a transport
+    /// heartbeat.
+    pub application_idle_timeout: Duration,
     /// Filename-derived provider namespace owning this connection generation.
     pub profile_namespace: tau_proto::ProviderName,
     /// Startup-stable Responses protocol contract for this profile/model route.

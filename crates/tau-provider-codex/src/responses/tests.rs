@@ -611,6 +611,7 @@ fn websocket_replay_decodes_each_event_once_and_preserves_opaque_sidecar() {
 #[test]
 fn build_request_includes_prompt_cache_key_when_supported() {
     let config = ResponsesConfig {
+        application_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),
@@ -784,6 +785,7 @@ fn response_config_debug_preserves_profile_namespace_diagnostic() {
 #[test]
 fn build_request_includes_service_tier_when_configured() {
     let config = ResponsesConfig {
+        application_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),
@@ -907,6 +909,7 @@ fn build_request_maps_max_effort_to_openai_max() {
 #[test]
 fn build_request_omits_prompt_cache_key_without_seed() {
     let config = ResponsesConfig {
+        application_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),
@@ -3210,6 +3213,7 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
 
 fn chain_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        application_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),

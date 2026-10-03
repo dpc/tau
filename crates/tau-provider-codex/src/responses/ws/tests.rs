@@ -844,6 +844,7 @@ fn test_ws_conn() -> (WsConn, InboundSender, UnboundedReceiver<WsCommand>) {
 
 fn test_responses_config() -> ResponsesConfig {
     ResponsesConfig {
+        application_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
         profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".to_owned(),
@@ -1973,6 +1974,103 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
 
     drop(conn);
     server.join();
+}
+
+/// The production reader observes protocol liveness without admitting it to
+/// the application queue or postponing application silence failure. The
+/// terminal summary survives that error and never logs heartbeat payloads.
+#[test]
+fn localhost_ws_controls_do_not_postpone_application_timeout() {
+    let server = TestWsServer::spawn(ServerScript::ControlsOnly);
+    let mut config = test_responses_config();
+    config.base_url = server.base_url();
+    let fixture = PromptFixture::new();
+    let envelope = build_ws_envelope(&config, &fixture.payload(), None, None);
+    let mut abort = NeverAbort;
+    let mut conn = WsConn::connect(
+        &config,
+        "thread-controls",
+        &crate::test_network_policy(),
+        &mut abort,
+    )
+    .expect("localhost connect");
+    let output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let output = output.clone();
+            move || output.clone()
+        })
+        .finish();
+    let started = Instant::now();
+    let result = tracing::subscriber::with_default(subscriber, || {
+        conn.run_envelope_with_timeouts(
+            "ap-controls",
+            &envelope,
+            EnvelopeExecution {
+                on_transport_dispatch: None,
+                after_transport_dispatch: None,
+                recording_stream: None,
+                response_capture: None,
+                evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
+                timeouts: EnvelopeTimeouts {
+                    idle: Duration::from_millis(100),
+                    absolute: None,
+                },
+                response_mode: ResponseMode::Ordinary,
+            },
+            &mut abort,
+            &mut |_| {},
+            &mut |_| {},
+            &mut None,
+        )
+    });
+    let body = http_status_zero(result);
+    assert!(body.contains("provider stream idle timeout"), "{body}");
+    assert!(body.contains("partial_output=false"), "{body}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let log = String::from_utf8(output.0.lock().expect("trace lock").clone()).expect("UTF-8");
+    assert!(log.contains("outcome=\"response_idle_timeout\""), "{log}");
+    assert!(log.contains("application_idle_timeout_ms=100"), "{log}");
+    assert!(log.contains("frame_count=0"), "{log}");
+    assert!(!log.contains("received_ping_count=0"), "{log}");
+    assert!(!log.contains("received_pong_count=0"), "{log}");
+    assert!(log.contains("last_received_ping_ago_ms="), "{log}");
+    assert!(log.contains("last_received_pong_ago_ms="), "{log}");
+    assert!(!log.contains("private-ping-payload"), "{log}");
+    assert!(!log.contains("private-pong-payload"), "{log}");
+    drop(conn);
+    server.join();
+}
+
+/// Deadline selection preserves five minutes by default, allows a fifteen
+/// minute application quiet interval, and leaves both compaction modes alone.
+#[test]
+fn ordinary_inference_selects_configured_idle_deadline_only() {
+    let mut config = test_responses_config();
+    assert_eq!(
+        inference_idle_timeout(&config, ResponseMode::Ordinary),
+        Duration::from_secs(300)
+    );
+    config.application_idle_timeout = Duration::from_secs(900);
+    let longer = inference_idle_timeout(&config, ResponseMode::Ordinary);
+    assert_eq!(
+        longer.saturating_sub(Duration::from_secs(300)),
+        Duration::from_secs(600)
+    );
+    assert_eq!(
+        longer.saturating_sub(Duration::from_secs(900)),
+        Duration::ZERO
+    );
+    assert_eq!(
+        inference_idle_timeout(&config, ResponseMode::Compact),
+        Duration::from_secs(300)
+    );
+    assert_eq!(
+        inference_idle_timeout(&config, ResponseMode::LocalSummary),
+        Duration::from_secs(300)
+    );
 }
 
 /// Ensure WebSocket turns wake promptly from registered cancellation rather

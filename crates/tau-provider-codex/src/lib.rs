@@ -242,6 +242,19 @@ impl InferenceProfileIdentity {
 }
 
 impl ResolvedConfig {
+    /// Returns ordinary inference's application-message silence limit.
+    #[must_use]
+    pub fn application_idle_timeout(&self) -> Duration {
+        self.inner.application_idle_timeout
+    }
+
+    /// Select a finite, positive ordinary inference application-idle deadline.
+    /// Does not change prewarm, compaction, connection setup, or retry policy.
+    pub fn with_application_idle_timeout_secs(mut self, seconds: std::num::NonZeroU32) -> Self {
+        self.inner.application_idle_timeout = Duration::from_secs(u64::from(seconds.get()));
+        self
+    }
+
     /// Returns the credential-free configured endpoint.
     #[must_use]
     pub fn base_url(&self) -> &str {
@@ -1756,6 +1769,7 @@ pub fn resolved_config_for_provider_model(
     let mode = effective_mode(model_id, requested_mode);
     ResolvedConfig {
         inner: responses::ResponsesConfig {
+            application_idle_timeout: responses::DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
             profile_namespace: provider.clone(),
             mode,
             base_url: DEFAULT_BASE_URL.to_owned(),

@@ -588,6 +588,17 @@ until the private native compaction contract is separately audited. They also
 omit unaudited provider-inline context management.
 Responses Lite is available only by setting `responses_lite_compatibility: true` on that
 ChatGPT profile (or answering Yes during `tau provider add`) and restarting.
+Ordinary Codex inference's application-message silence limit defaults to 300 seconds.
+Set top-level `application_idle_timeout_secs: 900` in the existing credential-free
+ChatGPT provider JSON and restart Tau for fifteen minutes. This is not a
+`harness.yaml` key. Positive integer seconds up to 4294967295 are accepted;
+prewarm, connection setup and standalone compaction keep their existing limits.
+Text application consumption renews the limit, including metadata; WebSocket
+Ping/Pong does not. Longer waits delay genuine-stall recovery without changing
+retry/repair or cancellation. One content-free envelope-end log summarizes received
+control-frame counts/ages and application receive/consume/semantic timing.
+These are local complete-message observations, not network timing or matched pongs;
+backpressure and the active-envelope observation boundary limit coverage.
 Tau never changes modes as a retry fallback. Both modes omit provider-inline
 context management. Astra also uses native standalone compaction, with a
 244,800-token default threshold (90 percent of its raw 272,000-token window);
@@ -634,7 +645,8 @@ is cleared before extension-owned logical retry. Canonical provider codes, never
 arbitrary prose, authorize these classifications.
 
 After setup, ChatGPT/Codex inference is WebSocket-only with a separate default
-five-minute idle watchdog. The timer resets on each provider frame and is not an
+configurable application-message idle watchdog (default five minutes). The timer
+resets on consumed Text messages, never Ping/Pong, and is not an
 absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt,
 clears tentative output, and parks the logical prompt for another attempt.
 

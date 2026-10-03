@@ -1,7 +1,7 @@
 //! Optional complete-text-message observations scoped to the existing owner.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Connection-local observation gate, independent of transport ownership.
@@ -9,6 +9,21 @@ use std::time::Instant;
 pub(super) struct MessageReadTiming {
     /// Odd generations enable observations; even generations are inactive.
     generation: AtomicU64,
+    /// Constant-size received control-frame evidence for the active owner.
+    controls: Mutex<ControlObservations>,
+}
+
+/// Aggregate receive facts, not sent pings or matched heartbeat exchanges.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ControlObservations {
+    /// Received Ping count, saturating instead of wrapping.
+    pub(super) ping_count: u64,
+    /// Received Pong count, without payload matching.
+    pub(super) pong_count: u64,
+    /// Last received Ping availability before any channel admission.
+    pub(super) last_ping_at: Option<Instant>,
+    /// Last received Pong availability before any channel admission.
+    pub(super) last_pong_at: Option<Instant>,
 }
 
 /// One reader observation, carried only alongside its existing text message.
@@ -29,9 +44,11 @@ pub(super) struct ActiveMessageReadTiming {
 }
 
 impl MessageReadTiming {
-    /// Enable only selected owner scopes; exhaustion leaves timing unavailable.
+    /// Enable one envelope owner's bounded observations; exhaustion disables
+    /// them.
     #[allow(deprecated, reason = "fetch_update supports the workspace MSRV")]
     pub(super) fn activate(self: &Arc<Self>) -> Option<ActiveMessageReadTiming> {
+        let mut controls = self.controls.lock().expect("control observation lock");
         let previous = self
             .generation
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
@@ -41,10 +58,32 @@ impl MessageReadTiming {
                     .flatten()
             })
             .ok()?;
+        *controls = ControlObservations::default();
         Some(ActiveMessageReadTiming {
             timing: Arc::clone(self),
             generation: previous + 1,
         })
+    }
+
+    /// Observe a control frame without queueing it, waking the owner, or
+    /// granting application-message liveness. No payload is inspected.
+    pub(super) fn observe_control(&self, ping: bool) {
+        let generation = self.generation.load(Ordering::Acquire);
+        if generation.is_multiple_of(2) {
+            return;
+        }
+        let mut controls = self.controls.lock().expect("control observation lock");
+        if self.generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        let now = Instant::now();
+        if ping {
+            controls.ping_count = controls.ping_count.saturating_add(1);
+            controls.last_ping_at = Some(now);
+        } else {
+            controls.pong_count = controls.pong_count.saturating_add(1);
+            controls.last_pong_at = Some(now);
+        }
     }
 
     /// Observe a complete text message only inside an active owner generation.
@@ -65,6 +104,14 @@ impl MessageReadTiming {
 }
 
 impl ActiveMessageReadTiming {
+    /// Snapshot the active envelope's bounded received control-frame evidence.
+    pub(super) fn controls(&self) -> ControlObservations {
+        *self
+            .timing
+            .controls
+            .lock()
+            .expect("control observation lock")
+    }
     /// Accept only messages sampled within this owner, not queued prior turns.
     pub(super) fn read_at(&self, observation: Option<MessageRead>) -> Option<Instant> {
         observation

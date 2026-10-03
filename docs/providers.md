@@ -1699,11 +1699,49 @@ nor failure after native content permits fallback. Arbitrary external provider
 extensions still own their standalone lowering: the harness cannot synthesize
 an implementation for an extension that rejects the operation.
 After setup, ChatGPT/Codex inference uses WebSocket exclusively with a separate
-five-minute idle watchdog. The watchdog resets on each provider frame and is not
-an absolute turn-duration cap. If upstream goes quiet, Tau
+application-message idle watchdog, defaulting to five minutes. To wait longer
+for delayed model output, add this top-level setting to the existing credential-free
+`kind: chatgpt` provider profile:
+
+```json
+"application_idle_timeout_secs": 900
+```
+
+The profile lives at
+`$XDG_CONFIG_HOME/tau/providers/<extension>/<provider>.json` or its XDG state
+counterpart. Edit the existing source; do not create a duplicate config/state
+profile. Nix-managed, read-only config profiles are supported. This is a provider
+profile setting, not a `harness.yaml` key. It is captured at startup; changing it
+requires a Tau restart. Omission keeps 300 seconds. Values must be integer seconds
+from 1 through 4294967295; zero, null, fractional and overflowing values fail profile
+validation. The setting applies only to ordinary Codex inference, not public
+Responses, connection setup, prewarm, or standalone compaction.
+
+The watchdog resets when the turn owner consumes a complete Text application
+message, including lifecycle/metadata JSON, before semantic parsing. WebSocket
+Ping/Pong never reset it or count as model progress. This is a silence limit,
+not a total attempt-duration cap. Longer values retain the same request through
+longer quiet periods but also delay failure/retry when a server is genuinely
+stuck; cancellation and existing retry/repair policy remain unchanged.
+If upstream goes quiet, Tau
 aborts the attempt and schedules the still-required logical prompt with transport, prompt id,
 elapsed/idle timing, configured idle timeout, whether partial output had already
 arrived, and read-source details where available.
+
+The existing `Codex WS envelope ended` operational INFO summary includes the
+effective application-idle limit, received Ping/Pong counts and last-seen ages,
+first application receive/consume and semantic timings, last sampled consumed
+message's receive age, and maximum read-to-consume delay. Receive means Tungstenite made
+a complete message available, not network arrival; semantic times describe parser
+acceptance. Timings are process-monotonic milliseconds from envelope start or
+ages at summary emission. A missing value means no qualifying observation.
+The existing `last_frame_ago_ms` measures application consumption, not heartbeat
+receipt. Control counts describe received frames only, not sent pings or matched
+exchanges. They are envelope-local and do not observe pooled idle time or a
+post-terminal tail. Backpressure on the existing one-message lane can delay
+further reads, so absence of observations does not prove absence on the network.
+Observation state is constant-size, counters saturate, and no heartbeat payloads,
+new per-frame logs, queues, tasks, journals, or public progress events are added.
 
 One finite Codex attempt may spend one immediate WS repair for an exact
 stale-chain/connection-limit failure or dead socket, but only before semantic

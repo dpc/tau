@@ -2613,6 +2613,7 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
             auth,
             responses: Default::default(),
             cache_diagnostics: Default::default(),
+            ..Default::default()
         }),
     );
     BuiltinProviderProfiles {
@@ -8118,6 +8119,9 @@ fn resolve_prompt_backend(
                 network,
                 extension_data_client,
             )
+            .map(|config| {
+                config.with_application_idle_timeout_secs(profile.application_idle_timeout_secs)
+            })
             .map(PromptBackend::Responses)
         }
         BuiltinProviderProfile::ChatCompletions(provider) => {
@@ -8258,6 +8262,9 @@ fn resolve_responses_backend(
                 network,
                 extension_data_client,
             )
+            .map(|config| {
+                config.with_application_idle_timeout_secs(profile.application_idle_timeout_secs)
+            })
         }
         BuiltinProviderProfile::ChatCompletions(_)
         | BuiltinProviderProfile::ChatgptPlan(_)

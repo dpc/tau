@@ -109,8 +109,11 @@ pub const OPENAI_BETA_WS: &str = "responses_websockets=2026-02-06";
 /// inference, and cannot refresh a prompt cache.
 const WEBSOCKET_CONTROL_PING_INTERVAL: Duration = Duration::from_secs(25);
 
-/// How long one WS turn may go without any provider event before Tau treats
-/// the socket as wedged and returns a retryable WebSocket error to the caller.
+/// Default silence limit for prewarm and standalone compaction application
+/// messages. Ordinary inference selects its configured limit separately.
+/// How long one WS turn may go without any application message before Tau
+/// treats the socket as wedged and returns a retryable WebSocket error to the
+/// caller.
 const TURN_EVENT_TIMEOUT: Duration = DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT;
 /// Maximum accepted WebSocket frame and complete message size.
 const MAX_WS_EVENT_BYTES: usize = 1024 * 1024;
@@ -171,7 +174,7 @@ pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Provider event timing bounds for one WebSocket envelope.
 struct EnvelopeTimeouts {
-    /// Maximum quiet interval between provider frames.
+    /// Maximum quiet interval between consumed Text application messages.
     idle: Duration,
     /// Optional absolute bound regardless of provider frame activity.
     absolute: Option<Duration>,
@@ -862,7 +865,7 @@ impl WsConn {
                     path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly
                 },
                 timeouts: EnvelopeTimeouts {
-                    idle: TURN_EVENT_TIMEOUT,
+                    idle: inference_idle_timeout(config, response_mode),
                     absolute: None,
                 },
                 response_mode,
@@ -1044,10 +1047,12 @@ impl WsConn {
         on_update: &mut impl FnMut(&StreamState),
         private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<StreamState, LlmError> {
-        let read_timing = private_trace
-            .as_ref()
-            .and_then(|_| self.message_read_timing.activate());
-        let mut diagnostics = EnvelopeDiagnostics::new(agent_prompt_id, self.diagnostic_epoch);
+        let mut diagnostics = EnvelopeDiagnostics::new(
+            agent_prompt_id,
+            self.diagnostic_epoch,
+            execution.timeouts.idle,
+            self.message_read_timing.activate(),
+        );
         let mut dispatch_attempted = false;
         let dispatch_result = serialize_and_enqueue_envelope_observed(
             envelope,
@@ -1204,7 +1209,7 @@ impl WsConn {
                     if let Some(capture) = execution.response_capture.as_mut() {
                         capture.record(text.as_ref());
                     }
-                    let read_at = read_timing.as_ref().and_then(|timing| timing.read_at(read));
+                    let read_at = diagnostics.read_at(read);
                     if let Some(trace) = private_trace.as_mut() {
                         if let Some(read_at) = read_at {
                             trace.text_message_read(read_at);
@@ -1224,7 +1229,7 @@ impl WsConn {
                         return Err(response_resource_limit_error());
                     };
                     state.record_transport_response_bytes(text.len());
-                    diagnostics.record_frame(text.len());
+                    diagnostics.record_frame(text.len(), read_at, now);
                     on_update(&state);
                     if let Some(stream) = execution.recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string())?;
@@ -1360,6 +1365,14 @@ impl WsConn {
     /// Carries transport bytes into the immediately following repair attempt.
     pub(super) fn carry_response_bytes(&mut self, bytes: u64) {
         self.carried_response_bytes = bytes;
+    }
+}
+
+/// Keep the requested idle setting confined to ordinary inference.
+fn inference_idle_timeout(config: &ResponsesConfig, mode: ResponseMode) -> Duration {
+    match mode {
+        ResponseMode::Ordinary => config.application_idle_timeout,
+        ResponseMode::Compact | ResponseMode::LocalSummary => TURN_EVENT_TIMEOUT,
     }
 }
 
@@ -1809,10 +1822,16 @@ async fn read_loop(
                 )),
                 true,
             ),
-            Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {
-                // Ping/Pong are protocol control frames — tungstenite surfaces
-                // them after auto-handling, no caller action
-                // needed.
+            Ok(Message::Ping(_)) => {
+                timing.observe_control(true);
+                continue;
+            }
+            Ok(Message::Pong(_)) => {
+                timing.observe_control(false);
+                continue;
+            }
+            Ok(Message::Frame(_)) => {
+                // Tungstenite does not surface raw frames on this stream.
                 continue;
             }
             Err(tungstenite::Error::Capacity(_)) => (InboundEvent::ResourceLimit, true),
