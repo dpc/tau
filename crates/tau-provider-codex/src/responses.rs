@@ -15,6 +15,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine as path_base64_engine};
+use reqwest::header as path_reqwest_header;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tau_proto::{
@@ -2276,9 +2277,33 @@ fn response_failed_error(
     LlmError::StreamError {
         body,
         code,
-        retry_after: None,
+        retry_after: failed_response_retry_hint(event, SystemTime::now()),
     }
     .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
+}
+
+/// Prefer validated nested HTTP retry advice to canonical structured reset
+/// metadata. Unlike Codex, Tau deliberately does not derive delays from prose.
+fn failed_response_retry_hint(event: &serde_json::Value, now: SystemTime) -> Option<Duration> {
+    event["response"]["error"]["headers"]
+        .as_object()
+        .and_then(|headers| {
+            headers.iter().find_map(|(name, value)| {
+                let name = path_reqwest_header::HeaderName::from_bytes(name.as_bytes()).ok()?;
+                if name != path_reqwest_header::RETRY_AFTER {
+                    return None;
+                }
+                let value = match value {
+                    serde_json::Value::String(value) => value.clone(),
+                    serde_json::Value::Number(value) => value.to_string(),
+                    serde_json::Value::Bool(value) => value.to_string(),
+                    _ => return None,
+                };
+                let value = path_reqwest_header::HeaderValue::from_str(&value).ok()?;
+                tau_provider::retry_policy::parse_retry_after(value.to_str().ok()?, now)
+            })
+        })
+        .or_else(|| canonical_event_reset_hint(event, now))
 }
 
 fn stream_error_event(

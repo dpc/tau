@@ -5676,6 +5676,139 @@ fn response_failed_context_rejection_is_typed_terminal() {
     );
 }
 
+/// Nested headers use HTTP validation and the shared delta/date parser, with
+/// valid advice (including zero) winning over longer structured reset metadata.
+#[test]
+fn response_failed_nested_retry_header_validation_and_precedence() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    for (name, value, expected) in [
+        ("Retry-After", serde_json::json!("12"), Some(12)),
+        ("rEtRy-AfTeR", serde_json::json!(" 0 "), Some(0)),
+        ("retry-after", serde_json::json!(37), Some(37)),
+        (
+            "retry-after",
+            serde_json::json!("Tue, 14 Nov 2023 22:14:20 GMT"),
+            Some(60),
+        ),
+        (
+            "retry-after",
+            serde_json::json!("Tue, 14 Nov 2023 22:12:20 GMT"),
+            Some(0),
+        ),
+        (
+            "retry-after",
+            serde_json::json!(u64::MAX.to_string()),
+            Some(u64::MAX),
+        ),
+        (
+            "retry-after",
+            serde_json::json!("18446744073709551616"),
+            None,
+        ),
+        ("retry-after", serde_json::json!("-1"), None),
+        ("retry-after", serde_json::json!("1.5"), None),
+        ("retry-after", serde_json::json!(""), None),
+        ("retry-after", serde_json::json!("12\r\n"), None),
+        ("retry-after", serde_json::json!(true), None),
+        ("retry-after", serde_json::json!(null), None),
+        ("retry-after", serde_json::json!(["12"]), None),
+        ("retry-after", serde_json::json!({"value": "12"}), None),
+        ("retry-after\n", serde_json::json!("12"), None),
+        ("unrelated", serde_json::json!("12"), None),
+    ] {
+        let event = serde_json::json!({
+            "type": "response.failed",
+            "response": {"error": {
+                "code": "rate_limit_exceeded",
+                "message": "Try again in 999 seconds",
+                "headers": {name: value},
+                "resets_in_seconds": 90
+            }}
+        });
+        assert_eq!(
+            failed_response_retry_hint(&event, now),
+            Some(Duration::from_secs(expected.unwrap_or(90))),
+            "{name}: {value}"
+        );
+    }
+}
+
+/// Missing/malformed headers fall back only to canonical structured metadata;
+/// provider prose and unrelated nested fields cannot fabricate retry advice.
+#[test]
+fn response_failed_retry_hint_fallback_preserves_prose_ignore_policy() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    for headers in [
+        serde_json::json!(null),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        let mut event = serde_json::json!({
+            "type": "response.failed",
+            "response": {"error": {
+                "message": "Try again in 999 seconds",
+                "headers": headers,
+                "unrelated": {"resets_in_seconds": 42}
+            }}
+        });
+        assert_eq!(failed_response_retry_hint(&event, now), None);
+        event["response"]["error"]["resets_at"] = serde_json::json!(160);
+        assert_eq!(
+            failed_response_retry_hint(&event, now),
+            Some(Duration::from_secs(60))
+        );
+        event["response"]["error"]
+            .as_object_mut()
+            .expect("error object")
+            .remove("headers");
+        assert_eq!(
+            failed_response_retry_hint(&event, now),
+            Some(Duration::from_secs(60))
+        );
+    }
+}
+
+/// Retry advice changes delays, not the existing classification or terminal
+/// disposition; the production event parser must surface the same failure.
+#[test]
+fn response_failed_retry_headers_preserve_failure_classification() {
+    for code in [
+        "rate_limit_exceeded",
+        "server_is_overloaded",
+        "unknown_future_error",
+        "insufficient_quota",
+        "usage_limit_reached",
+        "invalid_api_key",
+        "context_length_exceeded",
+        "cyber_policy",
+        "bio_policy",
+        "misalignment_policy_violation",
+        "invalid_prompt",
+    ] {
+        let mut event = serde_json::json!({
+            "type": "response.failed",
+            "response": {"error": {"code": code, "message": "failure"}}
+        });
+        let baseline = response_failed_error(
+            &event,
+            path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+        );
+        event["response"]["error"]["headers"] = serde_json::json!({"Retry-After": "12"});
+        let mut state = path_crate_common::StreamState::new();
+        let error = apply_event(&mut state, &event, &mut |_| {}).expect_err("failed terminal");
+        assert_eq!(error.failure_kind(), baseline.failure_kind(), "{code}");
+        match (baseline.retry_decision(), error.retry_decision()) {
+            (None, None) => {}
+            (Some(before), Some(after)) => {
+                assert_eq!(before.class, after.class, "{code}");
+                assert_eq!(after.retry_after, Some(Duration::from_secs(12)), "{code}");
+            }
+            decisions => panic!("changed retry disposition for {code}: {decisions:?}"),
+        }
+        assert!(state.output_items.is_empty());
+    }
+}
+
 /// Ensures incomplete Responses terminals close the prompt instead of
 /// repeatedly scheduling an unchanged incomplete request.
 #[test]
