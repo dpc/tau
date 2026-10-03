@@ -518,6 +518,15 @@ pub(super) fn recorded_request_body(
 }
 
 impl WsConn {
+    /// Reports a finished reader without consuming queued provider events.
+    ///
+    /// A running reader is not proof of transport health: closure can race this
+    /// observation or remain undetected. Turn-time repair still owns those
+    /// cases.
+    pub(super) fn reader_is_finished(&self) -> bool {
+        self.reader_abort.is_finished()
+    }
+
     /// Drains local controls before provider data, preserving coalesced
     /// failures.
     fn check_inbound_control(&self, abort: &mut impl TurnAbort) -> Result<(), LlmError> {

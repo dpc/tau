@@ -16,6 +16,43 @@ mod scripted_tcp_server;
 mod test_ca;
 mod test_server;
 
+/// Task completion is a non-consuming negative admission signal. Neither live
+/// nor finished observations may drain prior-owner semantic or terminal tails.
+#[test]
+fn reader_completion_check_preserves_queued_owner_tail() {
+    let (mut conn, inbound, _outbound) = test_ws_conn();
+    let previous = conn.message_read_timing.activate().expect("prior owner");
+    let read = conn.message_read_timing.observe();
+    assert!(read.is_some());
+    drop(previous);
+    let text = r#"{"type":"response.completed","response":{"id":"prior-owner"}}"#;
+    inbound
+        .send_blocking(InboundEvent::Event {
+            text: text.into(),
+            read,
+        })
+        .expect("queue prior-owner terminal");
+    assert!(!conn.reader_is_finished());
+    assert_eq!(conn.inbound_rx.len(), 1);
+    conn.reader_abort.abort();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !conn.reader_is_finished() {
+        assert!(Instant::now() < deadline, "reader did not finish");
+        std::thread::yield_now();
+    }
+    assert!(conn.reader_is_finished());
+    match conn.inbound_rx.try_recv().expect("tail remains queued") {
+        InboundEvent::Event {
+            text: queued,
+            read: queued_read,
+        } => {
+            assert_eq!(queued.as_str(), text);
+            assert!(queued_read.is_some(), "prior-owner sample remains attached");
+        }
+        _ => panic!("expected untouched prior-owner terminal"),
+    }
+}
+
 use std::cell::RefCell;
 use std::io::Read;
 use std::rc::Rc;

@@ -159,7 +159,7 @@ impl WsPool {
     }
 
     /// Look up an existing connection for `key`, validating its
-    /// bearer/age against the current request. Returns:
+    /// bearer/age and reader completion against the current request. Returns:
     ///
     /// - `Some(conn)` — caller owns it for the turn, must call
     ///   [`Self::release`] on success or drop on failure.
@@ -167,7 +167,9 @@ impl WsPool {
     ///   insert it via [`Self::release`] after the turn.
     ///
     /// Drops the entry if its bearer has rotated (OAuth refresh) or
-    /// the connection is approaching the server-side age limit.
+    /// the connection is approaching the server-side age limit, or its reader
+    /// has already finished. Admission never consumes queued provider events
+    /// and does not prove that a still-running reader is healthy.
     pub fn checkout(&mut self, key: &PoolKey, current_bearer: &str) -> Option<WsConn> {
         let conn = self.conns.pop(key)?;
         // Bearer rotation: refreshed access token means upstream
@@ -179,6 +181,12 @@ impl WsPool {
         // Age-out: a 59-minute-old socket would die mid-stream.
         // Reopen here instead, before sending anything.
         if MAX_CONNECTION_AGE <= conn.opened_at.elapsed() {
+            return None;
+        }
+        // Known-finished readers cannot serve a new turn or prewarm. Reject
+        // before enqueueing an envelope, without spending turn-time repair.
+        // Closure after this observation still belongs to the existing owner.
+        if conn.reader_is_finished() {
             return None;
         }
         Some(conn)

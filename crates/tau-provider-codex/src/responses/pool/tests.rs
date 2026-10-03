@@ -15,6 +15,8 @@ use crate::common::{PromptPayload, StreamState};
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbort, TurnAbortWaker};
 
+mod finished_reader;
+
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
 
 struct AtomicAbort {
@@ -2533,6 +2535,9 @@ struct ServerState {
     scripted_error: Option<serde_json::Value>,
     /// Optional exact successful response event sequence.
     scripted_events: Option<Vec<serde_json::Value>>,
+    /// Holds connection zero after its first response until a pooled-close test
+    /// permits either a close frame or an abrupt TCP drop.
+    pooled_close: Option<(Arc<ResponseGate>, bool)>,
 }
 
 /// Explicit request-arrival and response-release synchronization for tests.
@@ -2834,6 +2839,20 @@ fn respond_to_text_request(
         }
     }
     finish_server_turn(state);
+    let pooled_close = state
+        .lock()
+        .expect("server state lock")
+        .pooled_close
+        .clone();
+    if conn_idx == 0 && *turn_counter == 1 {
+        if let Some((gate, abrupt)) = pooled_close {
+            gate.arrive_and_wait();
+            if !abrupt {
+                let _ = ws.send(Message::Close(None));
+            }
+            return ControlFlow::Break(());
+        }
+    }
     ControlFlow::Continue(())
 }
 
