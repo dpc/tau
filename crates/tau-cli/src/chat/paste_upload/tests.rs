@@ -12,6 +12,68 @@ fn paste_upload_version_gate() {
     assert!(supported(Some(tau_proto::ProtocolVersion::new(8, 1))));
 }
 
+/// PNG bytes traverse the same upload preflight/chunk/digest flow as text;
+/// media bytes do not become provider image messages or a new wire operation.
+#[test]
+fn png_paste_uses_existing_original_byte_artifact_flow() {
+    let (ui, peer) = UnixStream::pair().expect("socket pair");
+    peer.set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let writer = Arc::new(Mutex::new(UiWriter::new(ui, UiIoMeter::default())));
+    let (control, worker) = PasteUpload::spawn(writer);
+    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(peer));
+    let (_term, handle, _input) = tau_cli_term_raw::Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term_raw::CursorShape::Bar,
+    );
+    let source: Arc<[u8]> = b"\x89PNG\r\n\x1a\n\x00\xffbinary".as_slice().into();
+    let size = source.len();
+    control.start_content(
+        "s1".parse().expect("session identity"),
+        1,
+        tau_cli_term::PasteContent::Png(source.clone()),
+        handle,
+    );
+    let available = read_request(&mut reader);
+    assert!(matches!(available.op, ArtifactOp::Available));
+    reply(&control, available, Ok(ArtifactValue::Done));
+    let begin = read_request(&mut reader);
+    assert!(
+        matches!(begin.op, ArtifactOp::Begin { size: ref actual } if actual.get() == size as u64)
+    );
+    let upload = "png-upload".parse().expect("upload identity");
+    reply(&control, begin, Ok(ArtifactValue::Upload { upload }));
+    let write = read_request(&mut reader);
+    assert!(
+        matches!(write.op, ArtifactOp::Write { offset: 0, ref bytes, .. } if bytes == &*source)
+    );
+    reply(
+        &control,
+        write,
+        Ok(ArtifactValue::Written {
+            next_offset: size as u64,
+        }),
+    );
+    let finalize = read_request(&mut reader);
+    assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
+    let key = format!("blake3:{}", blake3::hash(&source).to_hex())
+        .parse()
+        .expect("original digest key");
+    reply(
+        &control,
+        finalize,
+        Ok(ArtifactValue::Descriptor(tau_proto::ArtifactDescriptor {
+            key,
+            size: tau_proto::ArtifactSize::new(size as u64).expect("bounded original size"),
+        })),
+    );
+    control.stop();
+    worker.join().expect("upload worker exit");
+}
+
 /// Unrelated/late results do not advance a transfer, and Cancel sends Abort
 /// while leaving the interactive writer usable.
 #[test]

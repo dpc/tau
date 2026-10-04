@@ -1,9 +1,13 @@
 //! Owns prompt contents, editing history, and prompt-local viewport state.
 
+use crate::clipboard_paste::ClipboardPaste;
 use crate::{CompletionMenu, HistoryNav, PromptDraft, PromptSnapshot, StyledText};
 
 /// Prompt contents, editing history, and prompt-local viewport state.
 pub(super) struct PromptEditorState {
+    /// User-gesture clipboard acquisition owner, separate from artifact
+    /// uploads.
+    pub(super) clipboard: ClipboardPaste,
     /// Opt-in per-paste UTF-8 threshold for the application upload handler.
     pub(super) paste_upload_threshold: Option<usize>,
     /// Paste transaction holding the editor unchanged.
@@ -66,6 +70,7 @@ impl PromptEditorState {
     /// Creates an empty editor with the supplied left prompt.
     pub(super) fn new(left_prompt: StyledText) -> Self {
         Self {
+            clipboard: ClipboardPaste::default(),
             paste_upload_threshold: None,
             pending_paste: None,
             next_paste_id: 0,

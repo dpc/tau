@@ -39,6 +39,10 @@ pub(super) struct TerminalRuntimeState {
     /// inject arbitrary cursor movement or clear-screen escapes behind the
     /// renderer's back.
     pub(super) pending_raw: Vec<String>,
+    /// Private clipboard controls for the sole writer; may contain a paste
+    /// grant. Kept separate from unrelated live-only output effects for
+    /// handoff cleanup.
+    pub(super) clipboard_control: Vec<u8>,
     /// Nested redraw suppression depth used while the CLI renderer updates an
     /// off-screen agent transcript snapshot.
     pub(super) redraw_suppression: u32,
@@ -67,6 +71,7 @@ impl TerminalRuntimeState {
             sync_requested: RedrawSyncGeneration::default(),
             sync_completed: RedrawSyncGeneration::default(),
             pending_raw: Vec::new(),
+            clipboard_control: Vec::new(),
             redraw_suppression: 0,
             redraw_dirty_while_suppressed: false,
             redraw_history_size: usize::MAX,

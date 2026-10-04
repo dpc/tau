@@ -26,7 +26,7 @@ enum Command {
         /// Exact current UI session.
         session: tau_proto::SessionId,
         /// Normalized source, retained outside the editor buffer.
-        text: Arc<str>,
+        text: tau_cli_term::PasteContent,
         /// Completion destination for this attachment only.
         handle: tau_cli_term::TermHandle,
     },
@@ -80,7 +80,19 @@ impl PasteUpload {
         text: Arc<str>,
         handle: tau_cli_term::TermHandle,
     ) {
-        if text.len() as u64 > tau_proto::ARTIFACT_MAX_BYTES {
+        self.start_content(session, id, tau_cli_term::PasteContent::Text(text), handle);
+    }
+
+    /// Starts completed text or PNG bytes without rereading the clipboard on
+    /// retry.
+    pub(super) fn start_content(
+        &self,
+        session: tau_proto::SessionId,
+        id: u64,
+        text: tau_cli_term::PasteContent,
+        handle: tau_cli_term::TermHandle,
+    ) {
+        if text.bytes().len() as u64 > tau_proto::ARTIFACT_MAX_BYTES {
             handle.finish_paste_upload(
                 id,
                 Err("paste exceeds the 16 MiB artifact limit".to_owned()),
@@ -187,7 +199,7 @@ fn run(
                     continue;
                 }
                 let resumable = attempt.as_ref().is_some_and(|old| {
-                    old.paused && old.session == session && Arc::ptr_eq(&old.text, &text)
+                    old.paused && old.session == session && old.text.same_source(&text)
                 });
                 if !resumable {
                     if let Some(old) = attempt.take() {
@@ -196,7 +208,7 @@ fn run(
                     attempt = Some(Attempt {
                         id,
                         session,
-                        upload: tau_client::ArtifactUpload::new(text.as_bytes().to_vec())
+                        upload: tau_client::ArtifactUpload::new(text.bytes().to_vec())
                             .expect("source validated before worker admission"),
                         text,
                         handle: handle.clone(),

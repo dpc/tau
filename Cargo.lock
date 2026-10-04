@@ -586,20 +586,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "crossterm"
-version = "0.28.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
-dependencies = [
- "bitflags",
- "mio",
- "parking_lot",
- "rustix 0.38.44",
- "signal-hook",
- "signal-hook-mio",
-]
-
-[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -796,7 +782,6 @@ dependencies = [
  "built",
  "ciborium",
  "clap",
- "crossterm",
  "dirs",
  "dpc-tau-actions",
  "dpc-tau-blocking-notify-channel",
@@ -805,6 +790,7 @@ dependencies = [
  "dpc-tau-cli-term-raw",
  "dpc-tau-client",
  "dpc-tau-config",
+ "dpc-tau-crossterm",
  "dpc-tau-delivery-memory",
  "dpc-tau-ext-provider-builtin",
  "dpc-tau-ext-utils",
@@ -838,7 +824,7 @@ dependencies = [
 name = "dpc-tau-cli-picker"
 version = "0.2.1"
 dependencies = [
- "crossterm",
+ "dpc-tau-crossterm",
  "dpc-tau-term-screen",
 ]
 
@@ -846,8 +832,8 @@ dependencies = [
 name = "dpc-tau-cli-term"
 version = "0.2.1"
 dependencies = [
- "crossterm",
  "dpc-tau-cli-term-raw",
+ "dpc-tau-crossterm",
  "dpc-tau-term-screen",
  "dpc-tau-themes",
  "nix",
@@ -863,8 +849,8 @@ version = "0.2.1"
 dependencies = [
  "base64",
  "bon",
- "crossterm",
  "dpc-tau-blocking-notify-channel",
+ "dpc-tau-crossterm",
  "dpc-tau-term-screen",
  "tracing",
  "unicode-segmentation",
@@ -919,6 +905,20 @@ dependencies = [
  "serde_json",
  "tempfile",
  "winapi-util",
+]
+
+[[package]]
+name = "dpc-tau-crossterm"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "195ddd3382dbc3ca2016ea97bd4c0bc5c9c7b23d73f9ddf8361ad3c6c2cbf548"
+dependencies = [
+ "bitflags",
+ "mio",
+ "parking_lot",
+ "rustix 0.38.44",
+ "signal-hook",
+ "signal-hook-mio",
 ]
 
 [[package]]
@@ -1347,7 +1347,7 @@ name = "dpc-tau-term-screen"
 version = "0.2.1"
 dependencies = [
  "bon",
- "crossterm",
+ "dpc-tau-crossterm",
  "dpc-tau-proto",
  "unicode-segmentation",
  "unicode-width",
@@ -1447,7 +1447,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2803,7 +2803,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3089,7 +3089,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3102,7 +3102,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3180,7 +3180,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3201,7 +3201,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3616,7 +3616,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4252,7 +4252,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

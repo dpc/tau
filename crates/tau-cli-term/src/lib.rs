@@ -33,7 +33,7 @@ pub use completion::{
 #[cfg(test)]
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
-    Align, BlockId, Cell, Color, CursorShape, OpaquePresentationFact, OutputSnapshot,
+    Align, BlockId, Cell, Color, CursorShape, OpaquePresentationFact, OutputSnapshot, PasteContent,
     PresentationInvalidation, PresentationObservationKey, PriorityLine, PriorityLineAlignment,
     PriorityLinePriority, PriorityLineTruncation, RedrawSuppressionGuard, RendererDeliveryId, Span,
     Style, StyledBlock, StyledText, TermHandle, TerminalOptions, TwoLineElision, is_output_failure,
@@ -192,6 +192,14 @@ fn preserve_pause_on_unconfirmed_foreground<T, F: FnMut() -> io::Result<()>>(
 
 /// High-level events surfaced to the caller.
 pub enum Event {
+    /// Upload complete PNG clipboard bytes through the existing artifact
+    /// client.
+    PastePngUpload {
+        /// Exact local upload attempt identity.
+        id: u64,
+        /// Source kept outside editable prompt and histories.
+        bytes: std::sync::Arc<[u8]>,
+    },
     /// Upload one normalized paste while its original draft stays frozen.
     PasteUpload {
         /// Exact local attempt identity.
@@ -772,6 +780,9 @@ impl HighTerm {
 
     fn handle_next_raw_event(&mut self, raw: RawEvent) -> NextEventStep {
         match raw {
+            RawEvent::PastePngUpload { id, bytes } => {
+                NextEventStep::Return(Event::PastePngUpload { id, bytes })
+            }
             RawEvent::PasteUpload { id, text } => {
                 NextEventStep::Return(Event::PasteUpload { id, text })
             }
@@ -1003,6 +1014,9 @@ impl HighTerm {
 
     fn apply_raw_prompt_event(&mut self, raw: RawEvent) -> PromptActionOutcome {
         match raw {
+            RawEvent::PastePngUpload { id, bytes } => {
+                PromptActionOutcome::Return(Event::PastePngUpload { id, bytes })
+            }
             RawEvent::PasteUpload { id, text } => {
                 PromptActionOutcome::Return(Event::PasteUpload { id, text })
             }

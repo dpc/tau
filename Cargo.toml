@@ -129,9 +129,10 @@ clap = { version = "4", default-features = false, features = [
 ] }
 comfy-table = { version = "7", default-features = false }
 config = { version = "0.15", default-features = false, features = ["yaml"] }
-crossterm = { version = "0.28", default-features = false, features = [
+crossterm = { package = "dpc-tau-crossterm", version = "=0.28.1", default-features = false, features = [
   "bracketed-paste",
   "events",
+  "terminal-responses",
 ] }
 dialoguer = { version = "0.11", default-features = false, features = [
   "password",

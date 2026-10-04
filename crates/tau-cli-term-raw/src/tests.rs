@@ -253,12 +253,20 @@ fn external_pause_disables_and_resume_enables_focus_reporting() {
     write_external_pause_features(&mut pause, TerminalOptions::default()).expect("pause features");
     let pause = String::from_utf8(pause).expect("utf8 pause escapes");
     assert!(pause.contains("\u{1b}[?1004l"), "pause: {pause:?}");
+    assert!(
+        pause.starts_with("\u{1b}[?5522l"),
+        "clipboard must disable before handoff"
+    );
 
     let mut resume = Vec::new();
     write_external_resume_features(&mut resume, CursorShape::Bar, TerminalOptions::default())
         .expect("resume features");
     let resume = String::from_utf8(resume).expect("utf8 resume escapes");
     assert!(resume.contains("\u{1b}[?1004h"), "resume: {resume:?}");
+    assert!(
+        resume.starts_with("\u{1b}[?5522l\u{1b}[?5522$p"),
+        "resume must reset and reprobe, not blindly enable"
+    );
 }
 
 /// A disabled mouse setting must explicitly disable terminal mouse reporting

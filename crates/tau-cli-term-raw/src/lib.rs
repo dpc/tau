@@ -14,7 +14,9 @@
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
 mod block_layout_state;
+mod clipboard_paste;
 mod pending_paste;
+pub use clipboard_paste::PasteContent;
 mod presentation_mutation_generation;
 mod presentation_observation_state;
 mod prompt_editor_state;
@@ -28,6 +30,7 @@ mod terminal_runtime_state;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, MutexGuard, atomic as path_std_sync_atomic};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -1007,6 +1010,13 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
 }
 /// High-level events surfaced to the downstream event loop.
 pub enum Event {
+    /// Upload complete PNG bytes without inserting binary content in the draft.
+    PastePngUpload {
+        /// Exact local upload attempt identity.
+        id: u64,
+        /// Source retained outside prompt/history presentation.
+        bytes: Arc<[u8]>,
+    },
     /// Upload normalized text without exposing it to the editable draft.
     PasteUpload {
         /// Exact local attempt identity, never a wire or session authority.
@@ -2182,7 +2192,7 @@ impl TermHandle {
     /// point.
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
-        if st.editor.pending_paste.is_some() {
+        if st.editor.pending_paste.is_some() || st.editor.clipboard.busy() {
             return;
         }
         st.editor.revision = st.editor.revision.wrapping_add(1);
@@ -2208,7 +2218,10 @@ impl TermHandle {
         cursor: usize,
     ) -> bool {
         let mut st = self.lock();
-        if st.editor.pending_paste.is_some() || st.editor.revision != expected_revision {
+        if st.editor.pending_paste.is_some()
+            || st.editor.clipboard.busy()
+            || st.editor.revision != expected_revision
+        {
             return false;
         }
         st.editor.revision = st.editor.revision.wrapping_add(1);
@@ -2231,7 +2244,7 @@ impl TermHandle {
     /// was present at recall time.
     pub fn recall_prompt_before_current(&self, text: String) {
         let mut st = self.lock();
-        if st.editor.pending_paste.is_some() {
+        if st.editor.pending_paste.is_some() || st.editor.clipboard.busy() {
             return;
         }
         st.editor.revision = st.editor.revision.wrapping_add(1);
@@ -2248,7 +2261,7 @@ impl TermHandle {
     /// the replacement becomes the new editable draft.
     pub fn set_buffer_preserving_undo(&self, text: String, cursor: usize) {
         let mut st = self.lock();
-        if st.editor.pending_paste.is_some() {
+        if st.editor.pending_paste.is_some() || st.editor.clipboard.busy() {
             return;
         }
         st.editor.revision = st.editor.revision.wrapping_add(1);
@@ -2361,6 +2374,14 @@ fn validate_osc1337_name(name: &str) -> Result<(), &'static str> {
 
 /// Raw terminal events from crossterm or a virtual test input channel.
 pub enum RawEvent {
+    /// Raw OSC body from the sole terminal reader; never logged.
+    Osc(Vec<u8>),
+    /// Private mode 5522 capability report mapped by the reader.
+    ClipboardModeReport(bool),
+    /// Wakeup for bounded clipboard acquisition/probe deadlines.
+    ClipboardDeadline,
+    /// Focus change interrupted an incomplete user-gesture clipboard read.
+    ClipboardInterrupted,
     /// Directed local upload completion; contains reference or diagnostic only.
     PasteUploadFinished {
         /// Exact attempt identity.
@@ -2597,6 +2618,11 @@ impl Term {
             retirement_probe_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
+        handle
+            .lock()
+            .editor
+            .clipboard
+            .probe(path_std_time::Instant::now());
         handle.release_redraw_notification();
 
         Ok((
@@ -2747,9 +2773,62 @@ impl Term {
             };
 
             match raw {
+                RawEvent::Osc(body) => {
+                    let effects = {
+                        let mut st = self.handle.lock();
+                        let busy = st.editor.pending_paste.is_some();
+                        st.editor
+                            .clipboard
+                            .receive(&body, path_std_time::Instant::now(), busy)
+                    };
+                    if let Some(event) = self.apply_clipboard_effects(effects)? {
+                        return Ok(event);
+                    }
+                }
+                RawEvent::ClipboardModeReport(supported) => {
+                    let effects = self
+                        .handle
+                        .lock()
+                        .editor
+                        .clipboard
+                        .mode_report(supported, path_std_time::Instant::now());
+                    self.apply_clipboard_effects(effects)?;
+                }
+                RawEvent::ClipboardDeadline => {
+                    let effects = self
+                        .handle
+                        .lock()
+                        .editor
+                        .clipboard
+                        .expire(path_std_time::Instant::now());
+                    if let Some(event) = self.apply_clipboard_effects(effects)? {
+                        return Ok(event);
+                    }
+                }
+                RawEvent::ClipboardInterrupted => {
+                    return Ok(Event::Notice("Clipboard paste interrupted by focus change; draft unchanged. Paste again.".into()));
+                }
                 RawEvent::Key(key) => {
                     {
                         let mut st = self.handle.lock();
+                        if st.editor.clipboard.busy() {
+                            if key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                st.editor.clipboard.reset();
+                                drop(st);
+                                self.write_clipboard_control(b"\x1b[?5522l\x1b[?5522$p")?;
+                                self.handle
+                                    .lock()
+                                    .editor
+                                    .clipboard
+                                    .probe(path_std_time::Instant::now());
+                                return Ok(Event::Notice(
+                                    "Clipboard paste discarded; draft unchanged.".into(),
+                                ));
+                            }
+                            continue;
+                        }
                         if let Some(paste) = &st.editor.pending_paste {
                             if key.code == KeyCode::Char('c')
                                 && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -2759,15 +2838,15 @@ impl Term {
                                 return Ok(Event::PasteCancelled { id });
                             }
                             if key.code == KeyCode::Enter && paste.failed {
-                                let text = paste.text.clone();
+                                let content = paste.content.clone();
                                 st.editor.next_paste_id += 1;
                                 let id = st.editor.next_paste_id;
                                 st.editor.pending_paste = Some(pending_paste::PendingPaste {
                                     id,
-                                    text: text.clone(),
+                                    content: content.clone(),
                                     failed: false,
                                 });
-                                return Ok(Event::PasteUpload { id, text });
+                                return Ok(paste_upload_event(id, content));
                             }
                             // Upload ownership freezes edits, bindings,
                             // history,
@@ -2800,52 +2879,34 @@ impl Term {
                     });
                 }
                 RawEvent::FocusChanged { focused } => {
+                    {
+                        let mut st = self.handle.lock();
+                        if st.editor.clipboard.busy() {
+                            let _ = self
+                                .handle
+                                .input_tx
+                                .send(InputMessage::Raw(RawEvent::ClipboardInterrupted));
+                        }
+                        st.editor.clipboard.reset();
+                    }
+                    if self.owns_raw_mode {
+                        if focused {
+                            self.handle
+                                .lock()
+                                .editor
+                                .clipboard
+                                .probe(path_std_time::Instant::now());
+                            self.write_clipboard_control(b"\x1b[?5522l\x1b[?5522$p")?;
+                        } else {
+                            self.write_clipboard_control(b"\x1b[?5522l")?;
+                        }
+                    }
                     return Ok(Event::FocusChanged { focused });
                 }
                 RawEvent::Paste(text) => {
-                    // Insert the whole paste at the cursor in one go.
-                    // Going through the per-char path would re-trigger
-                    // the redraw thread N times and, more importantly,
-                    // would expose embedded `\n` bytes to the Enter
-                    // handler and submit the line mid-paste.
-                    if text.is_empty() {
-                        self.handle.redraw();
-                        continue;
+                    if let Some(event) = self.apply_text_paste(text) {
+                        return Ok(event);
                     }
-                    let text = normalize_paste_text(text);
-                    {
-                        let mut st = self.handle.lock();
-                        if st.editor.pending_paste.is_some() {
-                            return Ok(Event::Notice(
-                                "Paste busy; wait or press Ctrl-C to discard it before pasting again.".to_owned(),
-                            ));
-                        }
-                        if st
-                            .editor
-                            .paste_upload_threshold
-                            .is_some_and(|limit| text.len() >= limit)
-                        {
-                            st.editor.next_paste_id += 1;
-                            let id = st.editor.next_paste_id;
-                            let text: Arc<str> = text.into();
-                            st.editor.pending_paste = Some(pending_paste::PendingPaste {
-                                id,
-                                text: text.clone(),
-                                failed: false,
-                            });
-                            return Ok(Event::PasteUpload { id, text });
-                        }
-                        st.editor.revision = st.editor.revision.wrapping_add(1);
-                        st.advance_completion_generation();
-                        st.record_undo();
-                        let cursor = st.editor.cursor;
-                        st.editor.buffer.insert_str(cursor, &text);
-                        st.write_cursor(cursor + text.len());
-                        st.sync_buffer_to_history_nav();
-                    }
-                    self.refresh_completion();
-                    self.handle.redraw();
-                    return Ok(Event::BufferChanged);
                 }
                 RawEvent::PasteUploadFinished { id, result } => {
                     let mut st = self.handle.lock();
@@ -2881,7 +2942,11 @@ impl Term {
                     return Ok(Event::BufferChanged);
                 }
                 RawEvent::CompletionRefresh => {
-                    if self.handle.lock().editor.pending_paste.is_some() {
+                    let paste_busy = {
+                        let st = self.handle.lock();
+                        st.editor.pending_paste.is_some() || st.editor.clipboard.busy()
+                    };
+                    if paste_busy {
                         continue;
                     }
                     self.refresh_completion();
@@ -2892,6 +2957,7 @@ impl Term {
                     let eligible = {
                         let st = self.handle.lock();
                         st.editor.pending_paste.is_none()
+                            && !st.editor.clipboard.busy()
                             && st.editor.completion_generation == generation
                             && st
                                 .editor
@@ -2937,9 +3003,25 @@ impl Term {
             );
         }
 
-        let message = match self.input_rx.recv() {
+        let deadline = self.handle.lock().editor.clipboard.deadline();
+        if deadline.is_some_and(|deadline| deadline <= path_std_time::Instant::now()) {
+            return Ok(Some(RawEvent::ClipboardDeadline));
+        }
+        let received = match deadline {
+            Some(deadline) => self
+                .input_rx
+                .recv_timeout(deadline.saturating_duration_since(path_std_time::Instant::now())),
+            None => self
+                .input_rx
+                .recv()
+                .map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let message = match received {
             Ok(message) => message,
-            Err(_) => return Ok(None),
+            Err(RecvTimeoutError::Timeout) => {
+                return Ok(Some(RawEvent::ClipboardDeadline));
+            }
+            Err(RecvTimeoutError::Disconnected) => return Ok(None),
         };
         {
             let st = self.handle.lock();
@@ -2969,6 +3051,101 @@ impl Term {
                 Err(error)
             }
         }
+    }
+
+    /// Queues protocol controls to the existing sole output owner, outside
+    /// render frames. Waiting for its flush propagates retained terminal
+    /// failures.
+    fn write_clipboard_control(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        {
+            let _transaction = self.handle.output_transaction_barrier();
+            let mut st = self.handle.lock();
+            if st.terminal.external_paused || st.terminal.input_shutdown {
+                return Ok(());
+            }
+            st.terminal.clipboard_control.extend_from_slice(bytes);
+        }
+        self.handle.redraw_sync();
+        if let Some(error) = &self.handle.lock().terminal.output_failure {
+            return Err(error.io_error());
+        }
+        Ok(())
+    }
+
+    /// Applies only complete content; incomplete acquisition never reaches
+    /// upload.
+    fn apply_clipboard_effects(
+        &self,
+        effects: clipboard_paste::Effects,
+    ) -> io::Result<Option<Event>> {
+        self.write_clipboard_control(&effects.output)?;
+        if let Some(notice) = effects.notice {
+            return Ok(Some(Event::Notice(notice)));
+        }
+        match effects.content {
+            Some(PasteContent::Text(text)) => Ok(self.apply_text_paste(text.to_string())),
+            Some(content @ PasteContent::Png(_)) => {
+                let mut st = self.handle.lock();
+                if st.editor.pending_paste.is_some() {
+                    return Ok(Some(Event::Notice("Paste busy; draft unchanged.".into())));
+                }
+                st.editor.next_paste_id += 1;
+                let id = st.editor.next_paste_id;
+                st.editor.pending_paste = Some(pending_paste::PendingPaste {
+                    id,
+                    content: content.clone(),
+                    failed: false,
+                });
+                Ok(Some(paste_upload_event(id, content)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Inserts one normalized text paste atomically or freezes it for upload.
+    /// Both legacy2004 and completed5522 text use this same threshold path.
+    fn apply_text_paste(&self, text: String) -> Option<Event> {
+        if text.is_empty() {
+            self.handle.redraw();
+            return None;
+        }
+        let text = normalize_paste_text(text);
+        {
+            let mut st = self.handle.lock();
+            if st.editor.pending_paste.is_some() || st.editor.clipboard.busy() {
+                return Some(Event::Notice(
+                    "Paste busy; wait or press Ctrl-C to discard it before pasting again.".into(),
+                ));
+            }
+            if st
+                .editor
+                .paste_upload_threshold
+                .is_some_and(|limit| text.len() >= limit)
+            {
+                st.editor.next_paste_id += 1;
+                let id = st.editor.next_paste_id;
+                let text: Arc<str> = text.into();
+                st.editor.pending_paste = Some(pending_paste::PendingPaste {
+                    id,
+                    content: PasteContent::Text(text.clone()),
+                    failed: false,
+                });
+                return Some(Event::PasteUpload { id, text });
+            }
+            st.editor.revision = st.editor.revision.wrapping_add(1);
+            st.advance_completion_generation();
+            st.record_undo();
+            let cursor = st.editor.cursor;
+            st.editor.buffer.insert_str(cursor, &text);
+            st.write_cursor(cursor + text.len());
+            st.sync_buffer_to_history_nav();
+        }
+        self.refresh_completion();
+        self.handle.redraw();
+        Some(Event::BufferChanged)
     }
 
     /// Plugs in (or replaces) the completion source. Pass `None` to
@@ -3138,6 +3315,8 @@ impl Term {
         {
             let mut st = self.handle.lock();
             st.terminal.external_paused = true;
+            st.editor.clipboard.reset();
+            st.terminal.clipboard_control.clear();
         }
         // Wait until any redraw frame that already passed the paused-state
         // check has finished writing before releasing the terminal to an
@@ -3194,6 +3373,7 @@ impl Term {
             st.terminal.height = height;
             st.ensure_input_cursor_visible();
             st.terminal.external_paused = false;
+            st.editor.clipboard.probe(path_std_time::Instant::now());
             st.terminal.invalidate_screen = true;
         }
         self.handle.redraw();
@@ -3885,6 +4065,7 @@ impl Term {
         {
             let mut st = self.handle.lock();
             st.terminal.shutdown = true;
+            st.editor.clipboard.reset();
         }
         self.handle.release_redraw_notification();
 
@@ -3904,6 +4085,14 @@ fn word_left_boundary(buffer: &str, cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// Preserves the existing text event while keeping PNG source explicitly typed.
+fn paste_upload_event(id: u64, content: PasteContent) -> Event {
+    match content {
+        PasteContent::Text(text) => Event::PasteUpload { id, text },
+        PasteContent::Png(bytes) => Event::PastePngUpload { id, bytes },
+    }
+}
+
 fn read_real_raw_event(
     mut read: impl FnMut() -> io::Result<CtEvent>,
     mut term_size: impl FnMut() -> io::Result<(u16, u16)>,
@@ -3916,6 +4105,13 @@ fn read_real_raw_event(
             "terminal raw input event"
         );
         match raw {
+            CtEvent::Osc(body) => return Ok(RawEvent::Osc(body)),
+            CtEvent::ModeReport(report) if report.mode == 5522 => {
+                return Ok(RawEvent::ClipboardModeReport(matches!(
+                    report.status,
+                    crossterm::event::ModeStatus::Set | crossterm::event::ModeStatus::Reset
+                )));
+            }
             CtEvent::Key(key) => {
                 // The kitty protocol surfaces Press/Repeat/Release events; drop
                 // Release here so each keystroke fires exactly once downstream.
@@ -3945,6 +4141,7 @@ fn write_external_pause_features(
     writer: &mut impl Write,
     terminal_options: TerminalOptions,
 ) -> io::Result<()> {
+    writer.write_all(b"\x1b[?5522l")?;
     if !terminal_options.mouse {
         crossterm::execute!(writer, DisableMouseCapture)?;
     }
@@ -3962,6 +4159,7 @@ fn write_external_resume_features(
     cursor_shape: CursorShape,
     terminal_options: TerminalOptions,
 ) -> io::Result<()> {
+    writer.write_all(b"\x1b[?5522l\x1b[?5522$p")?;
     if !terminal_options.mouse {
         crossterm::execute!(writer, DisableMouseCapture)?;
     }
@@ -4752,6 +4950,8 @@ struct RedrawPass {
     force_full: bool,
     sync_gen: RedrawSyncGeneration,
     pending_raw: Vec<String>,
+    /// Clipboard controls emitted outside the frame and never logged.
+    clipboard_control: Vec<u8>,
     redraw_history_size: usize,
     frame: RenderFrame,
     /// Bounded opaque observations captured with this frame's layout.
@@ -5012,6 +5212,7 @@ fn prepare_redraw_pass(
     // may have arrived with state changes we haven't read yet.
     let sync_gen = st.terminal.sync_requested;
     let pending_raw = std::mem::take(&mut st.terminal.pending_raw);
+    let clipboard_control = std::mem::take(&mut st.terminal.clipboard_control);
     let redraw_history_size = st.terminal.redraw_history_size;
     let presentation_observations =
         (!st.presentation_observations.is_empty()).then(|| st.presentation_observations.capture());
@@ -5043,6 +5244,7 @@ fn prepare_redraw_pass(
         force_full,
         sync_gen,
         pending_raw,
+        clipboard_control,
         redraw_history_size,
         frame,
         presentation_observations,
@@ -5140,6 +5342,7 @@ fn render_redraw_pass(
     for seq in &pass.pending_raw {
         writer.write_all(seq.as_bytes())?;
     }
+    writer.write_all(&pass.clipboard_control)?;
     if pass.force_full {
         // The terminal was clobbered by an external program ($EDITOR returned).
         // Wipe Screen's cached idea of what's on the terminal so `full_render`

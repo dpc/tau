@@ -150,5 +150,44 @@ ones, and references do not pin retention.
 Uploads reuse the existing interactive UI transport; there is no extra UI
 connection or lifecycle participant. They require harness protocol 8.1 or newer
 and a persistent artifact store. A memory-only/older harness reports failure
-without inserting the original text. Terminal input remains crossterm bracketed
-text paste; native Kitty clipboard/image transport is not implemented.
+without inserting the original text.
+
+## Native terminal clipboard pastes
+
+Tau probes DEC private mode 5522 without blocking startup. A terminal advertising
+the Kitty OSC5522 clipboard extension can send a MIME offer after a user paste
+gesture. Tau enables that mode only after a supported report; unsupported or
+unanswered probes retain ordinary bracketed text paste. Mode5522 supersedes
+bracketed paste on capable terminals. The opt-in `terminal-responses` feature
+of `dpc-tau-crossterm` supplies responses through the existing sole Unix terminal
+reader; non-Unix input currently retains the text fallback.
+
+Tau prefers `image/png`, then UTF-8 `text/plain;charset=utf-8`, then `text/plain`
+(strictly decoded as UTF-8). PNG bytes always become an artifact, regardless of
+size; text still uses the normalization and 8 KiB threshold above. MIME claims
+are hints, not image validation. No filesystem paths or `text/uri-list` offers
+are dereferenced, and copied-file byte transfer is not implemented.
+
+Each read preserves the offer's primary/default location and optional paste
+grant, supplies the name `Paste event`, and uses a fresh request ID. Only matching
+opening OK, independently decoded DATA chunks, and final DONE admit content.
+Inventory is limited to 64 KiB; read chunks to 4096 decoded bytes; complete
+content to 16 MiB. These are Tau ingestion bounds, not terminal clipboard
+capacity or an immutable clipboard snapshot.
+
+Acquisition freezes the original draft and cursor. Ctrl-C discards acquisition;
+it does not cancel an agent prompt. Concurrent pastes report busy; overlapping
+unidentified inventories are discarded explicitly rather than mixed. Permission,
+unsupported MIME, malformed transfer, and timeout failures discard partial bytes
+and leave the draft untouched. Paste again to retry acquisition. Only a completed
+source enters the upload retry flow above; Enter never rereads the clipboard.
+
+The probe, MIME offer, and requested read have fixed total deadlines of 1, 10,
+and 15 seconds respectively. Traffic does not extend them; a very slow SSH
+transfer can therefore fail explicitly even while receiving data. Tau disables
+and clears clipboard mode before external editor/picker handoff and cleanup,
+and disables on focus loss. Focus gain and terminal resume reprobe. Already
+queued replies cannot be retracted; discarded or stale IDs never publish partial
+artifacts. Crossterm's isolated-ESC disambiguation limit is 25 ms: once recognized,
+response frames can span reads, but a longer split between initial ESC and its
+introducer is not guaranteed to frame as a response.

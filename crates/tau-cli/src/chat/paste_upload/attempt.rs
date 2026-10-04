@@ -8,7 +8,7 @@ pub(super) struct Attempt {
     pub(super) session: tau_proto::SessionId,
     /// Shared source identity lets explicit retry resume without changing
     /// bytes.
-    pub(super) text: Arc<str>,
+    pub(super) text: tau_cli_term::PasteContent,
     /// Existing chunk/offset/digest-verifying artifact state machine.
     pub(super) upload: tau_client::ArtifactUpload,
     /// Local editor receiving only reference or content-free failure.
