@@ -195,7 +195,7 @@ and previous-response chaining retain the selected mode; there is no mode fallba
 
 Both modes suppress provider-inline `context_management` for GPT-5.6 and advertise
 standalone compaction. Astra uses the same native standalone contract, with a
-244,800-token default threshold (90 percent of its 272,000-token raw window);
+945,000-token default threshold (90 percent of the shared raw-window default);
 its surface remains standard regardless of the profile's Lite compatibility flag.
 Compaction eligibility is separate from GPT-5.6's image and Lite capabilities.
 V2 success requires `response.completed` and exactly one
@@ -225,9 +225,12 @@ Custom definitions and snapshots it in each transient provider prompt. Lite
 never advertises or lowers hosted search. Completed hosted-call items remain
 bounded provider-owned opaque replay data and never enter Tau tool dispatch.
 
-ChatGPT model metadata publishes the raw provider context window as the total
-window and the provider's 95-percent effective ceiling as the separate legal
-input maximum. Standalone compaction thresholds derive from the raw window,
+ChatGPT model metadata publishes Tau's raw context-window default as the total
+window and a 95-percent effective ceiling as the separate input maximum.
+Known GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna, and GPT-6.1 Sol share a
+1,050,000-token raw default; unknown and legacy models retain 272,000 tokens.
+These are local budgeting defaults, not verified private-backend capacities.
+Native standalone compaction thresholds derive from 90 percent of the raw window,
 while runtime usage, local context limits, and reserve scheduling use the
 effective input maximum.
 

@@ -2424,7 +2424,7 @@ fn publishes_chatgpt_model_metadata() {
             .iter()
             .find(|model| model.id.model.as_str() == model_id)
             .expect("GPT-6 Sol/Luna model");
-        assert_eq!(model.context_window, GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW);
+        assert_eq!(model.context_window, CONTEMPORARY_RAW_CONTEXT_WINDOW);
         assert_eq!(
             model.max_input_tokens,
             Some(effective_context_window_for_model(model_id))
@@ -2461,7 +2461,7 @@ fn publishes_chatgpt_model_metadata() {
             .all(|model| {
                 model.supports_standalone_compaction
                     && model.standalone_compaction_threshold
-                        == Some(tau_proto::TokenCount::new(334_800))
+                        == Some(tau_proto::TokenCount::new(945_000))
                     && model.standalone_compaction_prefix_budget.is_none()
             })
     );
@@ -2492,7 +2492,7 @@ fn publishes_chatgpt_model_metadata() {
             .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
             .expect("gpt-5.6-sol model")
             .context_window,
-        GPT_5_6_RAW_CONTEXT_WINDOW
+        CONTEMPORARY_RAW_CONTEXT_WINDOW
     );
     assert_eq!(
         models
@@ -2621,17 +2621,56 @@ fn unaudited_gpt_5_6_suffix_does_not_gain_audited_route_capabilities() {
     assert!(config.supports_compaction);
 }
 
-/// Ensures request configuration retains each model's raw context window
-/// independently of the effective window published to the harness.
+/// Keeps published input budgets, native compaction thresholds, and request
+/// configuration aligned for every contemporary model, namespace, and mode.
+/// Exact-ID fallback cases prevent accidentally enlarging legacy or unknown
+/// models.
 #[test]
-fn config_uses_model_specific_context_window() {
-    let gpt_6 = config_for_model(&ModelName::new("gpt-6-sol"), "token".to_owned(), None);
-    let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
-    let gpt_5_5 = config_for_model(&ModelName::new("gpt-5.5"), "token".to_owned(), None);
-
-    assert_eq!(gpt_6.raw_context_window, GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW);
-    assert_eq!(gpt_5_6.raw_context_window, GPT_5_6_RAW_CONTEXT_WINDOW);
-    assert_eq!(gpt_5_5.raw_context_window, DEFAULT_RAW_CONTEXT_WINDOW);
+fn context_defaults_align_metadata_and_request_configuration() {
+    for provider in ["chatgpt", "work-chatgpt"] {
+        for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+            for (model, raw, effective, threshold) in [
+                ("gpt-5.6-sol", 1_050_000, 997_500, Some(945_000)),
+                ("gpt-5.6-terra", 1_050_000, 997_500, Some(945_000)),
+                ("gpt-5.6-luna", 1_050_000, 997_500, Some(945_000)),
+                ("gpt-6-astra", 1_050_000, 997_500, Some(945_000)),
+                ("gpt-6-sol", 1_050_000, 997_500, None),
+                ("gpt-6-luna", 1_050_000, 997_500, None),
+                ("gpt-6.1-sol", 1_050_000, 997_500, None),
+                ("gpt-5.5", 272_000, 258_400, None),
+                ("gpt-5.4", 272_000, 258_400, None),
+                ("gpt-5.4-mini", 272_000, 258_400, None),
+                ("gpt-5.3-codex", 272_000, 258_400, None),
+                ("gpt-5.6-experimental", 272_000, 258_400, None),
+                ("gpt-6-astra-experimental", 272_000, 258_400, None),
+                ("gpt-6.1-sol-experimental", 272_000, 258_400, None),
+                ("gpt-6", 272_000, 258_400, None),
+                ("unknown", 272_000, 258_400, None),
+            ] {
+                let provider = ProviderName::new(provider);
+                let info = model_info(&provider, model, mode);
+                let config = resolved_config_for_provider_model(
+                    &provider,
+                    &ModelName::new(model),
+                    ResolvedCredentials::new("token".to_owned(), None),
+                    mode,
+                );
+                assert_eq!(info.context_window.get(), raw, "{provider}/{model}");
+                assert_eq!(
+                    info.max_input_tokens.map(|tokens| tokens.get()),
+                    Some(effective),
+                    "{provider}/{model}"
+                );
+                assert_eq!(
+                    info.standalone_compaction_threshold
+                        .map(|tokens| tokens.get()),
+                    threshold,
+                    "{provider}/{model}"
+                );
+                assert_eq!(config.raw_context_window().get(), raw, "{provider}/{model}");
+            }
+        }
+    }
 }
 
 /// Ensures audited GPT-5.6 and GPT-6 models omit provider-inline compaction
@@ -2665,13 +2704,13 @@ fn astra_aliases_publish_native_standalone_compaction_without_surface_changes() 
             assert!(!astra.standalone_compaction_generation_negative);
             assert_eq!(
                 astra.standalone_compaction_threshold,
-                Some(tau_proto::TokenCount::new(244_800))
+                Some(tau_proto::TokenCount::new(945_000))
             );
             assert!(astra.standalone_compaction_prefix_budget.is_none());
-            assert_eq!(astra.context_window, tau_proto::TokenCount::new(272_000));
+            assert_eq!(astra.context_window, tau_proto::TokenCount::new(1_050_000));
             assert_eq!(
                 astra.max_input_tokens,
-                Some(tau_proto::TokenCount::new(258_400))
+                Some(tau_proto::TokenCount::new(997_500))
             );
             assert!(astra.supports_parallel_tool_calls);
             assert_eq!(astra.input_modalities, vec![tau_proto::InputModality::Text]);

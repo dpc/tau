@@ -37,8 +37,10 @@ pub const LOG_TARGET: &str = "provider-codex";
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 const DEFAULT_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(272_000);
-const GPT_5_6_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(372_000);
-const GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW: tau_proto::TokenCount =
+// Tau's shared input-budget default for the known contemporary models, not a
+// verified private-backend capacity. Unknown and legacy models keep the
+// fallback.
+const CONTEMPORARY_RAW_CONTEXT_WINDOW: tau_proto::TokenCount =
     tau_proto::TokenCount::new(1_050_000);
 const GPT_6_SOL_LUNA_MAX_OUTPUT_TOKENS: tau_proto::TokenCount = tau_proto::TokenCount::new(128_000);
 const STANDALONE_COMPACTION_CONTEXT_WINDOW_PERCENT: u64 = 90;
@@ -1946,10 +1948,8 @@ fn default_affinity_for_model(model: &str) -> i32 {
 }
 
 fn raw_context_window_for_model(model: &str) -> tau_proto::TokenCount {
-    if is_gpt_6_sol_or_luna(model) {
-        GPT_6_SOL_LUNA_RAW_CONTEXT_WINDOW
-    } else if is_gpt_5_6(model) {
-        GPT_5_6_RAW_CONTEXT_WINDOW
+    if is_gpt_5_6(model) || is_gpt_6(model) {
+        CONTEMPORARY_RAW_CONTEXT_WINDOW
     } else {
         DEFAULT_RAW_CONTEXT_WINDOW
     }

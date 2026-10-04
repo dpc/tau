@@ -1670,17 +1670,21 @@ Only the same socket and exact profile/mode/cache identity may use a successful
 prewarm response id. The real request must retain the warmed lowered input as an
 exact prefix; a changed fingerprint, divergent prefix, stale generation, or
 invalidation discards the anchor and sends full context.
-The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
-effective context window and include `max` among their reasoning choices.
-GPT-6 Sol and Luna publish a 1,050,000-token total window, a 997,500-token
-effective input ceiling, a 128,000-token output capability, and the documented
+The known ChatGPT GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna, and GPT-6.1
+Sol models share Tau's 1,050,000-token total-window default and 997,500-token
+effective input ceiling. These are local budgeting defaults, not verified
+private-backend capacities; unknown and legacy models retain the conservative
+272,000-token total and 258,400-token effective fallback.
+GPT-5.6 models include `max` among their reasoning choices.
+GPT-6 Sol and Luna publish a 128,000-token output capability and the documented
 `none` through `max` reasoning choices except `minimal`.
 They omit unaudited provider-inline context management and use local-summary
 standalone compaction.
 Standard mode publishes and requests parallel direct tool calls; Lite
 compatibility publishes its one-call limit. Neither mode emits provider-inline
-context management. Astra also uses native standalone compaction, with a
-244,800-token default threshold over its 272,000-token raw window. It retains
+context management. GPT-5.6 and Astra use native standalone compaction, with a
+945,000-token default threshold derived from 90 percent of the shared raw
+window. Astra retains
 standard Responses even when the profile enables Lite compatibility. Named
 policies such as `100k` at `outer_turn_finished` may compact earlier.
 Manual and threshold-driven compaction use a fresh ordinary

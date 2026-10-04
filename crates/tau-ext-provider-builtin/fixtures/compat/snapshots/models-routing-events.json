@@ -569,7 +569,7 @@
           "kind": "unknown"
         }
       },
-      "context_window": 372000,
+      "context_window": 1050000,
       "default_affinity": 700,
       "efforts": {
         "control": {
@@ -613,8 +613,8 @@
         "text",
         "image"
       ],
-      "max_input_tokens": 353400,
-      "standalone_compaction_threshold": 334800,
+      "max_input_tokens": 997500,
+      "standalone_compaction_threshold": 945000,
       "supported_tool_types": [
         "function",
         "custom"
@@ -664,7 +664,7 @@
           "kind": "unknown"
         }
       },
-      "context_window": 372000,
+      "context_window": 1050000,
       "default_affinity": 600,
       "efforts": {
         "control": {
@@ -708,8 +708,8 @@
         "text",
         "image"
       ],
-      "max_input_tokens": 353400,
-      "standalone_compaction_threshold": 334800,
+      "max_input_tokens": 997500,
+      "standalone_compaction_threshold": 945000,
       "supported_tool_types": [
         "function",
         "custom"
@@ -759,7 +759,7 @@
           "kind": "unknown"
         }
       },
-      "context_window": 372000,
+      "context_window": 1050000,
       "default_affinity": 500,
       "efforts": {
         "control": {
@@ -803,8 +803,8 @@
         "text",
         "image"
       ],
-      "max_input_tokens": 353400,
-      "standalone_compaction_threshold": 334800,
+      "max_input_tokens": 997500,
+      "standalone_compaction_threshold": 945000,
       "supported_tool_types": [
         "function",
         "custom"
@@ -854,7 +854,7 @@
           "kind": "unknown"
         }
       },
-      "context_window": 272000,
+      "context_window": 1050000,
       "efforts": {
         "control": {
           "kind": "mapped",
@@ -901,8 +901,8 @@
       "input_modalities": [
         "text"
       ],
-      "max_input_tokens": 258400,
-      "standalone_compaction_threshold": 244800,
+      "max_input_tokens": 997500,
+      "standalone_compaction_threshold": 945000,
       "supported_tool_types": [
         "function",
         "custom"
@@ -1423,7 +1423,7 @@
       "credential_present": true,
       "mode": "lite_compatibility",
       "model": "gpt-5.6-sol",
-      "raw_context_window": 372000,
+      "raw_context_window": 1050000,
       "requested": "chatgpt/gpt-5.6-sol",
       "supports_compaction": false,
       "supports_encrypted_reasoning": true,
