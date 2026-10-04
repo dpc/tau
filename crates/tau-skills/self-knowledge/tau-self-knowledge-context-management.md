@@ -31,6 +31,16 @@ wins, and at most one standalone compaction starts. Status conditions are
 optional. With no `status` tool in the frozen prompt, open/settled turns
 match `working`/`done` for this purpose.
 
+Use `when.at: outer_turn_starting` for lazy compaction before the next outer
+turn's first inference instead of eagerly after the previous finish. It never
+runs on same-turn tool or other continuations. Queued/coalesced work qualifies
+only when it actually begins a new turn. A `statuses: [done]` filter uses the
+last runtime work status (not persisted across reload); without a visible status
+tool this checkpoint matches `working`. At turn start it coalesces with matching
+`before_inference` policies into one compaction at the lowest threshold. Keep
+an independent `before_inference` safety rule for mid-turn context pressure.
+Existing defaults and `outer_turn_finished` semantics are unchanged.
+
 Manual UI `:compact`, the model's `compact` tool, optional same-session
 `agent_compact` tool, and scheduled standalone compaction are separate
 entrypoints. Standalone work prefers provider-native compaction when available;

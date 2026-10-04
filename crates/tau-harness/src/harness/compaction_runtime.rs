@@ -1677,6 +1677,17 @@ impl Harness {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
+        // Admission reaches this checkpoint before the first ordinary dispatch
+        // creates its outer-turn owner. Tool/length/replay continuations retain
+        // that owner; queued input alone must never create another start check.
+        // Coalesce both checkpoints into the same protected transaction so the
+        // independent before-inference safety policy still works mid-turn.
+        let policy_point_matches = |candidate| {
+            candidate == point
+                || (point == path_tau_config_settings::ContextPolicyPoint::BeforeInference
+                    && candidate == path_tau_config_settings::ContextPolicyPoint::OuterTurnStarting
+                    && conv.turn.outer_turn.owned_id().is_none())
+        };
         let Some(model) = self.model_for_agent_role(conv) else {
             return false;
         };
@@ -1710,7 +1721,7 @@ impl Harness {
                     .values()
                     .filter(|policy| {
                         policy.enable
-                            && policy.when.at == point
+                            && policy_point_matches(policy.when.at)
                             && policy
                                 .when
                                 .statuses
@@ -1756,7 +1767,7 @@ impl Harness {
                 .flat_map(|role| role.compactions.iter())
                 .filter_map(|(name, policy)| {
                     if !policy.enable
-                        || policy.when.at != point
+                        || !policy_point_matches(policy.when.at)
                         || policy
                             .when
                             .statuses

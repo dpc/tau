@@ -603,6 +603,18 @@ the start, so live execution and restart commit the same terminal without
 provider work.
 
 `before_inference` policies otherwise retain the deferred runtime behavior above.
+Opt-in `outer_turn_starting` policies join that same deferred selection only
+when admitted work has no open or finish-pending canonical outer-turn owner.
+They run lazily before the new turn's first ordinary inference, not on the
+previous finish or on same-turn tool, output-length, or restored continuations.
+Matching start and before-inference policies coalesce into one protected
+threshold-evidence transaction. Successful compaction proceeds to its owned
+inference without another policy pass. Selection uses the last runtime work
+status before the new inference; it neither resets nor persists that status.
+Without a visible status tool, this pre-inference checkpoint matches `working`.
+Queued or coalesced work becomes eligible only when it actually starts a new
+outer turn. Existing admission, cancellation, rejected-publication, and recovery
+ownership applies unchanged; a dispatch attempt is not a new turn.
 `outer_turn_finished` policies that match the logical terminal status coalesce
 into one `automatic_compaction_decision` on the final canonical
 `provider.response_finished`, or on the harness-authored canceled

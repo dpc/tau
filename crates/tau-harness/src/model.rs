@@ -388,6 +388,9 @@ pub(crate) fn role_infos(
                                     let point = match policy.when.at {
                                         ContextPolicyPoint::AfterResponse => "after_response",
                                         ContextPolicyPoint::BeforeInference => "before_inference",
+                                        ContextPolicyPoint::OuterTurnStarting => {
+                                            "outer_turn_starting"
+                                        }
                                         ContextPolicyPoint::OuterTurnFinished => {
                                             "outer_turn_finished"
                                         }

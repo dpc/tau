@@ -371,6 +371,39 @@ standalone compaction using the lowest resolved matching threshold. Omitted
 not expose the `status` tool, Tau treats an open turn as `working` and its
 settled finish as `done` for policy matching only.
 
+For lazy task-boundary compaction, select `outer_turn_starting` instead of
+`outer_turn_finished`. It runs only when admitted work will start a new outer
+turn, before its first ordinary inference, never during same-turn tool or other
+continuations. Nothing runs merely because the previous turn finished. Queued
+messages folded into an active turn do not qualify; queued/coalesced work that
+starts the next turn does. Optional `statuses: [done]` matches the last reported
+work status, before the new inference; status remains runtime-only across reload.
+Without a visible status tool this checkpoint matches `working`.
+
+```yaml
+agents:
+  compactions:
+    compact-after-done:
+      threshold: 100000
+      when:
+        at: outer_turn_starting
+        statuses: [done]
+    compact-turn-end-any-status:
+      threshold: 200000
+      when:
+        at: outer_turn_starting
+    compact-context-limit:
+      threshold: 250000
+      when:
+        at: before_inference
+```
+
+At a new turn, matching `outer_turn_starting` and `before_inference` policies
+coalesce using the lowest threshold. The independent `before_inference` rules
+remain eligible mid-turn. Successful standalone compaction proceeds directly
+to its owned inference, without a second start-policy evaluation. Defaults and
+the eager `outer_turn_finished` behavior remain unchanged.
+
 When completed inference reports input usage strictly above the threshold, Tau
 queues the message as an internal prompt after the current response and any tool
 calls. When it reaches the agent, the UI history shows

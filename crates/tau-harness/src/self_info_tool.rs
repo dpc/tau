@@ -172,6 +172,7 @@ fn format_headers(info: &InternalSelfInfo) -> String {
         let at = match policy.at {
             ContextPolicyPoint::AfterResponse => "after_response",
             ContextPolicyPoint::BeforeInference => "before_inference",
+            ContextPolicyPoint::OuterTurnStarting => "outer_turn_starting",
             ContextPolicyPoint::OuterTurnFinished => "outer_turn_finished",
         };
         if let Some(threshold) = policy.threshold {

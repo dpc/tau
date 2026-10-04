@@ -6461,6 +6461,48 @@ fn context_policy_rejects_empty_status_set() {
     assert!(error.to_string().contains("nonempty list"));
 }
 
+/// The opt-in lazy checkpoint must load through the real config layers without
+/// changing the built-in mid-turn safety policy or accepting it for alerts.
+#[test]
+fn outer_turn_starting_compaction_loads_without_changing_defaults() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents:\n  role_groups:\n    custom:\n      roles:\n        reviewer: {}\n  compactions:\n    lazy:\n      threshold: 100000\n      when:\n        at: outer_turn_starting\n        statuses: [done]\n",
+    )
+    .expect("write");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
+    let policies = &settings.roles["reviewer"].compactions;
+    assert_eq!(
+        policies["lazy"].when.at,
+        ContextPolicyPoint::OuterTurnStarting
+    );
+    assert_eq!(
+        policies["lazy"].when.statuses,
+        Some(vec![tau_proto::AgentWorkStatusPhase::Done])
+    );
+    assert_eq!(policies["default"].when, ContextPolicyWhen::default());
+    let yaml = serde_yaml_ng::to_string(&policies["lazy"]).expect("serialize");
+    assert!(yaml.contains("at: outer_turn_starting"));
+    assert_eq!(
+        serde_yaml_ng::from_str::<CompactionPolicy>(&yaml).expect("roundtrip"),
+        policies["lazy"]
+    );
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents:\n  context_size_alerts:\n    lazy:\n      threshold: 100000\n      message: compact soon\n      when:\n        at: outer_turn_starting\n",
+    )
+    .expect("write");
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("alerts do not support the lazy checkpoint");
+    assert!(
+        error
+            .to_string()
+            .contains("only supports after_response or outer_turn_finished"),
+        "{error}"
+    );
+}
+
 /// Alerts retain their historical after-response/any selector when no `when`
 /// block is configured.
 #[test]

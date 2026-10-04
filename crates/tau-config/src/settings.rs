@@ -2480,11 +2480,13 @@ impl HarnessSettings {
                 }
                 if !matches!(
                     policy.when.at,
-                    ContextPolicyPoint::BeforeInference | ContextPolicyPoint::OuterTurnFinished
+                    ContextPolicyPoint::BeforeInference
+                        | ContextPolicyPoint::OuterTurnStarting
+                        | ContextPolicyPoint::OuterTurnFinished
                 ) {
                     return Err(SettingsError::Config(config::ConfigError::Message(
                         format!(
-                            "role `{role_name}` compaction policy `{policy_name}` only supports before_inference or outer_turn_finished"
+                            "role `{role_name}` compaction policy `{policy_name}` only supports before_inference, outer_turn_starting or outer_turn_finished"
                         ),
                     )));
                 }
@@ -3094,6 +3096,8 @@ pub enum ContextPolicyPoint {
     /// At the existing safe checkpoint immediately before ordinary inference.
     #[default]
     BeforeInference,
+    /// Before the first ordinary inference of newly admitted outer-turn work.
+    OuterTurnStarting,
     /// After the durable outer-turn finish has committed.
     OuterTurnFinished,
 }

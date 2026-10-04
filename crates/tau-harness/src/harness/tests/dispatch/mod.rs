@@ -2904,6 +2904,7 @@ mod compaction_standalone_rejections;
 mod compaction_strict;
 mod compaction_terminalization;
 mod compaction_threshold;
+mod compaction_turn_start;
 mod configuration;
 mod extension_routing;
 mod internal_tool_dispatch;
