@@ -852,6 +852,7 @@ dependencies = [
  "dpc-tau-blocking-notify-channel",
  "dpc-tau-crossterm",
  "dpc-tau-term-screen",
+ "nix",
  "tracing",
  "unicode-segmentation",
  "vt100",

@@ -354,6 +354,50 @@ fn shutdown_does_not_render_while_external_paused() {
     assert!(buf.is_empty(), "shutdown must not write while paused");
 }
 
+/// Normal quit must retain its transcript and final cursor/status placement,
+/// unlike an external editor's cleared canvas; neither path may reopen input.
+#[test]
+fn clipboard_handoff_prepared_quit_preserves_final_render_and_cursor() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(8, 40, 0);
+    let (term, handle, _input) =
+        Term::new_virtual(40, 8, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    handle.print_output("before-quit", "retained transcript");
+    handle.set_buffer("draft".into(), 5);
+    flush_redraws(&handle, &buf, &mut parser);
+    term.prepare_interactive_exit()
+        .expect("prepare normal quit");
+    assert!(buf.is_empty(), "quit preparation must not clear the canvas");
+    assert!(handle.lock().terminal.external_paused);
+    assert!(handle.lock().terminal.exit_prepared);
+    assert!(term.real_reader.borrow().is_none());
+    handle.print_output("final-update", "final visible update");
+    handle.redraw_sync();
+    assert!(
+        buf.is_empty(),
+        "normal output stays muted after preparation"
+    );
+    drop(term);
+    let bytes = buf.drain_bytes();
+    assert!(!bytes.windows(4).any(|bytes| bytes == b"\x1b[2J"));
+    assert!(!bytes.windows(8).any(|bytes| bytes == b"\x1b[?5522h"));
+    parser.process(&bytes);
+    let contents = parser.screen().contents();
+    assert!(contents.contains("retained transcript"));
+    assert!(contents.contains("final visible update"));
+    assert!(contents.contains("> draft"));
+    let prompt_row = contents
+        .lines()
+        .position(|line| line.contains("> draft"))
+        .expect("prompt retained");
+    let (row, column) = parser.screen().cursor_position();
+    assert!(
+        prompt_row < usize::from(row),
+        "shell/status cursor must follow content"
+    );
+    assert_eq!(column, 0);
+}
+
 /// Real terminal cleanup is also skipped while paused; the pause path has
 /// already disabled raw-mode terminal features before handing ownership to the
 /// external program.
@@ -7133,16 +7177,13 @@ fn completion_refresh_reuses_an_outstanding_real_reader() {
     let starts = path_std_sync::Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
     let first_starts = starts.clone();
 
-    assert!(spawn_real_reader_if_needed(
-        &in_flight,
-        input_tx.clone(),
-        move || {
-            first_starts.fetch_add(1, path_std_sync_atomic::Ordering::AcqRel);
-            started_tx.send(()).expect("reader started");
-            release_rx.recv().expect("release real reader");
-            Ok(RawEvent::FocusChanged { focused: true })
-        },
-    ));
+    let reader = spawn_real_reader_if_needed(&in_flight, input_tx.clone(), move || {
+        first_starts.fetch_add(1, path_std_sync_atomic::Ordering::AcqRel);
+        started_tx.send(()).expect("reader started");
+        release_rx.recv().expect("release real reader");
+        Ok(Some(RawEvent::FocusChanged { focused: true }))
+    })
+    .expect("start first reader");
     started_rx.recv().expect("reader is blocked");
 
     input_tx
@@ -7154,14 +7195,13 @@ fn completion_refresh_reuses_an_outstanding_real_reader() {
     ));
 
     let second_starts = starts.clone();
-    assert!(!spawn_real_reader_if_needed(
-        &in_flight,
-        input_tx,
-        move || {
+    assert!(
+        spawn_real_reader_if_needed(&in_flight, input_tx, move || {
             second_starts.fetch_add(1, path_std_sync_atomic::Ordering::AcqRel);
             unreachable!("second reader must not start")
-        },
-    ));
+        },)
+        .is_none()
+    );
     assert_eq!(starts.load(path_std_sync_atomic::Ordering::Acquire), 1);
 
     release_tx.send(()).expect("release reader");
@@ -7170,7 +7210,249 @@ fn completion_refresh_reuses_an_outstanding_real_reader() {
         InputMessage::RealRaw(RawEvent::FocusChanged { focused: true })
     ));
     finish_real_reader(&in_flight);
+    reader.join().expect("reader completed");
     assert!(!in_flight.load(path_std_sync_atomic::Ordering::Acquire));
+}
+
+/// Cancel/focus/probe resets cannot forgive input already admitted from native
+/// mode. Failure keeps mode disabled; only a complete fence permits re-enable.
+#[test]
+fn clipboard_handoff_obligation_survives_all_local_resets() {
+    let now = path_std_time::Instant::now();
+    let mut clipboard = clipboard_paste::ClipboardPaste::default();
+    assert!(!clipboard.needs_fence());
+    clipboard.probe(now);
+    assert_eq!(clipboard.mode_report(true, now).output, b"\x1b[?5522h");
+    clipboard.reset();
+    assert!(clipboard.needs_fence());
+    clipboard.probe(now);
+    assert!(clipboard.needs_fence());
+    clipboard.expire(now + Duration::from_secs(2));
+    assert!(clipboard.needs_fence());
+    let first = clipboard.begin_handoff().request();
+    clipboard.probe(now);
+    assert!(clipboard.mode_report(true, now).output.is_empty());
+    let second = clipboard.begin_handoff().request();
+    assert_ne!(first, second);
+    clipboard.finish_handoff();
+    assert!(!clipboard.needs_fence());
+    clipboard.probe(now);
+    assert_eq!(clipboard.mode_report(true, now).output, b"\x1b[?5522h");
+}
+
+/// A stuck helper must outlive the decision without an unbounded join or a
+/// competing reader. Its late foreground request is not an automatic retry.
+#[test]
+fn clipboard_handoff_unacknowledged_reader_retains_ownership_until_explicit_retry() {
+    let (term, handle, input) =
+        Term::new_virtual(80, 24, "> ", Box::new(io::sink()), CursorShape::Bar);
+    handle.set_buffer("draft".into(), 2);
+    let (release_tx, release_rx) = path_std_sync::mpsc::channel();
+    let (started_tx, started_rx) = path_std_sync::mpsc::channel();
+    *term.real_reader.borrow_mut() = spawn_real_reader_if_needed(
+        &term.real_read_in_flight,
+        term.handle.input_tx.clone(),
+        move || {
+            started_tx.send(()).expect("reader started");
+            release_rx.recv().expect("reader release");
+            Ok(Some(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL,
+            ))))
+        },
+    );
+    started_rx.recv().expect("reader started");
+    let reader_id = term
+        .real_reader
+        .borrow()
+        .as_ref()
+        .expect("retained reader")
+        .thread()
+        .id();
+    term.handle
+        .input_tx
+        .send(InputMessage::RefreshCompletion)
+        .expect("local wake");
+    let write_called = path_std_cell::Cell::new(false);
+    let error = term
+        .quiesce_input_with(
+            path_std_time::Instant::now() + Duration::from_millis(30),
+            |_| {
+                write_called.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("live helper must prevent handoff");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(!write_called.get());
+    term.start_real_reader();
+    assert_eq!(
+        term.real_reader
+            .borrow()
+            .as_ref()
+            .expect("same retained reader")
+            .thread()
+            .id(),
+        reader_id
+    );
+    assert!(
+        term.real_read_in_flight
+            .load(path_std_sync_atomic::Ordering::Acquire)
+    );
+    release_tx.send(()).expect("release reader");
+    // The local wake is preserved ahead of the helper's ordinary input.
+    assert!(matches!(
+        term.next_raw().expect("preserved local wake"),
+        Some(RawEvent::CompletionRefresh)
+    ));
+    assert!(matches!(
+        term.get_next_event().expect("late foreground request"),
+        Event::ExternalEditor
+    ));
+    assert!(
+        term.pause_for_external().is_err(),
+        "late request cannot launch"
+    );
+    assert_eq!(handle.get_buffer(), "draft");
+    assert_eq!(handle.get_cursor(), 2);
+    input
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("explicit retry key");
+    assert!(matches!(
+        term.get_next_event().expect("explicit foreground retry"),
+        Event::ExternalEditor
+    ));
+    assert!(!term.handoff_request_is_deferred());
+    term.quiesce_input_with(
+        path_std_time::Instant::now() + Duration::from_secs(1),
+        |_| Ok(()),
+    )
+    .expect("explicit retry retires completed helper");
+    assert!(term.real_reader.borrow().is_none());
+}
+
+/// Ordinary keys and completed bracketed pastes remain FIFO without reinjection
+/// into the child. Staging overflow preserves even the event crossing the cap.
+#[test]
+fn clipboard_handoff_staging_is_fifo_and_overflow_never_drops_keys() {
+    let (term, handle, _) = Term::new_virtual(80, 24, "> ", Box::new(io::sink()), CursorShape::Bar);
+    handle.set_buffer("draft".into(), 5);
+    term.stage_handoff_input(
+        RawEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        None,
+    )
+    .expect("stage ordinary key");
+    term.stage_handoff_input(RawEvent::Paste("bc".into()), None)
+        .expect("stage completed bracketed paste");
+    term.stage_handoff_input(
+        RawEvent::Osc(b"5522;type=read:id=old:status=DONE;".to_vec()),
+        None,
+    )
+    .expect("consume private old protocol");
+    for _ in 0..2 {
+        assert!(matches!(
+            term.get_next_event().expect("preserved input"),
+            Event::BufferChanged
+        ));
+    }
+    assert_eq!(handle.get_buffer(), "draftabc");
+    for _ in 0..4096 {
+        term.stage_handoff_input(RawEvent::CompletionRefresh, None)
+            .expect("within staging cap");
+    }
+    assert!(
+        term.stage_handoff_input(
+            RawEvent::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+            None,
+        )
+        .is_err()
+    );
+    assert_eq!(term.staged_input.borrow().len(), 4097);
+    assert!(matches!(
+        term.staged_input.borrow().back(),
+        Some(RawEvent::Key(_))
+    ));
+}
+
+/// A failed helper cannot leave an orphaned admission marker that silently
+/// wedges input or turns missing ownership acknowledgment into success.
+#[test]
+fn clipboard_handoff_reader_failure_is_not_a_boundary() {
+    let (term, _, _input) = Term::new_virtual(80, 24, "> ", Box::new(io::sink()), CursorShape::Bar);
+    *term.real_reader.borrow_mut() = spawn_real_reader_if_needed(
+        &term.real_read_in_flight,
+        term.handle.input_tx.clone(),
+        || panic!("injected reader failure"),
+    );
+    let error = term
+        .quiesce_input_with(
+            path_std_time::Instant::now() + Duration::from_secs(1),
+            |_| panic!("failed reader cannot write a fence"),
+        )
+        .expect_err("failed reader is not proof");
+    assert_eq!(error.to_string(), "terminal input reader failed");
+    assert!(term.real_reader.borrow().is_none());
+    assert!(
+        !term
+            .real_read_in_flight
+            .load(path_std_sync_atomic::Ordering::Acquire)
+    );
+}
+
+/// The absolute decision deadline wins even when the helper is absent or the
+/// complete fence has arrived but helper termination has not been confirmed.
+#[test]
+fn clipboard_handoff_expired_budget_and_late_retirement_never_authorize_release() {
+    let (term, _, _input) = Term::new_virtual(80, 24, "> ", Box::new(io::sink()), CursorShape::Bar);
+    let expired = path_std_time::Instant::now() - Duration::from_millis(1);
+    assert_eq!(
+        term.drain_reader_until(expired, None)
+            .expect_err("expired budget")
+            .kind(),
+        io::ErrorKind::TimedOut
+    );
+    let mut fence = clipboard_fence::ClipboardFence::new("fresh".into());
+    fence
+        .receive(b"5522;type=read:id=fresh:status=OK;")
+        .expect("opening");
+    fence
+        .receive(b"5522;type=read:id=fresh:status=DATA:mime=Lg==;")
+        .expect("empty inventory");
+    let tx = term.handle.input_tx.clone();
+    let (release_tx, release_rx) = path_std_sync::mpsc::channel();
+    term.real_read_in_flight
+        .store(true, path_std_sync_atomic::Ordering::Release);
+    *term.real_reader.borrow_mut() = Some(thread::spawn(move || {
+        tx.send(InputMessage::RealRaw(RawEvent::Osc(
+            b"5522;type=read:id=fresh:status=DONE;".to_vec(),
+        )))
+        .expect("complete proof");
+        release_rx.recv().expect("late termination");
+    }));
+    let error = term
+        .drain_reader_until(
+            path_std_time::Instant::now() + Duration::from_millis(30),
+            Some(&mut fence),
+        )
+        .expect_err("proof alone cannot authorize late retirement");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(term.real_reader.borrow().is_some());
+    release_tx.send(()).expect("retire helper");
+    // Even once finished, the expired attempt cannot become a delayed success.
+    while !term
+        .real_reader
+        .borrow()
+        .as_ref()
+        .expect("retained helper")
+        .is_finished()
+    {
+        thread::yield_now();
+    }
+    assert!(term.drain_reader_until(expired, None).is_err());
+    assert!(term.real_reader.borrow().is_none());
 }
 
 /// Enter acceptance keeps a whole-buffer candidate's explicit UTF-8 byte

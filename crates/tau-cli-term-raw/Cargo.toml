@@ -31,4 +31,9 @@ tracing.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
+nix = { version = "0.29", default-features = false, features = [
+  "fs",
+  "process",
+  "term",
+] }
 vt100.workspace = true

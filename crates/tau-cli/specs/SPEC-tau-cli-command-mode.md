@@ -23,6 +23,15 @@ and the command still receives a freshly serialized decision.
 `:quit-session` sends the unconditional dedicated shutdown request, regardless of
 policy or other UIs, causing canonical session shutdown.
 
+Normal interactive quit, Ctrl-D, session quit, and detach first require the raw
+terminal's safe input boundary described in
+[ARCH-tau-cli-term](../../tau-cli-term/specs/ARCH-tau-cli-term.md). Failure cancels
+the operation before any lifecycle request and offers explicit retry.
+`:quit-force` bypasses only that boundary with a warning that clean shell input
+cannot be guaranteed; it still uses ordinary harness quit policy. Preserved old
+input cannot trigger a delayed force exit. Fatal attachment failures and lost
+transport retain best-effort cleanup rather than the normal interactive guarantee.
+
 Quit decisions serialize at the harness: an acknowledged quitter no longer
 participates in the last-UI count even while its transport drains. Explicit
 detach cannot undo already-selected shutdown. Following terminal cleanup, normal

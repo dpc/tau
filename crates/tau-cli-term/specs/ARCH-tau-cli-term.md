@@ -29,6 +29,20 @@ Routing and typed literal provenance belong to `tau-cli`, as specified by
 
 Bounded subprocess execution lives in `src/bounded_command.rs`.
 
+- The raw terminal owns one retained cooperative poll/read helper. Before any
+  foreground callback or interactive exit, it proves that helper terminated;
+  after native clipboard admission it additionally requires a complete fresh-ID
+  dot-metadata response ordered after mode-off. A two-second decision budget
+  fails closed without an unbounded helper join. Failed handoffs retain Tau's
+  draft and ordinary input, disable native clipboard admission, and require
+  explicit retry; preserved old requests cannot launch later automatically.
+  Unsupported terminals need no clipboard fence. This bounds the decision, not
+  terminal-output syscalls or crossterm's internal parser work; a late helper
+  retains input ownership until normal input consumption retires it.
+  Normal quit shares this boundary but does not clear the editor canvas:
+  terminal features are released, input stays parked, and shutdown still renders
+  the final retained content and places the cursor below it. External callbacks
+  remain fully redraw-muted through teardown.
 - Git/fuzzy completion helpers use `ProcessOwnership::ProcessGroup`: Tau bounds
   stdout and elapsed time, kills the process group on overflow, timeout, or
   inherited-pipe failures, but does not hand foreground terminal ownership to the

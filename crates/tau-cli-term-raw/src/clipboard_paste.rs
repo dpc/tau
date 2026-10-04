@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+use super::clipboard_fence::ClipboardFence;
+
 #[cfg(test)]
 mod tests;
 
@@ -68,6 +70,12 @@ pub(super) struct ClipboardPaste {
     identity: String,
     /// True only after a supported mode report for the current ownership epoch.
     enabled: bool,
+    /// Attachment-lifetime obligation; cancellation cannot retract queued
+    /// bytes.
+    stream_obligation: bool,
+    /// Failed handoffs keep native mode disabled until a successful explicit
+    /// retry.
+    handoff_blocked: bool,
     /// Deadline for a nonblocking capability probe.
     probe: Option<Instant>,
     /// Unique read serial retained across resets to isolate late replies.
@@ -87,6 +95,8 @@ impl Default for ClipboardPaste {
         Self {
             identity: format!("{}-{nanos}-{serial}", std::process::id()),
             enabled: false,
+            stream_obligation: false,
+            handoff_blocked: false,
             probe: None,
             serial: 0,
             transfer: None,
@@ -125,7 +135,8 @@ impl ClipboardPaste {
     /// probe.
     pub(super) fn mode_report(&mut self, supported: bool, now: Instant) -> Effects {
         let admitted = self.probe.take().is_some_and(|deadline| now < deadline);
-        if supported && admitted {
+        if supported && admitted && !self.handoff_blocked {
+            self.stream_obligation = true;
             self.enabled = true;
             Effects {
                 output: b"\x1b[?5522h".to_vec(),
@@ -134,6 +145,25 @@ impl ClipboardPaste {
         } else {
             Effects::default()
         }
+    }
+
+    /// Requires a stream fence only after native mode was actually admitted.
+    pub(super) fn needs_fence(&self) -> bool {
+        self.stream_obligation
+    }
+
+    /// Revokes acquisition while retaining the independent stream obligation.
+    pub(super) fn begin_handoff(&mut self) -> ClipboardFence {
+        self.reset();
+        self.handoff_blocked = true;
+        self.serial += 1;
+        ClipboardFence::new(format!("tau-fence-{}-{}", self.identity, self.serial))
+    }
+
+    /// Discharges the obligation only after the correlated fence completed.
+    pub(super) fn finish_handoff(&mut self) {
+        self.stream_obligation = false;
+        self.handoff_blocked = false;
     }
 
     /// Indicates acquisition ownership, separate from artifact upload

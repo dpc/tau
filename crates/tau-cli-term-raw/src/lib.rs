@@ -14,6 +14,7 @@
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
 mod block_layout_state;
+mod clipboard_fence;
 mod clipboard_paste;
 mod pending_paste;
 pub use clipboard_paste::PasteContent;
@@ -27,8 +28,8 @@ mod terminal_generation_tests;
 mod terminal_history_generation;
 mod terminal_runtime_state;
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell as LocalCell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufWriter, Write};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, MutexGuard, atomic as path_std_sync_atomic};
@@ -44,6 +45,12 @@ const INPUT_HISTORY_MAX_ENTRIES: usize = 1000;
 /// Maximum primary UTF-8 text retained for one terminal attachment's drafts.
 const INPUT_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
 const STALL_WARNING_INTERVAL: Duration = Duration::from_secs(5);
+/// Maximum retained ordinary events during one bounded handoff attempt.
+const HANDOFF_INPUT_MAX_EVENTS: usize = 4096;
+/// Maximum staged paste/event bytes, plus the single event crossing the cap.
+const HANDOFF_INPUT_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Decision budget; does not cancel output syscalls or unfinished parser work.
+const HANDOFF_DECISION_BUDGET: Duration = Duration::from_secs(2);
 static STALL_WARNING_LIMITER: Mutex<StallWarningLimiter> =
     Mutex::new(StallWarningLimiter { last: None });
 
@@ -2422,6 +2429,8 @@ enum InputMessage {
     RefreshCompletionIfGeneration(u64),
     /// A real-terminal reader error that retires the in-flight reader marker.
     RealError(io::Error),
+    /// A cooperative poll slice finished without a complete public event.
+    RealIdle,
 }
 
 /// Starts exactly one real-terminal reader until its result reaches the input
@@ -2429,8 +2438,8 @@ enum InputMessage {
 fn spawn_real_reader_if_needed(
     in_flight: &Arc<path_std_sync_atomic::AtomicBool>,
     tx: path_std_sync::mpsc::Sender<InputMessage>,
-    read: impl FnOnce() -> io::Result<RawEvent> + Send + 'static,
-) -> bool {
+    read: impl FnOnce() -> io::Result<Option<RawEvent>> + Send + 'static,
+) -> Option<JoinHandle<()>> {
     if in_flight
         .compare_exchange(
             false,
@@ -2440,16 +2449,16 @@ fn spawn_real_reader_if_needed(
         )
         .is_err()
     {
-        return false;
+        return None;
     }
-    thread::spawn(move || {
+    Some(thread::spawn(move || {
         let message = match read() {
-            Ok(raw) => InputMessage::RealRaw(raw),
+            Ok(Some(raw)) => InputMessage::RealRaw(raw),
+            Ok(None) => InputMessage::RealIdle,
             Err(error) => InputMessage::RealError(error),
         };
         let _ = tx.send(message);
-    });
-    true
+    }))
 }
 
 /// Retires a consumed real-terminal reader result on its owning input thread.
@@ -2503,11 +2512,9 @@ pub fn is_output_failure(error: &io::Error) -> bool {
 /// Owns the input event loop. Call [`Term::get_next_event`] in a loop to
 /// drive it.
 ///
-/// Real terminals isolate each blocking crossterm read in a short-lived helper
-/// thread and deliver the result through an internal channel. This lets
-/// shutdown wake the downstream input loop without timeout polling while still
-/// avoiding a persistent stdin reader that could race a foreground program such
-/// as `$EDITOR`.
+/// Real terminals retain one cooperative poll/read helper at a time. Shutdown
+/// and local wakeups share its result channel; foreground handoff must confirm
+/// helper termination and any native clipboard fence before releasing input.
 ///
 /// Virtual terminals (tests) use the injected channel branch.
 pub struct Term {
@@ -2519,6 +2526,14 @@ pub struct Term {
     input_rx: path_std_sync::mpsc::Receiver<InputMessage>,
     /// Keeps one real-terminal read alive across non-input wakeups.
     real_read_in_flight: Arc<path_std_sync_atomic::AtomicBool>,
+    /// Retained helper; only a confirmed-finished thread may be joined.
+    real_reader: RefCell<Option<JoinHandle<()>>>,
+    /// Ordinary events preserved while proving a foreground handoff boundary.
+    staged_input: RefCell<VecDeque<RawEvent>>,
+    /// A staged foreground request must not become a delayed automatic launch.
+    staged_request: LocalCell<bool>,
+    /// A late helper result belongs to the failed attempt, not a fresh retry.
+    real_reader_handoff: LocalCell<bool>,
     /// Redraw thread handle — taken and joined on drop.
     redraw_thread: Option<JoinHandle<()>>,
     /// Whether to disable raw mode on drop (false for virtual terms).
@@ -2630,6 +2645,10 @@ impl Term {
                 handle: handle.clone(),
                 input_rx,
                 real_read_in_flight: Arc::new(path_std_sync_atomic::AtomicBool::new(false)),
+                real_reader: RefCell::new(None),
+                staged_input: RefCell::new(VecDeque::new()),
+                staged_request: LocalCell::new(false),
+                real_reader_handoff: LocalCell::new(false),
                 redraw_thread: Some(redraw_thread),
                 owns_raw_mode: true,
                 terminal_options,
@@ -2708,6 +2727,10 @@ impl Term {
             handle: handle.clone(),
             input_rx,
             real_read_in_flight: Arc::new(path_std_sync_atomic::AtomicBool::new(false)),
+            real_reader: RefCell::new(None),
+            staged_input: RefCell::new(VecDeque::new()),
+            staged_request: LocalCell::new(false),
+            real_reader_handoff: LocalCell::new(false),
             redraw_thread: Some(redraw_thread),
             owns_raw_mode: false,
             terminal_options: TerminalOptions {
@@ -2978,78 +3001,125 @@ impl Term {
 
     /// Reads the next raw event, blocking until one arrives.
     ///
-    /// Real terminals perform blocking crossterm reads in a one-shot helper
-    /// thread and wait on the same channel used for shutdown wakeups. One
-    /// helper remains associated with an outstanding read across non-input
-    /// wakeups, so refreshes cannot start competing stdin readers. A returned
-    /// input result retires that helper before downstream code handles it; if
-    /// shutdown wins, a later result is dropped by the shutdown channel path.
+    /// Real terminals perform cooperative poll/read slices in one retained
+    /// helper and wait on the channel shared with shutdown wakeups. Non-input
+    /// wakeups never admit a competing reader. A result retires its admission
+    /// marker; confirmed thread termination precedes the next helper or
+    /// terminal handoff. Sticky shutdown ignores late results.
     fn next_raw(&self) -> io::Result<Option<RawEvent>> {
-        {
-            let st = self.handle.lock();
-            if let Some(error) = &st.terminal.output_failure {
-                return Err(error.io_error());
+        loop {
+            {
+                let st = self.handle.lock();
+                if let Some(error) = &st.terminal.output_failure {
+                    return Err(error.io_error());
+                }
+                if st.terminal.input_shutdown {
+                    return Ok(None);
+                }
             }
-            if st.terminal.input_shutdown {
-                return Ok(None);
+            if let Some(raw) = self.staged_input.borrow_mut().pop_front() {
+                self.staged_request.set(true);
+                return Ok(Some(raw));
             }
-        }
 
-        if self.owns_raw_mode {
-            spawn_real_reader_if_needed(
-                &self.real_read_in_flight,
-                self.handle.input_tx.clone(),
-                || read_real_raw_event(event::read, raw_term_size),
-            );
-        }
+            if self.owns_raw_mode {
+                self.start_real_reader();
+            }
 
-        let deadline = self.handle.lock().editor.clipboard.deadline();
-        if deadline.is_some_and(|deadline| deadline <= path_std_time::Instant::now()) {
-            return Ok(Some(RawEvent::ClipboardDeadline));
-        }
-        let received = match deadline {
-            Some(deadline) => self
-                .input_rx
-                .recv_timeout(deadline.saturating_duration_since(path_std_time::Instant::now())),
-            None => self
-                .input_rx
-                .recv()
-                .map_err(|_| RecvTimeoutError::Disconnected),
-        };
-        let message = match received {
-            Ok(message) => message,
-            Err(RecvTimeoutError::Timeout) => {
+            let deadline = self.handle.lock().editor.clipboard.deadline();
+            if deadline.is_some_and(|deadline| deadline <= path_std_time::Instant::now()) {
                 return Ok(Some(RawEvent::ClipboardDeadline));
             }
-            Err(RecvTimeoutError::Disconnected) => return Ok(None),
-        };
-        {
-            let st = self.handle.lock();
-            if let Some(error) = &st.terminal.output_failure {
-                return Err(error.io_error());
+            let wait = deadline
+                .map(|deadline| deadline.saturating_duration_since(path_std_time::Instant::now()));
+            let wait = if self.owns_raw_mode {
+                Some(
+                    wait.unwrap_or(Duration::from_millis(25))
+                        .min(Duration::from_millis(25)),
+                )
+            } else {
+                wait
+            };
+            let received = match wait {
+                Some(wait) => self.input_rx.recv_timeout(wait),
+                None => self
+                    .input_rx
+                    .recv()
+                    .map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            let message = match received {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => {
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+            };
+            {
+                let st = self.handle.lock();
+                if let Some(error) = &st.terminal.output_failure {
+                    return Err(error.io_error());
+                }
+                if st.terminal.input_shutdown {
+                    return Ok(None);
+                }
             }
-            if st.terminal.input_shutdown {
-                return Ok(None);
-            }
+            self.staged_request.set(false);
+            return match message {
+                InputMessage::Raw(raw) => Ok(Some(raw)),
+                InputMessage::RealRaw(raw) => {
+                    finish_real_reader(&self.real_read_in_flight);
+                    self.staged_request
+                        .set(self.real_reader_handoff.replace(false));
+                    Ok(Some(raw))
+                }
+                InputMessage::Shutdown => {
+                    self.handle.lock().terminal.input_shutdown = true;
+                    Ok(None)
+                }
+                InputMessage::RefreshCompletion => Ok(Some(RawEvent::CompletionRefresh)),
+                InputMessage::RefreshCompletionIfGeneration(generation) => {
+                    Ok(Some(RawEvent::CompletionRefreshIfGeneration(generation)))
+                }
+                InputMessage::RealError(error) => {
+                    finish_real_reader(&self.real_read_in_flight);
+                    self.real_reader_handoff.set(false);
+                    Err(error)
+                }
+                InputMessage::RealIdle => {
+                    finish_real_reader(&self.real_read_in_flight);
+                    self.real_reader_handoff.set(false);
+                    continue;
+                }
+            };
         }
-        match message {
-            InputMessage::Raw(raw) => Ok(Some(raw)),
-            InputMessage::RealRaw(raw) => {
-                finish_real_reader(&self.real_read_in_flight);
-                Ok(Some(raw))
-            }
-            InputMessage::Shutdown => {
-                self.handle.lock().terminal.input_shutdown = true;
-                Ok(None)
-            }
-            InputMessage::RefreshCompletion => Ok(Some(RawEvent::CompletionRefresh)),
-            InputMessage::RefreshCompletionIfGeneration(generation) => {
-                Ok(Some(RawEvent::CompletionRefreshIfGeneration(generation)))
-            }
-            InputMessage::RealError(error) => {
-                finish_real_reader(&self.real_read_in_flight);
-                Err(error)
-            }
+    }
+
+    /// Joins only an already-finished helper; late completion never admits a
+    /// competing reader.
+    fn retire_finished_real_reader(&self) {
+        let mut reader = self.real_reader.borrow_mut();
+        if reader.as_ref().is_some_and(JoinHandle::is_finished)
+            && reader.take().expect("finished reader").join().is_err()
+        {
+            let _ = self
+                .handle
+                .input_tx
+                .send(InputMessage::RealError(io::Error::other(
+                    "terminal input reader failed",
+                )));
+        }
+    }
+
+    /// Starts one cooperative slice using the same admission path in normal
+    /// operation and during handoff.
+    fn start_real_reader(&self) {
+        self.retire_finished_real_reader();
+        if self.real_reader.borrow().is_none() {
+            *self.real_reader.borrow_mut() = spawn_real_reader_if_needed(
+                &self.real_read_in_flight,
+                self.handle.input_tx.clone(),
+                read_real_raw_event_slice,
+            );
         }
     }
 
@@ -3279,18 +3349,23 @@ impl Term {
     /// cursor shape, and clears the screen so the editor starts on a clean
     /// canvas.
     ///
-    /// No reader-thread coordination is needed: the one-shot crossterm reader
-    /// is joined logically by `get_next_event` returning before callers can
-    /// launch the external program, so no persistent stdin reader remains
-    /// active while the program owns the terminal.
+    /// Retires the sole cooperative input helper before releasing raw mode.
+    /// After native clipboard admission, requires a complete fresh metadata
+    /// fence with mode disabled. A two-second decision budget cancels unsafe
+    /// handoffs; it is not hard cancellation of terminal I/O syscalls.
     ///
     /// # Errors
     ///
     /// Returns terminal I/O errors from releasing raw-mode features or clearing
-    /// the screen. On failure, Tau attempts to roll terminal ownership back via
-    /// [`Self::resume_after_external`], which also unmutes redraws and
-    /// invalidates the next frame.
+    /// the screen. A failed boundary leaves Tau interactive, preserves ordinary
+    /// queued keys, and keeps native clipboard mode disabled for explicit
+    /// retry.
     pub fn pause_for_external(&self) -> io::Result<()> {
+        if self.staged_request.get() {
+            return Err(io::Error::other(
+                "foreground request received during handoff was blocked; retry explicitly",
+            ));
+        }
         if !self.owns_raw_mode {
             return Ok(());
         }
@@ -3308,6 +3383,37 @@ impl Term {
         })
     }
 
+    /// Prepares normal interactive exit without clearing the visible
+    /// transcript. The sole input owner remains parked; shutdown may still
+    /// finish its final render and place the cursor below Tau's content.
+    pub fn prepare_interactive_exit(&self) -> io::Result<()> {
+        if self.staged_request.get() {
+            return Err(io::Error::other(
+                "quit request received during handoff was blocked; retry explicitly",
+            ));
+        }
+        self.pause_for_external_with_release(|| {
+            if self.owns_raw_mode {
+                write_external_pause_features(&mut io::stdout(), self.terminal_options)?;
+                terminal::disable_raw_mode()?;
+            }
+            Ok(())
+        })?;
+        self.handle.lock().terminal.exit_prepared = true;
+        Ok(())
+    }
+
+    /// Distinguishes a preserved old request from an explicit post-failure
+    /// action, including deliberately unsafe force exits.
+    pub fn handoff_request_is_deferred(&self) -> bool {
+        self.staged_request.get()
+    }
+
+    /// Reports forced attachment shutdown separately from user Ctrl-D.
+    pub fn input_shutdown_requested(&self) -> bool {
+        self.handle.lock().terminal.input_shutdown
+    }
+
     fn pause_for_external_with_release(
         &self,
         release_terminal: impl FnOnce() -> io::Result<()>,
@@ -3315,6 +3421,7 @@ impl Term {
         {
             let mut st = self.handle.lock();
             st.terminal.external_paused = true;
+            st.terminal.exit_prepared = false;
             st.editor.clipboard.reset();
             st.terminal.clipboard_control.clear();
         }
@@ -3323,11 +3430,176 @@ impl Term {
         // external program.
         self.handle.redraw_sync();
 
+        if self.owns_raw_mode
+            && let Err(error) = self.quiesce_input()
+        {
+            // A reader that outlives the budget retains input ownership,
+            // but its clipboard producer must still be told to stop.
+            let _ = io::stdout().write_all(b"\x1b[?5522l");
+            let _ = io::stdout().flush();
+            let mut st = self.handle.lock();
+            st.terminal.external_paused = false;
+            st.terminal.invalidate_screen = true;
+            drop(st);
+            self.handle.redraw();
+            return Err(io::Error::other(format!(
+                "terminal handoff cancelled: {error}; draft and keys retained; retry explicitly"
+            )));
+        }
         if let Err(error) = release_terminal() {
             let _ = self.resume_after_external();
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Drains through one admitted helper at a time. Helpers perform poll on
+    /// behalf of the UI so an unfinished parser frame cannot trap the decision
+    /// thread inside crossterm's inner Unix read loop.
+    fn quiesce_input(&self) -> io::Result<()> {
+        let deadline = path_std_time::Instant::now() + HANDOFF_DECISION_BUDGET;
+        self.quiesce_input_with(deadline, |request| {
+            let mut stdout = io::stdout();
+            stdout.write_all(request)?;
+            stdout.flush()
+        })
+    }
+
+    /// Injectable output/deadline seam exercises ownership without a TTY.
+    fn quiesce_input_with(
+        &self,
+        deadline: path_std_time::Instant,
+        write: impl FnOnce(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut fence = {
+            let mut st = self.handle.lock();
+            st.editor
+                .clipboard
+                .needs_fence()
+                .then(|| st.editor.clipboard.begin_handoff())
+        };
+        // Do not admit a new helper until the existing one has returned and
+        // terminated. A timeout leaves its handle and admission marker intact.
+        if self.real_reader.borrow().is_some() {
+            self.real_reader_handoff.set(true);
+        }
+        self.drain_reader_until(deadline, None)?;
+        let Some(fence) = fence.as_mut() else {
+            return Ok(());
+        };
+        write(&fence.request())?;
+        loop {
+            if path_std_time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "clipboard fence timed out",
+                ));
+            }
+            self.start_real_reader();
+            self.real_reader_handoff.set(true);
+            if self.drain_reader_until(deadline, Some(fence))? {
+                self.handle.lock().editor.clipboard.finish_handoff();
+                return Ok(());
+            }
+        }
+    }
+
+    /// Consumes a helper's result and proves its termination without an
+    /// unbounded join. Local wakeups do not transfer stdin ownership.
+    fn drain_reader_until(
+        &self,
+        deadline: path_std_time::Instant,
+        mut fence: Option<&mut clipboard_fence::ClipboardFence>,
+    ) -> io::Result<bool> {
+        let mut proved = false;
+        loop {
+            self.retire_finished_real_reader();
+            let now = path_std_time::Instant::now();
+            if deadline <= now {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "input reader did not retire within the handoff budget",
+                ));
+            }
+            if self.real_reader.borrow().is_none()
+                && !self
+                    .real_read_in_flight
+                    .load(path_std_sync_atomic::Ordering::Acquire)
+            {
+                return Ok(proved);
+            }
+            match self
+                .input_rx
+                .recv_timeout((deadline - now).min(Duration::from_millis(5)))
+            {
+                Ok(InputMessage::RealRaw(raw)) => {
+                    finish_real_reader(&self.real_read_in_flight);
+                    self.real_reader_handoff.set(false);
+                    proved |= self.stage_handoff_input(raw, fence.as_deref_mut())?;
+                }
+                Ok(InputMessage::Raw(raw)) => {
+                    proved |= self.stage_handoff_input(raw, fence.as_deref_mut())?;
+                }
+                Ok(InputMessage::RealIdle) => {
+                    finish_real_reader(&self.real_read_in_flight);
+                    self.real_reader_handoff.set(false);
+                }
+                Ok(InputMessage::RealError(error)) => {
+                    finish_real_reader(&self.real_read_in_flight);
+                    self.real_reader_handoff.set(false);
+                    return Err(error);
+                }
+                Ok(InputMessage::RefreshCompletion) => {
+                    self.stage_handoff_input(RawEvent::CompletionRefresh, None)?;
+                }
+                Ok(InputMessage::RefreshCompletionIfGeneration(generation)) => {
+                    self.stage_handoff_input(
+                        RawEvent::CompletionRefreshIfGeneration(generation),
+                        None,
+                    )?;
+                }
+                Ok(InputMessage::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                    self.handle.lock().terminal.input_shutdown = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "terminal input stopped",
+                    ));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Protocol controls stay private; ordinary events resume in FIFO order.
+    /// Include the event that crosses the cap rather than dropping its keys.
+    fn stage_handoff_input(
+        &self,
+        raw: RawEvent,
+        fence: Option<&mut clipboard_fence::ClipboardFence>,
+    ) -> io::Result<bool> {
+        match raw {
+            RawEvent::Osc(body) => fence
+                .map_or(Ok(false), |fence| fence.receive(&body))
+                .map_err(io::Error::other),
+            RawEvent::ClipboardModeReport(_)
+            | RawEvent::ClipboardDeadline
+            | RawEvent::ClipboardInterrupted => Ok(false),
+            raw => {
+                let mut staged = self.staged_input.borrow_mut();
+                staged.push_back(raw);
+                let bytes: usize = staged
+                    .iter()
+                    .map(|event| match event {
+                        RawEvent::Paste(text) => text.len(),
+                        _ => std::mem::size_of::<RawEvent>(),
+                    })
+                    .sum();
+                if HANDOFF_INPUT_MAX_EVENTS < staged.len() || HANDOFF_INPUT_MAX_BYTES < bytes {
+                    return Err(io::Error::other("handoff input staging limit reached"));
+                }
+                Ok(false)
+            }
+        }
     }
 
     /// Re-acquires raw mode + bracketed paste after an external
@@ -3373,6 +3645,7 @@ impl Term {
             st.terminal.height = height;
             st.ensure_input_cursor_visible();
             st.terminal.external_paused = false;
+            st.terminal.exit_prepared = false;
             st.editor.clipboard.probe(path_std_time::Instant::now());
             st.terminal.invalidate_screen = true;
         }
@@ -4134,6 +4407,26 @@ fn read_real_raw_event(
             // "blocking" without unbounded recursion under noisy input.
             _ => {}
         }
+    }
+}
+
+/// Cooperatively ends one helper after 25ms without a complete event. Poll
+/// precedes every filtered read, including mouse and key-release events.
+fn read_real_raw_event_slice() -> io::Result<Option<RawEvent>> {
+    let deadline = path_std_time::Instant::now() + Duration::from_millis(25);
+    match read_real_raw_event(
+        || {
+            let remaining = deadline.saturating_duration_since(path_std_time::Instant::now());
+            if remaining.is_zero() || !event::poll(remaining)? {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            event::read()
+        },
+        raw_term_size,
+    ) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -5100,7 +5393,7 @@ fn render_shutdown_if_requested(
     if !st.terminal.shutdown {
         return false;
     }
-    if st.terminal.external_paused {
+    if st.terminal.external_paused && !st.terminal.exit_prepared {
         st.terminal.sync_completed = st.terminal.sync_requested;
         drop(st);
         sync_condvar.notify_all();
@@ -6075,5 +6368,7 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
     next_grapheme_boundary(s, pos)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod handoff_pty_tests;
 #[cfg(test)]
 mod tests;

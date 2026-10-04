@@ -1460,10 +1460,21 @@ fn quit_session_command_sends_dedicated_request_frame() {
         .expect("read timeout");
     let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
 
-    assert_eq!(
-        handle_ui_shutdown_command_text(":quit-session", &writer).expect("send shutdown request"),
-        Some(InputLoopExit::QuitSession)
-    );
+    let owner = interactive_exit::InteractiveExit {
+        prepare: &|| Ok(()),
+        resume: &|| unreachable!(),
+        shutdown: &|| send_ui_shutdown_request(&writer),
+        detach: &|| unreachable!(),
+        disconnected: &|| false,
+        feedback: &|_| unreachable!(),
+        deferred: false,
+    };
+    assert!(matches!(
+        owner
+            .execute(":quit-session")
+            .expect("prepared session quit"),
+        CommandOutcome::Exit(InputLoopExit::QuitSession)
+    ));
 
     let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
     assert_eq!(
@@ -1482,10 +1493,19 @@ fn detach_selects_policy_clearing_exit() {
     let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
     let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
 
-    assert_eq!(
-        handle_ui_detach_command_text(":detach"),
-        Some(InputLoopExit::Detach)
-    );
+    let owner = interactive_exit::InteractiveExit {
+        prepare: &|| Ok(()),
+        resume: &|| unreachable!(),
+        shutdown: &|| unreachable!(),
+        detach: &|| Some(tau_proto::UiQuitDisposition::Detached),
+        disconnected: &|| false,
+        feedback: &|_| unreachable!(),
+        deferred: false,
+    };
+    assert!(matches!(
+        owner.execute(":detach").expect("confirmed detach"),
+        CommandOutcome::Exit(InputLoopExit::Detach)
+    ));
     assert!(!InputLoopExit::Quit.detaches());
     assert!(InputLoopExit::Detach.detaches());
     drop(writer);

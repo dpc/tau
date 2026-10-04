@@ -16,6 +16,7 @@ mod configuration_tests;
 mod delivery_memory;
 #[cfg(test)]
 mod event_message_tests;
+mod interactive_exit;
 mod paste_upload;
 #[cfg(test)]
 mod recorded_line_routing_tests;
@@ -422,26 +423,6 @@ fn send_ui_shutdown_request(writer: &WriterHandle) -> io::Result<()> {
     )
 }
 
-/// Consume `:quit-session`, request canonical shutdown, and exit this UI.
-fn handle_ui_shutdown_command_text(
-    text: &str,
-    writer: &WriterHandle,
-) -> Result<Option<InputLoopExit>, io::Error> {
-    if text != ":quit-session" {
-        return Ok(None);
-    }
-    send_ui_shutdown_request(writer)?;
-    Ok(Some(InputLoopExit::QuitSession))
-}
-
-/// Select explicit, daemon-lifetime detach; the exit handshake commits it.
-fn handle_ui_detach_command_text(text: &str) -> Option<InputLoopExit> {
-    if text != ":detach" {
-        return None;
-    }
-    Some(InputLoopExit::Detach)
-}
-
 /// Wrap an event in the interactive UI's durable-by-default Emit message.
 fn durable_emit_message(event: &Event) -> HarnessInputMessage {
     HarnessInputMessage::emit(event.clone())
@@ -739,6 +720,10 @@ pub(crate) fn parse_retry_extension_command(
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     (":quit", "Quit this UI using the current session policy"),
     (":q", "Alias for :quit"),
+    (
+        ":quit-force",
+        "Force this UI to quit; queued terminal input may leak to the shell",
+    ),
     (":quit-session", "Quit the session and every attached UI"),
     (":cancel", "Cancel the current in-flight prompt"),
     (
@@ -3676,11 +3661,21 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_session_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        if matches!(text, ":quit" | ":q") {
-            return Ok(CommandOutcome::Exit(InputLoopExit::Quit));
+        let exit = interactive_exit::InteractiveExit {
+            prepare: &|| self.term.prepare_interactive_exit(),
+            resume: &|| self.term.cancel_prepared_exit(),
+            shutdown: &|| send_ui_shutdown_request(self.writer),
+            detach: &|| request_ui_quit(self.writer, &locked(&self.ctx.quit_results), true),
+            disconnected: &|| self.ctx.remote_disconnected.load(Ordering::Acquire),
+            feedback: &|message| {
+                self.output.command_feedback(message);
+                self.term.handle().redraw_sync();
+            },
+            deferred: self.term.handoff_request_is_deferred(),
         }
-        if let Some(exit) = handle_ui_shutdown_command_text(text, self.writer)? {
-            return Ok(CommandOutcome::Exit(exit));
+        .execute(text)?;
+        if !matches!(exit, CommandOutcome::NotHandled) {
+            return Ok(exit);
         }
         if text == ":cancel" {
             self.send_cancel_prompt();
@@ -3718,24 +3713,6 @@ impl<'a> TerminalInputSession<'a> {
         {
             self.output.command_feedback("usage: :retry");
             return Ok(CommandOutcome::Continue);
-        }
-        if let Some(exit) = handle_ui_detach_command_text(text) {
-            let disposition = request_ui_quit(self.writer, &locked(&self.ctx.quit_results), true);
-            return Ok(match disposition {
-                Some(tau_proto::UiQuitDisposition::Detached) => CommandOutcome::Exit(exit),
-                Some(tau_proto::UiQuitDisposition::Terminating) => {
-                    CommandOutcome::Exit(InputLoopExit::QuitSession)
-                }
-                None if self.ctx.remote_disconnected.load(Ordering::Acquire) => {
-                    CommandOutcome::Exit(InputLoopExit::Quit)
-                }
-                None => {
-                    self.output.command_feedback(
-                        "Detach was not confirmed; this UI remains connected. Retry :detach.",
-                    );
-                    CommandOutcome::Continue
-                }
-            });
         }
         if text == ":session" || text.starts_with(":session ") {
             self.handle_session_namespace(text)?;
@@ -4490,7 +4467,21 @@ impl<'a> TerminalInputSession<'a> {
             return None;
         }
 
+        if !self.ctx.remote_disconnected.load(Ordering::Acquire)
+            && !self.term.input_shutdown_requested()
+            && !self.prepare_interactive_exit()
+        {
+            return None;
+        }
         Some(InputLoopExit::Quit)
+    }
+
+    /// Cancels user-selected lifecycle operations before any daemon side effect
+    /// when terminal input ownership cannot be safely released.
+    fn prepare_interactive_exit(&self) -> bool {
+        interactive_exit::prepare(&|| self.term.prepare_interactive_exit(), &|message| {
+            self.output.command_feedback(message)
+        })
     }
 
     fn update_draft(&self) {

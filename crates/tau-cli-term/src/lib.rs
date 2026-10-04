@@ -344,6 +344,27 @@ pub struct HighTerm {
 }
 
 impl HighTerm {
+    /// Proves a safe input boundary and leaves terminal features released until
+    /// teardown. Failure cancels the exit and retains Tau's input ownership.
+    pub fn prepare_interactive_exit(&self) -> io::Result<()> {
+        self.term.prepare_interactive_exit()
+    }
+
+    /// Restores an attachment after a prepared detach was not acknowledged.
+    pub fn cancel_prepared_exit(&self) -> io::Result<()> {
+        self.term.resume_after_external()
+    }
+
+    /// Prevents preserved pre-boundary keys from silently forcing a later exit.
+    pub fn handoff_request_is_deferred(&self) -> bool {
+        self.term.handoff_request_is_deferred()
+    }
+
+    /// Distinguishes forced attachment shutdown from user-selected EOF.
+    pub fn input_shutdown_requested(&self) -> bool {
+        self.term.input_shutdown_requested()
+    }
+
     /// Runs an in-process interactive callback while it exclusively owns the
     /// terminal.
     ///

@@ -22,6 +22,9 @@ pub(super) struct TerminalRuntimeState {
     /// Set while the terminal is released to an external program.
     /// The redraw thread must not write to stdout in this state.
     pub(super) external_paused: bool,
+    /// Input was safely released for normal quit, not an external canvas;
+    /// shutdown must preserve the final render and cursor-below-content step.
+    pub(super) exit_prepared: bool,
     /// Set by `resume_after_external` (and similar) to force the next redraw to
     /// wipe its `Screen` cache and repaint from scratch. The redraw loop
     /// reads-and-clears this flag.
@@ -67,6 +70,7 @@ impl TerminalRuntimeState {
             input_shutdown: false,
             output_failure: None,
             external_paused: false,
+            exit_prepared: false,
             invalidate_screen: false,
             sync_requested: RedrawSyncGeneration::default(),
             sync_completed: RedrawSyncGeneration::default(),

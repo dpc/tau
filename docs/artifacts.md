@@ -185,9 +185,24 @@ source enters the upload retry flow above; Enter never rereads the clipboard.
 The probe, MIME offer, and requested read have fixed total deadlines of 1, 10,
 and 15 seconds respectively. Traffic does not extend them; a very slow SSH
 transfer can therefore fail explicitly even while receiving data. Tau disables
-and clears clipboard mode before external editor/picker handoff and cleanup,
-and disables on focus loss. Focus gain and terminal resume reprobe. Already
-queued replies cannot be retracted; discarded or stale IDs never publish partial
-artifacts. Crossterm's isolated-ESC disambiguation limit is 25 ms: once recognized,
+clipboard mode on focus loss. Focus gain and successful terminal resume reprobe.
+Cancellation and focus changes do not erase the obligation to drain already
+admitted native replies.
+
+Before an editor, picker, or normal interactive quit releases terminal input,
+Tau retires its sole input helper and, if native mode was admitted, requires a
+fresh, complete OSC5522 dot-metadata reply after mode-off. The two-second decision
+budget cancels the operation on missing or invalid proof; it does not hard-cancel
+kernel I/O. Tau stays interactive, retains the draft and ordinary queued keys,
+and keeps native clipboard mode disabled until a successful explicit retry.
+Old queued foreground requests cannot launch later automatically. Unsupported
+terminals that never admitted native mode need no metadata fence.
+Failed quit sends no quit/detach/shutdown request; retry the original command or
+Ctrl-D. Explicit `:quit-force` warns that queued protocol bytes or keys may reach
+the shell and cannot guarantee clean shell input. Fatal failures and forced
+termination have only best-effort cleanup, not this safe-boundary guarantee.
+
+Discarded or stale IDs never publish partial artifacts.
+Crossterm's isolated-ESC disambiguation limit is 25 ms: once recognized,
 response frames can span reads, but a longer split between initial ESC and its
 introducer is not guaranteed to frame as a response.
