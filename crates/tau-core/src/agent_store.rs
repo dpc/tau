@@ -8,6 +8,7 @@
 //! [`AgentStore::append_agent_message_fact_at`] so their canonical append
 //! precedes and cannot be vetoed by post-commit projection.
 
+mod agent_history;
 mod loaded_tool_call_ids;
 mod snapshot;
 
@@ -24,6 +25,7 @@ use std::sync::Arc;
 #[cfg(any(test, feature = "test-persistence"))]
 use std::time::Duration;
 
+use agent_history::AgentHistory;
 use fs2::FileExt;
 use loaded_tool_call_ids::LoadedToolCallIds;
 use serde::Deserialize;
@@ -439,13 +441,9 @@ struct ManagedAgentProjection {
     tree: AgentTree,
     /// Journal-derived list/checkpoint summary.
     summary: AgentSummary,
-    /// Non-persisted, replay-reconstructed saturating bounded encoded-size sum
-    /// of `events`, synchronized only by this type's constructors and append
-    /// API.
-    encoded_event_bytes: usize,
-    /// Accepted same-daemon replay records, including an asynchronously durable
-    /// suffix.
-    events: Vec<PersistedAgentEvent>,
+    /// Accepted replay cache and exact facts retained independently of its
+    /// records.
+    history: AgentHistory,
 }
 
 impl ManagedAgentProjection {
@@ -454,8 +452,7 @@ impl ManagedAgentProjection {
         Self {
             tree: AgentTree::from_events(agent_id, &[]),
             summary: AgentSummary::default(),
-            encoded_event_bytes: 0,
-            events: Vec::new(),
+            history: AgentHistory::default(),
         }
     }
 
@@ -466,12 +463,10 @@ impl ManagedAgentProjection {
         summary: AgentSummary,
         events: Vec<PersistedAgentEvent>,
     ) -> Self {
-        let encoded_event_bytes = managed_agent_encoded_event_bytes(&events);
         Self {
             tree,
             summary,
-            encoded_event_bytes,
-            events,
+            history: AgentHistory::from_records(events),
         }
     }
 
@@ -485,13 +480,12 @@ impl ManagedAgentProjection {
     ) -> Self {
         let mut summary = self.summary.clone();
         summary.apply(&record);
-        let mut events = self.events.clone();
-        events.push(record);
+        let mut history = self.history.clone();
+        history.push(record, measured_bytes);
         Self {
             tree,
             summary,
-            encoded_event_bytes: self.encoded_event_bytes.saturating_add(measured_bytes),
-            events,
+            history,
         }
     }
 }
@@ -965,7 +959,13 @@ impl AgentStore {
     #[must_use]
     pub fn agent_has_committed_identity(&self, agent_id: &AgentId) -> bool {
         if let Some(projection) = self.managed_projections.get(agent_id) {
-            return records_begin_with_creation(agent_id, &projection.events);
+            return projection
+                .history
+                .first_record
+                .as_ref()
+                .is_some_and(|record| {
+                    records_begin_with_creation(agent_id, std::slice::from_ref(record))
+                });
         }
         if self.created_agents.contains(agent_id) {
             return true;
@@ -1021,6 +1021,75 @@ impl AgentStore {
 
     /// Returns the first retained creation record without filesystem access.
     ///
+    /// The exact sequence, metadata and observation identity remain available
+    /// independently of the replay-record cache.
+    #[must_use]
+    pub fn loaded_agent_creation_record(&self, agent_id: &AgentId) -> Option<&PersistedAgentEvent> {
+        let record = if let Some(projection) = self.managed_projections.get(agent_id) {
+            projection.history.first_record.as_ref()
+        } else {
+            self.ephemeral_events
+                .get(agent_id)
+                .and_then(|events| events.first())
+        }?;
+        matches!(&record.event, Event::AgentStarted(started) if &started.agent_id == agent_id)
+            .then_some(record)
+    }
+
+    /// Returns the accepted record count for a prepared or memory-only agent.
+    ///
+    /// `None` denotes an unprepared agent, not an empty accepted stream.
+    #[must_use]
+    pub fn loaded_agent_record_count(&self, agent_id: &AgentId) -> Option<u64> {
+        self.managed_projections
+            .get(agent_id)
+            .map(|projection| projection.history.accepted_count)
+            .or_else(|| {
+                self.ephemeral_events
+                    .get(agent_id)
+                    .map(|records| records.len() as u64)
+            })
+    }
+
+    /// Returns the next numeric prompt suffix without reading a managed
+    /// journal.
+    ///
+    /// The cursor includes normal prompts, provider responses, dispatch starts,
+    /// and standalone-compaction transaction ids, including unselected
+    /// branches.
+    #[must_use]
+    pub fn loaded_next_prompt_index(&self, agent_id: &AgentId) -> Option<u64> {
+        self.managed_projections
+            .get(agent_id)
+            .map(|projection| projection.history.next_prompt_index)
+            .or_else(|| {
+                self.ephemeral_events
+                    .get(agent_id)
+                    .map(|records| AgentHistory::next_prompt_index_in(records))
+            })
+    }
+
+    /// Resolves the first accepted declaration of a historical tool-call id.
+    ///
+    /// This never reads storage and deliberately differs from last-wins
+    /// recovery maps. A declaration remains addressable after leaving the
+    /// selected branch.
+    #[must_use]
+    pub fn loaded_tool_declaration_ref(
+        &self,
+        agent_id: &AgentId,
+        call_id: &tau_proto::ToolCallId,
+    ) -> Option<tau_proto::ToolCallRef> {
+        if let Some(projection) = self.managed_projections.get(agent_id) {
+            return projection.history.tool_declarations.get(call_id).cloned();
+        }
+        self.ephemeral_events
+            .get(agent_id)
+            .and_then(|records| AgentHistory::tool_declaration_in(records, call_id))
+    }
+
+    /// Returns the first retained creation fact without filesystem access.
+    ///
     /// Live routing must not fall back to reading an unloaded journal. Managed
     /// durable projections and ephemeral histories share this immutable view.
     #[must_use]
@@ -1028,15 +1097,7 @@ impl AgentStore {
         &self,
         agent_id: &AgentId,
     ) -> Option<(&tau_proto::AgentStarted, Option<UnixMicros>)> {
-        let record = self
-            .managed_projections
-            .get(agent_id)
-            .and_then(|projection| projection.events.first())
-            .or_else(|| {
-                self.ephemeral_events
-                    .get(agent_id)
-                    .and_then(|events| events.first())
-            })?;
+        let record = self.loaded_agent_creation_record(agent_id)?;
         let Event::AgentStarted(started) = &record.event else {
             return None;
         };
@@ -1065,7 +1126,7 @@ impl AgentStore {
             remaining_bytes,
         } = budget;
         if let Some(projection) = self.managed_projections.get(agent_id) {
-            let Some(record) = projection.events.first() else {
+            let Some(record) = projection.history.first_record.as_ref() else {
                 return Ok(AgentCreationFacts::Missing);
             };
             let display_name = projection.tree.display_name();
@@ -1702,7 +1763,7 @@ impl AgentStore {
             return Ok(events);
         }
         if let Some(projection) = self.managed_projections.get(&parsed_agent_id) {
-            return Ok(projection.events.clone());
+            return Ok(projection.history.records.clone());
         }
         let path = self.agent_dir(parsed_agent_id.as_str()).join("events.cbor");
         let events = load_agent_events(&path)?;
@@ -1718,12 +1779,7 @@ impl AgentStore {
         if !self.agent_is_memory_only(&parsed_agent_id)
             && let Some(projection) = self.managed_projections.get(&parsed_agent_id)
         {
-            return Ok(projection.events.iter().find_map(|record| {
-                let Event::AgentStarted(started) = &record.event else {
-                    return None;
-                };
-                Some(started.role.clone())
-            }));
+            return Ok(projection.history.first_started_role.clone());
         }
         self.agent_events(agent_id).map(|events| {
             events.into_iter().find_map(|record| {
@@ -1981,10 +2037,13 @@ fn managed_agent_projection_charge(
     new_record_bytes: usize,
 ) -> usize {
     let retained = projection
+        .history
         .encoded_event_bytes
         .saturating_add(new_record_bytes);
     retained
-        .saturating_mul(4)
+        // Cover the immutable creation and declaration facts in addition to the
+        // existing tree/record replacement estimate, even after cache eviction.
+        .saturating_mul(5)
         .saturating_add(std::mem::size_of::<ManagedAgentProjection>())
 }
 

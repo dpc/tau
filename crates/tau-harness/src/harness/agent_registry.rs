@@ -2374,6 +2374,13 @@ impl Harness {
         {
             return false;
         }
+        if let Some(count) = self
+            .session_runtime
+            .agent_store
+            .loaded_agent_record_count(agent_id)
+        {
+            return count != 0;
+        }
         match self.session_runtime.agent_store.agent_events(agent_id) {
             Ok(events) => !events.is_empty(),
             Err(error) => {
@@ -2678,6 +2685,14 @@ impl Harness {
 
     /// Finds the first collision-free numeric prompt sequence from durable ids.
     pub(super) fn next_prompt_index_from_log(&self, agent_id: &str) -> u64 {
+        if let Ok(agent_id) = tau_proto::AgentId::parse(agent_id)
+            && let Some(index) = self
+                .session_runtime
+                .agent_store
+                .loaded_next_prompt_index(&agent_id)
+        {
+            return index;
+        }
         self.session_runtime
             .agent_store
             .agent_events(agent_id)

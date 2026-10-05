@@ -49,11 +49,11 @@ impl Harness {
     ) -> Result<Option<tau_proto::AgentId>, HarnessError> {
         let mut found = None;
         for agent_id in &self.agent_runtime.agent_registry.session_loaded {
-            let events = self
+            let Some(first) = self
                 .session_runtime
                 .agent_store
-                .agent_events(agent_id.as_str())?;
-            let Some(first) = events.first() else {
+                .loaded_agent_creation_record(agent_id)
+            else {
                 continue;
             };
             let Event::AgentStarted(started) = &first.event else {

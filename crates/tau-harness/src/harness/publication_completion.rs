@@ -9,6 +9,7 @@ use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublica
 use super::prompt_materialization_timing::PromptMaterializationTiming;
 use super::prompt_runtime_state::UncertainSupersessionPhase;
 use super::start_coordinator::StartPhase;
+use super::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY;
 use super::tool_runtime::PromptFoldDisposition;
 use super::*;
 
@@ -2071,23 +2072,16 @@ impl Harness {
         let Some(runtime_role) = runtime_role else {
             return false;
         };
-        self.session_runtime.agent_store
-            .agent_events(recipient_id.as_str())
-            .ok()
-            .into_iter()
-            .flatten()
-            .any(|record| {
-                matches!(
-                    record.event,
-                    Event::AgentStarted(started)
-                        if started.role == runtime_role
-                            && started.metadata.iter().any(|metadata| {
-                                metadata.key.as_str()
-                                    == crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY
-                                    && metadata.value == CborValue::Bool(true)
-                                    && !metadata.inheritable
-                            })
-                )
+        self.session_runtime
+            .agent_store
+            .loaded_agent_creation(recipient_id)
+            .is_some_and(|(started, _)| {
+                started.role == runtime_role
+                    && started.metadata.iter().any(|metadata| {
+                        metadata.key.as_str() == PEER_ENTRYPOINT_AGENT_METADATA_KEY
+                            && metadata.value == CborValue::Bool(true)
+                            && !metadata.inheritable
+                    })
             })
     }
 

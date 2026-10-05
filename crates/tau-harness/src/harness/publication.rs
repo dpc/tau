@@ -461,27 +461,9 @@ impl Harness {
             .identity
             .agent_id
             .as_deref()?;
-        let events = self
-            .session_runtime
+        self.session_runtime
             .agent_store
-            .agent_events(agent_id)
-            .ok()?;
-        events.iter().find_map(|record| {
-            let Event::ProviderResponseFinished(response) = &record.event else {
-                return None;
-            };
-            response
-                .output_items
-                .iter()
-                .position(
-                    |item| matches!(item, ContextItem::ToolCall(call) if &call.call_id == call_id),
-                )
-                .and_then(|item_index| u32::try_from(item_index).ok())
-                .map(|item_index| tau_proto::ToolCallRef {
-                    declaration: record.observation_id,
-                    item_index,
-                })
-        })
+            .loaded_tool_declaration_ref(&AgentId::parse(agent_id).ok()?, call_id)
     }
 
     /// Publish one terminal result for post-commit runtime settlement.
@@ -1682,14 +1664,8 @@ impl Harness {
         let creation = self
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
-            .ok()
-            .and_then(|events| match events.first().map(|entry| &entry.event) {
-                Some(Event::AgentStarted(started)) if started.agent_id == *agent_id => {
-                    Some(started.clone())
-                }
-                _ => None,
-            });
+            .loaded_agent_creation(agent_id)
+            .map(|(started, _)| started.clone());
         if let Some(creation) = creation {
             self.record_agent_creator_topology(&creation);
         }

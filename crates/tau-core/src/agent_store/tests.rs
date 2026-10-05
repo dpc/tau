@@ -7,6 +7,301 @@ use std::time::Instant;
 
 use super::*;
 
+/// Builds a response with repeated declarations for exact first-occurrence
+/// tests.
+fn history_response(agent_id: &AgentId, prompt: &str) -> Event {
+    let call = tau_proto::ToolCallItem {
+        call_id: tau_proto::ToolCallId::new("repeated-call"),
+        name: tau_proto::ToolName::new("test_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: tau_proto::CborValue::Null,
+        raw_arguments_json: None,
+        responses_envelope: None,
+    };
+    let mut other = call.clone();
+    other.call_id = tau_proto::ToolCallId::new("other-call");
+    Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        agent_prompt_id: prompt.parse().expect("prompt id"),
+        agent_id: agent_id.clone(),
+        output_items: vec![
+            tau_proto::ContextItem::ToolCall(other),
+            tau_proto::ContextItem::ToolCall(call.clone()),
+            tau_proto::ContextItem::ToolCall(call),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        provider_attempt: Default::default(),
+        automatic_compaction_decision: None,
+        originator: Default::default(),
+        usage: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        compaction_original_input_tokens: None,
+        compaction_output_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+}
+
+/// Gives projection-only test facts stable sequence and declaration identities.
+fn history_record(seq: u64, event: Event) -> PersistedAgentEvent {
+    PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        fold_semantics: AgentJournalFoldSemantics::for_new_event(&event),
+        event,
+        parent: AgentEventParent::InheritHead,
+        recorded_at: UnixMicros::new(seq + 1),
+    }
+}
+
+/// Exact facts survive disposal of replay records and retain the first tool
+/// declaration, including its item position, instead of recovery's last winner.
+#[test]
+fn managed_history_facts_do_not_depend_on_resident_records() {
+    let agent_id = AgentId::parse("history-facts").expect("agent id");
+    let records = vec![
+        history_record(0, started_event(&agent_id)),
+        history_record(1, history_response(&agent_id, "prompt-12")),
+        history_record(2, history_response(&agent_id, "prompt-3")),
+    ];
+    let mut history = AgentHistory::from_records(records.clone());
+    let call_id = tau_proto::ToolCallId::new("repeated-call");
+    let expected_ref = tau_proto::ToolCallRef {
+        declaration: records[1].observation_id,
+        item_index: 1,
+    };
+    assert_eq!(history.tool_declarations[&call_id], expected_ref);
+    assert_eq!(
+        AgentHistory::tool_declaration_in(&records, &call_id),
+        Some(expected_ref.clone())
+    );
+    let encoded = history.encoded_event_bytes;
+    history.records.clear();
+    let appended = history_record(3, history_response(&agent_id, "prompt-15"));
+    let measured = managed_agent_encoded_event_bytes(std::slice::from_ref(&appended));
+    history.push(appended, measured);
+    assert_eq!(history.first_record.as_ref(), records.first());
+    assert_eq!(history.accepted_count, 4);
+    assert_eq!(history.next_prompt_index, 16);
+    assert_eq!(history.tool_declarations[&call_id], expected_ref);
+    assert_eq!(history.encoded_event_bytes, encoded + measured);
+    assert_eq!(history.records.len(), 1);
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let mut store = AgentStore::read_only(temp.path());
+    store.managed_projections.insert(
+        agent_id.clone(),
+        ManagedAgentProjection {
+            tree: AgentTree::from_events(agent_id.clone(), &[]),
+            summary: AgentSummary::default(),
+            history,
+        },
+    );
+    assert!(store.agent_has_committed_identity(&agent_id));
+    assert_eq!(
+        store.agent_started_role(agent_id.as_str()).expect("role"),
+        Some("engineer".into())
+    );
+    assert_eq!(
+        store
+            .loaded_agent_creation(&agent_id)
+            .expect("creation")
+            .0
+            .role,
+        "engineer"
+    );
+    assert!(matches!(
+        store.agent_creation_facts(&agent_id, facts_budget(MAX_RECORD_BYTES, u64::MAX)),
+        Ok(AgentCreationFacts::Available { role, .. }) if role == "engineer"
+    ));
+    assert_eq!(
+        store.loaded_agent_creation_record(&agent_id),
+        records.first()
+    );
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(4));
+    assert_eq!(store.loaded_next_prompt_index(&agent_id), Some(16));
+    assert_eq!(
+        store.loaded_tool_declaration_ref(&agent_id, &call_id),
+        Some(expected_ref)
+    );
+}
+
+/// Every historical prompt-id family participates in collision avoidance, while
+/// malformed numeric suffixes are ignored and the maximum u64 saturates.
+#[test]
+fn managed_history_prompt_cursor_covers_all_id_families() {
+    let agent_id = AgentId::parse("history-cursor").expect("agent id");
+    let prompt = |id: &str| {
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id: id.parse().expect("prompt id"),
+            agent_id: agent_id.clone(),
+            session_id: "session".parse().expect("session id"),
+            model: "test/model".into(),
+            model_params: None,
+            outer_turn_id: None,
+            operation: tau_proto::PromptOperation::Inference,
+            originator: Default::default(),
+            ctx_id: None,
+        })
+    };
+    let dispatch = Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id.clone(),
+        transaction_id: None,
+        agent_prompt_id: "dispatch-30".parse().expect("prompt id"),
+        through: tau_proto::AgentHead::Root,
+        model: "test/model".into(),
+        operation: tau_proto::PromptOperation::Inference,
+        activation_cut: tau_proto::AgentHead::Root,
+        output_length_continuation: None,
+    });
+    let compact =
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: tau_proto::CompactionTransactionId::parse("transaction-40")
+                .expect("transaction"),
+            compact_prompt_id: "compact-900".parse().expect("prompt id"),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: None,
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            originator: Default::default(),
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+        });
+    let mut history = AgentHistory::default();
+    for (index, event) in [
+        prompt("prompt-10"),
+        history_response(&agent_id, "response-20"),
+        dispatch,
+        compact,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        history.push(history_record(index as u64, event), 0);
+        assert_eq!(history.next_prompt_index, (index as u64 + 1) * 10 + 1);
+        assert_eq!(
+            AgentHistory::next_prompt_index_in(&history.records),
+            history.next_prompt_index
+        );
+    }
+    history.push(history_record(4, prompt("prompt-not_numeric")), 0);
+    assert_eq!(history.next_prompt_index, 41);
+    history.push(history_record(5, prompt("prompt-18446744073709551615")), 0);
+    assert_eq!(history.next_prompt_index, u64::MAX);
+    history.push(history_record(6, prompt("prompt-2")), 0);
+    assert_eq!(history.next_prompt_index, u64::MAX);
+}
+
+/// An invalid append cannot leak declaration or cursor facts, and successful
+/// raw message appends advance the same accepted count used by structured
+/// appends.
+#[test]
+fn managed_history_facts_follow_only_committed_replacements() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let agent_id = AgentId::parse("history-admission").expect("agent id");
+    let call_id = tau_proto::ToolCallId::new("repeated-call");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    let creation = store.loaded_agent_creation_record(&agent_id).cloned();
+    let error = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::Under(NodeId::new(999)),
+            history_response(&agent_id, "rejected-90"),
+            UnixMicros::new(10),
+        )
+        .expect_err("invalid parent");
+    assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
+    assert_eq!(
+        store.loaded_agent_creation_record(&agent_id),
+        creation.as_ref()
+    );
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(1));
+    assert_eq!(store.loaded_next_prompt_index(&agent_id), Some(0));
+    assert_eq!(store.loaded_tool_declaration_ref(&agent_id, &call_id), None);
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            injected_message_event(&agent_id, "accepted".into()),
+        )
+        .expect("accepted append");
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(2));
+    store
+        .append_agent_message_fact_at(
+            agent_id.as_str(),
+            None,
+            Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                tau_proto::MessagePublisherId::parse("history-test").expect("publisher"),
+                MessageAgentTarget::new(agent_id.as_str()),
+                tau_proto::MessageFactId::new("message"),
+                tau_proto::MessageParty {
+                    stable_id: "sender".into(),
+                    display_name: None,
+                    sender_auth: None,
+                    sender_trust: None,
+                },
+                None,
+                "accepted raw fact",
+            )),
+            UnixMicros::new(12),
+        )
+        .expect("raw message append");
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(3));
+    let records = store.agent_events(agent_id.as_str()).expect("records");
+    let replay = AgentHistory::from_records(records);
+    assert_eq!(
+        store.loaded_agent_record_count(&agent_id),
+        Some(replay.accepted_count)
+    );
+    assert_eq!(
+        store.loaded_next_prompt_index(&agent_id),
+        Some(replay.next_prompt_index)
+    );
+    drop(store);
+    let owner = Arc::new(
+        SemanticPersistenceOwner::new(crate::PersistenceCapacity {
+            max_frames: 1,
+            ..Default::default()
+        })
+        .expect("bounded owner"),
+    );
+    let mut store = AgentStore::open_managed(temp.path(), owner).expect("managed store");
+    store
+        .prepare_existing_agent(agent_id.as_str())
+        .expect("prepare");
+    let held = store.persistence_leases[&agent_id]
+        .try_reserve_frame()
+        .expect("hold sole permit");
+    let error = store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            history_response(&agent_id, "capacity-rejected-99"),
+        )
+        .expect_err("no frame capacity");
+    assert!(matches!(
+        error,
+        AgentStoreError::Persistence(PersistenceAdmissionError::Full)
+    ));
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(3));
+    assert_eq!(store.loaded_next_prompt_index(&agent_id), Some(0));
+    assert_eq!(store.loaded_tool_declaration_ref(&agent_id, &call_id), None);
+    drop(held);
+}
+
 fn managed_charge_projection(event_count: usize) -> ManagedAgentProjection {
     let agent_id = AgentId::parse("charge-benchmark-agent").expect("agent id");
     let events: Vec<_> = (0..event_count)
@@ -40,9 +335,9 @@ fn managed_projection_cached_charge_matches_full_measurement() {
     for event_count in [0, 1, 17, 257] {
         let projection = managed_charge_projection(event_count);
         let new_record_bytes = usize::MAX / 8;
-        let explicit = managed_agent_encoded_event_bytes(&projection.events)
+        let explicit = managed_agent_encoded_event_bytes(&projection.history.records)
             .saturating_add(new_record_bytes)
-            .saturating_mul(4)
+            .saturating_mul(5)
             .saturating_add(std::mem::size_of::<ManagedAgentProjection>());
         assert_eq!(
             managed_agent_projection_charge(&projection, new_record_bytes),
@@ -575,6 +870,66 @@ fn agent_started_role_preserves_existing_fallbacks() {
         durable.agent_started_role("../invalid"),
         Err(AgentStoreError::InvalidAgentId { .. })
     ));
+}
+
+/// Managed role projection preserves recovery's first encountered creation even
+/// when it is not sequence zero, without broadening committed routing identity.
+#[test]
+fn managed_history_role_preserves_nonzero_creation_after_recovery() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let agent_id = AgentId::parse("historical-late-creation").expect("agent id");
+    let directory = temp.path().join(agent_id.as_str());
+    fs::create_dir_all(&directory).expect("agent directory");
+    File::create(directory.join("lock")).expect("existing agent lock");
+    let mut journal = File::create(directory.join("events.cbor")).expect("journal");
+    let mut later = started_event(&agent_id);
+    if let Event::AgentStarted(started) = &mut later {
+        started.role = "later-role".into();
+    }
+    for record in [
+        history_record(0, display_name_event(&agent_id, "before creation")),
+        history_record(1, started_event(&agent_id)),
+        history_record(2, later),
+    ] {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&record, &mut encoded).expect("encode history");
+        journal
+            .write_all(&(encoded.len() as u64).to_le_bytes())
+            .expect("frame length");
+        journal.write_all(&encoded).expect("frame");
+    }
+    drop(journal);
+    let observer = AgentStore::open_lazy(temp.path()).expect("observer");
+    let expected = observer
+        .agent_started_role(agent_id.as_str())
+        .expect("observed role");
+    assert_eq!(expected, Some("engineer".into()));
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(temp.path(), owner).expect("managed store");
+    store
+        .prepare_existing_agent(agent_id.as_str())
+        .expect("recover historical stream");
+    assert_eq!(
+        store
+            .agent_started_role(agent_id.as_str())
+            .expect("managed role"),
+        expected
+    );
+    store
+        .managed_projections
+        .get_mut(&agent_id)
+        .expect("projection")
+        .history
+        .records
+        .clear();
+    assert_eq!(
+        store
+            .agent_started_role(agent_id.as_str())
+            .expect("role without records"),
+        expected
+    );
+    assert!(!store.agent_has_committed_identity(&agent_id));
+    assert!(store.loaded_agent_creation_record(&agent_id).is_none());
 }
 
 /// Non-managed role lookup validates the complete durable history before
