@@ -8,10 +8,13 @@ content-address key; the abbreviated example is not usable. Consumers share one
 formatter/parser for this spelling, and `import` and `read_image` also accept a
 bare key for simple existing integrations.
 
-The shell extension registers `export(path)` and `import(key)` under ordinary
+The shell extension registers `export(path, mime_type?)` and
+`import(key, filename?, mime_type?)` under ordinary
 tool-role policy. Export reads one local regular file under the shell instance's
 remembered workdir authority, uploads at most 16 MiB of original bytes, and
-returns `artifact` and `size` output headers plus a bounded `filename` hint.
+returns `artifact` and `size` output headers plus bounded `filename` and available
+`mime_type` hints. Explicit MIME wins; otherwise common filename extensions supply
+a best-effort declaration, without content sniffing.
 Import validates the reference, downloads and verifies the complete original,
 and returns `path` and `size` output headers after writing it to a private
 unpredictable mode-0600 temporary file on the shell execution host; that local
@@ -20,6 +23,20 @@ path can be passed to filesystem tools. The provider-independent
 Artifact storage without granting shell or workdir authority. None of these
 tools exposes store paths, inline original bytes, execution, or archive
 extraction.
+
+Carry accompanying hints through the assistant workflow, for example
+`import(key="<tau-artifact:FULL_KEY>", filename="report", mime_type="application/pdf")`.
+The private unpredictable filename ends in `-report.pdf`. Names are reduced to
+their basename, sanitized to ASCII letters/digits/dot/dash/underscore, and bounded.
+An existing extension takes precedence over MIME; otherwise a common MIME type
+adds an extension. Unknown MIME types add nothing. No claim verifies media or
+makes content safe.
+
+Hints belong to each use, **not the digest**: key-only import cannot recover
+them and still creates a generic private temporary name. Identical bytes can
+carry different names/media claims without overwriting shared metadata. Preserve
+the hints beside the canonical reference when sharing it, then pass the hints
+separately to import; the reference parser still accepts only the reference/key.
 
 ## Consumer API
 
@@ -135,8 +152,9 @@ The maximum artifact is 16 MiB. Tau does not read paths or fetch pasted URLs.
 While uploading, the original draft and cursor stay unchanged and editing,
 submission, history navigation, and draft-switch bindings are paused. Ctrl-C
 discards the paste without canceling an agent prompt. A second paste is rejected
-with a busy notice. A successful upload inserts only an editable
-`<tau-artifact:FULL_KEY>` reference. It does not submit the prompt.
+with a busy notice. A successful upload inserts an editable
+`<tau-artifact:FULL_KEY> (mime_type: text/plain;charset=utf-8)` reference and
+normalized-text media hint, not the original text. It does not submit the prompt.
 
 On failure the source remains in memory outside the draft: Enter explicitly
 retries, Ctrl-C discards. Tau never falls back to submitting the wall of text.
@@ -164,7 +182,9 @@ reader; non-Unix input currently retains the text fallback.
 
 Tau prefers `image/png`, then UTF-8 `text/plain;charset=utf-8`, then `text/plain`
 (strictly decoded as UTF-8). PNG bytes always become an artifact, regardless of
-size; text still uses the normalization and 8 KiB threshold above. MIME claims
+size and inserts `<tau-artifact:FULL_KEY> (mime_type: image/png)` into the draft;
+no original filename is available. `Paste event` is a permission label, never a
+filename hint. Text still uses the normalization and 8 KiB threshold above. MIME claims
 are hints, not image validation. No filesystem paths or `text/uri-list` offers
 are dereferenced, and copied-file byte transfer is not implemented.
 

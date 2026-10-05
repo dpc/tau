@@ -120,6 +120,12 @@ lock-wait snapshots, and unchanged local-to-wire terminal names.
 
 ## Discovery
 
+Artifact transfer tests carry export filename/MIME hints into import and require
+a useful sanitized suffix, unchanged original bytes, and mode-0600 permissions.
+Focused hint tests cover traversal, Windows separators, unsafe characters,
+bounded names, MIME-only suffixes, extension precedence, unknown/missing hints,
+and distinct private tempfiles for identical bytes. Key-only imports stay generic.
+
 AGENTS.md tests cover ancestor and local ordering, size caps, user roots before
 project roots, and trusted symlink following. Skill tests cover project/user and
 XDG/legacy precedence, collisions through `tau-skills`, supported symlink forms,

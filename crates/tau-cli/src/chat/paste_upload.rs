@@ -238,7 +238,7 @@ fn run(
                 } else if let Some(descriptor) = current.upload.descriptor() {
                     current.handle.finish_paste_upload(
                         current.id,
-                        Ok(tau_proto::artifact_reference(&descriptor.key)),
+                        Ok(paste_reference(&descriptor.key, &current.text)),
                     );
                     attempt = None;
                 } else {
@@ -255,4 +255,17 @@ fn run(
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+}
+
+/// Keeps known source media beside the editable reference, not in blob
+/// identity.
+fn paste_reference(key: &tau_proto::ArtifactKey, content: &tau_cli_term::PasteContent) -> String {
+    let mime_type = match content {
+        tau_cli_term::PasteContent::Text(_) => "text/plain;charset=utf-8",
+        tau_cli_term::PasteContent::Png(_) => "image/png",
+    };
+    format!(
+        "{} (mime_type: {mime_type})",
+        tau_proto::artifact_reference(key)
+    )
 }

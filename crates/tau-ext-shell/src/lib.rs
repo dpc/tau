@@ -527,14 +527,17 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              Originals are limited to 16 MiB. A successful export returns a canonical \
              <tau-artifact:FULL_KEY> reference and byte size as output headers and renews shared \
              artifact age, including for duplicate bytes. Original bytes persist independently \
-             of ephemeral session transcripts."
+             of ephemeral session transcripts. Filename and declared mime_type hints are \
+             returned beside the reference; pass them to import to retain useful names. \
+             MIME is not verified and hints are not stored by digest."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to one local regular file"}
+                "path": {"type": "string", "description": "Path to one local regular file"},
+                "mime_type": {"type": "string", "description": "Optional declared MIME hint; otherwise inferred best-effort from common filename extensions, not content"}
             },
             "required": ["path"],
             "additionalProperties": false
@@ -548,7 +551,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             title: Some("Export an original".to_owned()),
             arguments: CborValue::Map(vec![example_field("path", example_text("output.png"))]),
             note: Some(
-                "Pass the returned artifact reference directly to import or read_image.".to_owned(),
+                "Pass the reference to read_image; pass reference plus filename/mime_type hints to import.".to_owned(),
             ),
             subcommand: None,
         }],
@@ -562,7 +565,8 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              non-executable temporary file on this shell host. A bare internal key is also \
              accepted. Size and digest are verified before success. The local path and byte size \
              are returned as output headers. Import does not renew retention age; pass the \
-             returned local path to filesystem tools."
+              returned local path to filesystem tools. Pass accompanying filename/mime_type \
+              hints for a sanitized useful name or extension; key-only imports cannot recover hints."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -573,7 +577,9 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                     "type": "string",
                     "pattern": "^(?:blake3:[0-9a-f]{64}|<tau-artifact:blake3:[0-9a-f]{64}>)$",
                     "description": "Canonical <tau-artifact:FULL_KEY> reference returned by export; a bare key is also accepted"
-                }
+                },
+                "filename": {"type": "string", "description": "Optional per-use original filename hint returned by export; sanitized and bounded, never used as a destination path"},
+                "mime_type": {"type": "string", "description": "Optional declared MIME hint accompanying the reference; common types add an extension when filename has none, without verifying content"}
             },
             "required": ["key"],
             "additionalProperties": false

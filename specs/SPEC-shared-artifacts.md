@@ -40,8 +40,8 @@ generation; both that authority and transfer connection ownership remain current
 for each request. Initial owned stdio and attached socket UIs use the same
 admission route; unrelated external peers, probes, and in-memory/non-admitted
 clients gain no upload authority. Read/list/mutation authority is not added.
-Large terminal pastes upload normalized editor-equivalent UTF-8 and insert only
-the canonical editable artifact reference. The pending source never enters
+Large terminal pastes upload normalized editor-equivalent UTF-8 and insert
+the canonical editable artifact reference with a per-use media hint. The pending source never enters
 prompt drafts, history, or event presentation. Failure retains it for explicit
 retry/discard without submitting the original text. Cancellation leaves the
 original draft unchanged and may leave a committed shared original.
@@ -88,10 +88,13 @@ cleaner may apply its own configured policy.
 The shell `export` consumer reads one bounded local regular file using its
 ordinary remembered-workdir filesystem authority and performs a new explicit
 upload. Its model-facing result exposes the canonical artifact reference and
-byte size as output headers. Shell `import` validates a canonical reference or
+byte size and available per-use filename/media hints as output headers.
+Hints travel beside references, never as digest-indexed metadata; key-only
+imports cannot recover them. Shell `import` validates a canonical reference or
 bare key, verifies the complete download, and publishes only private
 non-executable temporary-path and byte-size output headers on the shell execution
-host. These tools never expose harness store paths or original bytes through
+host, optionally using accompanying hints for a sanitized basename or media suffix.
+These tools never expose harness store paths or original bytes through
 model text; import and inspection do not renew age.
 
 The protocol revision follows

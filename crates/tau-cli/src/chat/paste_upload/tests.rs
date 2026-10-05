@@ -12,6 +12,31 @@ fn paste_upload_version_gate() {
     assert!(supported(Some(tau_proto::ProtocolVersion::new(8, 1))));
 }
 
+/// Completed clipboard artifacts carry their known media claim beside the
+/// canonical key, without inventing an original filename from permission
+/// labels.
+#[test]
+fn clipboard_artifact_reference_preserves_png_and_normalized_text_hints() {
+    let key = format!("blake3:{}", blake3::hash(b"original").to_hex())
+        .parse()
+        .expect("key");
+    let reference = tau_proto::artifact_reference(&key);
+    assert_eq!(
+        paste_reference(
+            &key,
+            &tau_cli_term::PasteContent::Png(Arc::from(&b"original"[..]))
+        ),
+        format!("{reference} (mime_type: image/png)")
+    );
+    assert_eq!(
+        paste_reference(
+            &key,
+            &tau_cli_term::PasteContent::Text(Arc::from("original"))
+        ),
+        format!("{reference} (mime_type: text/plain;charset=utf-8)")
+    );
+}
+
 /// PNG bytes traverse the same upload preflight/chunk/digest flow as text;
 /// media bytes do not become provider image messages or a new wire operation.
 #[test]
@@ -142,7 +167,8 @@ fn paste_upload_correlates_retries_and_cancel_without_closing_ui() {
 }
 
 /// Explicit retry resends the same acknowledged upload identity and chunk;
-/// only a verified final descriptor releases a plain reference into the draft.
+/// only a verified final descriptor releases a reference and media hint into
+/// the draft.
 #[test]
 fn paste_upload_retry_preserves_identity_and_inserts_only_verified_reference() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -229,7 +255,10 @@ fn paste_upload_retry_preserves_identity_and_inserts_only_verified_reference() {
         term.get_next_event().expect("completion event"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), format!("draft: {reference}"));
+    assert_eq!(
+        handle.get_buffer(),
+        format!("draft: {reference} (mime_type: text/plain;charset=utf-8)")
+    );
     control.stop();
     worker.join().expect("worker exit");
 }

@@ -24,6 +24,7 @@ use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
 use crate::tool_lifecycle::ToolLifecycle;
 use crate::tools::{EXPORT_TOOL_NAME, IMPORT_TOOL_NAME};
 
+mod hints;
 #[cfg(test)]
 mod tests;
 
@@ -350,7 +351,12 @@ impl ArtifactTransferManager {
                     int_entry("size", descriptor.size.get()),
                 ];
                 if let Some(filename) = filename {
+                    if let Some(mime_type) = hints::export_mime(&invoke, Some(&filename)) {
+                        entries.push(text_entry("mime_type", mime_type));
+                    }
                     entries.push(text_entry("filename", filename));
+                } else if let Some(mime_type) = hints::export_mime(&invoke, None) {
+                    entries.push(text_entry("mime_type", mime_type));
                 }
                 report_result(output, &invoke, CborValue::Map(entries));
                 lifecycle.finish();
@@ -389,8 +395,12 @@ impl ArtifactTransferManager {
                             agent_id: Some(invoke.agent_id.clone()),
                             queued_bytes: 0,
                         };
+                        let suffix = hints::import_suffix(
+                            tau_proto::cbor_text_field(&invoke.arguments, "filename").as_deref(),
+                            tau_proto::cbor_text_field(&invoke.arguments, "mime_type").as_deref(),
+                        );
                         let enqueue = scheduler.enqueue(WorkPriority::Cheap, meta, move || {
-                            let result = write_private_temp(&bytes, &cancel);
+                            let result = write_private_temp(&bytes, &cancel, &suffix);
                             drop(reservation);
                             let _ = tx.send(Command::ImportWritten {
                                 call_id,
@@ -703,9 +713,14 @@ fn prepare_import(
     })
 }
 
-fn write_private_temp(bytes: &[u8], cancel: &AtomicBool) -> Result<RetainedTemp, String> {
+fn write_private_temp(
+    bytes: &[u8],
+    cancel: &AtomicBool,
+    suffix: &str,
+) -> Result<RetainedTemp, String> {
     let mut temp = tempfile::Builder::new()
         .prefix("tau-artifact-")
+        .suffix(suffix)
         .tempfile()
         .map_err(|error| format!("failed to create private import file: {error}"))?;
     #[cfg(unix)]

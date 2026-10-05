@@ -36,7 +36,12 @@ When `export` and `import` are exposed, verify a small original round trip:
 export a local regular file, confirm its `artifact` and `size` output headers,
 import the returned `<tau-artifact:FULL_KEY>` reference, confirm the import's
 `path` and `size` output headers, compare the imported local file byte-for-byte,
-and confirm its private non-executable permissions. For an image original, pass
+and confirm its private non-executable permissions. Carry returned `filename`
+and `mime_type` hints to import and verify a sanitized useful filename/suffix;
+also verify key-only import stays generic (hints are not stored by digest).
+Explicit export MIME is a declaration, not verified media. Check a PNG clipboard
+artifact inserts its reference with `mime_type: image/png`, never an invented filename.
+For an image original, pass
 the complete artifact reference directly to
 `read_image`; import is needed only for filesystem tools.
 Do not inspect harness State paths or treat the digest as provenance or safety.
