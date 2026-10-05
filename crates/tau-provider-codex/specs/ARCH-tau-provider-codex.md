@@ -31,13 +31,30 @@ image bytes, or base64 enters diagnostic output; callers own artifact storage
 and ordinary tool lifecycle. Both Standard and Lite profiles may opt in, without
 claiming account entitlement or probing it.
 
-GPT-5.6 Sol, Terra, and Luna on the ChatGPT Responses surface explicitly
-publish image input and image tool-result support. Successful typed function
+All currently published ChatGPT/Codex models explicitly publish image input and
+image tool-result support: GPT-6 Sol, Sol 6.1, Luna, and Astra; GPT-5.6 Sol,
+Terra, and Luna; GPT-5.5, GPT-5.4, GPT-5.4 Mini, and GPT-5.3 Codex.
+One exact-model predicate controls both publication and wire lowering; catalog
+addition alone does not grant image disclosure. Successful typed function
 results lower to one `function_call_output` whose `output` array contains the
 normalized `input_text` followed by `input_image` data URLs. Canonical binary
 bytes remain in Tau; base64 exists only in the outgoing request. Responses Lite
 omits `detail` after local high-detail preparation. Other model/routes project a
 bounded omission marker and never receive bytes.
+
+The October 5, 2026 source audit uses OpenAI Codex revision
+[`7f892275`](https://github.com/openai/codex/tree/7f892275e31002f0422477c6219189284560e689):
+its [model metadata](https://github.com/openai/codex/blob/7f892275e31002f0422477c6219189284560e689/codex-rs/models-manager/models.json)
+declares text/image input for the GPT-6, GPT-5.6, and GPT-5.5 entries above.
+OpenAI's model docs declare text/image input for
+[GPT-5.4](https://developers.openai.com/api/docs/models/gpt-5.4),
+[GPT-5.4 Mini](https://developers.openai.com/api/docs/models/gpt-5.4-mini), and
+[GPT-5.3 Codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex).
+The upstream [image tool](https://github.com/openai/codex/blob/7f892275e31002f0422477c6219189284560e689/codex-rs/core/src/tools/handlers/view_image.rs)
+checks model image-input metadata and emits native `function_call_output` image
+content, with no GPT-5.6-only wire restriction. This is source/metadata evidence,
+not a live account-entitlement or visual-fidelity test. Unknown/experimental
+model IDs remain text-only; Lite, phase, and compaction support remain separate.
 
 Normal inference, WebSocket, replay, and standalone compaction share this item
 converter. Each request admits at most 24 MiB of canonical image bytes and 32
@@ -197,7 +214,7 @@ Both modes suppress provider-inline `context_management` for GPT-5.6 and adverti
 standalone compaction. Astra uses the same native standalone contract, with a
 945,000-token default threshold (90 percent of the shared raw-window default);
 its surface remains standard regardless of the profile's Lite compatibility flag.
-Compaction eligibility is separate from GPT-5.6's image and Lite capabilities.
+Compaction eligibility, image support, and Lite compatibility are separate capabilities.
 V2 success requires `response.completed` and exactly one
 opaque provider compaction item. Tau installs exactly that validated item as
 the replacement window and copies no input item from the compacted prefix. The

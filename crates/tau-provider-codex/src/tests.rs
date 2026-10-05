@@ -2302,7 +2302,7 @@ fn cache_diagnostics_pre_dispatch_cancel_is_zero() {
 }
 
 /// Sol 6.1 must retain coding tools and local-summary compaction without
-/// claiming unverified private-route native compaction, images, phase, or Lite.
+/// claiming unverified private-route native compaction, phase, or Lite.
 #[test]
 fn gpt_6_1_sol_publishes_conservative_private_capabilities() {
     let models = models_for_provider(&ProviderName::new("chatgpt"));
@@ -2339,10 +2339,19 @@ fn gpt_6_1_sol_publishes_conservative_private_capabilities() {
     assert!(!model.supports_compaction);
     assert!(model.standalone_compaction_threshold.is_none());
     assert!(!supports_native_standalone_compaction("gpt-6.1-sol"));
-    assert_eq!(model.input_modalities, vec![tau_proto::InputModality::Text]);
+    assert_eq!(
+        model.input_modalities,
+        vec![
+            tau_proto::InputModality::Text,
+            tau_proto::InputModality::Image
+        ]
+    );
     assert_eq!(
         model.tool_result_modalities,
-        vec![tau_proto::InputModality::Text]
+        vec![
+            tau_proto::InputModality::Text,
+            tau_proto::InputModality::Image
+        ]
     );
     for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
         let config = config_for_model_mode(&model.id.model, "token".into(), None, mode);
@@ -2534,32 +2543,55 @@ fn publishes_chatgpt_model_metadata() {
             })
             .all(|model| !model.efforts.contains(NativeReasoningEffort::Max))
     );
-    assert!(
-        models
-            .iter()
-            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
-            .all(|model| {
-                model
-                    .input_modalities
-                    .contains(&tau_proto::InputModality::Image)
-                    && model
-                        .tool_result_modalities
-                        .contains(&tau_proto::InputModality::Image)
-            })
-    );
-    assert!(
-        models
-            .iter()
-            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
-            .all(|model| {
-                !model
-                    .input_modalities
-                    .contains(&tau_proto::InputModality::Image)
-                    && !model
-                        .tool_result_modalities
-                        .contains(&tau_proto::InputModality::Image)
-            })
-    );
+    assert!(models.iter().all(|model| {
+        model
+            .input_modalities
+            .contains(&tau_proto::InputModality::Image)
+            && model
+                .tool_result_modalities
+                .contains(&tau_proto::InputModality::Image)
+    }));
+}
+
+/// Publication must agree with the source-audited image wire contract for every
+/// catalog entry and account namespace, including the Zulip bot's Luna route.
+/// Unknown names must not inherit image disclosure from a familiar prefix.
+#[test]
+fn image_modalities_follow_exact_audited_routes() {
+    for provider in ["chatgpt", "chatgpt-fedi"] {
+        for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+            let provider = ProviderName::new(provider);
+            for model in CHATGPT_MODELS {
+                let info = model_info(&provider, model, mode);
+                assert!(supports_image_tool_results(model), "{model}");
+                assert_eq!(info.id.provider, provider);
+                assert_eq!(
+                    info.input_modalities,
+                    vec![
+                        tau_proto::InputModality::Text,
+                        tau_proto::InputModality::Image
+                    ],
+                    "{model}"
+                );
+                assert_eq!(
+                    info.tool_result_modalities, info.input_modalities,
+                    "{model}"
+                );
+            }
+            for model in [
+                "gpt-6-luna-experimental",
+                "gpt-6.1-sol-experimental",
+                "gpt-5.6-experimental",
+                "gpt-6",
+                "text-only",
+            ] {
+                let info = model_info(&provider, model, mode);
+                assert!(!supports_image_tool_results(model), "{model}");
+                assert_eq!(info.input_modalities, vec![tau_proto::InputModality::Text]);
+                assert_eq!(info.tool_result_modalities, info.input_modalities);
+            }
+        }
+    }
 }
 
 #[test]
@@ -2687,7 +2719,7 @@ fn config_scopes_inline_compaction_away_from_newer_models() {
 }
 
 /// Astra must reach scheduled and explicit native compaction through every
-/// namespace without inheriting GPT-5.6's unrelated Lite or image capabilities.
+/// namespace without inheriting GPT-5.6's unrelated Lite capabilities.
 #[test]
 fn astra_aliases_publish_native_standalone_compaction_without_surface_changes() {
     for provider in ["chatgpt", "work-chatgpt"] {
@@ -2713,10 +2745,19 @@ fn astra_aliases_publish_native_standalone_compaction_without_surface_changes() 
                 Some(tau_proto::TokenCount::new(997_500))
             );
             assert!(astra.supports_parallel_tool_calls);
-            assert_eq!(astra.input_modalities, vec![tau_proto::InputModality::Text]);
+            assert_eq!(
+                astra.input_modalities,
+                vec![
+                    tau_proto::InputModality::Text,
+                    tau_proto::InputModality::Image
+                ]
+            );
             assert_eq!(
                 astra.tool_result_modalities,
-                vec![tau_proto::InputModality::Text]
+                vec![
+                    tau_proto::InputModality::Text,
+                    tau_proto::InputModality::Image
+                ]
             );
             let config = resolved_config_for_provider_model(
                 &provider,

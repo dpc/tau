@@ -46,10 +46,11 @@ meets its [documented gates](../docs/read-image-fidelity-oracle.md).
 
 The harness exposes an image-producing tool only when the exact provider model
 route publishes both image-input and image-tool-result modalities. Audited
-routes include GPT-5.6 Sol/Terra/Luna on the ChatGPT Responses surface and
+routes include the published multimodal ChatGPT/Codex models listed in
+[ARCH-tau-provider-codex](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md) and
 operator-declared multimodal llama.cpp Chat Completions models.
 Responses lowering uses `function_call_output.output[]` with text followed by
-`input_image`; standard GPT-5.6 Responses preserves `detail: high`, while
+`input_image`; standard ChatGPT Responses preserves `detail: high`, while
 Responses Lite receives prepared high-detail pixels but omits
 the `detail` field. Audited Chat Completions lowering uses a `tool` message whose
 `content` array contains the normalized `text` part followed by `image_url`

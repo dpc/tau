@@ -1816,7 +1816,7 @@ fn model_info(
             .into_iter()
             .collect(),
         supported_tool_types: vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom],
-        input_modalities: if is_gpt_5_6(model) {
+        input_modalities: if supports_image_tool_results(model) {
             vec![
                 tau_proto::InputModality::Text,
                 tau_proto::InputModality::Image,
@@ -1824,7 +1824,7 @@ fn model_info(
         } else {
             vec![tau_proto::InputModality::Text]
         },
-        tool_result_modalities: if is_gpt_5_6(model) {
+        tool_result_modalities: if supports_image_tool_results(model) {
             vec![
                 tau_proto::InputModality::Text,
                 tau_proto::InputModality::Image,
@@ -1975,6 +1975,29 @@ fn effective_mode(model: &str, requested: responses::ResponsesMode) -> responses
 
 fn is_gpt_5_6(model: &str) -> bool {
     matches!(model, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
+}
+
+/// Exact source-audited ChatGPT models accepting native image function output.
+///
+/// Keep publication and wire lowering on this same predicate. The upstream
+/// modality metadata and generic `view_image` output contract are documented in
+/// ARCH-tau-provider-codex; adding a model to the catalog alone must not grant
+/// image disclosure authority.
+fn supports_image_tool_results(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-6-sol"
+            | "gpt-6.1-sol"
+            | "gpt-6-luna"
+            | "gpt-6-astra"
+            | "gpt-5.6-sol"
+            | "gpt-5.6-terra"
+            | "gpt-5.6-luna"
+            | "gpt-5.5"
+            | "gpt-5.4"
+            | "gpt-5.4-mini"
+            | "gpt-5.3-codex"
+    )
 }
 
 fn is_gpt_6_sol_or_luna(model: &str) -> bool {

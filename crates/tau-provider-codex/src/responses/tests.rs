@@ -302,10 +302,11 @@ fn shell_command_wire_definition_uses_only_call_local_workdir() {
     );
 }
 
-/// Ensures both GPT-5.6 modes receive native image function output while only
-/// standard Responses preserves the audited high-detail wire field.
+/// Ensures every source-audited model lowers native image function output with
+/// tool-call causality intact. Only the effective Lite mode omits high detail;
+/// account aliases such as the Zulip bot's route must retain the same contract.
 #[test]
-fn gpt_5_6_lowers_typed_image_inside_function_output() {
+fn audited_models_lower_typed_image_inside_function_output() {
     let items = [ContextItem::ToolResult(ToolResultItem {
         presentation: Default::default(),
         call_id: "call-image".into(),
@@ -337,31 +338,41 @@ fn gpt_5_6_lowers_typed_image_inside_function_output() {
         debug_provider_requests: false,
     };
 
-    for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
-        let mut config = chain_test_config();
-        config.model_id = "gpt-5.6-sol".to_owned();
-        config.mode = mode;
-        let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
-        let output = body["input"]
-            .as_array()
-            .expect("input")
-            .iter()
-            .find(|item| item["type"] == "function_call_output")
-            .expect("function output");
-        assert_eq!(output["call_id"], "call-image");
-        assert_eq!(output["output"][0]["type"], "input_text");
-        assert_eq!(output["output"][1]["type"], "input_image");
-        assert_eq!(
-            output["output"][1]["image_url"],
-            "data:image/png;base64,iVBORw0KGgpEQVRB"
-        );
-        if mode == ResponsesMode::Standard {
-            assert_eq!(output["output"][1]["detail"], "high");
-        } else {
-            assert!(
-                output["output"][1].get("detail").is_none(),
-                "Responses Lite strips detail only after local high-detail preparation"
-            );
+    for provider in ["chatgpt", "chatgpt-fedi"] {
+        for &model in crate::CHATGPT_MODELS {
+            for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+                let config = crate::resolved_config_for_provider_model(
+                    &tau_proto::ProviderName::new(provider),
+                    &tau_proto::ModelName::new(model),
+                    crate::ResolvedCredentials::new("test-token".to_owned(), None),
+                    mode,
+                )
+                .inner;
+                let body = serde_json::to_value(build_request(&config, &request, None))
+                    .expect("serialize");
+                assert_eq!(body["model"], model);
+                let output = body["input"]
+                    .as_array()
+                    .expect("input")
+                    .iter()
+                    .find(|item| item["type"] == "function_call_output")
+                    .expect("function output");
+                assert_eq!(output["call_id"], "call-image");
+                assert_eq!(output["output"][0]["type"], "input_text");
+                assert_eq!(output["output"][1]["type"], "input_image");
+                assert_eq!(
+                    output["output"][1]["image_url"],
+                    "data:image/png;base64,iVBORw0KGgpEQVRB"
+                );
+                if config.mode == ResponsesMode::Standard {
+                    assert_eq!(output["output"][1]["detail"], "high");
+                } else {
+                    assert!(
+                        output["output"][1].get("detail").is_none(),
+                        "Responses Lite strips detail only after local high-detail preparation"
+                    );
+                }
+            }
         }
     }
 }
@@ -410,7 +421,8 @@ fn typed_image_lowering_enforces_both_request_budgets() {
 /// placeholder instead of sending image bytes or synthesizing a user message.
 #[test]
 fn unaudited_responses_route_omits_typed_image() {
-    let config = chain_test_config();
+    let mut config = chain_test_config();
+    config.model_id = "gpt-6-luna-experimental".to_owned();
     let items = [ContextItem::ToolResult(ToolResultItem {
         presentation: Default::default(),
         call_id: "call-image".into(),

@@ -3043,7 +3043,7 @@ fn build_input_items<'a>(
     };
     let mut input = Vec::new();
     let mut image_budget = ImageRequestBudget {
-        supported: crate::is_gpt_5_6(&config.model_id),
+        supported: crate::supports_image_tool_results(&config.model_id),
         responses_lite,
         image_bytes: 0,
         data_url_bytes: 0,

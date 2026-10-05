@@ -401,7 +401,7 @@ only.
 `chatgpt/gpt-6.1-sol` is selectable without changing the `gpt-6-sol` default.
 It offers Function/Custom tools and local-summary standalone compaction, a
 1,050,000-token window, and low/medium/high/xhigh/max efforts. Private native
-compaction, Lite, images, phase, and verbosity remain unadvertised without
+compaction, Lite, phase, and verbosity remain unadvertised without
 exact route evidence. For public API coding use a `responses` profile and the
 tested `crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-sol.json`
 model entry. The public Responses
@@ -574,6 +574,16 @@ current state. The extension streams response updates and emits final response
 events with stop reasons and usage/cache diagnostics.
 
 ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previous_response_id` when possible so follow-up requests can send only newly added messages while upstream carries reasoning state. If an upstream stored response id expires, Tau retries once with a full replay within that finite provider attempt; an ambiguous failed attempt then returns to the logical-prompt scheduler.
+
+All currently published ChatGPT/Codex models support native image function
+output, so `read_image` is available when role policy permits it. This includes
+GPT-6 Sol/Sol 6.1/Luna/Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4,
+GPT-5.4 Mini, and GPT-5.3 Codex in every configured ChatGPT account namespace.
+The same exact-model check governs advertised image modalities and wire
+lowering; unknown/experimental IDs stay text-only. The audit uses upstream
+Codex modality metadata and `view_image` function-output encoding, not a live
+account or visual-fidelity test. Image support does not imply Lite, phase, or
+native compaction support. See `ARCH-tau-provider-codex` for pinned evidence.
 
 ChatGPT GPT-5.6 Sol, Terra, and Luna publish a 353,400-token effective context
 window and include `max` among their published reasoning choices. They use

@@ -40,6 +40,12 @@ ordinary-input, cached-input, and output rates unchanged. Tau records only the
 standard short-context tier: the current estimator cannot represent the separate
 long-context or processing-tier rates, and these API-equivalent comparisons do
 not claim private subscription billing.
+The October 5, 2026 image-capability correction records text/image input and
+native tool-result modalities for all eleven published ChatGPT/Codex models.
+The exact-model source audit and pinned upstream image-tool evidence live in
+[`ARCH-tau-provider-codex`](../../../tau-provider-codex/specs/ARCH-tau-provider-codex.md#typed-image-tool-output);
+the snapshot does not claim live account verification or grant unknown model IDs
+image support.
 The zzd2 cache-control migration uses
 `options: { mode: implicit, ttl: "30m" }`; the retired legacy
 `prompt_cache_retention` contract is deliberately absent because its old `24h`

@@ -1391,11 +1391,16 @@ default `gpt-6-sol` selection. Its advertised window is 1,050,000 tokens
 (997,500 effective input ceiling), maximum output 128,000, and effort choices
 are `low`, `medium`, `high`, `xhigh`, `max`—not `none` or `minimal`.
 The private route stays Standard even if the profile requests Lite. Native
-and inline compaction, image tool results, phase, and verbosity controls
-remain unadvertised for this exact model pending private-route evidence.
-Tau currently has no ordinary user-image message carrier: binary images use
-tool-result blocks, whose private acceptance is not established by public
-image-input support. Ordinary tools and local-summary compaction remain available.
+and inline compaction, phase, and verbosity controls remain unadvertised for
+this exact model pending private-route evidence.
+All currently published ChatGPT/Codex models support `read_image` through native
+image tool-result blocks, including Sol 6.1 and account aliases such as
+`chatgpt-fedi/gpt-6-luna`. Tau's source audit checks upstream model modalities
+and Codex's native image function-output encoding, not just public API vision
+support; see
+[the exact supported models and evidence](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md#typed-image-tool-output).
+Unknown/experimental IDs remain text-only. This does not assert live account
+entitlement, change other provider adapters, or add a user-image message carrier.
 
 For the public API, create a `responses` profile pointing at
 `https://api.openai.com/v1` and use the tested
