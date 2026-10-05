@@ -200,9 +200,9 @@ impl ClipboardPaste {
         let Some(body) = body.strip_prefix("5522;") else {
             return Effects::default();
         };
-        let Some((metadata, payload)) = body.split_once(';') else {
-            return Effects::default();
-        };
+        // WezTerm emits metadata-only OK, DONE and error frames without a
+        // payload separator; DATA still requires one, even for empty bytes.
+        let (metadata, payload) = body.split_once(';').unwrap_or((body, ""));
         let mut fields = HashMap::new();
         for field in metadata.split(':') {
             let Some((key, value)) = field.split_once('=') else {
@@ -242,6 +242,12 @@ impl ClipboardPaste {
         match status {
             "OK" if transfer.id.is_some() && !transfer.opened => transfer.opened = true,
             "DATA" if transfer.opened => {
+                if !body.contains(';') {
+                    self.transfer = None;
+                    return Self::failure(
+                        "Missing clipboard DATA payload separator; draft unchanged.",
+                    );
+                }
                 if let Err(error) = Self::append_data(transfer, &fields, payload) {
                     self.transfer = None;
                     return Self::failure(error);

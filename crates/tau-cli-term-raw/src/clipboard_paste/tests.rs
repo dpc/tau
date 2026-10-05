@@ -3,8 +3,8 @@ use std::sync::mpsc::Sender;
 
 use super::*;
 
-/// Constructs exact body bytes, not an invented provider or clipboard
-/// interface.
+/// Matches Kitty's read-response grammar and WezTerm's ClipboardResponse
+/// serializer: only DATA carries a payload separator.
 fn packet(status: &str, id: Option<&str>, mime: Option<&str>, bytes: &[u8]) -> Vec<u8> {
     let mut metadata = format!("5522;type=read:status={status}");
     if let Some(id) = id {
@@ -13,7 +13,86 @@ fn packet(status: &str, id: Option<&str>, mime: Option<&str>, bytes: &[u8]) -> V
     if let Some(mime) = mime {
         metadata.push_str(&format!(":mime={}", STANDARD.encode(mime)))
     }
-    format!("{metadata};{}", STANDARD.encode(bytes)).into_bytes()
+    if status == "DATA" {
+        format!("{metadata};{}", STANDARD.encode(bytes)).into_bytes()
+    } else {
+        assert!(bytes.is_empty(), "metadata-only response has no bytes");
+        metadata.into_bytes()
+    }
+}
+
+/// Literal WezTerm offer/control frames must open an acquisition and release
+/// PNG bytes only after the matching metadata-only DONE, not on DATA.
+#[test]
+fn wezterm_metadata_only_controls_complete_png_read() {
+    let now = Instant::now();
+    let mut owner = ClipboardPaste::default();
+    owner.probe(now);
+    owner.mode_report(true, now);
+    owner.receive(b"5522;type=read:status=OK:pw=c2VjcmV0", now, false);
+    assert!(owner.busy());
+    owner.receive(
+        b"5522;type=read:status=DATA:mime=Lg==;aW1hZ2UvcG5n",
+        now,
+        false,
+    );
+    let request = owner.receive(b"5522;type=read:status=DONE", now, false);
+    assert!(!request.output.is_empty());
+    let id = read_id(&owner);
+    assert!(
+        owner
+            .receive(
+                format!("5522;type=read:id={id}:status=OK").as_bytes(),
+                now,
+                false,
+            )
+            .content
+            .is_none()
+    );
+    assert!(
+        owner
+            .receive(
+                format!("5522;type=read:id={id}:status=DATA:mime=aW1hZ2UvcG5n;iVBORw0KGgo=")
+                    .as_bytes(),
+                now,
+                false,
+            )
+            .content
+            .is_none()
+    );
+    assert!(
+        owner
+            .receive(b"5522;type=read:id=wrong:status=DONE", now, false)
+            .content
+            .is_none()
+    );
+    let effects = owner.receive(
+        format!("5522;type=read:id={id}:status=DONE").as_bytes(),
+        now,
+        false,
+    );
+    assert!(
+        matches!(effects.content, Some(PasteContent::Png(ref bytes)) if &**bytes == b"\x89PNG\r\n\x1a\n")
+    );
+}
+
+/// A missing DATA delimiter must not become an empty chunk or artifact, and
+/// unknown metadata-only statuses must not complete an active read.
+#[test]
+fn metadata_only_data_and_unknown_status_discard_acquisition() {
+    for status in ["DATA:mime=aW1hZ2UvcG5n", "UNKNOWN"] {
+        let (mut owner, now, _) = offered(b"image/png");
+        let id = read_id(&owner);
+        owner.receive(&packet("OK", Some(&id), None, b""), now, false);
+        let effects = owner.receive(
+            format!("5522;type=read:id={id}:status={status}").as_bytes(),
+            now,
+            false,
+        );
+        assert!(effects.notice.is_some());
+        assert!(effects.content.is_none());
+        assert!(!owner.busy());
+    }
 }
 
 /// Enables a probed owner and supplies a complete unsolicited MIME inventory.

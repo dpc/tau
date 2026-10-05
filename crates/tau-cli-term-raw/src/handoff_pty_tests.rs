@@ -115,13 +115,14 @@ impl PtyPeer {
         id.to_owned()
     }
 
-    /// Emits the prompt-free metadata transcript, never a content read.
+    /// Emits WezTerm's prompt-free metadata transcript, including header-only
+    /// OK/DONE controls, never a content read.
     fn complete_fence(&mut self, id: &str) {
         self.send(
             format!(
-                "\x1b]5522;type=read:id={id}:status=OK;\x1b\\\
+                "\x1b]5522;type=read:id={id}:status=OK\x1b\\\
              \x1b]5522;type=read:id={id}:status=DATA:mime=Lg==;dGV4dC9wbGFpbg==\x1b\\\
-             \x1b]5522;type=read:id={id}:status=DONE;\x1b\\"
+             \x1b]5522;type=read:id={id}:status=DONE\x1b\\"
             )
             .as_bytes(),
         );
@@ -222,6 +223,19 @@ fn clipboard_handoff_real_pty_unsupported_terminal_needs_no_fence() {
     peer.finish();
 }
 
+/// Normal interactive quit must accept the actual sender's header-only
+/// controls while retaining the same complete correlated fence requirement.
+#[test]
+fn clipboard_handoff_real_pty_quit_accepts_wezterm_controls() {
+    let mut peer = PtyPeer::new("quit");
+    peer.wait_for(b"CHILD_READY");
+    peer.send(b"\x0f");
+    let id = peer.fence_id();
+    peer.complete_fence(&id);
+    peer.wait_for(b"CHILD_QUIT_PREPARED");
+    peer.finish();
+}
+
 /// A correlated peer error or malformed DATA is immediate failure, not proof;
 /// the raw terminal stays owned by Tau with its draft and staged keys intact.
 #[test]
@@ -278,6 +292,18 @@ fn clipboard_handoff_pty_child() {
     io::stdout().flush().expect("publish action marker");
     if case == "before-off" {
         thread::sleep(Duration::from_millis(100));
+    }
+    if case == "quit" {
+        term.prepare_interactive_exit()
+            .expect("verified quit fence");
+        assert!(handle.lock().terminal.exit_prepared);
+        assert!(handle.lock().terminal.external_paused);
+        assert!(!terminal::is_raw_mode_enabled().expect("query raw mode"));
+        assert!(term.real_reader.borrow().is_none());
+        assert!(!handle.lock().editor.clipboard.needs_fence());
+        println!("CHILD_QUIT_PREPARED");
+        io::stdout().flush().expect("publish quit marker");
+        return;
     }
     if matches!(case.as_str(), "error" | "malformed") {
         assert!(term.pause_for_external().is_err());

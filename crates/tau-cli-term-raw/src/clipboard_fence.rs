@@ -60,13 +60,15 @@ impl ClipboardFence {
         }
         if fields.get("type") != Some(&"read")
             || fields.get("id").copied() != Some(self.id.as_str())
-            || !body.contains(';')
         {
             return Err("invalid fence response");
         }
         match fields.get("status").copied() {
             Some("OK") if !self.opened && payload.is_empty() => self.opened = true,
             Some("DATA") if self.opened => {
+                if !body.contains(';') {
+                    return Err("missing fence DATA payload separator");
+                }
                 if fields.get("mime") != Some(&"Lg==") || payload.len() > 5464 {
                     return Err("invalid fence MIME or chunk size");
                 }

@@ -10,12 +10,12 @@ fn only_complete_correlated_inventory_proves_the_fence() {
     );
     assert!(
         !fence
-            .receive(b"5522;type=read:id=old:status=DONE;")
+            .receive(b"5522;type=read:id=old:status=DONE")
             .expect("ignore stale response")
     );
     assert!(
         !fence
-            .receive(b"5522;type=read:id=fresh:status=OK;")
+            .receive(b"5522;type=read:id=fresh:status=OK")
             .expect("valid opening")
     );
     assert!(
@@ -25,7 +25,7 @@ fn only_complete_correlated_inventory_proves_the_fence() {
     );
     assert!(
         fence
-            .receive(b"5522;type=read:id=fresh:status=DONE;")
+            .receive(b"5522;type=read:id=fresh:status=DONE")
             .expect("valid completion")
     );
 }
@@ -35,12 +35,13 @@ fn only_complete_correlated_inventory_proves_the_fence() {
 #[test]
 fn malformed_and_incomplete_fences_are_not_proof() {
     for reply in [
-        "type=read:id=fresh:status=EPERM;",
-        "type=read:id=fresh:status=ENOSYS;",
-        "type=read:id=fresh:status=EBUSY;",
-        "type=read:id=fresh:status=DONE;",
+        "type=read:id=fresh:status=EPERM",
+        "type=read:id=fresh:status=ENOSYS",
+        "type=read:id=fresh:status=EBUSY",
+        "type=read:id=fresh:status=DONE",
         "type=read:id=fresh:status=OK:id=fresh;",
-        "type=read:id=fresh:status=OK",
+        "type=write:id=fresh:status=OK",
+        "type=read:id=fresh:status=UNKNOWN",
     ] {
         assert!(
             ClipboardFence::new("fresh".into())
@@ -54,6 +55,7 @@ fn malformed_and_incomplete_fences_are_not_proof() {
         "type=read:id=fresh:status=DATA:mime=Lg==;!!!!",
         "type=read:id=fresh:status=DATA:mime=dGV4dC9wbGFpbg==;",
         "type=read:id=fresh:status=DATA:mime=Lg==;YQ",
+        "type=read:id=fresh:status=DATA:mime=Lg==",
     ] {
         let mut fence = ClipboardFence::new("fresh".into());
         fence
