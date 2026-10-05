@@ -453,6 +453,16 @@ impl Harness {
                         agent.dispatch.pending_replay_activation || selected.had_ready_message_wake
                     });
             if has_durable_activation {
+                // Capture exact pre-fold authority, not a later descendant-head
+                // guess. This synchronous retry may fold queued input and claim
+                // a checkpoint with a new through node and activation cut.
+                let capacity_retry_owner = self
+                    .runtime_io
+                    .publication
+                    .capacity_rejected_activations
+                    .get(&agent_id)
+                    .filter(|owner| self.capacity_rejected_activation_is_current(&agent_id, owner))
+                    .cloned();
                 let _ = self.ensure_agent_id_for_agent(&agent_id);
                 let output_length_owner_ready = self
                     .agent_runtime
@@ -581,20 +591,39 @@ impl Harness {
                         .pending_materialization_timings
                         .insert(checkpoint.agent_prompt_id.clone(), timing);
                 }
+                let started = tau_proto::AgentInferenceDispatchStarted {
+                    agent_id: checkpoint.durable_agent_id,
+                    transaction_id: None,
+                    agent_prompt_id: checkpoint.agent_prompt_id,
+                    through: checkpoint.through,
+                    model: checkpoint.selection.model,
+                    operation: checkpoint.selection.operation,
+                    activation_cut: checkpoint.selection.activation_cut,
+                    output_length_continuation: checkpoint.output_length_continuation,
+                };
+                // Transfer only the unchanged, validated retry owner to the
+                // checkpoint claimed by this fold. Publication still consumes
+                // it only on an exact committed checkpoint
+                // match; interception or another Full must not
+                // lose the retry obligation.
+                if let Some(rejected) = capacity_retry_owner
+                    && rejected.agent_id == started.agent_id
+                    && rejected.transaction_id == started.transaction_id
+                    && rejected.model == started.model
+                    && rejected.operation == started.operation
+                    && rejected.output_length_continuation == started.output_length_continuation
+                    && let Some(retained) = self
+                        .runtime_io
+                        .publication
+                        .capacity_rejected_activations
+                        .get_mut(&agent_id)
+                    && retained == &rejected
+                {
+                    *retained = started.clone();
+                }
                 self.publish_for_agent(
                     &agent_id,
-                    tau_proto::Event::AgentInferenceDispatchStarted(
-                        tau_proto::AgentInferenceDispatchStarted {
-                            agent_id: checkpoint.durable_agent_id,
-                            transaction_id: None,
-                            agent_prompt_id: checkpoint.agent_prompt_id,
-                            through: checkpoint.through,
-                            model: checkpoint.selection.model,
-                            operation: checkpoint.selection.operation,
-                            activation_cut: checkpoint.selection.activation_cut,
-                            output_length_continuation: checkpoint.output_length_continuation,
-                        },
-                    ),
+                    tau_proto::Event::AgentInferenceDispatchStarted(started),
                 );
                 if allowed.is_some()
                     || self

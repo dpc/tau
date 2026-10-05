@@ -239,33 +239,7 @@ impl Harness {
             std::mem::take(&mut self.runtime_io.publication.capacity_rejected_activations);
         let mut current = HashMap::new();
         for (cid, owner) in retained {
-            let owner_is_current = self
-                .agent_runtime
-                .agent_registry
-                .agents
-                .get(&cid)
-                .is_some_and(|agent| {
-                    let through = agent
-                        .identity
-                        .head
-                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-                    let continuation = match &agent.turn.output_length_continuation {
-                        path_crate_agent::OutputLengthContinuationState::OwnerReady(dispatch) => {
-                            Some(&dispatch.plan.owner)
-                        }
-                        _ => None,
-                    };
-                    through == owner.through
-                        && continuation == owner.output_length_continuation.as_ref()
-                        && self
-                            .select_inference_dispatch(&cid, Some(owner.activation_cut))
-                            .is_ok_and(|selection| {
-                                owner.model == selection.model
-                                    && owner.operation == selection.operation
-                                    && owner.activation_cut == selection.activation_cut
-                            })
-                });
-            if owner_is_current {
+            if self.capacity_rejected_activation_is_current(&cid, &owner) {
                 current.insert(cid, owner);
             }
         }
@@ -296,6 +270,42 @@ impl Harness {
         self.try_advance_capacity_rejected_agents(&rejected);
         self.drain_deferred_publishes();
         self.drain_capacity_rejected_idle_dispatches(&rejected);
+    }
+
+    /// Validates the exact retained ordinary owner before any retry folds
+    /// input.
+    pub(super) fn capacity_rejected_activation_is_current(
+        &self,
+        cid: &AgentId,
+        owner: &tau_proto::AgentInferenceDispatchStarted,
+    ) -> bool {
+        self.agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| {
+                let through = agent
+                    .identity
+                    .head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                let continuation = match &agent.turn.output_length_continuation {
+                    path_crate_agent::OutputLengthContinuationState::OwnerReady(dispatch) => {
+                        Some(&dispatch.plan.owner)
+                    }
+                    _ => None,
+                };
+                agent.identity.agent_id.as_ref() == Some(&owner.agent_id)
+                    && owner.transaction_id.is_none()
+                    && through == owner.through
+                    && continuation == owner.output_length_continuation.as_ref()
+                    && self
+                        .select_inference_dispatch(cid, Some(owner.activation_cut))
+                        .is_ok_and(|selection| {
+                            owner.model == selection.model
+                                && owner.operation == selection.operation
+                                && owner.activation_cut == selection.activation_cut
+                        })
+            })
     }
 
     /// Publishes one documented owed compaction fact with its exact semantic

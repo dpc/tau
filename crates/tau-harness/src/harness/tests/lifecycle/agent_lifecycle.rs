@@ -1776,8 +1776,21 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
 /// traffic, and replay one recovered finish plus one fresh successor.
 #[test]
 fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
+    assert_semantic_capacity_incident_recovery(false);
+}
+
+/// Unrelated extension traffic queued before the capacity wake must consume the
+/// exact retry owner immediately, and the later wake must not duplicate work.
+#[test]
+fn semantic_capacity_incident_with_unrelated_frame_before_wake() {
+    assert_semantic_capacity_incident_recovery(true);
+}
+
+/// Exercises the same canonical recovery and replay cuts with and without an
+/// unrelated extension frame ahead of the final capacity wake.
+fn assert_semantic_capacity_incident_recovery(unrelated_frame_before_wake: bool) {
     let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path()).expect("start");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
     let _interceptor = connect_test_tool(&mut h, "length-finish-interceptor");
     let _dispatch_interceptor = connect_test_tool(&mut h, "capacity-dispatch-interceptor");
     h.handle_extension_event(
@@ -2010,6 +2023,27 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
     ));
     h.handle_runtime_event(full_event, &mut served_clients)
         .expect("observe capacity-Full edge before recovery");
+    if unrelated_frame_before_wake {
+        let message = HarnessInputMessage::Subscribe(tau_proto::Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: Vec::new(),
+        });
+        let frame_bytes = tau_proto::ProtocolMessageBytes::new(
+            tau_proto::encode_message_to_vec(&message)
+                .expect("encode unrelated subscription")
+                .len() as u64,
+        )
+        .expect("nonempty subscription frame");
+        h.runtime_io
+            .tx
+            .send(HarnessEvent::FromConnection {
+                connection_id: crate::test_connection_id("capacity-dispatch-interceptor"),
+                message: Box::new(message),
+                frame_bytes,
+                decoded_at: Instant::now(),
+            })
+            .expect("queue unrelated frame before wake");
+    }
     h.session_runtime
         .persistence_owner
         .as_ref()
@@ -2018,6 +2052,18 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
     let RuntimeEventWait::Event(event) = h.next_runtime_event() else {
         panic!("dispatch capacity recovery must wake the runtime loop");
     };
+    if unrelated_frame_before_wake {
+        assert!(matches!(
+            &event,
+            HarnessEvent::FromConnection { connection_id, .. }
+                if connection_id == &crate::test_connection_id("capacity-dispatch-interceptor")
+        ));
+    } else {
+        assert!(matches!(
+            &event,
+            HarnessEvent::Command(crate::harness::HarnessCommand::SemanticPersistenceProgress)
+        ));
+    }
     h.handle_runtime_event(event, &mut served_clients)
         .expect("dispatch capacity-ready progress");
     assert!(
@@ -2032,6 +2078,17 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
         h.runtime_io.publication.idle_dispatches.len(),
         h.agent_runtime.agent_registry.agents[&source_cid]
     );
+    if unrelated_frame_before_wake {
+        let RuntimeEventWait::Event(event) = h.next_runtime_event() else {
+            panic!("capacity wake remains queued after unrelated frame");
+        };
+        assert!(matches!(
+            &event,
+            HarnessEvent::Command(crate::harness::HarnessCommand::SemanticPersistenceProgress)
+        ));
+        h.handle_runtime_event(event, &mut served_clients)
+            .expect("later capacity wake cannot dispatch twice");
+    }
     let next = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -2086,6 +2143,38 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
         .agent_store
         .agent_events(source.agent_id.as_str())
         .expect("durable events after retry");
+    for prompt_id in [
+        &source.agent_prompt_id,
+        &successor.agent_prompt_id,
+        &fresh_prompt_id,
+    ] {
+        assert_eq!(
+            durable_events
+                .iter()
+                .filter(|record| matches!(
+                    &record.event,
+                    Event::AgentInferenceDispatchStarted(started)
+                        if &started.agent_prompt_id == prompt_id
+                ))
+                .count(),
+            1,
+            "each source, continuation, and fresh dispatch commits once"
+        );
+    }
+    for prompt_id in [&source.agent_prompt_id, &successor.agent_prompt_id] {
+        assert_eq!(
+            durable_events
+                .iter()
+                .filter(|record| matches!(
+                    &record.event,
+                    Event::ProviderResponseFinished(response)
+                        if &response.agent_prompt_id == prompt_id
+                ))
+                .count(),
+            1,
+            "each injected terminal becomes canonical once"
+        );
+    }
     let fresh_dispatch = durable_events
         .iter()
         .find(|record| {
@@ -2132,7 +2221,7 @@ fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
     drop(h);
     wait_for_session_unlock(td.path(), "s1");
     let resumed =
-        echo_harness_with_start_reason("s1", td.path(), tau_proto::SessionStartReason::Resume)
+        quiet_provider_harness_with_start_reason(td.path(), tau_proto::SessionStartReason::Resume)
             .expect("cold resume after recovered finish");
     let cold_records = resumed
         .session_runtime
