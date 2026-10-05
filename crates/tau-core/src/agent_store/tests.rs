@@ -62,6 +62,186 @@ fn history_record(seq: u64, event: Event) -> PersistedAgentEvent {
     }
 }
 
+/// A finite worker snapshot must merge with the current accepted suffix, not
+/// the earlier request cut, without changing live facts or folded authority.
+#[test]
+fn managed_history_cache_prefetch_merges_current_pinned_suffix() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let agent_id = AgentId::parse("history-cache").expect("agent id");
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(temp.path(), owner.clone()).expect("store");
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        crate::DurabilityBarrierOutcome::Durable
+    );
+    let prefix = store
+        .agent_history_prefix(&agent_id)
+        .expect("capture")
+        .expect("readable");
+    assert_eq!(prefix.next_seq().get(), 1);
+    let first = store.agent_events(agent_id.as_str()).expect("resident");
+    store
+        .evict_agent_history(&agent_id, Some(1))
+        .expect("evict written prefix");
+    assert!(store.agent_history_is_evicted(&agent_id));
+    assert!(matches!(
+        store.agent_events(agent_id.as_str()),
+        Err(AgentStoreError::HistoryNotResident { .. })
+    ));
+    assert_eq!(
+        store.agent_history_pin_usage(&agent_id, 1).expect("pin"),
+        (0, 0)
+    );
+    let prefetched = std::thread::spawn(move || prefix.prefetch())
+        .join()
+        .expect("reader")
+        .expect("valid prefix");
+    // Accept records after the reader has already produced its result. The
+    // result must never replace or omit these current accepted facts.
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "after read"),
+        )
+        .expect("append while cold");
+    store
+        .append_agent_message_fact_at(
+            agent_id.as_str(),
+            None,
+            Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                tau_proto::MessagePublisherId::parse("cache-test").expect("publisher"),
+                MessageAgentTarget::new(agent_id.as_str()),
+                tau_proto::MessageFactId::new("late-message"),
+                tau_proto::MessageParty {
+                    stable_id: "sender".into(),
+                    display_name: None,
+                    sender_auth: None,
+                    sender_trust: None,
+                },
+                None,
+                "accepted after reader completion",
+            )),
+            UnixMicros::new(12),
+        )
+        .expect("raw append while cold");
+    let projection = &store.managed_projections[&agent_id];
+    let suffix = projection.history.records.clone();
+    let accepted_bytes = projection.history.encoded_event_bytes;
+    let nodes = projection.tree.nodes().len();
+    assert_eq!(
+        store.agent_history_pin_usage(&agent_id, 1).expect("pin"),
+        (managed_agent_encoded_event_bytes(&suffix), 2),
+    );
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        crate::DurabilityBarrierOutcome::Durable
+    );
+    // The write frontier overtook the captured cut; the request pin still
+    // prevents ordinary eviction from dropping the merge suffix.
+    store
+        .evict_agent_history(&agent_id, Some(1))
+        .expect("preserve request cut");
+    assert_eq!(store.managed_projections[&agent_id].history.records, suffix);
+    store
+        .install_agent_history_prefix(prefetched)
+        .expect("atomic cache handoff");
+    let expected: Vec<_> = first.into_iter().chain(suffix).collect();
+    assert_eq!(
+        store.agent_events(agent_id.as_str()).expect("complete"),
+        expected
+    );
+    assert!(!store.agent_history_is_evicted(&agent_id));
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(3));
+    let projection = &store.managed_projections[&agent_id];
+    assert_eq!(projection.history.encoded_event_bytes, accepted_bytes);
+    assert_eq!(projection.tree.nodes().len(), nodes);
+    assert_eq!(projection.tree.display_name(), Some("after read"));
+    store
+        .evict_agent_history(&agent_id, None)
+        .expect("release pin");
+    let history = &store.managed_projections[&agent_id].history;
+    assert_eq!(history.first_resident_seq, 3);
+    assert_eq!(history.records.capacity(), 0);
+    assert_eq!(history.record_bytes.capacity(), 0);
+    assert_eq!(history.encoded_event_bytes, accepted_bytes);
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(3));
+}
+
+/// A stale completion and a missing protected suffix must fail before changing
+/// cache residency; neither can silently install an incomplete history.
+#[test]
+fn managed_history_cache_rejects_stale_completion_and_missing_suffix() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let agent_id = AgentId::parse("history-cache-authority").expect("agent id");
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(temp.path(), owner.clone()).expect("store");
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        crate::DurabilityBarrierOutcome::Durable
+    );
+    let prefix = store
+        .agent_history_prefix(&agent_id)
+        .expect("capture")
+        .expect("readable");
+    let old = prefix.prefetch().expect("read on test thread");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "later"),
+        )
+        .expect("append");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        crate::DurabilityBarrierOutcome::Durable
+    );
+    // Deliberately violate the caller's pin contract to exercise the handoff
+    // invariant check rather than producing a successful partial history.
+    store.evict_agent_history(&agent_id, None).expect("evict");
+    assert!(matches!(
+        store.install_agent_history_prefix(old),
+        Err(AgentStoreError::InvalidEvent { .. })
+    ));
+    assert!(store.agent_history_is_evicted(&agent_id));
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(2));
+    assert_eq!(
+        store.agent(agent_id.as_str()).expect("tree").display_name(),
+        Some("later")
+    );
+    let stale = store
+        .agent_history_prefix(&agent_id)
+        .expect("capture")
+        .expect("readable")
+        .prefetch()
+        .expect("read on test thread");
+    store
+        .release_managed_agents(Duration::from_secs(2))
+        .expect("release");
+    store
+        .prepare_existing_agent(agent_id.as_str())
+        .expect("new lease");
+    let recovered = store.agent_events(agent_id.as_str()).expect("recovered");
+    assert!(matches!(
+        store.install_agent_history_prefix(stale),
+        Err(AgentStoreError::Persistence(
+            PersistenceAdmissionError::StaleLease
+        ))
+    ));
+    assert_eq!(
+        store.agent_events(agent_id.as_str()).expect("unchanged"),
+        recovered
+    );
+}
+
 /// Exact facts survive disposal of replay records and retain the first tool
 /// declaration, including its item position, instead of recovery's last winner.
 #[test]
@@ -84,7 +264,7 @@ fn managed_history_facts_do_not_depend_on_resident_records() {
         Some(expected_ref.clone())
     );
     let encoded = history.encoded_event_bytes;
-    history.records.clear();
+    history.evict_before(history.accepted_count);
     let appended = history_record(3, history_response(&agent_id, "prompt-15"));
     let measured = managed_agent_encoded_event_bytes(std::slice::from_ref(&appended));
     history.push(appended, measured);
@@ -920,8 +1100,7 @@ fn managed_history_role_preserves_nonzero_creation_after_recovery() {
         .get_mut(&agent_id)
         .expect("projection")
         .history
-        .records
-        .clear();
+        .evict_before(3);
     assert_eq!(
         store
             .agent_started_role(agent_id.as_str())

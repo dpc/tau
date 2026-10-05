@@ -9,6 +9,7 @@
 //! precedes and cannot be vetoed by post-commit projection.
 
 mod agent_history;
+mod history_cache;
 mod loaded_tool_call_ids;
 mod snapshot;
 
@@ -27,6 +28,7 @@ use std::time::Duration;
 
 use agent_history::AgentHistory;
 use fs2::FileExt;
+pub use history_cache::PrefetchedAgentHistory;
 use loaded_tool_call_ids::LoadedToolCallIds;
 use serde::Deserialize;
 pub use snapshot::{
@@ -50,6 +52,12 @@ use crate::{PersistenceAdmissionError, PersistenceLease, SemanticPersistenceOwne
 /// Errors returned by the append-only agent store.
 #[derive(Debug)]
 pub enum AgentStoreError {
+    /// A managed record prefix was evicted and requires off-loop prefetch.
+    HistoryNotResident {
+        /// Exact prepared agent whose full history is unavailable
+        /// synchronously.
+        agent_id: AgentId,
+    },
     /// Bounded semantic persistence admission or lifecycle failure.
     Persistence(PersistenceAdmissionError),
     CreateParentDirectory {
@@ -137,6 +145,12 @@ mod tests;
 impl fmt::Display for AgentStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::HistoryNotResident { agent_id } => {
+                write!(
+                    f,
+                    "agent `{agent_id}` history requires asynchronous prefetch"
+                )
+            }
             Self::Persistence(source) => write!(f, "{source}"),
             Self::CreateParentDirectory { path, source } => write!(
                 f,
@@ -243,6 +257,7 @@ impl Error for AgentStoreError {
             Self::InvalidAgentId { source, .. } => Some(source),
             Self::InvalidEvent { source } => Some(source),
             Self::RecordTooLarge { .. }
+            | Self::HistoryNotResident { .. }
             | Self::Locked { .. }
             | Self::InvalidAgentDir { .. }
             | Self::InvalidSequence { .. }
@@ -1741,8 +1756,12 @@ impl AgentStore {
         )
     }
 
-    /// Loads per-agent protocol events from disk or the memory-only replay
-    /// stream for ephemeral agents.
+    /// Returns complete accepted events from a prepared managed or memory-only
+    /// cache, or reads the journal when no prepared projection exists.
+    ///
+    /// An evicted managed cache returns [`AgentStoreError::HistoryNotResident`]
+    /// rather than a partial suffix or a synchronous filesystem fallback. Its
+    /// lifecycle owner must prefetch and install the complete history first.
     pub fn agent_events(
         &self,
         agent_id: &str,
@@ -1763,6 +1782,11 @@ impl AgentStore {
             return Ok(events);
         }
         if let Some(projection) = self.managed_projections.get(&parsed_agent_id) {
+            if projection.history.first_resident_seq != 0 {
+                return Err(AgentStoreError::HistoryNotResident {
+                    agent_id: parsed_agent_id,
+                });
+            }
             return Ok(projection.history.records.clone());
         }
         let path = self.agent_dir(parsed_agent_id.as_str()).join("events.cbor");

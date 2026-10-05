@@ -12,9 +12,13 @@ use crate::PersistedAgentEvent;
 /// residency.
 #[derive(Clone, Debug, Default)]
 pub(super) struct AgentHistory {
-    /// Resident accepted records; this prerequisite still retains the full
-    /// history.
+    /// Resident accepted suffix, beginning at `first_resident_seq`.
     pub(super) records: Vec<PersistedAgentEvent>,
+    /// Encoded sizes parallel to resident records, for bounded pin accounting.
+    pub(super) record_bytes: Vec<usize>,
+    /// Sequence of the first resident record, or accepted end for an empty
+    /// suffix.
+    pub(super) first_resident_seq: u64,
     /// Encoded charge of all accepted records, also covering the retained tree.
     pub(super) encoded_event_bytes: usize,
     /// Exact first record, kept separately from mutable tree metadata.
@@ -73,7 +77,14 @@ impl AgentHistory {
         for record in &records {
             history.observe(record);
         }
-        history.encoded_event_bytes = managed_agent_encoded_event_bytes(&records);
+        history.record_bytes = records
+            .iter()
+            .map(|record| managed_agent_encoded_event_bytes(std::slice::from_ref(record)))
+            .collect();
+        history.encoded_event_bytes = history
+            .record_bytes
+            .iter()
+            .fold(0_usize, |sum, size| sum.saturating_add(*size));
         history.records = records;
         history
     }
@@ -83,7 +94,23 @@ impl AgentHistory {
     pub(super) fn push(&mut self, record: PersistedAgentEvent, measured_bytes: usize) {
         self.observe(&record);
         self.encoded_event_bytes = self.encoded_event_bytes.saturating_add(measured_bytes);
+        self.record_bytes.push(measured_bytes);
         self.records.push(record);
+    }
+
+    /// Releases a complete resident prefix without retaining its vector
+    /// capacity.
+    pub(super) fn evict_before(&mut self, next_seq: u64) {
+        let next_seq = next_seq
+            .min(self.accepted_count)
+            .max(self.first_resident_seq);
+        let count = (next_seq - self.first_resident_seq) as usize;
+        if count == 0 {
+            return;
+        }
+        self.records = self.records.split_off(count);
+        self.record_bytes = self.record_bytes.split_off(count);
+        self.first_resident_seq = next_seq;
     }
 
     /// Folds exact live facts without depending on any currently resident

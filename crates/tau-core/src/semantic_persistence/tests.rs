@@ -1234,6 +1234,74 @@ fn agent_history_prefix_excludes_unwritten_and_rolled_back_suffixes() {
     );
 }
 
+/// Eviction follows the complete-write frontier even when newer accepted
+/// records cannot be written, and installation preserves that unwritten suffix.
+#[test]
+fn agent_history_cache_keeps_unwritten_records_during_eviction() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(Default::default(), backend.clone())
+            .expect("owner"),
+    );
+    let agent_id = tau_proto::AgentId::parse("unwritten-cache").expect("agent id");
+    let mut store =
+        AgentStore::open_managed(root.path().join("agents"), owner.clone()).expect("store");
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable,
+    );
+    let prefix = store
+        .agent_history_prefix(&agent_id)
+        .expect("capture")
+        .expect("written prefix");
+    backend.hold_writes.store(true, Ordering::SeqCst);
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "unwritten"),
+        )
+        .expect("accept while write blocked");
+    backend.wait_until_write_held();
+    // Release the deterministic backend before assertions can panic; persistent
+    // write failure continues to keep the second record unwritten.
+    backend.fail_writes.store(true, Ordering::SeqCst);
+    backend.release_writes();
+    assert!(owner.wait_for_failure_for_test(PersistenceFailureKind::Write, Duration::from_secs(2)));
+    let expected = store.agent_events(agent_id.as_str()).expect("resident");
+    store.evict_agent_history(&agent_id, None).expect("evict");
+    assert!(store.agent_history_is_evicted(&agent_id));
+    assert_eq!(store.loaded_agent_record_count(&agent_id), Some(2));
+    assert_eq!(
+        store
+            .agent_history_pin_usage(&agent_id, 1)
+            .expect("suffix")
+            .1,
+        1
+    );
+    assert_eq!(
+        store.agent(agent_id.as_str()).expect("tree").display_name(),
+        Some("unwritten")
+    );
+    store
+        .install_agent_history_prefix(prefix.prefetch().expect("read on test thread"))
+        .expect("merge unwritten suffix");
+    assert_eq!(
+        store.agent_events(agent_id.as_str()).expect("complete"),
+        expected
+    );
+    backend.fail_writes.store(false, Ordering::SeqCst);
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable,
+    );
+}
+
 /// Complete-written history is readable during persistent synchronization
 /// failure; read authority is not a durability acknowledgement or sync barrier.
 #[test]

@@ -98,6 +98,17 @@ The atomic swap drops the superseded complete projection and releases its
 staging-only byte reservation immediately; queued work retains only its frame,
 incremental projection ownership, checkpoint candidate, and worker/debt state.
 
+Managed agent projections separate authoritative trees and exact live-query facts
+from accepted-record cache residency. The core cache API can evict only a
+generation's complete-written prefix, capped by caller-owned suffix pins, and
+install a validated off-loop prefix together with the current accepted suffix.
+Missing pins or stale read authority fail the handoff without changing live
+state. Prepared managed caches never return a partial suffix or silently read
+disk. Unprepared agents, including those queried through a managed store, retain
+the existing synchronous journal fallback.
+Harness eviction is not enabled yet: lifecycle pins and bounded asynchronous
+prefetch must be integrated before production callers use the cache API.
+
 The worker retries exact-EOF rollback-safe heads on deadlines, poisons only
 generations whose rollback cannot be proven, coalesces watermarked checkpoint and
 session-touch debt, and synchronizes file data plus exact child-before-parent

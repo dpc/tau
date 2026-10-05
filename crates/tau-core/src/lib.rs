@@ -30,8 +30,8 @@ pub use agent_checkpoint::{
 pub use agent_store::{
     AgentAppendOutcome, AgentCreationFacts, AgentCreationFactsBudget,
     AgentCreationFactsBudgetExceeded, AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot,
-    AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked, read_agent_creation_record,
-    retired_agent_tombstone, retired_agents_dir,
+    AgentPersistenceMode, AgentStore, AgentStoreError, PrefetchedAgentHistory, agent_is_locked,
+    read_agent_creation_record, retired_agent_tombstone, retired_agents_dir,
 };
 pub use bus::{DeliveryOutcomeCount, EventBus};
 pub use compaction_chain_view::{
