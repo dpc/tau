@@ -280,6 +280,219 @@ fn managed_agent_started_role_ignores_retained_history_suffix() {
     );
 }
 
+/// Cold preparation keeps one authoritative tree, preserves accepted history
+/// across appends, and leaves no stale loaded tree after release. Eager
+/// fixtures exercise transfer of an inspection tree as well as ordinary managed
+/// recovery.
+#[test]
+fn restored_managed_agent_retains_only_authoritative_tree() {
+    for eager_fixture in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let agent_id = AgentId::parse("single-restored-tree").expect("agent id");
+        let accepted = {
+            let mut writer = AgentStore::open_fixture(temp.path()).expect("writer");
+            for event in [
+                started_event(&agent_id),
+                injected_message_event(&agent_id, "retained history".repeat(1024)),
+                display_name_event(&agent_id, "before recovery"),
+            ] {
+                writer
+                    .append_agent_event(agent_id.as_str(), None, event)
+                    .expect("seed history");
+            }
+            writer
+                .agent_events(agent_id.as_str())
+                .expect("seed records")
+        };
+        let mut store = if eager_fixture {
+            AgentStore::open_fixture(temp.path()).expect("eager fixture")
+        } else {
+            let owner = path_std_sync::Arc::new(
+                SemanticPersistenceOwner::new(Default::default()).expect("owner"),
+            );
+            AgentStore::open_managed(temp.path(), owner).expect("managed store")
+        };
+        store
+            .prepare_existing_agent(agent_id.as_str())
+            .expect("recover agent");
+        store
+            .prepare_existing_agent(agent_id.as_str())
+            .expect("preparation is idempotent");
+        assert!(!store.agents.contains_key(&agent_id));
+        assert_eq!(store.managed_projections.len(), 1);
+        assert_eq!(
+            store
+                .agent_events(agent_id.as_str())
+                .expect("recovered records"),
+            accepted
+        );
+        let tree = &store.managed_projections[&agent_id].tree;
+        assert!(std::ptr::eq(store.agent(agent_id.as_str()).unwrap(), tree));
+        assert!(std::ptr::eq(store.agents()[0], tree));
+        assert_eq!(tree.display_name(), Some("before recovery"));
+        assert_eq!(
+            store.agent_started_role(agent_id.as_str()).expect("role"),
+            Some("engineer".to_owned())
+        );
+
+        store
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                display_name_event(&agent_id, "after recovery"),
+            )
+            .expect("append to recovered projection");
+        assert!(!store.agents.contains_key(&agent_id));
+        assert_eq!(
+            store.agent(agent_id.as_str()).unwrap().display_name(),
+            Some("after recovery")
+        );
+        assert!(matches!(
+            store
+                .agent_creation_facts(&agent_id, facts_budget(256 * 1024, 4 * 1024 * 1024))
+                .expect("roster facts"),
+            AgentCreationFacts::Available {
+                display_name: Some(display_name),
+                ..
+            } if display_name == "after recovery"
+        ));
+        let updated = store
+            .agent_events(agent_id.as_str())
+            .expect("updated records");
+        assert_eq!(&updated[..accepted.len()], accepted.as_slice());
+        assert_eq!(updated.len(), accepted.len() + 1);
+        store
+            .release_managed_agents(Duration::from_secs(2))
+            .expect("release drains accepted records");
+        assert!(store.agent(agent_id.as_str()).is_none());
+        assert!(store.agents().is_empty());
+        assert!(store.managed_projections.is_empty());
+        assert_eq!(
+            store.agent_events(agent_id.as_str()).expect("disk replay"),
+            updated
+        );
+        assert_eq!(
+            store
+                .load_agent(agent_id.as_str())
+                .expect("explicit reload")
+                .unwrap()
+                .display_name(),
+            Some("after recovery")
+        );
+        assert!(!store.agents.contains_key(&agent_id));
+        assert_eq!(
+            store
+                .agent_events(agent_id.as_str())
+                .expect("reloaded records"),
+            updated
+        );
+        let reader = AgentStore::open(temp.path()).expect("read-only inspection");
+        assert_eq!(
+            reader.agent(agent_id.as_str()).unwrap().display_name(),
+            Some("after recovery")
+        );
+        assert_eq!(
+            reader
+                .agent_events(agent_id.as_str())
+                .expect("cold records"),
+            updated
+        );
+    }
+}
+
+/// Newly reserved agents and cold-restored agents expose no loaded tree after
+/// their managed generation is released; durable records remain replayable.
+#[test]
+fn fresh_managed_agent_release_leaves_no_loaded_tree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let owner =
+        path_std_sync::Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(temp.path(), owner).expect("managed store");
+    let agent_id = AgentId::parse("fresh-managed-tree").expect("agent id");
+    store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("create agent");
+    let accepted = store
+        .agent_events(agent_id.as_str())
+        .expect("accepted records");
+    store
+        .release_managed_agents(Duration::from_secs(2))
+        .expect("release");
+    assert!(store.agent(agent_id.as_str()).is_none());
+    assert!(store.agents().is_empty());
+    assert_eq!(
+        store.agent_events(agent_id.as_str()).expect("disk replay"),
+        accepted
+    );
+    assert!(
+        store
+            .load_agent(agent_id.as_str())
+            .expect("reload fresh agent")
+            .is_some()
+    );
+    assert!(!store.agents.contains_key(&agent_id));
+}
+
+/// Maintenance removal of a recovered projection cannot expose its older
+/// preparation tree; snapshot and explicit replay retain the same records.
+#[test]
+fn restored_managed_snapshot_leaves_no_stale_loaded_tree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("snapshot-restored-tree").expect("agent id");
+    let accepted = {
+        let mut writer = AgentStore::open_fixture(temp.path()).expect("writer");
+        writer
+            .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+            .expect("create agent");
+        writer
+            .agent_events(agent_id.as_str())
+            .expect("seed records")
+    };
+    let owner =
+        path_std_sync::Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(temp.path(), owner).expect("managed store");
+    store
+        .lock_and_recover_agent(agent_id.as_str())
+        .expect("recover");
+    let snapshot = store
+        .capture_managed_snapshot([agent_id.clone()], Duration::from_secs(2))
+        .expect("maintenance snapshot");
+    assert!(!store.agents.contains_key(&agent_id));
+    assert!(store.agent(agent_id.as_str()).is_none());
+    assert!(store.agents().is_empty());
+    assert_eq!(
+        snapshot
+            .records(&agent_id)
+            .expect("snapshot records")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read snapshot"),
+        accepted
+    );
+    assert_eq!(
+        store.agent_events(agent_id.as_str()).expect("disk replay"),
+        accepted
+    );
+    drop(snapshot);
+    assert!(
+        store
+            .load_agent(agent_id.as_str())
+            .expect("reload after maintenance")
+            .is_some()
+    );
+    let leases = store.managed_persistence_leases();
+    store
+        .persistence_owner
+        .as_ref()
+        .unwrap()
+        .release(&leases, Duration::from_secs(2))
+        .expect("group release");
+    store.finish_managed_release();
+    assert!(store.agent(agent_id.as_str()).is_none());
+    assert!(store.agents().is_empty());
+    assert!(!store.agents.contains_key(&agent_id));
+}
+
 /// A present managed projection without a creation event returns no role and
 /// must not fall through to the durable journal.
 #[test]

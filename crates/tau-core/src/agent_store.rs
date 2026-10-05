@@ -410,6 +410,8 @@ pub struct AgentStore {
     /// reservations.
     #[cfg(any(test, feature = "test-persistence"))]
     fixture_existing_agents: HashSet<AgentId>,
+    /// Trees for read-only inspection, memory-only agents, and not-yet-prepared
+    /// fixtures. Prepared durable trees belong only to `managed_projections`.
     agents: HashMap<AgentId, AgentTree>,
     /// Exact non-persisted tool-call identities in the currently loaded trees.
     loaded_tool_call_ids: LoadedToolCallIds,
@@ -819,7 +821,10 @@ impl AgentStore {
             self.created_agents.insert(agent_id.clone());
         }
         self.summaries.insert(agent_id.clone(), summary.clone());
-        self.agents.insert(agent_id.clone(), tree.clone());
+        // Preparation transfers any fixture inspection tree to the managed
+        // projection; keeping a second tree would retain stale recovered
+        // history.
+        self.agents.remove(&agent_id);
         self.persistence_leases
             .insert(agent_id.clone(), prepared.lease);
         self.managed_projections.insert(
