@@ -519,7 +519,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
         first
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("first records")
             .iter()
             .filter(|record| matches!(
@@ -544,7 +544,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
     let resumed_records = second
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("resumed records");
     assert_eq!(
         resumed_records
@@ -603,7 +603,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
     assert_eq!(agent.totals.outer_turns_unterminated, 1);
     let records = tau_core::AgentStore::open(state.join("agents"))
         .expect("agent store")
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("final records");
     let starts = records
         .iter()
@@ -931,7 +931,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         let creation = h
             .session_runtime
             .agent_store
-            .agent_events(worker_agent_id.as_str())
+            .snapshot_agent_events_for_test(worker_agent_id.as_str())
             .expect("worker journal")
             .into_iter()
             .find_map(|record| match record.event {
@@ -1074,7 +1074,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(worker_agent_id.as_str())
+        .snapshot_agent_events_for_test(worker_agent_id.as_str())
         .expect("worker journal after queued activation advances");
     assert_eq!(
         records
@@ -1226,7 +1226,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(worker_agent_id.as_str())
+        .snapshot_agent_events_for_test(worker_agent_id.as_str())
         .expect("worker journal after second terminal");
     assert_eq!(
         records
@@ -1728,7 +1728,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events("main")
+        .snapshot_agent_events_for_test("main")
         .expect("restored records");
     assert_eq!(
         records

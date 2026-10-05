@@ -649,6 +649,7 @@ fn tree_request_returns_one_directed_multiline_notice() {
     let mut served_clients = 0;
     h.handle_runtime_event(event, &mut served_clients)
         .expect("handle tree request");
+    drive_harness_until_history_complete(&mut h);
 
     let notice = read_notice(&mut requesting_ui);
     assert_eq!(notice.kind, tau_proto::notice_kind::HARNESS_NOTICE);

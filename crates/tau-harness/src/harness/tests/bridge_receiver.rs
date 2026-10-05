@@ -90,7 +90,7 @@ fn bridge_receiver_opt_in_lazy_creation_and_sticky_selection() {
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(first.as_str())
+        .snapshot_agent_events_for_test(first.as_str())
         .expect("events");
     assert!(events.iter().all(|record| !matches!(
         record.event,
@@ -402,7 +402,7 @@ fn bridge_receiver_pending_creation_is_singleflight_without_bootstrap() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(id.as_str())
+            .snapshot_agent_events_for_test(id.as_str())
             .expect("events")
             .iter()
             .all(|record| !matches!(record.event, Event::AgentPromptSubmitted(_)))

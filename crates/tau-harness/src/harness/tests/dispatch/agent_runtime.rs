@@ -159,7 +159,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events("forged-agent")
+            .snapshot_agent_events_for_test("forged-agent")
             .expect("agent events")
             .is_empty()
     );

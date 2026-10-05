@@ -528,7 +528,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             let records = h
                 .session_runtime
                 .agent_store
-                .agent_events(agent_id.as_str())
+                .snapshot_agent_events_for_test(agent_id.as_str())
                 .expect("durable events")
                 .to_vec();
             let expected = records

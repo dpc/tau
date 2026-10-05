@@ -1084,6 +1084,34 @@ impl AgentStore {
             })
     }
 
+    /// Tests exact internal-message texts across all accepted branches without
+    /// reading storage or requiring the accepted replay cache to be resident.
+    ///
+    /// `None` denotes an unprepared agent. Managed facts advance atomically
+    /// with accepted append/replay; ephemeral agents scan their in-memory log.
+    #[must_use]
+    pub fn loaded_internal_prompt_matches(
+        &self,
+        agent_id: &AgentId,
+        matches_text: impl Fn(&str) -> bool,
+    ) -> Option<bool> {
+        if let Some(projection) = self.managed_projections.get(agent_id) {
+            return Some(
+                projection
+                    .history
+                    .internal_prompt_texts
+                    .iter()
+                    .any(|text| matches_text(text)),
+            );
+        }
+        self.ephemeral_events.get(agent_id).map(|records| {
+            records
+                .iter()
+                .filter_map(|record| AgentHistory::internal_prompt_text(&record.event))
+                .any(matches_text)
+        })
+    }
+
     /// Resolves the first accepted declaration of a historical tool-call id.
     ///
     /// This never reads storage and deliberately differs from last-wins

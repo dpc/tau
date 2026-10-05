@@ -1405,6 +1405,12 @@ impl Harness {
         if !self.extensions.ready_received.contains(source_id) {
             return Ok(());
         }
+        // Ready receipt still clears the handshake deadline. A cold late
+        // subscription holds the existing global dispatch barrier, without
+        // inventing a timeout or bypass through declaration completion.
+        if self.extension_subscription_is_pending(source_id) {
+            return Ok(());
+        }
         if self
             .extensions
             .pending_provider_model_declarations

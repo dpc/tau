@@ -1183,7 +1183,7 @@ fn cold_restart_classifies_membership_and_prompt_prefixes_without_dispatch() {
         let agent_events = h
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .unwrap_or_default();
         assert_eq!(
             agent_events
@@ -1334,7 +1334,7 @@ fn cold_restart_restores_checkpointed_start_without_coordinator() {
         assert!(
             h.session_runtime
                 .agent_store
-                .agent_events(accepted.agent_id.as_str())
+                .snapshot_agent_events_for_test(accepted.agent_id.as_str())
                 .expect("agent journal")
                 .iter()
                 .any(|record| matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
@@ -1466,7 +1466,7 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
     let second_records = h
         .session_runtime
         .agent_store
-        .agent_events(&second_agent_id)
+        .snapshot_agent_events_for_test(&second_agent_id)
         .expect("second agent records");
     assert!(!second_records.is_empty());
     assert!(
@@ -2561,7 +2561,7 @@ fn automatic_policy_terminal_matrix_commits_owned_suffix_once() {
             let records = h
                 .session_runtime
                 .agent_store
-                .agent_events(terminal_prompt.agent_id.as_str())
+                .snapshot_agent_events_for_test(terminal_prompt.agent_id.as_str())
                 .expect("durable records");
             let terminals = records
                 .iter()
@@ -3319,7 +3319,7 @@ fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
     let settlement_order = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("peer journal")
         .iter()
         .filter_map(|record| match &record.event {
@@ -4077,7 +4077,7 @@ fn wait_observation_classifies_invalid_and_unresolved_exact_arguments() {
             harness
                 .session_runtime
                 .agent_store
-                .agent_events(&agent_id)
+                .snapshot_agent_events_for_test(&agent_id)
                 .expect("agent records")
                 .iter()
                 .any(|record| matches!(

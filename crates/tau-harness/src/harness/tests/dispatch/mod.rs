@@ -730,7 +730,7 @@ fn persisted_background_terminal(
     harness
         .session_runtime
         .agent_store
-        .agent_events(agent_id)
+        .snapshot_agent_events_for_test(agent_id)
         .expect("agent events")
         .into_iter()
         .find_map(|record| match record.event {
@@ -883,7 +883,12 @@ fn agent_event_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usi
         .agent_registry
         .agent_routes
         .keys()
-        .filter_map(|agent_id| h.session_runtime.agent_store.agent_events(agent_id).ok())
+        .map(|agent_id| {
+            h.session_runtime
+                .agent_store
+                .snapshot_agent_events_for_test(agent_id)
+                .expect("complete accepted history")
+        })
         .flatten()
         .filter(|entry| matches_event(&entry.event))
         .count()
@@ -2027,7 +2032,7 @@ fn durable_compaction_counts(
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("target events");
     (
         events
@@ -2057,7 +2062,7 @@ fn durable_background_outcome_counts(
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("caller events");
     (
         events
@@ -2104,7 +2109,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
     let first_started = h
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("target events")
         .into_iter()
         .filter_map(|record| match record.event {
@@ -2152,7 +2157,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(target_id.as_str())
+            .snapshot_agent_events_for_test(target_id.as_str())
             .expect("target events")
             .iter()
             .filter(|record| matches!(
@@ -2238,7 +2243,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
     let starts = h
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("target events")
         .into_iter()
         .filter_map(|record| match record.event {
@@ -2298,7 +2303,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
     let successor_outcomes = h
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("target events")
         .iter()
         .filter(|record| match &record.event {

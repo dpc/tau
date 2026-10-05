@@ -469,7 +469,7 @@ fn side_agent_pending_message_wake_defers_automatic_decision_until_final_respons
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("durable records");
         let live = h
             .session_runtime
@@ -492,7 +492,7 @@ fn side_agent_pending_message_wake_defers_automatic_decision_until_final_respons
     let records = resumed
         .session_runtime
         .agent_store
-        .agent_events(&durable_agent_id)
+        .snapshot_agent_events_for_test(&durable_agent_id)
         .expect("resumed durable records");
     assert_eq!(
         records
@@ -1155,7 +1155,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events("forged-agent")
+            .snapshot_agent_events_for_test("forged-agent")
             .expect("agent events")
             .is_empty()
     );

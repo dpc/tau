@@ -2952,7 +2952,7 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
     assert!(
         !h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent events")
             .iter()
             .any(|record| matches!(
@@ -3237,7 +3237,7 @@ fn ordinary_queued_steers_retry_after_capacity_recovery() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent records before recovery")
             .iter()
             .all(|record| !matches!(record.event, Event::AgentPromptSteered(_)))
@@ -3248,7 +3248,7 @@ fn ordinary_queued_steers_retry_after_capacity_recovery() {
     let steers = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records after recovery")
         .iter()
         .filter_map(|record| match &record.event {
@@ -3439,7 +3439,7 @@ fn ordinary_steer_retry_preserves_replacement_and_unrelated_deferred_publish() {
     let steers = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("ordinary agent records")
         .iter()
         .filter_map(|record| match &record.event {
@@ -3458,7 +3458,7 @@ fn ordinary_steer_retry_preserves_replacement_and_unrelated_deferred_publish() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(other_agent_id.as_str())
+            .snapshot_agent_events_for_test(other_agent_id.as_str())
             .expect("unrelated agent records")
             .iter()
             .any(|record| matches!(
@@ -3547,7 +3547,7 @@ fn ordinary_steer_middle_rejection_preserves_committed_prefix() {
     let before_recovery = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("records before middle retry")
         .iter()
         .filter_map(|record| match &record.event {
@@ -3574,7 +3574,7 @@ fn ordinary_steer_middle_rejection_preserves_committed_prefix() {
     let after_recovery = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("records after middle retry")
         .iter()
         .filter_map(|record| match &record.event {
@@ -5713,7 +5713,7 @@ fn agent_started_event(role: &str) -> Event {
 fn persisted_agent_started_events(h: &Harness) -> Vec<Event> {
     h.session_runtime
         .agent_store
-        .agent_events("agent-started-test")
+        .snapshot_agent_events_for_test("agent-started-test")
         .expect("agent.started durable log")
         .into_iter()
         .map(|entry| entry.event)
@@ -6106,7 +6106,7 @@ fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records");
     assert!(records.iter().any(|record| record.event == started));
     assert!(records.iter().any(|record| record.event == finished));
@@ -6125,7 +6125,7 @@ fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("records after peer emits")
             .len(),
         record_count,
@@ -6197,7 +6197,7 @@ fn parked_ui_prompt_has_committed_interaction_fact() {
     let interactions: Vec<_> = h
         .session_runtime
         .agent_store
-        .agent_events(&agent_id)
+        .snapshot_agent_events_for_test(&agent_id)
         .expect("agent journal")
         .into_iter()
         .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))

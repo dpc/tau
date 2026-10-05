@@ -138,6 +138,7 @@ fn idle_saved_agent_unload_commits_and_preserves_history() {
             })),
         )
         .expect("extension subscription");
+    drive_harness_until_history_complete(&mut harness);
     harness
         .agent_runtime
         .agent_runtime_indicators

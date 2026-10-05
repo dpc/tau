@@ -69,11 +69,12 @@ pub(crate) fn run_prompt_stdin(
         cli_overrides,
         storage_mode_from_ephemeral(ephemeral),
     )?;
-    let (reader, mut writer) = connect_prompt_stdin_client(&mut daemon, session_id)?;
-    let messages = spawn_prompt_stdin_reader(reader);
+    let (mut reader, mut writer) = connect_prompt_stdin_client(&mut daemon, session_id)?;
     let result = (|| {
         let role = prompt_stdin_role(startup_role);
-        let submitted = submit_prompt(&mut writer, session_id, role, prompt)?;
+        let submitted =
+            submit_after_subscription(&mut reader, &mut writer, session_id, role, prompt)?;
+        let messages = spawn_prompt_stdin_reader(reader);
         let admission =
             wait_for_create_agent_admission(&messages, &submitted.request_id, &submitted.ctx_id)?;
 
@@ -151,6 +152,19 @@ fn subscribe_to_prompt_stdin_events(writer: &mut OneShotWriter) -> io::Result<()
         ],
     )
 }
+/// Admits the subscription before sending the sole paid-work request. Responses
+/// remain buffered for the reader thread started immediately after submission.
+fn submit_after_subscription(
+    reader: &mut OneShotReader,
+    writer: &mut OneShotWriter,
+    session_id: &tau_proto::SessionId,
+    role: &str,
+    prompt: String,
+) -> io::Result<SubmittedPrompt> {
+    crate::ui_client::wait_for_subscription(reader, Some(session_id))?;
+    submit_prompt(writer, session_id, role, prompt)
+}
+
 fn submit_prompt(
     writer: &mut OneShotWriter,
     session_id: &tau_proto::SessionId,

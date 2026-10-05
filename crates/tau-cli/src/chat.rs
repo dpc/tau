@@ -59,6 +59,7 @@ use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, Ui
 use crate::peer_exit::PeerExit;
 use crate::prompt_history::{PromptHistoryAdmission, PromptHistoryStore};
 use crate::tool_render::ui_dir_block;
+use crate::ui_client::subscription_handoff::SubscriptionHandoff;
 use crate::ui_prompt::{
     CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, PromptCommandHandling,
     create_user_agent_prompt,
@@ -1381,6 +1382,11 @@ fn run_chat_session(
     let socket_initial_quit_applied = Arc::new(Mutex::new(Some(initial_quit_applied_tx)));
     let remote_disconnected = Arc::new(AtomicBool::new(false));
     let socket_remote_disconnected = remote_disconnected.clone();
+    // A new state belongs to this exact transport only; reconnects cannot reuse
+    // a previous reader's successful boundary.
+    let subscription_handoff = Arc::new(Mutex::new(SubscriptionHandoff::new(Some(
+        session_id.clone(),
+    ))));
     let peer_exit = match &shutdown {
         UiTransportShutdown::Socket(stream) => PeerExit::from_socket(stream).ok(),
         UiTransportShutdown::InitialStdio(_) => None,
@@ -1406,6 +1412,7 @@ fn run_chat_session(
         socket_input_shutdown,
         socket_initial_quit_applied,
         socket_remote_disconnected,
+        subscription_handoff.clone(),
         socket_ui_io_meter,
         socket_local_disconnect_started,
         socket_delivery_memory,
@@ -1647,6 +1654,7 @@ fn run_chat_session(
                 prompt_symbol: settings.prompt_symbol,
                 agent_in_progress,
                 remote_disconnected: remote_disconnected.clone(),
+                subscription_handoff,
                 renderer_tx: event_tx,
                 active_session_state,
                 editor_context,
@@ -2033,6 +2041,7 @@ fn spawn_socket_reader(
     socket_input_shutdown: Arc<Mutex<Option<tau_cli_term::TermHandle>>>,
     socket_initial_quit_applied: InitialQuitProjection,
     socket_remote_disconnected: Arc<AtomicBool>,
+    subscription_handoff: Arc<Mutex<SubscriptionHandoff>>,
     socket_ui_io_meter: UiIoMeter,
     socket_local_disconnect_started: Arc<AtomicBool>,
     socket_delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
@@ -2158,6 +2167,7 @@ fn spawn_socket_reader(
                         );
                     }
                     let message = decoded.message;
+                    locked(&subscription_handoff).observe(&message);
                     let frame_bytes = decoded.encoded_bytes;
                     let read_elapsed = read_started.elapsed();
                     let queue_bytes = usize::try_from(frame_bytes.get()).unwrap_or(usize::MAX);
@@ -2605,6 +2615,8 @@ struct TerminalInputLoopCtx {
     prompt_symbol: String,
     agent_in_progress: Arc<path_std_sync::atomic::AtomicBool>,
     remote_disconnected: Arc<AtomicBool>,
+    /// Exact-transport replay admission, separate from selected-agent intent.
+    subscription_handoff: Arc<Mutex<SubscriptionHandoff>>,
     renderer_tx: LocalRendererSender,
     active_session_state: Arc<Mutex<tau_proto::SessionId>>,
     editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
@@ -3408,8 +3420,14 @@ impl<'a> TerminalInputSession<'a> {
             TermEvent::FocusChanged { focused } => self.send_focus_changed(focused),
             TermEvent::BufferChanged => self.update_draft(),
             TermEvent::Action(action) => self.handle_binding_action(&action)?,
-            TermEvent::BackTab => self.cycle_role_group(),
-            TermEvent::Escape => self.recall_queued_prompt(),
+            TermEvent::BackTab => self.handle_binding_action("cycle-role-group")?,
+            TermEvent::Escape => {
+                if let Some(message) = locked(&self.ctx.subscription_handoff).submission_blocked() {
+                    self.output.command_feedback(message);
+                } else {
+                    self.recall_queued_prompt();
+                }
+            }
             TermEvent::Line(_)
             | TermEvent::Eof
             | TermEvent::CancelPrompt
@@ -3421,6 +3439,12 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_binding_action(&mut self, action: &str) -> Result<(), CliError> {
+        if action != "verbose-mode-toggle"
+            && let Some(message) = locked(&self.ctx.subscription_handoff).submission_blocked()
+        {
+            self.output.command_feedback(message);
+            return Ok(());
+        }
         match action {
             "fast-toggle" => self.toggle_fast_service_tier(),
             "verbose-mode-toggle" => {
@@ -3464,7 +3488,32 @@ impl<'a> TerminalInputSession<'a> {
         );
     }
 
+    /// Preserves the unsubmitted editor text and one-shot options on admission
+    /// failure.
+    fn restore_input_if_subscription_blocked(&mut self, text: &str) -> bool {
+        let message = locked(&self.ctx.subscription_handoff)
+            .submission_blocked()
+            .map(str::to_owned);
+        let Some(message) = message else {
+            return false;
+        };
+        self.term.handle().set_buffer(text.to_owned(), text.len());
+        self.output.command_feedback(&message);
+        self.update_draft();
+        true
+    }
+
     fn handle_line(&mut self, line: &str) -> Result<Option<InputLoopExit>, CliError> {
+        // Keep editing, cancellation and explicit exit usable while admission
+        // is pending or failed. Other commands can depend on missing
+        // live results.
+        if !matches!(
+            line.trim(),
+            ":quit" | ":q" | ":quit-force" | ":quit-session" | ":detach" | ":cancel"
+        ) && self.restore_input_if_subscription_blocked(line)
+        {
+            return Ok(None);
+        }
         let started = Instant::now();
         let diagnostic_seq = NEXT_PROMPT_SUBMISSION_DIAGNOSTIC_SEQ.fetch_add(1, Ordering::Relaxed);
         self.prompt_diagnostic_seq = Some(diagnostic_seq);
@@ -4367,6 +4416,9 @@ impl<'a> TerminalInputSession<'a> {
         text: &str,
         command_handling: PromptCommandHandling,
     ) -> Option<InputLoopExit> {
+        if self.restore_input_if_subscription_blocked(text) {
+            return None;
+        }
         let target = self.ctx.routing.target();
         if matches!(target, UiTarget::InitialOverview | UiTarget::Overview) {
             self.term.handle().set_buffer(text.to_owned(), text.len());

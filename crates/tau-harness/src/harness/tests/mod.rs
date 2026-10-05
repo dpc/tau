@@ -1406,11 +1406,11 @@ fn loaded_agent_events(h: &Harness, session_id: &str) -> Vec<Event> {
     session
         .loaded_agents()
         .into_iter()
-        .filter_map(|agent_id| {
+        .map(|agent_id| {
             h.session_runtime
                 .agent_store
-                .agent_events(agent_id.as_str())
-                .ok()
+                .snapshot_agent_events_for_test(agent_id.as_str())
+                .expect("complete accepted history for loaded agent")
         })
         .flatten()
         .map(|entry| entry.event)
@@ -2426,6 +2426,41 @@ fn recv_next_harness_event(h: &Harness) -> HarnessEvent {
     recv_next_harness_event_after(h, || {})
 }
 
+/// Await actual cold-reader handoffs for assertions written after subscription
+/// or UI completion. This pumps ordinary ingress under one finite deadline;
+/// it does not retry requests, warm caches or suppress eviction.
+fn drive_harness_until_history_complete(h: &mut Harness) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while h.session_runtime.history.has_pending() {
+        let event = h
+            .recv_event_until(deadline)
+            .expect("history completion before test deadline");
+        match event {
+            HarnessEvent::Command(command) => h.handle_harness_command(command).expect("command"),
+            HarnessEvent::FromConnection {
+                connection_id,
+                message,
+                ..
+            } => {
+                h.handle_extension_message(&connection_id, *message)
+                    .expect("ingress");
+            }
+            HarnessEvent::Disconnected { connection_id } => h.handle_disconnect(&connection_id),
+            HarnessEvent::ReadFailed { connection_id, .. } => h.handle_disconnect(&connection_id),
+            HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
+                h.handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())
+                    .expect("cleanup");
+            }
+            HarnessEvent::ComponentIngressReady => unreachable!("wake expanded"),
+            HarnessEvent::NewClient(_) => panic!("unexpected client while driving history"),
+        }
+    }
+    assert!(
+        h.runtime_io.publication.pending_error.is_none(),
+        "history handoff must not hide a fatal error"
+    );
+}
+
 /// Pumps the harness event loop until the named tool call's result
 /// or error is received and handled.
 fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
@@ -2469,6 +2504,35 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
             HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         }
     }
+}
+
+/// Observes tree formatting through the real socket-authorized asynchronous
+/// request surface, rather than calling its resident-only implementation.
+fn request_test_tree(h: &mut Harness, agent: &tau_proto::AgentId) -> String {
+    let name = format!("tree-oracle-{}", h.runtime_io.bus.connections().len());
+    let sink = connect_test_client_with_origin(
+        h,
+        &name,
+        tau_proto::ClientKind::Ui,
+        ConnectionOrigin::Socket,
+    );
+    h.handle_ui_tree_request(
+        &crate::test_connection_id(&name),
+        tau_proto::UiTreeRequest {
+            session_id: h.session_runtime.current_session_id.clone(),
+            target_agent_id: Some(agent.clone()),
+        },
+    );
+    drive_harness_until_history_complete(h);
+    sink.lock()
+        .expect("tree response")
+        .iter()
+        .filter_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::HarnessNotice(notice)) => Some(notice.message.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("directed tree notice")
 }
 
 fn drive_harness_until_tool_turn_empty(h: &mut Harness) {

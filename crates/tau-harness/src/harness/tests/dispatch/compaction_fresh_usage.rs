@@ -126,7 +126,7 @@ fn automatic_replacement_only_over_budget_commits_one_preflight_failure() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(&agent_id)
+        .snapshot_agent_events_for_test(&agent_id)
         .expect("records");
     let cold = tau_core::AgentTree::from_events(agent_id.clone(), &records);
     assert_eq!(

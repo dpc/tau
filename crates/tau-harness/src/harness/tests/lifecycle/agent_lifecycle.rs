@@ -277,7 +277,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(&durable_agent_id)
+        .snapshot_agent_events_for_test(&durable_agent_id)
         .expect("durable agent events");
     let (outer_turn_id, successor_agent_prompt_id) = records
         .iter()
@@ -377,7 +377,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(&durable_agent_id)
+        .snapshot_agent_events_for_test(&durable_agent_id)
         .expect("durable agent events after cancellation");
     assert!(
         records.iter().any(|record| matches!(
@@ -559,7 +559,7 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable records");
     let successor = records
         .iter()
@@ -827,7 +827,7 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
             successor = h
                 .session_runtime
                 .agent_store
-                .agent_events(source.agent_id.as_str())
+                .snapshot_agent_events_for_test(source.agent_id.as_str())
                 .expect("source records")
                 .iter()
                 .find_map(|record| match &record.event {
@@ -915,7 +915,7 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
             cut_records = h
                 .session_runtime
                 .agent_store
-                .agent_events(source.agent_id.as_str())
+                .snapshot_agent_events_for_test(source.agent_id.as_str())
                 .expect("cold cut records")
                 .to_vec();
             h.shutdown().expect("shutdown before journal cut");
@@ -942,7 +942,7 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
         let records = restored
             .session_runtime
             .agent_store
-            .agent_events(source_agent_id.as_str())
+            .snapshot_agent_events_for_test(source_agent_id.as_str())
             .expect("restored records");
         let steer_count = records
             .iter()
@@ -1157,7 +1157,7 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable records");
     assert_eq!(
         records
@@ -1213,7 +1213,7 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
         restored
             .session_runtime
             .agent_store
-            .agent_events(source.agent_id.as_str())
+            .snapshot_agent_events_for_test(source.agent_id.as_str())
             .expect("restored records")
             .iter()
             .any(|record| matches!(record.event, Event::AgentOuterTurnFinished(_)))
@@ -1272,7 +1272,7 @@ fn output_length_reactive_rejection_cancelled_before_commit_never_dispatches() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("records");
     assert!(!records.iter().any(|record| matches!(
         record.event,
@@ -1499,7 +1499,7 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("records");
     assert_eq!(
         records
@@ -1577,7 +1577,7 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
     let replayed_records = resumed
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("replayed records");
     let replayed_trace = replayed_records
         .iter()
@@ -1743,7 +1743,7 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("records");
     assert_eq!(
         records
@@ -1870,7 +1870,7 @@ fn assert_semantic_capacity_incident_recovery(unrelated_frame_before_wake: bool)
         .expect("read-only abrupt-cut cold replay");
     assert!(
         abrupt_cut
-            .agent_events(source.agent_id.as_str())
+            .snapshot_agent_events_for_test(source.agent_id.as_str())
             .expect("abrupt-cut agent")
             .iter()
             .all(|record| !matches!(
@@ -2125,7 +2125,7 @@ fn assert_semantic_capacity_incident_recovery(unrelated_frame_before_wake: bool)
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(source.agent_id.as_str())
+            .snapshot_agent_events_for_test(source.agent_id.as_str())
             .expect("durable events after retry")
             .iter()
             .filter(|record| matches!(
@@ -2141,7 +2141,7 @@ fn assert_semantic_capacity_incident_recovery(unrelated_frame_before_wake: bool)
     let durable_events = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events after retry");
     for prompt_id in [
         &source.agent_prompt_id,
@@ -2215,7 +2215,7 @@ fn assert_semantic_capacity_incident_recovery(unrelated_frame_before_wake: bool)
     let live_records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("live records after clean drain")
         .to_vec();
     drop(h);
@@ -2226,7 +2226,7 @@ fn assert_semantic_capacity_incident_recovery(unrelated_frame_before_wake: bool)
     let cold_records = resumed
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("cold records");
     let cold_prefix = cold_records
         .get(..live_records.len())
@@ -2513,7 +2513,7 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let reserved_successor_id = records
         .iter()
@@ -2711,7 +2711,7 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let terminals = records
         .iter()
@@ -2885,7 +2885,7 @@ fn output_length_real_terminal_race_cancels_with_exact_accounting() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let cancelled = records
         .iter()
@@ -3069,7 +3069,7 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let cancelled = records
         .iter()
@@ -3266,7 +3266,7 @@ fn parked_provider_terminal_cancellation_arbitrates_once() {
         let terminals = |h: &Harness| {
             h.session_runtime
                 .agent_store
-                .agent_events(terminal_prompt.agent_id.as_str())
+                .snapshot_agent_events_for_test(terminal_prompt.agent_id.as_str())
                 .expect("durable agent events")
                 .into_iter()
                 .filter(|record| match &record.event {
@@ -3317,7 +3317,7 @@ fn parked_provider_terminal_cancellation_arbitrates_once() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(terminal_prompt.agent_id.as_str())
+            .snapshot_agent_events_for_test(terminal_prompt.agent_id.as_str())
             .expect("durable records");
         assert_eq!(
             records
@@ -3363,7 +3363,7 @@ fn parked_provider_terminal_cancellation_arbitrates_once() {
         let resumed_records = resumed
             .session_runtime
             .agent_store
-            .agent_events(terminal_prompt.agent_id.as_str())
+            .snapshot_agent_events_for_test(terminal_prompt.agent_id.as_str())
             .expect("resumed durable records");
         assert_eq!(
             resumed_records
@@ -3606,7 +3606,7 @@ fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
         assert!(
             h.session_runtime
                 .agent_store
-                .agent_events(source.agent_id.as_str())
+                .snapshot_agent_events_for_test(source.agent_id.as_str())
                 .expect("durable events")
                 .iter()
                 .filter_map(|record| match &record.event {
@@ -4049,7 +4049,7 @@ fn output_length_eligibility_matrix_is_exact() {
         let planned = h
             .session_runtime
             .agent_store
-            .agent_events(source.agent_id.as_str())
+            .snapshot_agent_events_for_test(source.agent_id.as_str())
             .expect("agent events")
             .iter()
             .filter(|record| {
@@ -4095,7 +4095,7 @@ fn output_length_eligibility_matrix_is_exact() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(source.agent_id.as_str())
+            .snapshot_agent_events_for_test(source.agent_id.as_str())
             .expect("agent events")
             .to_vec();
         tau_core::AgentTree::try_from_events(source.agent_id.clone(), &records)
@@ -4281,7 +4281,7 @@ fn output_length_successor_terminal_matrix_is_exact() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(source.agent_id.as_str())
+            .snapshot_agent_events_for_test(source.agent_id.as_str())
             .expect("durable events");
         let terminals = records
             .iter()

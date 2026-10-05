@@ -1049,9 +1049,8 @@ pub fn send_daemon_message_with_trace(
     let ctx_id = next_ctx_id();
     let session_id = tau_proto::SessionId::parse(session_id)
         .map_err(|error| HarnessError::Participant(error.to_string()))?;
-    let mut peer = connect_daemon_message_peer(socket_path, &session_id)?;
-    send_daemon_message_prompt(&mut peer, session_id.as_str(), message, &ctx_id)?;
-    wait_for_daemon_trace_outcome(peer, ctx_id)
+    let peer = connect_daemon_message_peer(socket_path, &session_id)?;
+    wait_for_daemon_trace_outcome(peer, ctx_id, &session_id, message)
 }
 
 fn connect_daemon_message_peer(
@@ -1125,6 +1124,8 @@ fn daemon_message_create_agent(
 fn wait_for_daemon_trace_outcome(
     mut peer: SocketPeer,
     ctx_id: String,
+    session_id: &tau_proto::SessionId,
+    prompt_text: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
     let started_at = Instant::now();
     let mut lifecycle_messages = Vec::new();
@@ -1135,6 +1136,9 @@ fn wait_for_daemon_trace_outcome(
     // tool calls, higher when tool-result follow-ups bump the counter).
     let mut our_spid_counter: Option<u64> = None;
     let mut created_agent_id = None;
+    // Cold history delays new live eligibility. Never send work until the
+    // successful replay boundary guarantees its correlation facts are visible.
+    let mut submitted = false;
 
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
@@ -1144,6 +1148,33 @@ fn wait_for_daemon_trace_outcome(
             &mut peer,
             SEND_DAEMON_MESSAGE_TIMEOUT.saturating_sub(started_at.elapsed()),
         )? {
+            if !submitted && let HarnessOutputMessage::Deliver(delivery) = &message {
+                match delivery.event() {
+                    Event::AgentReplayComplete(complete) if complete.error.is_some() => {
+                        return Err(HarnessError::Participant(
+                            complete.error.clone().expect("checked replay error"),
+                        ));
+                    }
+                    Event::SessionReplayComplete(complete) => {
+                        if &complete.session_id != session_id {
+                            return Err(HarnessError::Participant(
+                                "daemon replay completed for another session".to_owned(),
+                            ));
+                        }
+                        if let Some(error) = &complete.error {
+                            return Err(HarnessError::Participant(error.clone()));
+                        }
+                        send_daemon_message_prompt(
+                            &mut peer,
+                            session_id.as_str(),
+                            prompt_text,
+                            &ctx_id,
+                        )?;
+                        submitted = true;
+                    }
+                    _ => {}
+                }
+            }
             let state = DaemonTraceState {
                 ctx_id: &ctx_id,
                 lifecycle_messages: &mut lifecycle_messages,

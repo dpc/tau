@@ -62,6 +62,198 @@ fn history_record(seq: u64, event: Event) -> PersistedAgentEvent {
     }
 }
 
+/// Every internal input variant contributes exact branch-independent facts;
+/// ordinary user inputs do not. Repeated text shares one retained payload,
+/// while distinct payload storage necessarily grows with accepted history.
+#[test]
+fn managed_history_internal_text_facts_are_exact_and_quantified() {
+    let agent_id = AgentId::parse("internal-facts").expect("agent");
+    let text = "x".repeat(64 * 1024);
+    let injected = |text: String, message_class| {
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.clone(),
+            text,
+            message_class,
+            inference_activation: false,
+        })
+    };
+    let submitted = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        agent_id: agent_id.clone(),
+        text: "submitted".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        display_name: None,
+        ctx_id: None,
+        inference_activation: false,
+    });
+    let steered = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        agent_id: agent_id.clone(),
+        text: "steered".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        ctx_id: None,
+        inference_activation: false,
+        self_compaction_terminal: None,
+    });
+    let mut records = vec![
+        history_record(0, submitted.clone()),
+        history_record(1, steered.clone()),
+    ];
+    for seq in 2..130 {
+        records.push(history_record(
+            seq,
+            injected(text.clone(), tau_proto::PromptMessageClass::Internal),
+        ));
+    }
+    records.push(history_record(
+        130,
+        injected("user only".to_owned(), tau_proto::PromptMessageClass::User),
+    ));
+    let mut history = AgentHistory::from_records(records.clone());
+    assert_eq!(history.internal_prompt_texts.len(), 3);
+    assert_eq!(
+        history
+            .internal_prompt_texts
+            .iter()
+            .map(String::len)
+            .sum::<usize>(),
+        65_552
+    );
+    assert!(!history.internal_prompt_texts.contains("user only"));
+    assert!(!history.internal_prompt_texts.contains("Submitted"));
+    history.evict_before(history.accepted_count);
+    assert!(history.records.is_empty());
+    assert!(history.internal_prompt_texts.contains("submitted"));
+    assert!(history.internal_prompt_texts.contains("steered"));
+    let mut appended = AgentHistory::default();
+    for record in records {
+        appended.push(record, 0);
+    }
+    assert_eq!(
+        history.internal_prompt_texts,
+        appended.internal_prompt_texts
+    );
+    for seq in 131..259 {
+        let distinct = format!("{seq:04}{}", "y".repeat(64 * 1024 - 4));
+        history.push(
+            history_record(
+                seq,
+                injected(distinct, tau_proto::PromptMessageClass::Internal),
+            ),
+            0,
+        );
+    }
+    history.evict_before(history.accepted_count);
+    assert_eq!(history.internal_prompt_texts.len(), 131);
+    // Text payload bytes only: excludes String/hash-table allocation overhead.
+    assert_eq!(
+        history
+            .internal_prompt_texts
+            .iter()
+            .map(String::len)
+            .sum::<usize>(),
+        8_454_160
+    );
+
+    // Exercise the real acceptance boundary, unselected branches, eviction and
+    // cold reconstruction rather than only the fact fold above.
+    let temp = tempfile::tempdir().expect("root");
+    let mut store = AgentStore::open_fixture(temp.path()).expect("store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    let internal = injected(
+        "injected".to_owned(),
+        tau_proto::PromptMessageClass::Internal,
+    );
+    for event in [submitted, steered, internal] {
+        let text = AgentHistory::internal_prompt_text(&event)
+            .expect("internal")
+            .to_owned();
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::Under(NodeId::new(999)),
+                event.clone(),
+                UnixMicros::new(10),
+            )
+            .expect_err("invalid append does not publish facts");
+        assert_eq!(
+            store.loaded_internal_prompt_matches(&agent_id, |found| found == text),
+            Some(false)
+        );
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::Root,
+                event.clone(),
+                UnixMicros::new(11),
+            )
+            .expect("separate branch");
+        let mut user = event;
+        match &mut user {
+            Event::AgentPromptSubmitted(prompt) => {
+                prompt.message_class = tau_proto::PromptMessageClass::User;
+                prompt.text = "user submitted".to_owned();
+            }
+            Event::AgentPromptSteered(prompt) => {
+                prompt.message_class = tau_proto::PromptMessageClass::User;
+                prompt.text = "user steered".to_owned();
+            }
+            Event::AgentUserMessageInjected(prompt) => {
+                prompt.message_class = tau_proto::PromptMessageClass::User;
+                prompt.text = "user injected".to_owned();
+            }
+            _ => unreachable!("input fixture"),
+        }
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::Root,
+                user,
+                UnixMicros::new(12),
+            )
+            .expect("user input");
+    }
+    for reopened in [false, true] {
+        if reopened {
+            drop(store);
+            store = AgentStore::open_fixture(temp.path()).expect("cold store");
+            store
+                .prepare_existing_agent(agent_id.as_str())
+                .expect("replay");
+        }
+        for cold in [false, true] {
+            if cold {
+                store
+                    .managed_projections
+                    .get_mut(&agent_id)
+                    .expect("projection")
+                    .history
+                    .evict_before(7);
+            }
+            for text in ["submitted", "steered", "injected"] {
+                assert_eq!(
+                    store.loaded_internal_prompt_matches(&agent_id, |found| found == text),
+                    Some(true)
+                );
+            }
+            assert_eq!(
+                store.loaded_internal_prompt_matches(&agent_id, |found| found.starts_with("user")),
+                Some(false)
+            );
+        }
+    }
+}
+
 /// A finite worker snapshot must merge with the current accepted suffix, not
 /// the earlier request cut, without changing live facts or folded authority.
 #[test]
@@ -170,6 +362,90 @@ fn managed_history_cache_prefetch_merges_current_pinned_suffix() {
     assert_eq!(history.record_bytes.capacity(), 0);
     assert_eq!(history.encoded_event_bytes, accepted_bytes);
     assert_eq!(store.loaded_agent_record_count(&agent_id), Some(3));
+}
+
+/// Test assertions must observe exact accepted records without warming a cold
+/// cache, dropping its unwritten suffix, or changing protected-cut accounting.
+#[test]
+fn managed_history_test_snapshot_preserves_residency_and_unwritten_suffix() {
+    let temp = tempfile::tempdir().expect("root");
+    let agent = AgentId::parse("snapshot-oracle").expect("agent");
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = AgentStore::open_managed(temp.path(), owner.clone()).expect("store");
+    store.reserve_new_agent(agent.as_str()).expect("reserve");
+    let creation = started_event(&agent);
+    store
+        .append_agent_event(agent.as_str(), None, creation.clone())
+        .expect("creation");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        crate::DurabilityBarrierOutcome::Durable
+    );
+    let resident = store.agent_events(agent.as_str()).expect("resident");
+    assert_eq!(
+        store
+            .snapshot_agent_events_for_test(agent.as_str())
+            .expect("snapshot"),
+        resident
+    );
+    assert!(!store.agent_history_is_evicted(&agent));
+
+    owner.arm_derived_work_pause_for_test();
+    let written = display_name_event(&agent, "written");
+    store
+        .append_agent_event(agent.as_str(), None, written.clone())
+        .expect("write");
+    assert!(owner.wait_for_derived_work_pause_for_test(Duration::from_secs(2)));
+    let cut = store
+        .agent_history_prefix(&agent)
+        .expect("capture")
+        .expect("prefix")
+        .next_seq()
+        .get();
+    store.evict_agent_history(&agent, None).expect("evict");
+    let unwritten = display_name_event(&agent, "accepted but unwritten");
+    store
+        .append_agent_event(agent.as_str(), None, unwritten.clone())
+        .expect("accept");
+    let before = store.agent_history_pin_usage(&agent, cut).expect("pin");
+    let snapshot = store.snapshot_agent_events_for_test(agent.as_str());
+    let after = store
+        .agent_history_pin_usage(&agent, cut)
+        .expect("unchanged pin");
+    let still_cold = store.agent_history_is_evicted(&agent);
+    let written_cut = store
+        .agent_history_prefix(&agent)
+        .expect("capture")
+        .expect("prefix")
+        .next_seq()
+        .get();
+    owner.release_derived_work_pause_for_test();
+
+    let snapshot = snapshot.expect("full accepted snapshot");
+    assert_eq!(
+        snapshot
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>(),
+        vec![creation, written, unwritten]
+    );
+    assert_eq!(
+        snapshot
+            .iter()
+            .map(|record| record.seq.get())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert!(
+        written_cut < snapshot.len() as u64,
+        "oracle includes facts the paused worker has not written"
+    );
+    assert_eq!(before, after);
+    assert!(still_cold);
+    assert!(matches!(
+        store.agent_events(agent.as_str()),
+        Err(AgentStoreError::HistoryNotResident { .. })
+    ));
 }
 
 /// A stale completion and a missing protected suffix must fail before changing

@@ -1636,6 +1636,7 @@ fn durable_request_replay_is_observation_only() {
             Vec::new(),
         )
         .expect("subscribe to request history");
+    drive_harness_until_history_complete(&mut harness);
     let routed = routed.lock().expect("routed events");
     assert!(routed.iter().any(|routed| {
         routed.source_id.is_none()

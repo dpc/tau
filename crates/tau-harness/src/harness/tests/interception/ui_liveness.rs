@@ -336,6 +336,7 @@ fn liveness_events_are_no_store_for_both_persistence_values() {
         Vec::new(),
     )
     .expect("request liveness history");
+    drive_harness_until_history_complete(&mut h);
     assert!(
         historical
             .lock()

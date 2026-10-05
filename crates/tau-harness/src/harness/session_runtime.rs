@@ -67,36 +67,6 @@ pub(super) fn format_elapsed_count(count: u64, unit: &str) -> String {
     format!("{count} {unit}{suffix} {verb} passed")
 }
 
-pub(super) fn event_is_internal_prompt_text(event: &Event, text: &str) -> bool {
-    match event {
-        Event::AgentPromptSubmitted(prompt) => {
-            prompt.message_class.is_internal() && prompt.text == text
-        }
-        Event::AgentPromptSteered(steered) => {
-            steered.message_class.is_internal() && steered.text == text
-        }
-        Event::AgentUserMessageInjected(injected) => {
-            injected.message_class.is_internal() && injected.text == text
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn event_is_internal_restore_notice(event: &Event) -> bool {
-    match event {
-        Event::AgentPromptSubmitted(prompt) => {
-            prompt.message_class.is_internal() && is_restore_notice_prompt_text(&prompt.text)
-        }
-        Event::AgentPromptSteered(steered) => {
-            steered.message_class.is_internal() && is_restore_notice_prompt_text(&steered.text)
-        }
-        Event::AgentUserMessageInjected(injected) => {
-            injected.message_class.is_internal() && is_restore_notice_prompt_text(&injected.text)
-        }
-        _ => false,
-    }
-}
-
 pub(super) fn restored_tool_call_error_message(call_id: &ToolCallId) -> String {
     format!(
         "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
@@ -873,42 +843,26 @@ impl Harness {
             .unwrap_or_default()
     }
 
-    pub(super) fn any_loaded_agent_event(
-        &self,
-        session_id: &SessionId,
-        matches_event: impl Fn(&Event) -> bool,
-    ) -> bool {
-        self.loaded_agent_ids_for_session(session_id)
-            .into_iter()
-            .filter_map(|agent_id| match self.session_runtime.agent_store.agent_events(agent_id.as_str()) {
-                Ok(events) => Some(events),
-                Err(error) => {
-                    tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events while checking restored prompts");
-                    None
-                }
-            })
-            .flatten()
-            .any(|entry| matches_event(&entry.event))
-    }
-
     pub(super) fn agent_internal_prompt_already_persisted(
         &self,
         agent_id: &AgentId,
         text: &str,
     ) -> bool {
-        self.session_runtime.agent_store
-            .agent_events(agent_id.as_str())
-            .inspect_err(|error| {
-                tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events while checking restored background notice");
-            })
-            .ok()
-            .into_iter()
-            .flatten()
-            .any(|entry| event_is_internal_prompt_text(&entry.event, text))
+        self.session_runtime
+            .agent_store
+            .loaded_internal_prompt_matches(agent_id, |persisted| persisted == text)
+            .unwrap_or(false)
     }
 
     pub(super) fn restore_notice_already_persisted(&self, session_id: &SessionId) -> bool {
-        self.any_loaded_agent_event(session_id, event_is_internal_restore_notice)
+        self.loaded_agent_ids_for_session(session_id)
+            .into_iter()
+            .any(|agent_id| {
+                self.session_runtime
+                    .agent_store
+                    .loaded_internal_prompt_matches(&agent_id, is_restore_notice_prompt_text)
+                    .unwrap_or(false)
+            })
     }
 
     pub(super) fn last_recorded_session_event_at(
@@ -1808,6 +1762,7 @@ impl Harness {
         self.drain_publish_idle_dispatches();
         self.try_publish_ready_uncertain_supersessions();
         self.try_advance_queue();
+        self.finish_history_startup();
         Ok(())
     }
 
@@ -1823,6 +1778,9 @@ impl Harness {
         &mut self,
         agent_id: &tau_proto::AgentId,
     ) -> Result<(), HarnessError> {
+        if self.history_load_is_pending(agent_id) {
+            return Ok(());
+        }
         let role = self
             .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             .and_then(|cid| self.agent_runtime.agent_registry.agents.get(&cid))
@@ -2060,6 +2018,17 @@ impl Harness {
         &mut self,
         context: &tau_proto::AgentInitializationContextSet,
     ) {
+        self.begin_history_preparation(&context.agent_id);
+        self.apply_finalized_agent_context_with_history_pinned(context);
+        self.finish_history_preparation(&context.agent_id);
+    }
+
+    /// Keeps discovery's final synchronous consumers pinned after removing its
+    /// pending entry and through nested publication and resumed dispatch.
+    fn apply_finalized_agent_context_with_history_pinned(
+        &mut self,
+        context: &tau_proto::AgentInitializationContextSet,
+    ) {
         let current = self
             .prompt_coordination
             .context_discovery
@@ -2122,6 +2091,7 @@ impl Harness {
         self.resume_discovery_dispatches(&context.agent_id);
         self.drain_publish_idle_dispatches();
         self.try_advance_queue();
+        self.finish_history_discovery(context);
     }
 
     /// Persist a user-initiated `!` shell command's output as a

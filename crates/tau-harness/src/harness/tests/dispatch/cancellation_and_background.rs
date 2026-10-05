@@ -2349,7 +2349,7 @@ fn plural_wait_terminal_append_retries_before_atomic_consumption() {
     assert!(
         !h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent records")
             .iter()
             .any(|record| matches!(
@@ -2380,7 +2380,7 @@ fn plural_wait_terminal_append_retries_before_atomic_consumption() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent records")
             .iter()
             .filter(|record| matches!(
@@ -4289,7 +4289,7 @@ fn background_cancel_clears_actual_running_call() {
     let terminal = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records")
         .into_iter()
         .find_map(|record| {
@@ -4305,25 +4305,36 @@ fn background_cancel_clears_actual_running_call() {
     h.shutdown().expect("shutdown");
     drop(h);
     wait_for_session_unlock(&sp, session_id.as_str());
-    let mut reopened = echo_harness_with_start_reason(
+    let restored_id = agent_id.clone();
+    let mut reopened = echo_harness_with_start_reason_before_session_init(
         session_id.as_str(),
         &sp,
         tau_proto::SessionStartReason::Resume,
+        Box::new(move |h| {
+            let cid = h
+                .runtime_agent_id_for_target_agent(Some(restored_id.as_str()))
+                .expect("restored route");
+            assert!(
+                !h.session_runtime
+                    .agent_store
+                    .agent_history_is_evicted(&restored_id)
+            );
+            let restored = h
+                .restored_background_tool_states_for_agent(&cid)
+                .into_iter()
+                .find(|state| state.placeholder.call_id.as_str() == "bg-exclusive-cancel-running")
+                .expect("restored cancelled background generation");
+            assert_eq!(restored.terminal_observation, Some(terminal));
+            assert!(matches!(
+                restored.terminal_cause,
+                Some(tau_proto::ToolTerminalCause::Cancellation { .. })
+            ));
+        }),
     )
     .expect("cold reopen");
     let reopened_cid = reopened
         .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
         .expect("reopened agent");
-    let restored = reopened
-        .restored_background_tool_states_for_agent(&reopened_cid)
-        .into_iter()
-        .find(|state| state.placeholder.call_id.as_str() == "bg-exclusive-cancel-running")
-        .expect("restored cancelled background generation");
-    assert_eq!(restored.terminal_observation, Some(terminal));
-    assert!(matches!(
-        restored.terminal_cause,
-        Some(tau_proto::ToolTerminalCause::Cancellation { .. })
-    ));
     let preview = reopened
         .background_completion_preview_for(
             &"bg-exclusive-cancel-running".into(),
@@ -6384,7 +6395,7 @@ fn scheduler_wait_for_completed_background_call_retains_durable_correlation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records");
     let source_terminal = records
         .iter()
@@ -6436,7 +6447,7 @@ fn scheduler_wait_for_completed_background_call_retains_durable_correlation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records");
     let wait_call = records
         .iter()
@@ -6631,7 +6642,7 @@ fn scheduler_plural_wait_retains_ordered_durable_correlation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records");
     let source_a_terminal = records
         .iter()
@@ -6678,7 +6689,7 @@ fn scheduler_plural_wait_retains_ordered_durable_correlation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records");
     let (wait_observation, wait_call) = records
         .iter()

@@ -224,6 +224,7 @@ fn workdir_discovery_resume_finalization_does_not_reenter_initial_startup() {
     let baseline = initial_count(&h);
     h.complete_session_init(session.clone(), tau_proto::SessionStartReason::Resume)
         .expect("resume");
+    drive_harness_until_history_complete(&mut h);
     assert_eq!(initial_count(&h), baseline);
     assert!(h.session_initialized(&session));
     assert_eq!(prompt_created_count(&h), 1);
@@ -1246,7 +1247,7 @@ fn workdir_refresh_retries_only_current_capacity_rejected_install() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(agent.as_str())
+            .snapshot_agent_events_for_test(agent.as_str())
             .expect("records");
         assert_eq!(
             records

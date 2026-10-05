@@ -331,7 +331,7 @@ fn outer_turn_starting_restart_preserves_transaction() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(target.as_str())
+            .snapshot_agent_events_for_test(target.as_str())
             .expect("records");
         let cold = tau_core::AgentTree::from_events(target.clone(), &records);
         assert_eq!(
@@ -355,7 +355,7 @@ fn outer_turn_starting_restart_preserves_transaction() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(target.as_str())
+        .snapshot_agent_events_for_test(target.as_str())
         .expect("records");
     assert_eq!(
         records

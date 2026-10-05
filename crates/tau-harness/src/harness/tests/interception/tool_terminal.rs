@@ -767,7 +767,7 @@ fn provider_terminal_append_failure_remains_retryable() {
         harness
             .session_runtime
             .agent_store
-            .agent_events(&agent_id)
+            .snapshot_agent_events_for_test(&agent_id)
             .expect("read restored agent journal")
             .iter()
             .any(|record| matches!(record.event, Event::ProviderToolResult(_)))
@@ -794,7 +794,7 @@ fn provider_terminal_validation_rejection_does_not_fail_stop() {
     let records_before = harness
         .session_runtime
         .agent_store
-        .agent_events(&agent_id)
+        .snapshot_agent_events_for_test(&agent_id)
         .expect("agent records")
         .len();
     harness.publish_for_agent(
@@ -808,7 +808,7 @@ fn provider_terminal_validation_rejection_does_not_fail_stop() {
         harness
             .session_runtime
             .agent_store
-            .agent_events(&agent_id)
+            .snapshot_agent_events_for_test(&agent_id)
             .expect("agent records")
             .len(),
         records_before + 1
@@ -1783,7 +1783,7 @@ fn failed_result_then_disconnect_commits_fresh_disconnected_classification() {
     let records = harness
         .session_runtime
         .agent_store
-        .agent_events(&agent_id)
+        .snapshot_agent_events_for_test(&agent_id)
         .expect("agent records");
     assert!(records.iter().any(|record| matches!(
         &record.event,
@@ -1872,7 +1872,7 @@ fn failed_result_then_cancellation_commits_fresh_cancellation_classification() {
     let records = harness
         .session_runtime
         .agent_store
-        .agent_events(&agent_id)
+        .snapshot_agent_events_for_test(&agent_id)
         .expect("agent records");
     assert!(records.iter().any(|record| matches!(
         &record.event,

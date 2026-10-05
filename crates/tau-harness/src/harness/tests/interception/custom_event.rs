@@ -466,6 +466,7 @@ fn custom_events_are_live_only_for_both_persistence_values() {
         Vec::new(),
     )
     .expect("request custom-event history");
+    drive_harness_until_history_complete(&mut h);
     assert!(
         historical
             .lock()

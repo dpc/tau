@@ -501,6 +501,32 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
     Ok(peer)
 }
 
+/// Waits for successful exact-session live admission before sending work whose
+/// transient correlation events would otherwise race a deferred cold replay.
+pub(super) fn recv_until_session_replay_complete(
+    peer: &mut SocketPeer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let observed = recv_observed_before(peer, deadline)?;
+        match observed.event {
+            Event::AgentReplayComplete(complete) if complete.error.is_some() => {
+                return Err(format!("agent replay failed: {:?}", complete.error).into());
+            }
+            Event::SessionReplayComplete(complete) if !observed.replay => {
+                if complete.session_id.as_str() != "deterministic-e2e-session" {
+                    return Err("unexpected subscription session".into());
+                }
+                if let Some(error) = complete.error {
+                    return Err(format!("session replay failed: {error}").into());
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn create_agent(
     peer: &mut SocketPeer,
     ctx_id: &str,

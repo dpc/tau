@@ -229,6 +229,7 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
         Vec::new(),
     )
     .expect("subscribe to historical provider results");
+    drive_harness_until_history_complete(&mut h);
     assert!(
         replay
             .lock()

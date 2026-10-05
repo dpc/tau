@@ -312,7 +312,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     let child_events = h
         .session_runtime
         .agent_store
-        .agent_events(child_agent_id.as_str())
+        .snapshot_agent_events_for_test(child_agent_id.as_str())
         .expect("child events");
     assert!(child_events.iter().any(|entry| matches!(
         &entry.event,
@@ -520,7 +520,7 @@ fn ui_child_metadata_overrides_colliding_parent_entry() {
     let child_events = h
         .session_runtime
         .agent_store
-        .agent_events(child_agent_id.as_str())
+        .snapshot_agent_events_for_test(child_agent_id.as_str())
         .expect("child events");
     assert!(child_events.iter().any(|record| matches!(
         &record.event,

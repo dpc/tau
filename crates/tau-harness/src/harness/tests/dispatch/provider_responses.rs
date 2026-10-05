@@ -380,7 +380,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         assert_eq!(
             h.session_runtime
                 .agent_store
-                .agent_events(&durable_agent_id)
+                .snapshot_agent_events_for_test(&durable_agent_id)
                 .expect("durable records")
                 .iter()
                 .filter(
@@ -393,7 +393,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("durable records");
         let terminal_index = records
             .iter()
@@ -584,7 +584,7 @@ fn provider_loss_human_ui_supersession_coalesces_and_retries_exact_stale() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(&durable_agent_id)
+        .snapshot_agent_events_for_test(&durable_agent_id)
         .expect("durable records");
     assert_eq!(
         records
@@ -673,7 +673,7 @@ fn provider_terminal_wins_over_parked_human_ui_supersession() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .all(|record| !matches!(
@@ -755,7 +755,7 @@ fn parked_provider_terminal_report_wins_before_human_ui_supersession() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .any(|record| matches!(
@@ -768,7 +768,7 @@ fn parked_provider_terminal_report_wins_before_human_ui_supersession() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .all(|record| !matches!(
@@ -852,7 +852,7 @@ fn nonowning_deferred_provider_report_does_not_wedge_human_ui_supersession() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .filter(|record| matches!(
@@ -1020,7 +1020,7 @@ fn assert_retired_exact_provider_report_redrives_cancel(replace: bool) {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .filter(|record| matches!(
@@ -1037,7 +1037,7 @@ fn assert_retired_exact_provider_report_redrives_cancel(replace: bool) {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .all(|record| !matches!(
@@ -1202,7 +1202,7 @@ fn replay_uncertain_stale_owner_coalesces_human_ui_during_initialization_cut() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .all(|record| !matches!(
@@ -1227,7 +1227,7 @@ fn replay_uncertain_stale_owner_coalesces_human_ui_during_initialization_cut() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .filter(|record| matches!(
@@ -1279,7 +1279,7 @@ fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
             let before_stale = h
                 .session_runtime
                 .agent_store
-                .agent_events(&durable_agent_id)
+                .snapshot_agent_events_for_test(&durable_agent_id)
                 .expect("pre-Stale records")
                 .to_vec();
             submit_authenticated_ui_prompt(
@@ -1292,7 +1292,7 @@ fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
             let after_stale = h
                 .session_runtime
                 .agent_store
-                .agent_events(&durable_agent_id)
+                .snapshot_agent_events_for_test(&durable_agent_id)
                 .expect("post-Stale records")
                 .to_vec();
             let stale_index = after_stale
@@ -1344,7 +1344,7 @@ fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
         let records = restored
             .session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("restored records");
         assert!(
             records.starts_with(&cut_records),
@@ -1468,7 +1468,7 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
         let crash_cut = first
             .session_runtime
             .agent_store
-            .agent_events(durable_agent_id.as_str())
+            .snapshot_agent_events_for_test(durable_agent_id.as_str())
             .expect("pre-crash records")
             .to_vec();
         first.shutdown().expect("release seed session");
@@ -1549,7 +1549,7 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
     let records = restored
         .session_runtime
         .agent_store
-        .agent_events(durable_agent_id.as_str())
+        .snapshot_agent_events_for_test(durable_agent_id.as_str())
         .expect("post-recovery records");
     assert_eq!(
         records
@@ -1672,7 +1672,7 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
         let crash_cut = first
             .session_runtime
             .agent_store
-            .agent_events(durable_agent_id.as_str())
+            .snapshot_agent_events_for_test(durable_agent_id.as_str())
             .expect("pre-crash records")
             .to_vec();
         first.shutdown().expect("release seed session");
@@ -1740,7 +1740,7 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
             first_restore
                 .session_runtime
                 .agent_store
-                .agent_events(durable_agent_id.as_str())
+                .snapshot_agent_events_for_test(durable_agent_id.as_str())
                 .expect("first-restore records")
                 .iter()
                 .filter(|record| matches!(&record.event, Event::MessageDelivered(_)))
@@ -1752,7 +1752,7 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
             first_restore
                 .session_runtime
                 .agent_store
-                .agent_events(durable_agent_id.as_str())
+                .snapshot_agent_events_for_test(durable_agent_id.as_str())
                 .expect("first-restore records")
                 .iter()
                 .all(|record| !matches!(
@@ -1789,7 +1789,7 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
     let records = second_restore
         .session_runtime
         .agent_store
-        .agent_events(durable_agent_id.as_str())
+        .snapshot_agent_events_for_test(durable_agent_id.as_str())
         .expect("post-replay records");
     let stale_count = records
         .iter()
@@ -1853,7 +1853,7 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
     let records = second_restore
         .session_runtime
         .agent_store
-        .agent_events(durable_agent_id.as_str())
+        .snapshot_agent_events_for_test(durable_agent_id.as_str())
         .expect("post-replay records");
     assert_eq!(
         records
@@ -2014,7 +2014,7 @@ fn blocked_compaction_history_does_not_mask_uncertain_inference_replay() {
         let crash_cut = first
             .session_runtime
             .agent_store
-            .agent_events(durable_agent_id.as_str())
+            .snapshot_agent_events_for_test(durable_agent_id.as_str())
             .expect("pre-crash records")
             .to_vec();
         first.shutdown().expect("release seed session");
@@ -2043,7 +2043,7 @@ fn blocked_compaction_history_does_not_mask_uncertain_inference_replay() {
     let records = restored
         .session_runtime
         .agent_store
-        .agent_events(durable_agent_id.as_str())
+        .snapshot_agent_events_for_test(durable_agent_id.as_str())
         .expect("restored records");
     let replay_records = &records[crash_cut.len()..];
     assert_eq!(
@@ -2182,7 +2182,7 @@ fn retained_manual_compaction_start_while_human_ui_stale_is_parked_wins() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(&durable_agent_id)
+            .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
             .all(|record| !matches!(

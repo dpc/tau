@@ -790,18 +790,6 @@ fn recv_until_compaction_started(
     }
 }
 
-/// Waits for the resumed daemon to finish historical delivery before submitting
-/// the continuation whose provider response is the replay oracle.
-fn recv_until_session_replay_complete(
-    peer: &mut tau_socket::SocketPeer,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        if matches!(recv_event(peer)?, Event::SessionReplayComplete(_)) {
-            return Ok(());
-        }
-    }
-}
-
 /// Waits for the durable successful transcript replacement fact.
 fn recv_until_compacted(
     peer: &mut tau_socket::SocketPeer,

@@ -1,6 +1,6 @@
 use std::io as path_std_io;
 
-use tau_proto::{Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage};
+use tau_proto::{EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage};
 
 use crate::CliError;
 use crate::daemon::DaemonHandle;
@@ -40,7 +40,7 @@ pub(crate) fn request_rendered_value_with_selectors<T>(
     let (mut reader, mut writer) =
         connect_render_client(daemon, client_name, additional_selectors)?;
     let result = (|| {
-        wait_for_preview_session(&mut reader)?;
+        crate::ui_client::wait_for_subscription(&mut reader, None)?;
         let request_id = crate::ui_client::next_request_id(request_id_prefix);
         crate::ui_client::send_message(&mut writer, &build_request(request_id.clone()))?;
 
@@ -83,37 +83,6 @@ fn connect_render_client(
     additional_selectors.push(EventSelector::Exact(EventName::SESSION_REPLAY_COMPLETE));
     crate::ui_client::subscribe(&mut writer, additional_selectors)?;
     Ok((reader, writer))
-}
-
-/// Waits for the per-client catch-up boundary emitted after eager session
-/// initialization, so previews include the stable extension context surface.
-fn wait_for_preview_session(reader: &mut UiInputReader) -> Result<(), CliError> {
-    loop {
-        let Some(message) = reader.read_message().map_err(path_std_io::Error::other)? else {
-            return Err(CliError::Participant("daemon disconnected".to_owned()));
-        };
-        match message {
-            HarnessOutputMessage::Deliver(delivery) => {
-                if let Event::SessionReplayComplete(complete) = *delivery.event {
-                    if let Some(error) = complete.error {
-                        return Err(CliError::Participant(format!(
-                            "preview session `{}` failed to initialize: {error}",
-                            complete.session_id
-                        )));
-                    }
-                    return Ok(());
-                }
-            }
-            HarnessOutputMessage::Disconnect(disconnect) => {
-                return Err(CliError::Participant(
-                    disconnect
-                        .reason
-                        .unwrap_or_else(|| "daemon disconnected".to_owned()),
-                ));
-            }
-            _ => {}
-        }
-    }
 }
 
 fn disconnect_render_client(writer: &mut UiOutputWriter) {

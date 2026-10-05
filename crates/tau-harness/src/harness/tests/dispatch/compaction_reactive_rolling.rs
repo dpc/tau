@@ -132,7 +132,7 @@ fn local_summary_length_chain_replays_then_retreats_original_prefix() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(continuation.agent_id.as_str())
+        .snapshot_agent_events_for_test(continuation.agent_id.as_str())
         .expect("records");
     let cold = tau_core::AgentTree::from_events(continuation.agent_id.clone(), &records);
     assert_eq!(
@@ -624,7 +624,7 @@ fn partial_compaction_restart_and_replacement_only_retreat_preserve_suffix() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("records");
     let cold = tau_core::AgentTree::from_events(agent_id.clone(), &records);
     let live = h
@@ -763,7 +763,7 @@ fn idle_explicit_compaction_anchors_logical_suffix_at_start_parent() {
             let records = h
                 .session_runtime
                 .agent_store
-                .agent_events(target_id.as_str())
+                .snapshot_agent_events_for_test(target_id.as_str())
                 .expect("records");
             let cold = tau_core::AgentTree::from_events(target_id, &records);
             assert_eq!(

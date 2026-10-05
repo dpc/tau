@@ -5,9 +5,7 @@
 
 use super::bridge_receiver::ReceivingPurpose;
 use super::operator_agent_unload::PendingOperatorUnload;
-use super::start_coordinator::{
-    MAX_START_QUERY_ID_BYTES, StartCoordinator, StartPhase, StartPhaseOwner,
-};
+use super::start_coordinator::{MAX_START_QUERY_ID_BYTES, StartCoordinator, StartPhase};
 use super::*;
 
 /// Agent identity, membership, routing, and lifecycle state owned by the
@@ -1805,6 +1803,7 @@ impl Harness {
             .get(cid)
             .and_then(|agent| agent.identity.agent_id.clone());
         if let Some(unloading_agent_id) = unloading_agent_id {
+            self.retire_history_load(&unloading_agent_id);
             let unloading_agent_id_proto = unloading_agent_id.clone();
             self.clear_agent_runtime_indicators_for_agent(&unloading_agent_id_proto);
             self.prompt_coordination
@@ -2399,6 +2398,24 @@ impl Harness {
         initial_metadata: Vec<tau_proto::AgentInitialMetadata>,
         start_operation_id: Option<tau_proto::StartOperationId>,
     ) {
+        self.begin_history_preparation(agent_id);
+        self.ensure_loaded_agent_with_history_pinned(
+            cid,
+            agent_id,
+            initial_metadata,
+            start_operation_id,
+        );
+        self.finish_history_preparation(agent_id);
+    }
+
+    /// Preparation can publish synchronously, so its pin encloses all exits.
+    fn ensure_loaded_agent_with_history_pinned(
+        &mut self,
+        cid: &AgentId,
+        agent_id: &AgentId,
+        initial_metadata: Vec<tau_proto::AgentInitialMetadata>,
+        start_operation_id: Option<tau_proto::StartOperationId>,
+    ) {
         self.agent_runtime
             .agent_registry
             .stopped_ids
@@ -2647,29 +2664,19 @@ impl Harness {
                     waiting_on,
                 },
             );
-        let loaded = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        let loaded = tau_proto::SessionAgentLoaded {
             session_id: self.session_runtime.current_session_id.clone(),
             agent_id: agent_id.clone(),
             agent_initialization_id,
             ephemeral: self.session_runtime.storage_mode.is_memory_only()
                 || persistence.is_ephemeral(),
+        };
+        self.begin_history_load(&loaded);
+        self.publish_or_prefetch_history_load(super::history_lifecycle::HistoryLoad {
+            loaded,
+            start_id: start_operation_id,
+            persist: !already_loaded,
         });
-        if let Some(start_id) = start_operation_id {
-            self.enqueue_start_phase(
-                loaded,
-                !already_loaded,
-                false,
-                StartPhaseOwner {
-                    start_id,
-                    expected_phase: StartPhase::AwaitLoadedCommit,
-                    expected_event: tau_proto::EventName::SESSION_AGENT_LOADED,
-                },
-            );
-        } else if already_loaded {
-            self.enqueue_publish(None, loaded, false, false, None);
-        } else {
-            self.publish_event(None, loaded);
-        }
         if self.runtime_io.publication.pending_intercept.is_none()
             && self
                 .prompt_coordination

@@ -1100,7 +1100,7 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
     resumed
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("load replayed agent journal");
     let replayed_projection = resumed
         .session_runtime
@@ -1207,7 +1207,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
     resumed
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("load replayed journal");
     let tree = resumed
         .session_runtime
@@ -1304,7 +1304,7 @@ fn member_agent_message_fact_uses_agent_journal() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("member agent records")[1]
             .event,
         fact
@@ -1363,7 +1363,7 @@ fn live_route_only_message_fact_uses_agent_journal() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("live-route agent records")[0]
             .event,
         fact
@@ -2224,7 +2224,9 @@ fn resume_drops_partial_plural_wait_and_preserves_completed_member() {
     {
         let mut store =
             tau_core::AgentStore::open_fixture(state.join("agents")).expect("agent store");
-        let records = store.agent_events("main").expect("agent records");
+        let records = store
+            .snapshot_agent_events_for_test("main")
+            .expect("agent records");
         let response = records
             .iter()
             .find(|record| matches!(record.event, Event::ProviderResponseFinished(_)))
@@ -2502,6 +2504,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     )
     .expect("subscribe");
 
+    drive_harness_until_history_complete(&mut h);
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut got_session_started = false;
     let mut got_agent_started = false;
@@ -2606,6 +2609,7 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
         }),
     )
     .expect("extension subscribe");
+    drive_harness_until_history_complete(&mut h);
 
     {
         let events = extension_events.lock().expect("sink");
@@ -3132,6 +3136,7 @@ fn extension_subscribe_announces_current_session_snapshot() {
         }),
     )
     .expect("extension subscribe");
+    drive_harness_until_history_complete(&mut h);
 
     let events = extension_events.lock().expect("sink");
     assert!(
@@ -3332,6 +3337,7 @@ fn ui_observer_replays_requested_durable_facts_but_not_transient_progress() {
     )
     .expect("subscribe");
 
+    drive_harness_until_history_complete(&mut h);
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut replayed = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
@@ -3398,6 +3404,7 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     )
     .expect("subscribe");
 
+    drive_harness_until_history_complete(&mut h);
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut queued = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
@@ -3610,6 +3617,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     )
     .expect("subscribe");
 
+    drive_harness_until_history_complete(&mut h);
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut got_background_result = false;
     let mut got_background_error = false;
@@ -4009,6 +4017,7 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
             })),
         )
         .expect("subscribe to replay");
+    drive_harness_until_history_complete(&mut resumed);
 
     let replay = sink
         .lock()
@@ -4203,7 +4212,7 @@ fn reasoning_is_persisted_and_replayed_as_typed_items_not_assistant_text() {
 
     let store = tau_core::AgentStore::open_lazy(agents_dir).expect("open persisted agent store");
     let persisted = store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("read persisted agent events")
         .into_iter()
         .find_map(|record| match record.event {
@@ -4290,6 +4299,7 @@ fn replay_emits_current_metadata_snapshot_and_selected_mutation_history() {
     )
     .expect("subscribe");
 
+    drive_harness_until_history_complete(&mut h);
     let replayed: Vec<Event> = sink
         .lock()
         .expect("sink")

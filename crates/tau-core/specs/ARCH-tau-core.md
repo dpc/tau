@@ -106,8 +106,17 @@ Missing pins or stale read authority fail the handoff without changing live
 state. Prepared managed caches never return a partial suffix or silently read
 disk. Unprepared agents, including those queried through a managed store, retain
 the existing synchronous journal fallback.
-Harness eviction is not enabled yet: lifecycle pins and bounded asynchronous
-prefetch must be integrated before production callers use the cache API.
+The harness owns independent startup, preparation, load-reaction, discovery and
+request-suffix protection before using these cache APIs; see
+[ARCH-tau-harness](../../tau-harness/specs/ARCH-tau-harness.md).
+Eviction changes only residency, not accepted history, journal contents, tree
+authority or asynchronous durability guarantees.
+Exact live facts retain distinct internal-message texts from submitted, steered
+and injected inputs across every accepted branch, so live notice deduplication
+does not depend on replay-cache residency. Repeated text shares one fact payload;
+distinct internal text grows without a fixed bound with accepted history and is
+not covered by the request-suffix budget. Eviction does not reclaim these texts
+or the authoritative tree.
 
 The worker retries exact-EOF rollback-safe heads on deadlines, poisons only
 generations whose rollback cannot be proven, coalesces watermarked checkpoint and

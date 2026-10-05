@@ -193,7 +193,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     let durable_before = h
         .session_runtime
         .agent_store
-        .agent_events(&watcher_id)
+        .snapshot_agent_events_for_test(&watcher_id)
         .expect("watcher durable log")
         .len();
     h.update_agent_watch_provider_status(
@@ -216,7 +216,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(&watcher_id)
+            .snapshot_agent_events_for_test(&watcher_id)
             .expect("watcher durable log")
             .len(),
         durable_before,
@@ -1610,7 +1610,7 @@ fn assert_delegated_final_status_cold_cuts(working: bool, harness_owned: bool) {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("read worker journal");
     let terminals = records
         .iter()
@@ -1660,10 +1660,29 @@ fn assert_delegated_final_status_cold_cuts(working: bool, harness_owned: bool) {
     ] {
         rewrite_agent_records(&state, &agent_id, &records[..cut]);
         for resume_index in 0..2 {
-            let mut restored =
-                echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
-                    .expect("cold resume exact cut");
-            let runtime = restored.restored_agent_runtime_from_log(agent_id.as_str());
+            let captured = Arc::new(Mutex::new(None));
+            let destination = captured.clone();
+            let restored_id = agent_id.clone();
+            let mut restored = echo_harness_with_start_reason_before_session_init(
+                "s1",
+                &state,
+                tau_proto::SessionStartReason::Resume,
+                Box::new(move |h| {
+                    assert!(
+                        !h.session_runtime
+                            .agent_store
+                            .agent_history_is_evicted(&restored_id)
+                    );
+                    *destination.lock().expect("capture") =
+                        Some(h.restored_agent_runtime_from_log(restored_id.as_str()));
+                }),
+            )
+            .expect("cold resume exact cut");
+            let runtime = captured
+                .lock()
+                .expect("capture")
+                .take()
+                .expect("startup fold");
             assert_eq!(runtime.originator.is_user(), completed, "cut={cut}");
             assert_eq!(runtime.parent_agent.is_none(), completed, "cut={cut}");
             assert_eq!(runtime.resumable, completed || harness_owned, "cut={cut}");
@@ -2047,6 +2066,7 @@ fn agent_stats_snapshots_publish_work_status_transitions_and_replay() {
         Vec::new(),
     )
     .expect("subscribe for replay");
+    drive_harness_until_history_complete(&mut h);
     let replayed = drain_stats_updated(&replay);
     assert!(replayed.iter().any(|snapshot| {
         snapshot.agent_id == public_id

@@ -187,7 +187,7 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let owner = records
         .iter()

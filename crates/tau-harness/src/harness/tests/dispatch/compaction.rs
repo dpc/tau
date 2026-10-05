@@ -1669,7 +1669,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
     let first_records = h
         .session_runtime
         .agent_store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("caller records");
     let first_response_index = first_records
         .iter()
@@ -1773,7 +1773,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
     let first_records = h
         .session_runtime
         .agent_store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("caller records after compaction");
     let prompt_operations = first_records
         .iter()
@@ -1884,7 +1884,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
     let reopened_records = resumed
         .session_runtime
         .agent_store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("reopened caller records");
     let durable_materialized = reopened_records
         .iter()
@@ -1932,7 +1932,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
     let final_records = resumed
         .session_runtime
         .agent_store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("final caller records");
     let second_requests = final_records
         .iter()
@@ -2437,7 +2437,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(&public_id)
+            .snapshot_agent_events_for_test(&public_id)
             .expect("records");
         let terminals = records
             .iter()
@@ -2592,7 +2592,7 @@ fn manual_self_compaction_failure_delivers_error_once() {
     let records = resumed
         .session_runtime
         .agent_store
-        .agent_events(&public_id)
+        .snapshot_agent_events_for_test(&public_id)
         .expect("restored records");
     assert_eq!(
         records
@@ -2717,7 +2717,7 @@ fn manual_self_compaction_cold_failure_before_delivery() {
     let records = resumed
         .session_runtime
         .agent_store
-        .agent_events(&public_id)
+        .snapshot_agent_events_for_test(&public_id)
         .expect("records");
     let terminals = records
         .iter()
@@ -2889,7 +2889,7 @@ fn assert_explicit_compaction_successor_preserves_owner(output_length: bool) {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(target_id.as_str())
+            .snapshot_agent_events_for_test(target_id.as_str())
             .expect("records");
         let failed_index = records
             .iter()
@@ -2939,7 +2939,7 @@ fn assert_explicit_compaction_successor_preserves_owner(output_length: bool) {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(target_id.as_str())
+            .snapshot_agent_events_for_test(target_id.as_str())
             .expect("records");
         let cold = tau_core::AgentTree::from_events(target_id.clone(), &records);
         assert!(
@@ -3028,7 +3028,7 @@ fn explicit_compaction_no_fitting_prefix_fails_before_provider_dispatch() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(target_id.as_str())
+            .snapshot_agent_events_for_test(target_id.as_str())
             .expect("records");
         let cold = tau_core::AgentTree::from_events(target_id, &records);
         assert!(
@@ -3750,7 +3750,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         )
         .expect("append retained caller background result");
     let seeded_records = store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("seeded records");
     let seeded_record_count = seeded_records.len();
     let seeded_correlation_count = seeded_records
@@ -3829,7 +3829,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     let first_records = first
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("first reopened records");
     assert_eq!(
         first_records.len(),
@@ -4072,7 +4072,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     let second_records = second
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("second reopened records");
     assert!(second_records.starts_with(&first_records));
     let [initialization] = &second_records[first_records.len()..] else {
@@ -4403,13 +4403,13 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
         }] if durable_request == &requested && durable_start.as_ref() == &started
     ));
     let seeded_caller_correlation_count = store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("seeded caller records")
         .iter()
         .filter(|record| is_caller_correlation(&record.event))
         .count();
     let seeded_target_correlation_count = store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("seeded target records")
         .iter()
         .filter(|record| is_target_correlation(&record.event))
@@ -4433,7 +4433,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
     let target_records = first
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("target records");
     assert_eq!(
         target_records
@@ -4492,7 +4492,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
     let caller_records = first
         .session_runtime
         .agent_store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("caller records");
     assert_eq!(
         caller_records
@@ -4572,7 +4572,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
     let second_target_records = second
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("second target records");
     assert_eq!(
         second_target_records
@@ -4619,7 +4619,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
     let second_caller_records = second
         .session_runtime
         .agent_store
-        .agent_events(caller_id.as_str())
+        .snapshot_agent_events_for_test(caller_id.as_str())
         .expect("second caller records");
     assert_eq!(
         second_caller_records
@@ -5188,7 +5188,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("target events");
     let requests = records
         .iter()
@@ -6234,7 +6234,7 @@ fn manual_compaction_preserves_cancelled_wait_correlation() {
     let declaration = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent journal")
         .into_iter()
         .find_map(|record| {
@@ -6265,7 +6265,7 @@ fn manual_compaction_preserves_cancelled_wait_correlation() {
     let events: Vec<_> = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent journal")
         .into_iter()
         .map(|record| record.event)
@@ -8958,7 +8958,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
     let committed: Vec<_> = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records")
         .into_iter()
         .filter_map(|record| match record.event {
@@ -9231,7 +9231,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
         resumed
             .session_runtime
             .agent_store
-            .agent_events(&agent_id)
+            .snapshot_agent_events_for_test(&agent_id)
             .expect("records")
             .iter()
             .all(|record| !matches!(
@@ -9749,7 +9749,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
         assert_eq!(
             h.session_runtime
                 .agent_store
-                .agent_events("main")
+                .snapshot_agent_events_for_test("main")
                 .expect("agent events")
                 .iter()
                 .filter(|entry| matches!(
@@ -9769,7 +9769,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
         let checkpoint = h
             .session_runtime
             .agent_store
-            .agent_events("main")
+            .snapshot_agent_events_for_test("main")
             .expect("agent events")
             .iter()
             .find_map(|entry| match &entry.event {
@@ -9796,7 +9796,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
         assert!(
             h.session_runtime
                 .agent_store
-                .agent_events("main")
+                .snapshot_agent_events_for_test("main")
                 .expect("events")
                 .iter()
                 .any(|entry| matches!(
@@ -9829,7 +9829,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
         assert_eq!(
             h.session_runtime
                 .agent_store
-                .agent_events("main")
+                .snapshot_agent_events_for_test("main")
                 .expect("agent events")
                 .iter()
                 .filter(|entry| matches!(

@@ -553,7 +553,7 @@ fn manual_standalone_compact_installs_one_boundary() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(&agent_id)
+            .snapshot_agent_events_for_test(&agent_id)
             .expect("durable events")
             .iter()
             .any(|record| matches!(
@@ -670,7 +670,7 @@ fn manual_compact_capacity_recovery_retries_retained_start_once() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(target_agent_id.as_str())
+            .snapshot_agent_events_for_test(target_agent_id.as_str())
             .expect("durable agent events")
             .iter()
             .filter(|record| matches!(
@@ -700,7 +700,7 @@ fn manual_compact_capacity_recovery_retries_retained_start_once() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(target_agent_id.as_str())
+            .snapshot_agent_events_for_test(target_agent_id.as_str())
             .expect("durable agent events")
             .iter()
             .filter(|record| matches!(
@@ -835,7 +835,7 @@ fn standalone_accounting_and_outcome_append_rejections_recover_independently() {
     let accounting_record = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events")
         .into_iter()
         .find(|record| {
@@ -934,7 +934,7 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
     let recovered_events = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events after capacity recovery");
     assert_eq!(
         recovered_events
@@ -962,7 +962,7 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events");
     let initial = events
         .iter()
@@ -1353,7 +1353,7 @@ fn provider_loss_and_shutdown_finalize_active_standalone_accounting() {
                 let accounted = h
                     .session_runtime
                     .agent_store
-                    .agent_events(agent_id.as_str())
+                    .snapshot_agent_events_for_test(agent_id.as_str())
                     .expect("agent events")
                     .into_iter()
                     .find_map(|record| match record.event {
@@ -1453,7 +1453,7 @@ fn lifecycle_loss_finalizes_awaiting_cancellation_without_second_request() {
         let records = resumed
             .session_runtime
             .agent_store
-            .agent_events(durable_agent_id.as_str())
+            .snapshot_agent_events_for_test(durable_agent_id.as_str())
             .expect("agent events");
         assert_eq!(
             records
@@ -1535,7 +1535,7 @@ fn unload_waits_for_preparked_terminal_accounting() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent events")
             .iter()
             .any(|record| matches!(
@@ -1609,7 +1609,7 @@ fn unload_waits_for_all_standalone_accounting_obligations() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events");
     for prompt_id in [&first.agent_prompt_id, &second.agent_prompt_id] {
         assert!(records.iter().any(|record| match &record.event {
@@ -1686,7 +1686,7 @@ fn unload_waits_for_dual_retained_accounting_retry_batch() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events");
     for prompt_id in [&first.agent_prompt_id, &second.agent_prompt_id] {
         assert!(records.iter().any(|record| match &record.event {
@@ -1899,7 +1899,7 @@ fn parked_retry_accounting_is_followed_by_final_shutdown_closure() {
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events");
     let accounting = events
         .iter()
@@ -1983,7 +1983,7 @@ fn parked_cancellation_initial_is_followed_by_final_shutdown_correction() {
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events");
     let initial = events
         .iter()
@@ -2160,7 +2160,7 @@ fn parked_standalone_accounting_correction_is_force_settled_during_shutdown() {
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events");
     let initial = events
         .iter()
@@ -2261,7 +2261,7 @@ fn shutdown_force_settles_correction_unlocked_by_final_retry() {
     let events = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events");
     let initial = events
         .iter()

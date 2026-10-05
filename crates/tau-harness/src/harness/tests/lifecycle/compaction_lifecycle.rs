@@ -261,7 +261,7 @@ fn standalone_success_is_owed_until_compacted_admission() {
     let compacted = |h: &Harness| {
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent events")
             .into_iter()
             .filter(|record| {
@@ -420,7 +420,7 @@ fn ui_compaction_satisfaction_is_owed_across_publication_failures() {
         let satisfied = |h: &Harness| {
             h.session_runtime
                 .agent_store
-                .agent_events(agent_id.as_str())
+                .snapshot_agent_events_for_test(agent_id.as_str())
                 .expect("agent events")
                 .into_iter()
                 .filter(|record| {
@@ -549,7 +549,7 @@ fn interrupted_compaction_replay_repair_is_owed_across_publication_failures() {
         let repaired = h
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent events")
             .into_iter()
             .filter(|record| {
@@ -575,7 +575,7 @@ fn interrupted_compaction_replay_repair_is_owed_across_publication_failures() {
         let replayed = resumed
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("replayed events")
             .into_iter()
             .filter(|record| {
@@ -714,7 +714,7 @@ fn output_length_continuation_delivers_exactly_one_captured_successor() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let responses = records
         .iter()
@@ -1080,7 +1080,7 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let responses = records
         .iter()
@@ -1219,7 +1219,7 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
         cut_records = h
             .session_runtime
             .agent_store
-            .agent_events(source_agent_id.as_str())
+            .snapshot_agent_events_for_test(source_agent_id.as_str())
             .expect("cut records")
             .to_vec();
         h.shutdown().expect("shutdown before crash cut");
@@ -1274,7 +1274,7 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
     let records = restored
         .session_runtime
         .agent_store
-        .agent_events(source_agent_id.as_str())
+        .snapshot_agent_events_for_test(source_agent_id.as_str())
         .expect("restored records");
     assert_eq!(
         records

@@ -1070,14 +1070,7 @@ fn deterministic_restart_preserves_response_before_successor_input()
         tau_harness::SessionLaunchStatus::Resumed,
     );
     let mut peer_b = connect_ui(&socket_b)?;
-    loop {
-        if matches!(
-            recv_observed(&mut peer_b)?.event,
-            Event::SessionReplayComplete(_)
-        ) {
-            break;
-        }
-    }
+    recv_until_session_replay_complete(&mut peer_b)?;
     submit_prompt(&mut peer_b, &agent_id, "restart-successor", Q)?;
     let second_prompt = recv_until_created(&mut peer_b, Some("restart-successor"))?;
     assert_restart_context(&second_prompt.context, H, R, Q);
@@ -1308,6 +1301,7 @@ fn deterministic_clean_resume_restores_fake_cursor_without_replay_consumption()
     let socket = fixture.socket_path("resume-two");
     let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::Resumed);
     let mut peer = connect_ui(&socket)?;
+    recv_until_session_replay_complete(&mut peer)?;
     submit_prompt(
         &mut peer,
         &first_agent,
@@ -1397,6 +1391,7 @@ fn deterministic_typed_image_tool_result_replays_after_clean_restart()
     let replay_display = recv_until_typed_image_display(&mut peer, &agent_id, &call_id)
         .map_err(|error| format!("wait for byte-free typed-image replay display: {error}"))?;
     assert_typed_image_display(&replay_display, CALL_ID);
+    recv_until_session_replay_complete(&mut peer)?;
     submit_prompt(
         &mut peer,
         &agent_id,

@@ -3016,6 +3016,7 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
         Vec::new(),
     )
     .expect("stats replay");
+    drive_harness_until_history_complete(&mut h);
     let replayed = drain_stats_updated(&replay);
     assert!(replayed.iter().any(|snapshot| {
         snapshot.agent_id == public_id
@@ -7355,7 +7356,7 @@ fn assert_post_tool_automatic_policy_crash_cut_repairs_owed_suffix_once(cut_name
         records = h
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("records");
         let terminal_index = records
             .iter()
@@ -7435,7 +7436,7 @@ fn assert_post_tool_automatic_policy_crash_cut_repairs_owed_suffix_once(cut_name
         let restored_records = restored
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("restored records");
         let counts = automatic_policy_recovery_counts(&restored_records, &transaction_id);
         assert_eq!(

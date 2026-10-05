@@ -118,6 +118,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
@@ -184,6 +185,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
         },
     )
     .expect("navigate to first prompt anchor");
+    drive_harness_until_history_complete(&mut h);
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid].identity.head,
         Some(message_fact_node),
@@ -258,7 +260,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(created_id)
+            .snapshot_agent_events_for_test(created_id)
             .expect("created journal")
             .iter()
             .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
@@ -314,7 +316,7 @@ fn registered_bootstrap_create_installs_exact_restart_marker() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records");
     assert_eq!(records[0].seq.get(), 0);
     let Event::AgentStarted(started) = &records[0].event else {
@@ -409,7 +411,7 @@ fn bootstrap_prompt_exact_content_and_role_survive_cold_replay() {
         let records = h
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("bootstrap journal");
         let Event::AgentStarted(started) = &records[0].event else {
             panic!("sequence zero must be AgentStarted");
@@ -648,7 +650,7 @@ fn bootstrap_marker_before_prompt_cut_suppresses_retry() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(&agent_id)
+        .snapshot_agent_events_for_test(&agent_id)
         .expect("marker-only journal");
     assert!(matches!(records[0].event, Event::AgentStarted(_)));
     assert!(records.iter().all(|record| !matches!(
@@ -1170,6 +1172,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
@@ -1229,6 +1232,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
         },
     )
     .expect("navigate before second prompt");
+    drive_harness_until_history_complete(&mut h);
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid].identity.head,
         Some(assistant_node)
@@ -1851,7 +1855,7 @@ fn assert_ui_prompt_auto_resume_rejected_cases(cases: &[RejectedAutoResumeCase])
         assert_eq!(
             h.session_runtime
                 .agent_store
-                .agent_events(target_id.as_str())
+                .snapshot_agent_events_for_test(target_id.as_str())
                 .expect("agent journal")
                 .into_iter()
                 .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
@@ -2009,7 +2013,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(target_id.as_str())
+            .snapshot_agent_events_for_test(target_id.as_str())
             .expect("agent journal")
             .into_iter()
             .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
@@ -2858,7 +2862,7 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
     assert!(prompt.context.flatten().iter().any(|item| {
         text_part(item) == Some("<user source=\"ui\">  hello <world> & 雪\nnext  </user>")
     }));
-    let tree = h.tree_request_result(&test_session_id("s1"), Some(agent_id.as_str()));
+    let tree = request_test_tree(&mut h, &agent_id);
     assert!(tree.contains("hello <world> & 雪"));
     assert!(
         !tree.contains("<user>"),
@@ -3761,6 +3765,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         )],
     )
     .expect("reconnected catch-up");
+    drive_harness_until_history_complete(&mut h);
     assert!(
         reconnected
             .lock()

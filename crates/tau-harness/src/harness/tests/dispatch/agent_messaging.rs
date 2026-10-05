@@ -847,19 +847,20 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     assert!(session_agent_message_sent_events(&h).is_empty());
     assert_eq!(h.peer_messaging.pending_external_message_auth.len(), 1);
 
-    let command = loop {
+    let deadline = Instant::now() + path_std_time::Duration::from_secs(5);
+    while !h.peer_messaging.pending_external_message_auth.is_empty() {
         match h
             .runtime_io
             .rx
-            .recv_timeout(path_std_time::Duration::from_secs(5))
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("completion command")
         {
-            HarnessEvent::Command(command) => break command,
+            HarnessEvent::Command(command) => {
+                h.handle_harness_command(command).expect("completion")
+            }
             other => h.log_event(&other),
         }
-    };
-    h.handle_harness_command(command)
-        .expect("handle completion");
+    }
 
     assert!(session_agent_message_sent_events(&h).is_empty());
     assert!(h.peer_messaging.pending_external_message_auth.is_empty());
@@ -1332,7 +1333,7 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(&recipient_id)
+        .snapshot_agent_events_for_test(&recipient_id)
         .expect("auto-started agent records");
     let received_observation = records
         .iter()
@@ -2069,7 +2070,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     let recipient_events = h
         .session_runtime
         .agent_store
-        .agent_events(recipient_id.as_str())
+        .snapshot_agent_events_for_test(recipient_id.as_str())
         .expect("recipient journal");
     assert_eq!(
         recipient_events
@@ -2100,7 +2101,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     let sender_events = h
         .session_runtime
         .agent_store
-        .agent_events(sender_id.as_str())
+        .snapshot_agent_events_for_test(sender_id.as_str())
         .expect("sender journal");
     assert_eq!(
         sender_events
@@ -2587,7 +2588,7 @@ fn local_message_to_exact_waiter_releases_sender_and_parallel_successor() {
     let first_recipient_events = resumed
         .session_runtime
         .agent_store
-        .agent_events(first_recipient_id.as_str())
+        .snapshot_agent_events_for_test(first_recipient_id.as_str())
         .expect("restored first recipient");
     assert_eq!(
         first_recipient_events
@@ -2604,7 +2605,7 @@ fn local_message_to_exact_waiter_releases_sender_and_parallel_successor() {
     let sender_events = resumed
         .session_runtime
         .agent_store
-        .agent_events(sender_id.as_str())
+        .snapshot_agent_events_for_test(sender_id.as_str())
         .expect("restored sender");
     assert_eq!(
         sender_events
@@ -2747,7 +2748,7 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
         "typed and raw occurrences remain dormant on the incomparable branch; records={:?}",
         h.session_runtime
             .agent_store
-            .agent_events(&recipient_id)
+            .snapshot_agent_events_for_test(&recipient_id)
             .expect("agent records")
             .iter()
             .map(|record| record.event.name())
@@ -3899,7 +3900,7 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
     let durable_before = h
         .session_runtime
         .agent_store
-        .agent_events(&watcher_id)
+        .snapshot_agent_events_for_test(&watcher_id)
         .expect("watcher durable log")
         .len();
     h.update_agent_watch_provider_status(
@@ -3917,7 +3918,7 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(&watcher_id)
+            .snapshot_agent_events_for_test(&watcher_id)
             .expect("watcher durable log")
             .len(),
         durable_before,
@@ -5392,7 +5393,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         resumed
             .session_runtime
             .agent_store
-            .agent_events(parent_agent_id.as_str())
+            .snapshot_agent_events_for_test(parent_agent_id.as_str())
             .expect("parent journal")
             .iter()
             .filter(|record| matches!(

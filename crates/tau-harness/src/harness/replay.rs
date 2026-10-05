@@ -142,6 +142,24 @@ impl Harness {
         historical_selectors: Vec<EventSelector>,
         live_selectors: Vec<EventSelector>,
     ) -> Result<(), RouteError> {
+        let result =
+            self.install_subscription_resident(connection_id, historical_selectors, live_selectors);
+        match &result {
+            Ok(None) => self.finish_late_extension_subscription(connection_id),
+            Ok(Some(error)) => self.fail_late_extension_subscription(connection_id, error),
+            Err(error) => self.fail_late_extension_subscription(connection_id, &error.to_string()),
+        }
+        result.map(|_| ())
+    }
+
+    /// Retains the actual replay outcome separately from route admission so
+    /// configured activation never mistakes an error completion for success.
+    fn install_subscription_resident(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+        historical_selectors: Vec<EventSelector>,
+        live_selectors: Vec<EventSelector>,
+    ) -> Result<Option<String>, RouteError> {
         self.runtime_io.bus.set_subscriptions(
             connection_id,
             historical_selectors.clone(),
@@ -153,10 +171,12 @@ impl Harness {
             }
             let replay = self.replay_session_events(connection_id, &historical_selectors);
             self.replay_harness_notice(connection_id, &historical_selectors);
-            self.emit_session_replay_complete(connection_id, replay.session_error());
-            let _ = self.runtime_io.bus.finish_catch_up(connection_id);
+            let error = replay.session_error();
+            self.emit_session_replay_complete(connection_id, error.clone());
+            self.runtime_io.bus.finish_catch_up(connection_id)?;
+            return Ok(error);
         }
-        Ok(())
+        Ok(None)
     }
 
     fn replay_session_events(
@@ -282,6 +302,15 @@ impl Harness {
             }
         }
 
+        // Live-only subscriptions have no history consumer. Preserve their
+        // completion markers without reading cold caches merely to filter every
+        // fact and current-state snapshot out again.
+        if selectors.is_empty() {
+            for agent_id in loaded_agents {
+                self.emit_agent_replay_complete(client_id, agent_id, None);
+            }
+            return outcome;
+        }
         let mut validated_agent_events = path_std_collections::HashMap::new();
         for agent_id in &loaded_agents {
             match self

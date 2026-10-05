@@ -96,7 +96,7 @@ fn queued_prompt_wins_at_idle_deadline() {
         harness
             .session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent transcript")
             .iter()
             .any(|record| matches!(

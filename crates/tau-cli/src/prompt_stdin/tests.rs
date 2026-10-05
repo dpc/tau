@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::os::unix::net::UnixStream;
 use std::time as path_std_time;
 
 use tau_proto::{AgentPromptCreated, MessageItem, PromptOriginator, ProviderStopReason};
@@ -7,6 +8,102 @@ use super::*;
 
 const HOSTILE_TEXT: &str = "A\x1b[31mB\x1b[0mC\x1b]52;c;WA==\x07D\u{009B}31mE";
 const SAFE_TEXT: &str = "ABCDE";
+
+/// Signals the first blocking protocol read so tests can inspect the uplink at
+/// an exact pre-handoff cut without relying on sleeps.
+struct HandoffReadCut {
+    /// Client half of the real one-shot transport.
+    stream: UnixStream,
+    /// One notification before the first read.
+    entered: Option<mpsc::Sender<()>>,
+}
+
+impl Read for HandoffReadCut {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if let Some(entered) = self.entered.take() {
+            entered.send(()).expect("waiting test");
+        }
+        self.stream.read(bytes)
+    }
+}
+
+/// A held history handoff emits no create request. Success submits once;
+/// rejection, per-agent failure and disconnect submit nothing, without retry.
+#[test]
+fn prompt_stdin_waits_for_successful_subscription_before_sending_work() {
+    for outcome in ["success", "agent-error", "session-error", "disconnect"] {
+        let (client, mut server) = UnixStream::pair().expect("pair");
+        let client_writer = client.try_clone().expect("writer clone");
+        let (entered_tx, entered) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut reader = tau_proto::PeerInputReader::new(Box::new(HandoffReadCut {
+                stream: client,
+                entered: Some(entered_tx),
+            })
+                as Box<dyn Read + Send>);
+            let mut writer = tau_proto::PeerOutputWriter::new(io::BufWriter::new(Box::new(
+                client_writer,
+            )
+                as Box<dyn Write + Send>));
+            submit_after_subscription(
+                &mut reader,
+                &mut writer,
+                &"s1".parse().expect("session"),
+                "engineer",
+                "send once".to_owned(),
+            )
+            .is_ok()
+        });
+        entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiting for handoff");
+        server.set_nonblocking(true).expect("nonblocking cut");
+        assert_eq!(
+            server
+                .read(&mut [0])
+                .expect_err("no work before handoff")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        server.set_nonblocking(false).expect("blocking protocol");
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("deadline");
+        let message = match outcome {
+            "agent-error" => HarnessOutputMessage::deliver(Event::AgentReplayComplete(
+                tau_proto::AgentReplayComplete {
+                    agent_id: "a1".parse().expect("agent"),
+                    session_id: Some("s1".parse().expect("session")),
+                    error: Some("history failed".to_owned()),
+                },
+            )),
+            "disconnect" => HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some("closed before handoff".to_owned()),
+            }),
+            _ => HarnessOutputMessage::deliver(Event::SessionReplayComplete(
+                tau_proto::SessionReplayComplete {
+                    session_id: "s1".parse().expect("session"),
+                    error: (outcome == "session-error").then(|| "busy".to_owned()),
+                },
+            )),
+        };
+        let mut output = tau_proto::HarnessOutputWriter::new(&mut server);
+        output.write_message(&message).expect("handoff");
+        output.flush().expect("flush");
+        assert_eq!(worker.join().expect("worker"), outcome == "success");
+        let mut input = tau_proto::HarnessInputReader::new(server);
+        if outcome == "success" {
+            assert!(matches!(input.read_message().expect("request"),
+                Some(HarnessInputMessage::Emit(emit))
+                    if matches!(emit.event.as_ref(), Event::UiCreateAgent(request)
+                        if request.initial_prompt.as_deref() == Some("send once"))));
+        }
+        assert!(
+            input.read_message().expect("closed uplink").is_none(),
+            "no work on rejection and no duplicate work after success"
+        );
+    }
+}
 
 #[test]
 fn prompt_stdin_role_uses_startup_role_or_default() {

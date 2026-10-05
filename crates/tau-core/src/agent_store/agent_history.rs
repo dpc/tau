@@ -1,7 +1,7 @@
 //! Accepted replay records and exact facts needed without scanning those
 //! records.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tau_proto::{ContextItem, Event, ToolCallId, ToolCallRef};
 
@@ -29,6 +29,9 @@ pub(super) struct AgentHistory {
     /// First declaration occurrence for every historical provider-visible call
     /// id.
     pub(super) tool_declarations: HashMap<ToolCallId, ToolCallRef>,
+    /// Exact distinct internal-message texts across all accepted branches.
+    /// Live notice deduplication must survive replay-cache eviction.
+    pub(super) internal_prompt_texts: HashSet<String>,
     /// First unused numeric suffix across all four persisted prompt-id
     /// families.
     pub(super) next_prompt_index: u64,
@@ -37,6 +40,23 @@ pub(super) struct AgentHistory {
 }
 
 impl AgentHistory {
+    /// Extracts persisted internal input text without including ordinary user
+    /// input or provider output.
+    pub(super) fn internal_prompt_text(event: &Event) -> Option<&str> {
+        match event {
+            Event::AgentPromptSubmitted(prompt) if prompt.message_class.is_internal() => {
+                Some(&prompt.text)
+            }
+            Event::AgentPromptSteered(prompt) if prompt.message_class.is_internal() => {
+                Some(&prompt.text)
+            }
+            Event::AgentUserMessageInjected(prompt) if prompt.message_class.is_internal() => {
+                Some(&prompt.text)
+            }
+            _ => None,
+        }
+    }
+
     /// Scans a memory-only history without cloning records or constructing
     /// indexes.
     pub(super) fn next_prompt_index_in(records: &[PersistedAgentEvent]) -> u64 {
@@ -116,6 +136,9 @@ impl AgentHistory {
     /// Folds exact live facts without depending on any currently resident
     /// prefix.
     fn observe(&mut self, record: &PersistedAgentEvent) {
+        if let Some(text) = Self::internal_prompt_text(&record.event) {
+            self.internal_prompt_texts.insert(text.to_owned());
+        }
         if self.accepted_count == 0 {
             self.first_record = Some(record.clone());
         }

@@ -173,7 +173,7 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
     let expected_cross_error = pre_start_failure.then(|| {
         h.session_runtime
             .agent_store
-            .agent_events(&caller_id)
+            .snapshot_agent_events_for_test(&caller_id)
             .expect("caller events")
             .iter()
             .find_map(|record| match &record.event {
@@ -187,7 +187,7 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
     let self_delivery_count = h
         .session_runtime
         .agent_store
-        .agent_events(&caller_id)
+        .snapshot_agent_events_for_test(&caller_id)
         .expect("caller events")
         .iter()
         .filter(|record| {
@@ -202,7 +202,7 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
     let target_start_count = h
         .session_runtime
         .agent_store
-        .agent_events(target_id.as_str())
+        .snapshot_agent_events_for_test(target_id.as_str())
         .expect("target events")
         .iter()
         .filter(|record| matches!(record.event, Event::AgentStandaloneCompactionStarted(_)))
@@ -222,7 +222,7 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
         resumed
             .session_runtime
             .agent_store
-            .agent_events(&caller_id)
+            .snapshot_agent_events_for_test(&caller_id)
             .expect("resumed caller events")
             .iter()
             .filter(|record| {
@@ -241,7 +241,7 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
         resumed
             .session_runtime
             .agent_store
-            .agent_events(target_id.as_str())
+            .snapshot_agent_events_for_test(target_id.as_str())
             .expect("resumed target events")
             .iter()
             .filter(|record| matches!(record.event, Event::AgentStandaloneCompactionStarted(_)))

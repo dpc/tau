@@ -466,6 +466,7 @@ fn late_ui_snapshots_running_shell_then_receives_one_live_completion() {
             })),
         )
         .expect("subscribe late UI");
+    drive_harness_until_history_complete(&mut harness);
 
     let replayed = sink
         .lock()
@@ -580,6 +581,7 @@ fn running_shell_snapshot_bounds_only_attach_projection() {
                 })),
             )
             .expect("subscribe snapshot client");
+        drive_harness_until_history_complete(&mut harness);
         let sink = sink.lock().expect("sink");
         let replayed = sink.iter().filter_map(|routed| match &routed.frame {
             HarnessOutputMessage::Deliver(delivery) if delivery.replay => {

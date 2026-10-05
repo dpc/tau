@@ -439,7 +439,7 @@ fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
     assert!(
         !h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("memory replay events")
             .is_empty(),
         "ephemeral agent creation should be replayable while daemon lives"
@@ -1685,7 +1685,7 @@ fn daemon_disconnect_reason_is_reported() {
             ))
             .expect("write acceptance");
         let _ = accepted.recv(); // subscribe
-        let _ = accepted.recv(); // message
+        // Reject the handoff itself: the helper must not send a prompt first.
         accepted
             .send(&HarnessOutputMessage::Disconnect(Disconnect {
                 reason: Some("test disconnect".to_owned()),

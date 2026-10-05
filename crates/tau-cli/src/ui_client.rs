@@ -1,5 +1,7 @@
 //! Shared UI socket client helpers.
 
+pub(crate) mod subscription_handoff;
+
 use std::io::{self, BufWriter, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::OwnedFd;
@@ -534,6 +536,30 @@ pub(crate) fn subscribe(
     selectors: Vec<EventSelector>,
 ) -> io::Result<()> {
     send_message(writer, &subscribe_message(selectors))
+}
+
+/// Waits for successful history/live handoff before a one-shot client sends
+/// work. A failed replay or closed connection ends admission without retrying
+/// work.
+pub(crate) fn wait_for_subscription(
+    reader: &mut UiInputReader,
+    expected_session_id: Option<&tau_proto::SessionId>,
+) -> io::Result<()> {
+    let mut handoff = subscription_handoff::SubscriptionHandoff::new(expected_session_id.cloned());
+    loop {
+        let Some(message) = reader.read_message().map_err(io::Error::other)? else {
+            return Err(io::Error::other(
+                "daemon disconnected before subscription handoff",
+            ));
+        };
+        handoff.observe(&message);
+        if let Some(error) = handoff.failure() {
+            return Err(io::Error::other(error.to_owned()));
+        }
+        if handoff.submission_blocked().is_none() {
+            return Ok(());
+        }
+    }
 }
 
 pub(crate) fn send_message(

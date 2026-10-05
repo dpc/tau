@@ -53,6 +53,46 @@ impl AgentHistoryPrefix {
 }
 
 impl AgentStore {
+    /// Takes a blocking, non-mutating full accepted-history snapshot for test
+    /// assertions, including the accepted-but-unwritten suffix.
+    ///
+    /// Unlike runtime prefetch this never installs records or changes
+    /// residency. Tests of cache authority, residency or asynchronous
+    /// consumers must use the production APIs instead.
+    #[cfg(any(test, feature = "test-persistence"))]
+    pub fn snapshot_agent_events_for_test(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<PersistedAgentEvent>, AgentStoreError> {
+        let id = AgentId::parse(agent_id)
+            .map_err(|_| history_invariant("invalid test snapshot agent identity"))?;
+        if !self.agent_history_is_evicted(&id) {
+            return self.agent_events(agent_id);
+        }
+        let prefix = self
+            .agent_history_prefix(&id)?
+            .ok_or_else(|| history_invariant("cold test snapshot has no readable prefix"))?;
+        let mut records = prefix.read()?;
+        let history = &self
+            .managed_projections
+            .get(&id)
+            .ok_or_else(|| history_invariant("test snapshot projection disappeared"))?
+            .history;
+        let cut = prefix.next_seq().get();
+        if cut < history.first_resident_seq || history.accepted_count < cut {
+            return Err(history_invariant(
+                "test snapshot accepted suffix is unavailable",
+            ));
+        }
+        records.extend_from_slice(&history.records[(cut - history.first_resident_seq) as usize..]);
+        if records.len() as u64 != history.accepted_count {
+            return Err(history_invariant(
+                "test snapshot does not cover the accepted cut",
+            ));
+        }
+        Ok(records)
+    }
+
     /// Reports whether an explicitly prepared agent needs history prefetch.
     ///
     /// Unprepared and memory-only agents do not have an evicted managed cache.

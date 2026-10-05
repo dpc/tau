@@ -1101,7 +1101,10 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
 fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
+    // The test supplies exact transcript facts; automatic echo replies would
+    // move the selected head while the asynchronous tree request is pending.
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
@@ -1124,8 +1127,9 @@ fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
         },
     )
     .expect("select second prompt anchor");
+    drive_harness_until_history_complete(&mut h);
 
-    let result = h.tree_request_result(&test_session_id("s1"), Some(agent_id.as_str()));
+    let result = request_test_tree(&mut h, &agent_id);
     assert_eq!(
         result,
         concat!(
@@ -2090,7 +2094,7 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
     let prompt_records = h
         .session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent events")
         .into_iter()
         .filter_map(|record| match record.event {
@@ -2114,7 +2118,7 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent events")
             .iter()
             .any(|record| matches!(
@@ -2183,7 +2187,7 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
     assert!(
         h.session_runtime
             .agent_store
-            .agent_events(agent_id.as_str())
+            .snapshot_agent_events_for_test(agent_id.as_str())
             .expect("agent events")
             .iter()
             .any(|record| matches!(
@@ -3126,7 +3130,7 @@ fn prompt_activation_observation_is_allocated_once_and_skips_passive_notices() {
     let records = harness
         .session_runtime
         .agent_store
-        .agent_events(&agent_id)
+        .snapshot_agent_events_for_test(&agent_id)
         .expect("agent records");
     assert_eq!(
         records
@@ -4123,7 +4127,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     assert_eq!(
         h.session_runtime
             .agent_store
-            .agent_events(&agent_id)
+            .snapshot_agent_events_for_test(&agent_id)
             .expect("queued agent journal")
             .iter()
             .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
@@ -4157,6 +4161,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
 
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut queued = Vec::new();
+    drive_harness_until_history_complete(&mut h);
     while let Ok(Some(frame)) = reader.read_frame() {
         let inner = frame.into_event_frame();
         if let TestProtocolItem::Event(Event::AgentPromptQueued(event)) = inner {

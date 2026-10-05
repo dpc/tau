@@ -73,8 +73,21 @@ until completion. Revoked or unavailable read authority rejects the request
 without changing independent persistence-failure handling. There is no automatic
 retry. Unexpected journal read or
 validation errors terminate the session rather than producing empty history.
-Production eviction remains disabled until startup, load, and discovery
-protection and cold-reload continuations are integrated.
+Complete-written prefixes become evictable only after successful session
+initialization and the agent's independent preparation, load-reaction and
+current discovery consumers finish. Ending one owner does not release another;
+stale initialization results cannot release a newer owner's protection.
+Written-frontier progress sweeps eligible caches without reading journals.
+Cold agent reloads share bounded reader admission and keep discovery gated
+until their exact pending initialization can publish membership with history
+resident. Unload cancels that continuation without revoking the retained tree
+or persistence lease. Trees, exact live-query facts and accepted-unwritten
+suffixes remain authoritative throughout.
+
+One-shot daemon and CLI clients wait for successful replay handoff before
+submitting work whose replies require the new live subscription. Interactive
+input preserves unsent text and staged options while admission is pending or
+failed; success permits an explicit later submission, never automatic retry.
 
 Live delivery uses one process-local logical stream with runtime-only positions.
 The event bus freezes selector, visibility, exclusion, and directed-route

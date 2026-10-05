@@ -141,6 +141,15 @@ tool restore starts, and current queue/watch/stats snapshots reconstruct attach
 state. The harness does not filter other subscribers' durable agent history to
 match chat's needs.
 
+Historical subscriptions may finish asynchronously. One-shot clients wait for
+the successful non-replayed session boundary before sending work, and fail on
+agent- or session-level replay errors or disconnect. Interactive submission
+uses an independent exact-transport/session admission gate, not renderer
+selection as evidence of live eligibility. Pending or failed admission leaves
+the editor text and staged creation options intact and reports why submission
+is blocked; readiness never submits retained input automatically. Editing,
+cancellation and explicit exit remain available.
+
 The one-shot `--prompt-stdin` sink chooses presentation policy independently
 for inherited stdout and stderr. When stdout is a terminal, it applies the
 terminal-body sanitizer only to dynamic answer text. When stderr is a terminal,

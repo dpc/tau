@@ -133,6 +133,7 @@ impl Harness {
                 "semantic persistence accepted-frame FIFO drained after recovery"
             );
         }
+        self.evict_eligible_history();
     }
 
     /// Wake every publication owner retained by temporary admission pressure.
@@ -4142,6 +4143,7 @@ impl Harness {
         if let Event::SessionAgentUnloaded(unloaded) = event
             && unloaded.session_id == self.session_runtime.current_session_id
         {
+            self.retire_history_load(&unloaded.agent_id);
             self.clear_agent_runtime_indicators_for_agent(&unloaded.agent_id);
             self.peer_messaging
                 .peer_input_rate
@@ -4230,6 +4232,9 @@ impl Harness {
             self.cancel_agent_synchronized_publications(&cid);
         }
         if let Event::SessionAgentUnloaded(unloaded) = event {
+            // Teardown above removes the final discovery protection. There may
+            // be no later agent write edge to trigger eviction for this lease.
+            self.evict_eligible_history();
             self.finish_pending_operator_unload(unloaded);
         }
         if let Event::StartAgentResult(result) = event {
@@ -4239,6 +4244,7 @@ impl Harness {
             self.activate_received_agent_message(message, append_outcome);
         }
         if let Event::SessionAgentLoaded(loaded) = event {
+            self.enter_history_load_reaction(loaded);
             self.pin_history_roster_agent(&loaded.agent_id);
             if persist {
                 self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
@@ -4260,6 +4266,7 @@ impl Harness {
             {
                 self.fail_agent_initialization(&loaded.agent_id, &error.to_string());
             }
+            self.finish_history_load_reaction(loaded);
         }
         if let Event::AgentInitializationContextSet(context) = event {
             self.apply_finalized_agent_initialization_context(context);

@@ -198,6 +198,23 @@ deterministic preflight, disconnects optional losers without advancing prompts,
 activates every survivor as one barrier, marks and publishes all lifecycle
 readiness, replays globally ordered operational traffic received behind the
 barrier, and only then permits prompt/session advancement.
+After session initialization, a configured extension's pending history
+subscription also holds its received `Ready` in `Handshaking`. Only successful
+replay/live handoff for that exact connection releases activation; declaration
+completion cannot bypass it. This extends the existing **session-wide
+new-prompt dispatch barrier** while other event processing, running tools and
+cancellation continue. Ready receipt still removes the handshake deadline:
+there is no added read timeout, and stalled history I/O can retain this barrier
+indefinitely. Initial startup retains its existing ordering and does not wait
+for post-initialization history catch-up before Ready.
+
+A terminal startup-subscription rejection or expected authority cancellation
+disconnects the exact late handshaking extension through existing startup
+failure handling, without retrying the subscription. Duplicate requests do not
+cancel the original pending request. Actual journal read/decode/validation
+failure remains fatal to the session. A disconnected generation's completion
+cannot activate a replacement connection; no readiness authority transfers by
+extension name.
 Only the exhaustive set of capability declarations enters activation staging;
 all other emitted events are classified as operational by default. This keeps
 new state-mutating, reply, progress, and terminal events behind the barrier

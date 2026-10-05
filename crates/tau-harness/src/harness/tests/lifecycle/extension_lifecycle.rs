@@ -3147,7 +3147,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
     let records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events");
     let plans = records
         .iter()
@@ -3231,7 +3231,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
     let finished_records = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("finished durable events");
     assert_eq!(
         finished_records
@@ -3393,7 +3393,7 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
     let successor_terminals = h
         .session_runtime
         .agent_store
-        .agent_events(source.agent_id.as_str())
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
         .expect("durable events")
         .iter()
         .filter(|record| {

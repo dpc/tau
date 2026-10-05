@@ -52,7 +52,7 @@ fn submit(h: &mut Harness, agent_id: &AgentId, text: &str) {
 fn interactions(h: &Harness, agent_id: &AgentId) -> usize {
     h.session_runtime
         .agent_store
-        .agent_events(agent_id.as_str())
+        .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("agent records")
         .iter()
         .filter(|record| {
@@ -547,6 +547,7 @@ fn committed_ui_interaction_replays_without_admission_effects() {
             })),
         )
         .expect("late subscribe");
+        drive_harness_until_history_complete(&mut h);
         assert_eq!(late.lock().expect("late frames").iter().filter(|frame| matches!(
             &frame.frame, HarnessOutputMessage::Deliver(delivery)
                 if delivery.replay && matches!(delivery.event.as_ref(), Event::AgentUserInteractionRecorded(_))

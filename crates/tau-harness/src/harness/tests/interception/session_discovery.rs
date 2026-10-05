@@ -51,7 +51,7 @@ fn snapshot(
 fn register_discovery_test_provider(h: &mut Harness, source: &str) {
     h.handle_extension_message(
         &crate::test_connection_id(source),
-        TestMessage::Subscribe(Subscribe {
+        HarnessInputMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::SESSION_AGENT_LOADED,
@@ -843,6 +843,7 @@ fn late_ui_gets_one_session_and_one_live_agent_projection_without_raw_declaratio
     )
     .expect("subscribe");
 
+    drive_harness_until_history_complete(&mut h);
     let events = sink
         .lock()
         .expect("sink")
