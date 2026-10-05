@@ -132,6 +132,8 @@ pub struct PersistenceCapacityPressure {
 /// Drained content-free operational state from the persistence owner.
 #[derive(Default)]
 pub struct PersistenceOperationalStatus {
+    /// At least one complete-written agent frontier advanced since the drain.
+    pub agent_history_readable: bool,
     /// Exact resource totals at the drain cut.
     pub usage: PersistenceUsage,
     /// Bounded asynchronous worker failures since the previous drain.
@@ -551,6 +553,11 @@ pub(crate) struct PreparationPauseState {
 }
 
 pub(crate) struct AdmissionState {
+    /// Opt-in housekeeping wake; observers without eviction consumers must not
+    /// change runtime scheduling merely by preparing readable prefixes.
+    pub(crate) agent_history_wakes_enabled: bool,
+    /// Coalesced housekeeping edge; never a publication/durability barrier.
+    pub(crate) agent_history_readable: bool,
     /// False after shutdown begins or every worker exit.
     pub(crate) available: bool,
     /// Whether owner-initiated shutdown explains the worker exit.
@@ -607,6 +614,8 @@ pub(crate) struct ResourceLedger {
 }
 
 pub(crate) struct RegisteredStream {
+    /// Worker-proven complete-written prefix, absent before its first capture.
+    pub(super) readable_agent: Option<super::agent_history_prefix::ReadableAgentJournal>,
     /// Current generation for stale-writer rejection.
     pub(crate) generation: PersistenceGeneration,
     /// Explicit lifecycle state.
@@ -685,6 +694,8 @@ impl SemanticPersistenceOwner {
             capacity,
             backend,
             state: Mutex::new(AdmissionState {
+                agent_history_wakes_enabled: false,
+                agent_history_readable: false,
                 available: true,
                 shutting_down: false,
                 worker_exited: false,
@@ -767,6 +778,7 @@ impl SemanticPersistenceOwner {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             !state.failures.is_empty()
+                || (state.agent_history_wakes_enabled && state.agent_history_readable)
                 || state.capacity_full_pending.is_some()
                 || state.capacity_recovered.is_some()
                 || state.capacity_drained.is_some()
@@ -787,11 +799,27 @@ impl SemanticPersistenceOwner {
             .store(false, Ordering::Release);
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         PersistenceOperationalStatus {
+            agent_history_readable: mem::take(&mut state.agent_history_readable),
             usage: usage(&state.ledger),
             failures: state.failures.drain(..).collect(),
             capacity_full: state.capacity_full_pending.take(),
             recovered: state.capacity_recovered.take(),
             drained: state.capacity_drained.take(),
+        }
+    }
+
+    /// Enables coalesced complete-written history housekeeping notifications.
+    /// Stores opt in only when an eviction consumer is ready; this never gates
+    /// publication or waits for filesystem work.
+    pub fn enable_agent_history_wakes(&self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.agent_history_wakes_enabled = true;
+        if state.agent_history_readable {
+            notify_operational(&self.shared);
         }
     }
 
@@ -1609,6 +1637,7 @@ impl SemanticPersistenceOwner {
         state.streams.insert(
             stream.clone(),
             RegisteredStream {
+                readable_agent: None,
                 generation,
                 lifecycle,
                 journal_path,
@@ -1790,7 +1819,7 @@ impl PersistenceLease {
     }
 }
 
-fn validate_generation(
+pub(super) fn validate_generation(
     state: &AdmissionState,
     expected_owner_epoch: u64,
     owner_epoch: u64,
@@ -2017,7 +2046,7 @@ fn usage(ledger: &ResourceLedger) -> PersistenceUsage {
     }
 }
 
-fn notify_operational(shared: &Shared) {
+pub(super) fn notify_operational(shared: &Shared) {
     if shared.operational_wake_pending.swap(true, Ordering::AcqRel) {
         return;
     }

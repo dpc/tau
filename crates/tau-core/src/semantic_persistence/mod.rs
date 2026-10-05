@@ -4,6 +4,7 @@
 //! Stores stage deterministic replacements in memory and use a generation-bound
 //! lease to atomically install the replacement beside one FIFO frame.
 
+mod agent_history_prefix;
 mod backend;
 mod capacity;
 mod identity;
@@ -11,6 +12,7 @@ mod owner;
 mod preparation;
 mod worker;
 
+pub use agent_history_prefix::AgentHistoryPrefix;
 pub use capacity::PersistenceCapacity;
 pub use identity::{PersistenceGeneration, PersistenceLease, StreamIdentity};
 #[cfg(any(test, feature = "test-persistence"))]

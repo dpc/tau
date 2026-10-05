@@ -142,6 +142,25 @@ pub struct AgentJournalReader<'snapshot> {
     finished: bool,
 }
 
+impl<'snapshot> AgentJournalReader<'snapshot> {
+    /// Selects a worker-proven complete prefix without opening or seeking a
+    /// file.
+    pub(crate) fn from_complete_prefix(
+        path: &'snapshot Path,
+        file: &'snapshot File,
+        covered_bytes: u64,
+    ) -> Self {
+        Self {
+            path,
+            file,
+            offset: 0,
+            remaining_bytes: covered_bytes,
+            expected: PersistedAgentEventSeq::new(0),
+            finished: false,
+        }
+    }
+}
+
 impl Iterator for AgentJournalReader<'_> {
     type Item = Result<PersistedAgentEvent, AgentStoreError>;
 

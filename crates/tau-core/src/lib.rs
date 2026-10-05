@@ -47,7 +47,7 @@ pub use memory::{MemoryInbox, memory_connection};
 #[cfg(any(test, feature = "test-persistence"))]
 pub use semantic_persistence::DurabilityBarrierOutcome;
 pub use semantic_persistence::{
-    PersistenceAdmissionError, PersistenceCapacity, PersistenceCapacityLimit,
+    AgentHistoryPrefix, PersistenceAdmissionError, PersistenceCapacity, PersistenceCapacityLimit,
     PersistenceCapacityPressure, PersistenceFailure, PersistenceFailureKind, PersistenceGeneration,
     PersistenceLease, PersistenceOperationalStatus, PersistenceUsage, PreparedAgentStream,
     PreparedSessionStreams, SemanticPersistenceOwner, SessionPreparationMode,

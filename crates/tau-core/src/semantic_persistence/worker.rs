@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 
+use super::agent_history_prefix::ReadableAgentJournal;
 use super::backend::{ExistingPathKind, PersistenceBackend};
 use super::identity::{PersistenceGeneration, StreamIdentity};
 #[cfg(test)]
@@ -213,6 +214,9 @@ struct PreparedStream {
     generation: PersistenceGeneration,
     /// Open journal append handle.
     journal: File,
+    /// Sole persistent owner of the optional positional-read descriptor. The
+    /// registry holds only Weak references so its cleanup cannot close files.
+    read_handle: Option<Arc<File>>,
     /// Exclusive advisory lock retained for the generation.
     _lock: File,
     /// Exact append offset last proven complete.
@@ -748,16 +752,21 @@ fn prepare_agent(
     crate::AgentTree::try_from_events(agent_id.clone(), &events)
         .map_err(|error| io::Error::other(error.to_string()))?;
     let offset = shared.backend.seek_end(&mut journal)?;
-    streams.insert(
-        identity.stream.clone(),
-        PreparedStream {
-            generation: identity.generation,
-            journal,
-            _lock: lock,
-            offset,
-            session_meta: None,
-        },
+    let mut stream = PreparedStream {
+        generation: identity.generation,
+        journal,
+        read_handle: None,
+        _lock: lock,
+        offset,
+        session_meta: None,
+    };
+    advance_agent_readable_frontier(
+        shared,
+        identity,
+        &mut stream,
+        crate::PersistedAgentEventSeq::new(events.len() as u64),
     );
+    streams.insert(identity.stream.clone(), stream);
     Ok(events)
 }
 
@@ -897,6 +906,7 @@ fn prepare_session(
         PreparedStream {
             generation: session_identity.generation,
             journal: ordinary,
+            read_handle: None,
             _lock: lock,
             offset: ordinary_offset,
             session_meta: Some(meta.clone()),
@@ -910,6 +920,7 @@ fn prepare_session(
         PreparedStream {
             generation: restore_identity.generation,
             journal: restore,
+            read_handle: None,
             _lock: restore_lock,
             offset: restore_offset,
             session_meta: None,
@@ -1234,6 +1245,9 @@ fn append_job(
     };
     stream.offset = end;
     job.written_end = Some(stream.offset);
+    if let Some(candidate) = &job.checkpoint_candidate {
+        advance_agent_readable_frontier(shared, &job.identity, stream, candidate.next_seq);
+    }
     if let Some(candidate) = job.checkpoint_candidate.take() {
         let checkpoint = shared
             .backend
@@ -1258,6 +1272,50 @@ fn append_job(
         }
     }
     AppendDisposition::Complete
+}
+
+/// Publishes one coalesced readable frontier only after a proven full frame.
+/// Failure to obtain the optional read handle merely keeps the cache resident.
+fn advance_agent_readable_frontier(
+    shared: &Shared,
+    identity: &super::identity::LeaseIdentity,
+    stream: &mut PreparedStream,
+    next_seq: crate::PersistedAgentEventSeq,
+) {
+    // Keep even this optional syscall outside the admission mutex: runtime
+    // acceptance must never wait behind a filesystem operation.
+    if stream.read_handle.is_none() {
+        let Ok(file) = stream.journal.try_clone() else {
+            return;
+        };
+        stream.read_handle = Some(Arc::new(file));
+    }
+    let file = stream.read_handle.as_ref().expect("read handle installed");
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(registered) = state
+        .streams
+        .get_mut(&identity.stream)
+        .filter(|registered| registered.generation == identity.generation)
+    else {
+        return;
+    };
+    if let Some(readable) = &mut registered.readable_agent {
+        readable.end_offset = stream.offset;
+        readable.next_seq = next_seq;
+    } else {
+        registered.readable_agent = Some(ReadableAgentJournal {
+            file: Arc::downgrade(file),
+            end_offset: stream.offset,
+            next_seq,
+        });
+    }
+    state.agent_history_readable = true;
+    if state.agent_history_wakes_enabled {
+        super::owner::notify_operational(shared);
+    }
 }
 
 enum CreationError {
@@ -1367,6 +1425,7 @@ fn advance_creation(
     Ok(Some(PreparedStream {
         generation: job.generation(),
         journal,
+        read_handle: None,
         _lock: lock,
         offset: 0,
         session_meta: None,
@@ -1710,6 +1769,8 @@ pub(crate) fn worker_persistent_stream_charge() -> usize {
     std::mem::size_of::<PreparedStream>()
         .saturating_add(std::mem::size_of::<NewAgentCreation>())
         .saturating_add(4 * std::mem::size_of::<File>())
+        // Optional shared read handle and its Arc reference counters.
+        .saturating_add(std::mem::size_of::<File>() + 2 * std::mem::size_of::<usize>())
 }
 
 fn minimum_deadline(

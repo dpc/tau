@@ -1,7 +1,7 @@
 //! Deterministic production-backend persistence failure oracles.
 
 use std::fs::{File, OpenOptions, Permissions};
-use std::io::{self, Read as _, Seek as _, Write as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
@@ -30,6 +30,8 @@ struct WriteFaultBackend {
     write_hold_entries: AtomicUsize,
     exit_next_write: AtomicBool,
     fail_next_sync_data: AtomicBool,
+    /// Keeps durability unavailable while complete-written reads are tested.
+    fail_sync_data: AtomicBool,
     fail_next_sync_all: AtomicBool,
     fail_next_rename: AtomicBool,
     lock_publication: LockPublicationFaults,
@@ -97,6 +99,7 @@ impl WriteFaultBackend {
             write_hold_entries: AtomicUsize::new(0),
             exit_next_write: AtomicBool::new(false),
             fail_next_sync_data: AtomicBool::new(false),
+            fail_sync_data: AtomicBool::new(false),
             fail_next_sync_all: AtomicBool::new(false),
             fail_next_rename: AtomicBool::new(false),
             lock_publication: LockPublicationFaults {
@@ -355,6 +358,9 @@ impl PersistenceBackend for WriteFaultBackend {
         FilesystemBackend.truncate(file, offset)
     }
     fn sync_data(&self, file: &File) -> io::Result<()> {
+        if self.fail_sync_data.load(Ordering::SeqCst) {
+            return Err(io::Error::other("injected persistent data sync failure"));
+        }
         #[cfg(target_os = "linux")]
         if let Ok(path) = std::fs::read_link(format!(
             "/proc/self/fd/{}",
@@ -1114,6 +1120,305 @@ fn display_name_event(agent_id: &tau_proto::AgentId, display_name: &str) -> tau_
         agent_id: agent_id.clone(),
         display_name: display_name.to_owned(),
     })
+}
+
+/// A captured prefix is independent of the append cursor and cannot expose a
+/// queued or failed frame; later success advances only newly captured prefixes.
+#[test]
+fn agent_history_prefix_excludes_unwritten_and_rolled_back_suffixes() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(Default::default(), backend.clone())
+            .expect("owner"),
+    );
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let wake_count = Arc::clone(&wakes);
+    owner.set_operational_wake(Arc::new(move || {
+        wake_count.fetch_add(1, Ordering::SeqCst);
+    }));
+    let agent_id = tau_proto::AgentId::parse("prefix-agent").expect("agent id");
+    let mut store =
+        AgentStore::open_managed(root.path().join("agents"), owner.clone()).expect("store");
+    let lease = store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    assert!(
+        lease
+            .agent_history_prefix()
+            .expect("reserved generation")
+            .is_none()
+    );
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("first event");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable,
+    );
+    let original = lease
+        .agent_history_prefix()
+        .expect("capture")
+        .expect("written prefix");
+    let first_records = store.agent_events(agent_id.as_str()).expect("accepted");
+    assert_eq!(original.read().expect("read first prefix"), first_records);
+    assert_eq!(original.next_seq().get(), 1);
+    assert_eq!(wakes.load(Ordering::SeqCst), 0, "housekeeping is opt-in");
+    owner.enable_agent_history_wakes();
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        1,
+        "enabling observes pending progress"
+    );
+    assert!(owner.drain_operational_status().agent_history_readable);
+    assert!(!owner.drain_operational_status().agent_history_readable);
+
+    backend.hold_writes.store(true, Ordering::SeqCst);
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "new"),
+        )
+        .expect("accept while worker cannot write");
+    backend.wait_until_write_held();
+    assert_eq!(
+        store
+            .agent_events(agent_id.as_str())
+            .expect("accepted")
+            .len(),
+        2
+    );
+    assert_eq!(
+        lease
+            .agent_history_prefix()
+            .expect("capture while held")
+            .expect("prior written prefix")
+            .next_seq()
+            .get(),
+        1,
+    );
+    assert_eq!(
+        original.read().expect("read while append held"),
+        first_records
+    );
+    backend.fail_writes.store(true, Ordering::SeqCst);
+    backend.release_writes();
+    assert!(owner.wait_for_failure_for_test(PersistenceFailureKind::Write, Duration::from_secs(2)));
+    assert_eq!(
+        lease
+            .agent_history_prefix()
+            .expect("capture while failing")
+            .expect("prior written prefix")
+            .read()
+            .expect("unchanged readable prefix"),
+        first_records,
+    );
+    backend.fail_writes.store(false, Ordering::SeqCst);
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable,
+    );
+    assert_eq!(
+        original.read().expect("old prefix remains finite"),
+        first_records
+    );
+    let latest = lease
+        .agent_history_prefix()
+        .expect("latest")
+        .expect("written prefix");
+    assert_eq!(latest.next_seq().get(), 2);
+    assert_eq!(
+        latest.read().expect("read latest"),
+        store
+            .agent_events(agent_id.as_str())
+            .expect("accepted history")
+    );
+}
+
+/// Complete-written history is readable during persistent synchronization
+/// failure; read authority is not a durability acknowledgement or sync barrier.
+#[test]
+fn agent_history_prefix_does_not_require_fsync() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(Default::default(), backend.clone())
+            .expect("owner"),
+    );
+    let agent_id = tau_proto::AgentId::parse("unsynced-prefix-agent").expect("agent id");
+    let mut store =
+        AgentStore::open_managed(root.path().join("agents"), owner.clone()).expect("store");
+    let lease = store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    backend.fail_sync_data.store(true, Ordering::SeqCst);
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("first event");
+    assert!(owner.wait_for_failure_for_test(PersistenceFailureKind::Sync, Duration::from_secs(2)));
+    let prefix = lease
+        .agent_history_prefix()
+        .expect("capture unsynced")
+        .expect("written unsynced prefix");
+    assert_eq!(
+        prefix.read().expect("unsynced read"),
+        store
+            .agent_events(agent_id.as_str())
+            .expect("accepted history")
+    );
+    backend.fail_sync_data.store(false, Ordering::SeqCst);
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable,
+    );
+}
+
+/// Release invalidates old read authority even if the same path is prepared
+/// again, while a newly prepared generation reconstructs the exact full prefix.
+#[test]
+fn agent_history_prefix_rejects_released_generation_and_detects_corruption() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let agent_id = tau_proto::AgentId::parse("reprepared-prefix-agent").expect("agent id");
+    let agents_path = root.path().join("agents");
+    let mut store = AgentStore::open_managed(&agents_path, owner.clone()).expect("store");
+    let lease = store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("first event");
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        DurabilityBarrierOutcome::Durable,
+    );
+    let expected = store
+        .agent_events(agent_id.as_str())
+        .expect("accepted history");
+    let original = lease
+        .agent_history_prefix()
+        .expect("capture")
+        .expect("written prefix");
+    store
+        .release_managed_agents(Duration::from_secs(2))
+        .expect("release");
+    assert!(matches!(
+        original.read(),
+        Err(crate::AgentStoreError::Persistence(
+            super::PersistenceAdmissionError::StaleLease
+        ))
+    ));
+    store
+        .prepare_existing_agent(agent_id.as_str())
+        .expect("reprepare");
+    let current = store
+        .managed_persistence_leases()
+        .pop()
+        .expect("prepared lease")
+        .agent_history_prefix()
+        .expect("capture recovered prefix")
+        .expect("recovered prefix");
+    assert_ne!(original.lease().generation(), current.lease().generation());
+    assert_eq!(current.read().expect("recovered prefix"), expected);
+    assert!(matches!(
+        original.read(),
+        Err(crate::AgentStoreError::Persistence(
+            super::PersistenceAdmissionError::StaleLease
+        ))
+    ));
+
+    // A complete corrupt frame is an error, never a silently truncated prefix.
+    let path = agents_path.join(agent_id.as_str()).join("events.cbor");
+    let mut file = OpenOptions::new().write(true).open(&path).expect("journal");
+    file.seek(SeekFrom::Start(8)).expect("payload start");
+    file.write_all(&[0xff]).expect("inject invalid CBOR");
+    let corrupt = std::fs::read(&path).expect("corrupt bytes");
+    assert!(matches!(
+        current.read(),
+        Err(crate::AgentStoreError::Decode { .. })
+    ));
+    assert_eq!(std::fs::read(path).expect("unchanged bytes"), corrupt);
+    let raced = current.read_with_after_io_for_test(|| {
+        store
+            .release_managed_agents(Duration::from_secs(2))
+            .expect("release after failed read");
+    });
+    assert!(
+        matches!(
+            raced,
+            Err(crate::AgentStoreError::Persistence(
+                super::PersistenceAdmissionError::StaleLease
+            ))
+        ),
+        "revocation wins over the completed decode error"
+    );
+}
+
+/// Registry cleanup must not own a descriptor whose final close could happen
+/// under the admission mutex, including the maintenance-retained registration.
+#[test]
+fn agent_history_prefix_registry_is_nonowning_across_release() {
+    for maintenance in [false, true] {
+        let root = tempfile::tempdir().expect("temporary root");
+        let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+        let agent_id = tau_proto::AgentId::parse("released-prefix-agent").expect("agent id");
+        let mut store =
+            AgentStore::open_managed(root.path().join("agents"), owner.clone()).expect("store");
+        let lease = store.reserve_new_agent(agent_id.as_str()).expect("reserve");
+        store
+            .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+            .expect("first event");
+        assert_eq!(
+            owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+            DurabilityBarrierOutcome::Durable,
+        );
+        let handle = {
+            let shared = lease.identity.shared.upgrade().expect("live owner");
+            let state = shared.state.lock().expect("state");
+            state.streams[lease.stream()]
+                .readable_agent
+                .as_ref()
+                .expect("published frontier")
+                .file
+                .clone()
+        };
+        let captured = lease
+            .agent_history_prefix()
+            .expect("capture")
+            .expect("written prefix");
+        assert_eq!(
+            handle.strong_count(),
+            1,
+            "captured metadata and registry do not own the descriptor"
+        );
+        if maintenance {
+            owner
+                .release_for_maintenance(std::slice::from_ref(&lease), Duration::from_secs(2))
+                .expect("maintenance release");
+            assert_eq!(
+                handle.strong_count(),
+                0,
+                "worker released descriptor before replying"
+            );
+            owner
+                .claim_maintenance(std::slice::from_ref(&lease))
+                .expect("claim released generation");
+            owner
+                .finish_maintenance(std::slice::from_ref(&lease))
+                .expect("finish");
+        } else {
+            store
+                .release_managed_agents(Duration::from_secs(2))
+                .expect("release");
+            assert_eq!(
+                handle.strong_count(),
+                0,
+                "worker released descriptor before replying"
+            );
+        }
+        assert!(handle.upgrade().is_none());
+        assert!(matches!(
+            captured.read(),
+            Err(crate::AgentStoreError::Persistence(
+                super::PersistenceAdmissionError::StaleLease
+            ))
+        ));
+    }
 }
 
 /// A new-agent reservation rejects an existing live path before any accepted
