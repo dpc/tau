@@ -171,6 +171,46 @@ fn expect_tool_error(rx: &mpsc::Receiver<tau_proto::HarnessInputMessage>) -> tau
     error
 }
 
+/// Prevents error and cancellation replacements from erasing the transferred
+/// file's source, without claiming a successful destination or byte count.
+#[test]
+fn artifact_failure_displays_preserve_source_context() {
+    for (tool, field, source) in [
+        (EXPORT_TOOL_NAME, "path", "relative/image.png"),
+        (IMPORT_TOOL_NAME, "key", "blake3:unavailable"),
+    ] {
+        let (mut invoke, lifecycle, output, rx) = export_preparation_fixture(Path::new(source));
+        invoke.tool_name = tau_proto::ToolName::new(tool);
+        invoke.arguments = CborValue::Map(vec![text_entry(field, source.to_owned())]);
+        report_error(
+            &output,
+            &invoke,
+            "storage unavailable\nmore detail".to_owned(),
+        );
+        let error = expect_tool_error(&rx);
+        let display = error.display.expect("error display");
+        assert_eq!(display.args, source);
+        assert_eq!(display.status, tau_proto::ToolUseStatus::Error);
+        assert_eq!(display.status_text, "storage unavailable");
+        assert_eq!(display.stats.bytes, None);
+        assert_eq!(display.payload, None);
+
+        report_cancelled(&output, invoke, lifecycle);
+        let tau_proto::HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel terminal") else {
+            panic!("expected terminal emit");
+        };
+        let Event::ToolCancelledReported(cancelled) = *emit.event else {
+            panic!("expected tool cancellation");
+        };
+        let display = cancelled.display.expect("cancel display");
+        assert_eq!(display.args, source);
+        assert_eq!(display.status, tau_proto::ToolUseStatus::Warning);
+        assert_eq!(display.status_text, "cancelled");
+        assert_eq!(display.stats.bytes, None);
+        assert_eq!(display.payload, None);
+    }
+}
+
 /// Builds one export invocation and admitted lifecycle for direct preparation
 /// coverage.
 fn export_preparation_fixture(

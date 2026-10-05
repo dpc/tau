@@ -132,6 +132,16 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
     let rendered_export = tau_proto::ToolResponse::from_cbor(&export.result).render();
     assert!(rendered_export.contains(&format!("artifact: {reference}\n")));
     assert!(rendered_export.contains(&format!("size: {}\n", original.len())));
+    let display = export.display.as_ref().expect("export display");
+    assert_eq!(display.args, source_text);
+    assert_eq!(display.stats.bytes, Some(original.len() as u64));
+    assert_eq!(display.status, tau_proto::ToolUseStatus::Success);
+    assert_eq!(
+        display.payload,
+        Some(tau_proto::ToolUsePayload::Text {
+            text: format!("artifact: {reference}"),
+        })
+    );
 
     writer
         .write_event(&tool_started(
@@ -181,6 +191,16 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
     assert!(rendered_import.contains(&format!("size: {}\n", original.len())));
     assert!(rendered_import.contains("path: "));
     let path = PathBuf::from(cbor_map_text(&imported.result, "path").expect("import path"));
+    let display = imported.display.as_ref().expect("import display");
+    assert_eq!(display.args, path.display().to_string());
+    assert_eq!(display.stats.bytes, Some(original.len() as u64));
+    assert_eq!(display.status, tau_proto::ToolUseStatus::Success);
+    assert_eq!(
+        display.payload,
+        Some(tau_proto::ToolUsePayload::Text {
+            text: format!("artifact: {reference}"),
+        })
+    );
     assert_eq!(fs::read(&path).expect("imported bytes"), original);
     #[cfg(unix)]
     {

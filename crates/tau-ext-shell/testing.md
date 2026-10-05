@@ -53,6 +53,8 @@ original-byte equality and private imported-file permissions, asserts
 canonical `<tau-artifact:FULL_KEY>` reference directly into import, and passes
 the returned path as an ordinary filesystem artifact; image inspection consumes
 the same reference directly through `std-utils`.
+Terminal display coverage keeps the export source or import destination path,
+verified byte size, and artifact reference visible without displaying file contents.
 the removed GPT `cwd` spelling appears only in an explicitly named legacy
 compatibility test.
 Allowlist coverage distinguishes absent from empty configuration, validates

@@ -19,6 +19,7 @@ use tau_proto::{
 };
 
 use crate::Output;
+use crate::display::{ToolFailure, ok_display};
 use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
 use crate::tool_lifecycle::ToolLifecycle;
 use crate::tools::{EXPORT_TOOL_NAME, IMPORT_TOOL_NAME};
@@ -734,6 +735,16 @@ fn finish_error(output: &Output, transfer: Transfer, message: String) {
 }
 
 fn report_result(output: &Output, invoke: &ToolStarted, result: CborValue) -> bool {
+    let mut display = ok_display(
+        tau_proto::cbor_text_field(&result, "path").unwrap_or_else(|| invocation_args(invoke)),
+    );
+    display.stats.bytes =
+        tau_proto::cbor_int_field(&result, "size").and_then(|size| u64::try_from(size).ok());
+    let reference = tau_proto::cbor_text_field(&result, "artifact")
+        .or_else(|| tau_proto::cbor_text_field(&invoke.arguments, "key"));
+    display.payload = reference.map(|reference| tau_proto::ToolUsePayload::Text {
+        text: format!("artifact: {reference}"),
+    });
     output
         .report_tool_terminal(Event::ToolResult(ToolResult {
             presentation: Default::default(),
@@ -743,13 +754,16 @@ fn report_result(output: &Output, invoke: &ToolStarted, result: CborValue) -> bo
             result,
             provider_content: Vec::new(),
             kind: ToolResultKind::Final,
-            display: None,
+            display: Some(display),
             originator: invoke.originator.clone(),
         }))
         .is_ok()
 }
 
 fn report_error(output: &Output, invoke: &ToolStarted, message: String) {
+    let display = ToolFailure::new(&message)
+        .with_args(invocation_args(invoke))
+        .display;
     let _ = output.report_tool_terminal(Event::ToolError(ToolError {
         presentation: Default::default(),
         call_id: invoke.call_id.clone(),
@@ -757,20 +771,33 @@ fn report_error(output: &Output, invoke: &ToolStarted, message: String) {
         tool_type: tau_proto::ToolType::Function,
         message,
         details: None,
-        display: None,
+        display: Some(*display),
         originator: invoke.originator.clone(),
     }));
 }
 
 fn report_cancelled(output: &Output, invoke: ToolStarted, lifecycle: ToolLifecycle) {
+    let display = tau_proto::ToolUseState {
+        args: invocation_args(&invoke),
+        status: tau_proto::ToolUseStatus::Warning,
+        status_text: "cancelled".to_owned(),
+        ..Default::default()
+    };
     let _ = output.report_tool_terminal(Event::ToolCancelled(ToolCancelled {
         presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
-        display: None,
+        display: Some(display),
     }));
     lifecycle.finish();
+}
+
+/// Keeps the source path or artifact reference visible through every terminal.
+fn invocation_args(invoke: &ToolStarted) -> String {
+    crate::tools::initial_display(invoke)
+        .map(|display| display.args)
+        .unwrap_or_default()
 }
 
 fn artifact_error_message(error: ArtifactError) -> String {
