@@ -3,6 +3,7 @@
 //!
 //! Human UI authority remains distinct from configured extensions and peers.
 
+use super::history_runtime::HistoryOperation;
 use super::start_coordinator::StartPhase;
 use super::ui_interaction::UiInteractionAdmission;
 use super::*;
@@ -526,6 +527,20 @@ impl Harness {
         }: tau_proto::UiTreeRequest,
     ) {
         if !self.is_attached_socket_ui(client_id) {
+            return;
+        }
+        if session_id == self.session_runtime.current_session_id
+            && let Some(cid) = self.runtime_agent_id_for_target_agent(target_agent_id.as_deref())
+            && let Some(agent_id) = self.target_agent_id_for_agent(&cid)
+            && self.defer_history_operation(
+                client_id,
+                vec![agent_id],
+                HistoryOperation::Tree(tau_proto::UiTreeRequest {
+                    session_id: session_id.clone(),
+                    target_agent_id: target_agent_id.clone(),
+                }),
+            )
+        {
             return;
         }
         let message = self.tree_request_result(&session_id, target_agent_id.as_deref());
@@ -2395,6 +2410,19 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiNavigateTree,
     ) -> Result<bool, HarnessError> {
+        if req.session_id == self.session_runtime.current_session_id
+            && matches!(req.target, UiTreeNavigationTarget::PromptAnchor(_))
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(req.target_agent_id.as_deref())
+            && let Some(agent_id) = self.target_agent_id_for_agent(&cid)
+            && self.defer_history_operation(
+                client_id,
+                vec![agent_id],
+                HistoryOperation::Navigate(req.clone()),
+            )
+        {
+            return Ok(true);
+        }
         // Validate the requested target against *this* harness's bound
         // session before publishing. The durable branch-state fact is
         // agent-owned (`agent.head_moved`), not the UI-scoped request.

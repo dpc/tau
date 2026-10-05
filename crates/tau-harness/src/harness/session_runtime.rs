@@ -761,13 +761,14 @@ impl Harness {
             .target_agent_id_for_agent(&cid)
             .expect("agent has durable id");
         let tree = self.session_runtime.agent_store.agent(agent_id.as_str());
-        let events = match self
-            .session_runtime
-            .agent_store
-            .agent_events(agent_id.as_str())
-        {
-            Ok(events) => events,
-            Err(error) => {
+        let events = match matches!(target, UiTreeNavigationTarget::PromptAnchor(_)).then(|| {
+            self.session_runtime
+                .agent_store
+                .agent_events(agent_id.as_str())
+        }) {
+            Some(Ok(events)) => events,
+            None => Vec::new(),
+            Some(Err(error)) => {
                 self.send_ui_error_response(
                     client_id,
                     format!("navigate ignored: failed to load agent log: {error}"),

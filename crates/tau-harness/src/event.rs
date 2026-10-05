@@ -28,6 +28,8 @@ pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 /// Commands that mutate harness-owned state from inside the central loop.
 pub(crate) enum HarnessCommand {
+    /// Resume a bounded off-loop history request without publishing an event.
+    HistoryReadCompleted(Box<crate::history_reader::HistoryReadCompleted>),
     /// Route one bounded, transient artifact RPC completion.
     ArtifactCompleted(Box<crate::artifact_worker::ArtifactCompleted>),
     /// Surface corrupt artifact bookkeeping preserved by startup cleanup.

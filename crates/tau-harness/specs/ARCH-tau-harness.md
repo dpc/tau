@@ -60,6 +60,22 @@ retained publication owners; ordinary runtime progress remains a fallback.
 These wakes carry no semantic event or payload and do not strengthen the
 asynchronous crash boundary.
 
+Cold accepted-record caches use one off-loop history reader. Its eight permits
+cover queued work, active reads, and unconsumed completions. A pending Subscribe
+does not replace selectors or begin catch-up until its captured written prefixes
+have been validated and merged with the current accepted suffix in one runtime
+turn; existing live selectors remain active while it waits. Tree and prompt-anchor
+navigation requests use the same handoff. Retained request suffixes share a
+64 MiB encoded-byte and 4096-record budget, counting duplicate request pins;
+whole cold journals are outside this suffix budget. Overload and cancellation
+release logical pins immediately, but canceled physical work retains its permit
+until completion. Revoked or unavailable read authority rejects the request
+without changing independent persistence-failure handling. There is no automatic
+retry. Unexpected journal read or
+validation errors terminate the session rather than producing empty history.
+Production eviction remains disabled until startup, load, and discovery
+protection and cold-reload continuations are integrated.
+
 Live delivery uses one process-local logical stream with runtime-only positions.
 The event bus freezes selector, visibility, exclusion, and directed-route
 eligibility as consumer generations when admitting a frame. Per-connection

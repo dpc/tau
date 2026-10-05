@@ -37,6 +37,8 @@ impl std::fmt::LowerHex for SessionGeneration {
 
 /// Harness storage plus the active session's binding and lifecycle state.
 pub(crate) struct SessionRuntimeState {
+    /// Pending bounded history reads and their accepted-suffix ownership.
+    pub(crate) history: super::history_runtime::HistoryRuntime,
     /// Unique lifecycle owner for every durable semantic stream.
     pub(crate) persistence_owner: Option<std::sync::Arc<tau_core::SemanticPersistenceOwner>>,
     /// Runtime state directory for this harness.

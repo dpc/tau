@@ -596,6 +596,9 @@ impl Harness {
             HarnessCommand::SemanticPersistenceProgress => {
                 self.observe_semantic_persistence_progress();
             }
+            HarnessCommand::HistoryReadCompleted(completed) => {
+                self.complete_history_read(*completed);
+            }
             HarnessCommand::SemanticPersistenceActivationRetry => {
                 self.retry_capacity_rejected_activations();
             }

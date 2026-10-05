@@ -92,6 +92,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         now: Instant,
     ) {
+        self.cancel_connection_history(connection_id);
         self.ui_runtime.artifact_admissions.remove(connection_id);
         if let Some(artifacts) = &mut self.runtime_io.artifacts {
             artifacts.disconnect(connection_id);

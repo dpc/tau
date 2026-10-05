@@ -2732,6 +2732,7 @@ mod bridge_receiver;
 mod config_error;
 mod dedup;
 mod dispatch;
+mod history_reader;
 mod idle_session;
 mod interception;
 mod lifecycle;

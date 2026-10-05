@@ -448,6 +448,7 @@ impl Harness {
                 publication: PublicationState::default(),
             },
             session_runtime: SessionRuntimeState {
+                history: Default::default(),
                 persistence_owner,
                 state_dir: state_dir.clone(),
                 store,
@@ -1057,6 +1058,7 @@ impl Harness {
                 publication: PublicationState::default(),
             },
             session_runtime: SessionRuntimeState {
+                history: Default::default(),
                 persistence_owner: parts.persistence_owner,
                 state_dir: parts.state_dir,
                 store: parts.store,

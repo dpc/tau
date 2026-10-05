@@ -36,6 +36,7 @@ use tau_proto::{
 };
 
 use super::agent_runtime_state_for_turn;
+use super::history_runtime::HistoryOperation;
 use crate::extension::ExtensionState;
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
@@ -97,6 +98,45 @@ impl Harness {
     /// subscribers by [`Self::catch_up_subscribers_after_session_init`] once
     /// init completes.
     pub(crate) fn complete_subscription(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+        historical_selectors: Vec<EventSelector>,
+        live_selectors: Vec<EventSelector>,
+    ) -> Result<(), RouteError> {
+        if self.session_initialized(&self.session_runtime.current_session_id) {
+            let agents = if historical_selectors.is_empty() {
+                Vec::new()
+            } else {
+                match self.history_replay_agents() {
+                    Ok(agents) => agents,
+                    Err(error) => {
+                        self.send_replay_error(connection_id, &error.to_string());
+                        self.emit_session_replay_complete(connection_id, Some(error.to_string()));
+                        self.runtime_io
+                            .publication
+                            .pending_error
+                            .get_or_insert(crate::HarnessError::SessionStore(error));
+                        return Ok(());
+                    }
+                }
+            };
+            if self.defer_history_operation(
+                connection_id,
+                agents,
+                HistoryOperation::Subscribe {
+                    historical: historical_selectors.clone(),
+                    live: live_selectors.clone(),
+                },
+            ) {
+                return Ok(());
+            }
+        }
+        self.complete_subscription_resident(connection_id, historical_selectors, live_selectors)
+    }
+
+    /// Performs the replay/live handoff only after prefetch has made all
+    /// required histories resident; this path never schedules another read.
+    pub(super) fn complete_subscription_resident(
         &mut self,
         connection_id: &tau_proto::ConnectionId,
         historical_selectors: Vec<EventSelector>,
@@ -466,7 +506,7 @@ impl Harness {
         );
     }
 
-    fn emit_session_replay_complete(
+    pub(super) fn emit_session_replay_complete(
         &mut self,
         client_id: &tau_proto::ConnectionId,
         error: Option<String>,
@@ -579,7 +619,7 @@ impl Harness {
         }
     }
 
-    fn send_replay_error(&mut self, client_id: &tau_proto::ConnectionId, message: &str) {
+    pub(super) fn send_replay_error(&mut self, client_id: &tau_proto::ConnectionId, message: &str) {
         self.send_catch_up_event(
             client_id,
             None,

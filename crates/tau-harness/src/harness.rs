@@ -1599,6 +1599,7 @@ mod discovery_refresh;
 mod extension_activation;
 mod extension_lifecycle;
 mod harness_config_state;
+mod history_runtime;
 mod idle_session;
 mod local_summary_continuation;
 mod notification_delivery;

@@ -301,6 +301,9 @@ impl Harness {
                 observation_id,
             );
         let succeeded = result.is_ok();
+        if succeeded {
+            self.check_history_pin_budget();
+        }
         if let Err(error) = result {
             tracing::warn!(
                 target: "tau_harness",
@@ -1607,6 +1610,7 @@ impl Harness {
             .agent_store
             .append_agent_event_at(agent_id, None, parent, event, tau_proto::UnixMicros::now())
             .map_err(HarnessError::AgentStore)?;
+        self.check_history_pin_budget();
         if let Some(started) = creation {
             self.record_agent_creator_topology(&started);
         }
@@ -1707,6 +1711,7 @@ impl Harness {
                     event.clone(),
                     recorded_at,
                 )?;
+            self.check_history_pin_budget();
             return Ok(Some((agent_id, outcome)));
         } else {
             self.session_runtime

@@ -4229,6 +4229,7 @@ impl Harness {
             self.activate_received_agent_message(message, append_outcome);
         }
         if let Event::SessionAgentLoaded(loaded) = event {
+            self.pin_history_roster_agent(&loaded.agent_id);
             if persist {
                 self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
             }
@@ -4912,6 +4913,7 @@ impl Harness {
                 recorded_at,
             )?
         };
+        self.check_history_pin_budget();
         Ok(Some(outcome))
     }
 
