@@ -1238,7 +1238,11 @@ impl Harness {
                                 && matches!(agent.turn.turn_state, AgentTurnState::Idle)
                         });
                 if remains_valid {
-                    self.try_start_queued_ui_compaction(cid);
+                    if pending.inline_only {
+                        self.start_admitted_manual_compaction(cid);
+                    } else {
+                        self.try_start_queued_ui_compaction(cid);
+                    }
                     return;
                 }
                 self.try_start_queued_ui_compaction(cid);

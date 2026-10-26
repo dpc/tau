@@ -5,6 +5,7 @@ use super::*;
 use crate::agent::LoopCycleState;
 
 mod acceptance_teardown;
+mod inline_wait;
 mod restore_collision;
 mod role_drift;
 
@@ -6017,6 +6018,17 @@ fn manual_compaction_cancels_sole_input_wait_before_starting() {
 /// without publishing another terminal or starting compaction early.
 #[test]
 fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
+    check_repeated_manual_compaction_while_wait_cancellation_is_parked(true);
+}
+
+/// Inline requests share the cancellation owner while interception delays
+/// admission, and cannot publish an independent compaction intent.
+#[test]
+fn inline_compaction_coalesces_while_wait_cancellation_is_parked() {
+    check_repeated_manual_compaction_while_wait_cancellation_is_parked(false);
+}
+
+fn check_repeated_manual_compaction_while_wait_cancellation_is_parked(standalone: bool) {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
@@ -6024,7 +6036,7 @@ fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
-        .supports_standalone_compaction = true;
+        .supports_standalone_compaction = standalone;
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let wait = wait_input_call("wait-preempt-coalesce");
@@ -6052,11 +6064,10 @@ fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
         test_session_id("s1"),
         Some(agent_id.as_str()),
     );
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
-    );
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(_) | Event::AgentCompactionTriggered(_)
+    )));
     h.handle_extension_event(
         "wait-compact-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -6077,7 +6088,10 @@ fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
     assert_eq!(
         event_log_events(&h)
             .iter()
-            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(_) | Event::AgentCompactionTriggered(_)
+            ))
             .count(),
         1
     );
@@ -6087,6 +6101,17 @@ fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
 /// teardown of the wait and suppresses the pending compaction start.
 #[test]
 fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
+    check_explicit_cancel_while_wait_preemption_is_parked(true);
+}
+
+/// Explicit cancellation retires inline continuation ownership even when its
+/// proposed wait terminal is already parked at the publication seam.
+#[test]
+fn inline_explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
+    check_explicit_cancel_while_wait_preemption_is_parked(false);
+}
+
+fn check_explicit_cancel_while_wait_preemption_is_parked(standalone: bool) {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
@@ -6094,7 +6119,7 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
-        .supports_standalone_compaction = true;
+        .supports_standalone_compaction = standalone;
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let wait = wait_input_call("wait-preempt-explicit-cancel");
@@ -6133,11 +6158,10 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
     )
     .expect("release parked cancellation");
 
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
-    );
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(_) | Event::AgentCompactionTriggered(_)
+    )));
     assert!(
         !h.prompt_coordination
             .compaction_runtime
@@ -6150,6 +6174,17 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
 /// compaction; a fresh request can retry and starts exactly one transaction.
 #[test]
 fn failed_wait_cancellation_append_rolls_back_without_compaction() {
+    check_failed_wait_cancellation_append_rolls_back(false);
+}
+
+/// A rejected inline cancellation restores the live wait, discards its
+/// transient compact intent, and allows a fresh explicit request to claim it.
+#[test]
+fn inline_failed_wait_cancellation_append_rolls_back_without_compaction() {
+    check_failed_wait_cancellation_append_rolls_back(true);
+}
+
+fn check_failed_wait_cancellation_append_rolls_back(inline: bool) {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
@@ -6157,7 +6192,7 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
-        .supports_standalone_compaction = true;
+        .supports_standalone_compaction = !inline;
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let wait = wait_input_call("wait-preempt-append-failure");
@@ -6189,11 +6224,10 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     )
     .expect("release cancellation into append failure");
 
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
-    );
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(_) | Event::AgentCompactionTriggered(_)
+    )));
     assert_eq!(tool_result_count(&h, wait.id.as_str()), 0);
     assert!(h.input_wait_pending_for(&cid));
     h.handle_compact_request(
@@ -6211,7 +6245,10 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     assert_eq!(
         event_log_events(&h)
             .iter()
-            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(_) | Event::AgentCompactionTriggered(_)
+            ))
             .count(),
         1
     );

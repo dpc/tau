@@ -1326,6 +1326,7 @@ fn deferred_compaction_wait_claim_cleanup_is_silent_and_not_logged() {
         .insert(
             cid.clone(),
             crate::harness::PendingUiCompactionAfterWait {
+                inline_only: false,
                 session_generation: h.session_runtime.current_session_generation,
                 agent_id: agent_id.clone(),
                 wait_call_id: wait_call_id.clone(),
@@ -1355,6 +1356,7 @@ fn deferred_compaction_wait_claim_cleanup_is_silent_and_not_logged() {
         .insert(
             cid.clone(),
             crate::harness::PendingUiCompactionAfterWait {
+                inline_only: false,
                 session_generation: h.session_runtime.current_session_generation,
                 agent_id,
                 wait_call_id: ToolCallId::from("wait-unload"),

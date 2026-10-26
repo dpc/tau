@@ -2273,6 +2273,9 @@ enum PendingBackgroundTerminalKind {
 
 /// One UI compaction waiting for a claimed wait cancellation to commit.
 struct PendingUiCompactionAfterWait {
+    /// Continue directly through the inline compatibility path, without a
+    /// durable standalone request.
+    inline_only: bool,
     /// Session generation in which the request claimed the waiter.
     session_generation: SessionGeneration,
     /// Durable public identity used to reject a new runtime incarnation.

@@ -145,8 +145,9 @@ impl Harness {
                 self.start_admitted_manual_compaction(&cid);
             } else if self.try_start_inline_compaction_after_wait(&cid, &turn_state) {
                 // The provider-inline compactor has no standalone transaction.
-                // Preserve its sole-live-wait optimization as an immediate,
-                // closed-round operation rather than pretending it is queued.
+                // Preserve its sole-live-wait optimization through the
+                // cancellation's closed-round continuation, without queuing a
+                // durable standalone request.
             } else {
                 self.send_ui_error_response(
                     client_id,
@@ -178,6 +179,25 @@ impl Harness {
             return false;
         };
         if self
+            .prompt_coordination
+            .compaction_runtime
+            .pending_ui_after_wait
+            .get(cid)
+            .is_some_and(|pending| pending.wait_call_id == *wait_call_id)
+            && self.wait_claimed_for_manual_compaction(cid, wait_call_id)
+        {
+            return true;
+        }
+        let Some(agent_id) = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.identity.agent_id.clone())
+        else {
+            return false;
+        };
+        if self
             .tool_routing
             .tool_runtime
             .pending_terminal_observations
@@ -199,6 +219,18 @@ impl Harness {
         {
             return false;
         }
+        self.prompt_coordination
+            .compaction_runtime
+            .pending_ui_after_wait
+            .insert(
+                cid.clone(),
+                PendingUiCompactionAfterWait {
+                    inline_only: true,
+                    session_generation: self.session_runtime.current_session_generation,
+                    agent_id,
+                    wait_call_id: wait_call_id.clone(),
+                },
+            );
         self.observe_tool_terminal(cid, wait_call_id, tau_proto::ToolTerminalCause::Unknown);
         self.publish_for_agent(
             cid,
@@ -210,7 +242,6 @@ impl Harness {
                 display: None,
             }),
         );
-        self.start_admitted_manual_compaction(cid);
         true
     }
 
@@ -290,6 +321,7 @@ impl Harness {
             .insert(
                 cid.clone(),
                 PendingUiCompactionAfterWait {
+                    inline_only: false,
                     session_generation: self.session_runtime.current_session_generation,
                     agent_id,
                     wait_call_id: wait_call_id.clone(),

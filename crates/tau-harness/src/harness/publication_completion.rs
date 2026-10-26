@@ -720,8 +720,8 @@ impl Harness {
         self.process_input_wait_deadlines(Instant::now());
     }
 
-    /// Releases a transient wait claim while leaving the durable UI intent
-    /// owed.
+    /// Drop the cancellation continuation. A separately accepted standalone UI
+    /// intent remains owed; an inline-only intent has no durable request.
     pub(super) fn reject_pending_ui_compaction(&mut self, cid: &AgentId) {
         self.prompt_coordination
             .compaction_runtime
