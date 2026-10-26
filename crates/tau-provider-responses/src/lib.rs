@@ -14,7 +14,7 @@ mod websocket;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 pub use compact_diagnostics::CompactDiagnostics;
 pub use prepared_sse_request::{PrepareSseRequestError, PreparedSseRequest};
@@ -485,7 +485,14 @@ enum Error {
     EmptyResponse,
     Canceled,
     Outbound(tau_provider::OutboundError),
-    Http(u16, String),
+    Http {
+        /// HTTP response status before any semantic output.
+        status: u16,
+        /// Bounded structured error body.
+        body: String,
+        /// Trusted Retry-After lower bound captured before consuming the body.
+        retry_after: Option<Duration>,
+    },
     Provider {
         /// Optional status carried by a post-upgrade provider event.
         status: Option<u16>,
@@ -516,7 +523,11 @@ impl Error {
             | Self::UnsupportedTool
             | Self::UnsupportedOutput
             | Self::RepetitionDetected(_) => None,
-            Self::Http(status, body) => {
+            Self::Http {
+                status,
+                body,
+                retry_after,
+            } => {
                 if failure_kind(*status, body).is_some() {
                     return None;
                 }
@@ -531,7 +542,7 @@ impl Error {
                         401 | 403 => RetryClass::Auth,
                         _ => RetryClass::Unknown,
                     });
-                Some(RetryDecision::new(class))
+                Some(RetryDecision::new(class).with_retry_after(*retry_after))
             }
             Self::Provider { status, code } => {
                 if code
@@ -552,7 +563,7 @@ impl Error {
                         Some(401 | 403) => RetryClass::Auth,
                         _ => RetryClass::Unknown,
                     });
-                if status.is_some_and(
+                if class == RetryClass::Unknown && status.is_some_and(
                     |status| matches!(status, 400 | 402 | 404..=407 | 409..=424 | 426..=428 | 430..=499),
                 )
                 {
@@ -569,7 +580,7 @@ impl Error {
                 if failure_kind.is_some() {
                     return None;
                 }
-                if status.is_some_and(
+                if *retry_class == RetryClass::Unknown && status.is_some_and(
                     |status| matches!(status, 400 | 402 | 404..=407 | 409..=424 | 426..=428 | 430..=499),
                 ) {
                     None
@@ -592,13 +603,19 @@ impl Error {
 
     fn failure_kind(&self) -> Option<tau_proto::ProviderFailureKind> {
         match self {
-            Self::Http(status, body) => failure_kind(*status, body),
+            Self::Http { status, body, .. } => failure_kind(*status, body),
             Self::Provider { status, code } => {
                 if let Some(kind) = code.as_deref().and_then(provider_code_failure_kind) {
                     Some(kind)
-                } else if status.is_some_and(
-                    |status| matches!(status, 400 | 402 | 404..=407 | 409..=424 | 426..=499),
-                ) {
+                } else if code
+                    .as_deref()
+                    .map(classify_error_code)
+                    .unwrap_or(RetryClass::Unknown)
+                    == RetryClass::Unknown
+                    && status.is_some_and(
+                        |status| matches!(status, 400 | 402 | 404..=407 | 409..=424 | 426..=499),
+                    )
+                {
                     Some(tau_proto::ProviderFailureKind::RequestRejected)
                 } else {
                     None
@@ -607,16 +624,16 @@ impl Error {
             Self::SseProvider {
                 status,
                 failure_kind,
-                ..
+                retry_class,
             } => failure_kind.or_else(|| {
-                status
-                    .is_some_and(|status| {
+                (*retry_class == RetryClass::Unknown
+                    && status.is_some_and(|status| {
                         matches!(
                             status,
                             400 | 402 | 404..=407 | 409..=424 | 426..=499
                         )
-                    })
-                    .then_some(tau_proto::ProviderFailureKind::RequestRejected)
+                    }))
+                .then_some(tau_proto::ProviderFailureKind::RequestRejected)
             }),
             Self::InvalidRequest | Self::UnsupportedTool | Self::UnsupportedOutput => {
                 Some(tau_proto::ProviderFailureKind::RequestRejected)
@@ -710,14 +727,25 @@ fn selected_provider_detail(event: &Value) -> Option<&str> {
 }
 
 fn failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailureKind> {
-    if let Some(kind) = classified_http_identifier(body)
-        .as_deref()
-        .and_then(provider_code_failure_kind)
-    {
-        return Some(kind);
+    if let Some(identifier) = classified_http_identifier(body) {
+        if let Some(kind) = provider_code_failure_kind(&identifier) {
+            return Some(kind);
+        }
+        if classify_error_code(&identifier) != RetryClass::Unknown {
+            return None;
+        }
     }
     matches!(status, 400 | 404 | 409 | 413 | 422)
         .then_some(tau_proto::ProviderFailureKind::RequestRejected)
+}
+
+/// Preserve only the standard trusted header using the shared parsing rules.
+fn response_retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| tau_provider::retry_policy::parse_retry_after(value, SystemTime::now()))
 }
 
 /// Select the structured HTTP error identifier that owns classification.
@@ -1112,7 +1140,7 @@ fn run_attempt_with_capture_and_updates(
                 Some(decision) => AttemptOutcome::Retryable {
                     decision,
                     progress,
-                    canonical_unauthorized: matches!(error, Error::Http(401, _)),
+                    canonical_unauthorized: matches!(error, Error::Http { status: 401, .. }),
                 },
                 None => terminal(error, progress),
             }
@@ -1185,7 +1213,7 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
             }
             Error::InvalidRequest => "Responses request was invalid".to_owned(),
             Error::RepetitionDetected(repetition) => repetition.to_string(),
-            Error::Http(status, _) => format!("provider returned HTTP {status}"),
+            Error::Http { status, .. } => format!("provider returned HTTP {status}"),
             Error::Provider { status, code } => {
                 let detail = code.as_deref().map(tau_proto::visible_escape_metadata);
                 match (status, detail) {
@@ -2651,6 +2679,7 @@ async fn stream_sse(
     }
     if !response.status().is_success() {
         let status = response.status().as_u16();
+        let retry_after = response_retry_after(&response);
         if let Some(error) = network.proxy_response_error(&url, status) {
             return Err((Error::Outbound(error), State::default().progress()));
         }
@@ -2663,7 +2692,14 @@ async fn stream_sse(
         )
         .await
         .map_err(|error| (error, State::default().progress()))?;
-        return Err((Error::Http(status, body), State::default().progress()));
+        return Err((
+            Error::Http {
+                status,
+                body,
+                retry_after,
+            },
+            State::default().progress(),
+        ));
     }
     let mut response = response;
     let mut state = State {

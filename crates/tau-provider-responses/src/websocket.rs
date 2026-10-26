@@ -328,6 +328,7 @@ pub(super) async fn stream(
             trace.connect_upgrade_closed();
         }
         let status = response.status().as_u16();
+        let retry_after = super::response_retry_after(&response);
         if let Some(error) = network.proxy_response_error(&websocket_url, status) {
             return Err((Error::Outbound(error), State::default().progress()));
         }
@@ -340,7 +341,14 @@ pub(super) async fn stream(
         )
         .await
         .map_err(|error| (error, State::default().progress()))?;
-        return Err((Error::Http(status, body), State::default().progress()));
+        return Err((
+            Error::Http {
+                status,
+                body,
+                retry_after,
+            },
+            State::default().progress(),
+        ));
     }
     if let Err(error) = validate_websocket_upgrade(&response, &key, network, &websocket_url) {
         if let Some(trace) = private_trace.as_mut() {

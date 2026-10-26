@@ -17,6 +17,7 @@ use super::*;
 
 mod cache_diagnostics;
 mod prepared_sse;
+mod retry_evidence;
 
 /// In-memory trace writer for production transport assertions.
 #[derive(Clone, Default)]

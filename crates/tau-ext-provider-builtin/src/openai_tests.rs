@@ -20,6 +20,7 @@ use crate::tests::SharedTraceWriter;
 mod cache_refresh_admission_tests;
 mod compaction_transport_retry_tests;
 mod image_resolution_tests;
+mod responses_retry_hint_tests;
 
 /// Shared byte sink used by tests that run tau-client's writer thread.
 #[derive(Clone, Default)]

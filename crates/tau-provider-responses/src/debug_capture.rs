@@ -633,7 +633,7 @@ fn transport_label(transport: Transport) -> &'static str {
 /// it.
 fn error_metadata(error: &Error) -> Value {
     match error {
-        Error::Http(status, body) => serde_json::json!({
+        Error::Http { status, body, .. } => serde_json::json!({
             "kind": "http", "http_status": status, "body": body,
         }),
         Error::Provider { status, code } => serde_json::json!({
