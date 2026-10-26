@@ -1378,6 +1378,14 @@ impl CodexRuntime {
                 abort,
             );
         }
+        if let Err(error) =
+            tau_provider::local_summary_compaction::validate_trailing_trigger(request.context)
+        {
+            return CompactOutcome::Terminal {
+                error: CodexError(common::LlmError::InvalidResponse(error.to_owned())),
+                backend_reached: false,
+            };
+        }
         let metadata_enabled = self
             .cache_diagnostics
             .get_or_init(BTreeMap::new)

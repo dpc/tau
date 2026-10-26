@@ -1305,21 +1305,21 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
 /// requested JSON byte length.
 fn context_with_historical_prefix_bytes(target: tau_proto::ByteCount) -> tau_proto::PromptContext {
     let mut context = tau_proto::PromptContext {
-        blocks: vec![tau_proto::ContextBlock::UserInput(
-            tau_proto::UserInputBlock {
-                items: vec![
-                    tau_proto::ContextItem::Message(tau_proto::MessageItem {
-                        role: tau_proto::ContextRole::User,
-                        content: vec![tau_proto::ContentPart::Text {
-                            text: String::new(),
-                        }],
-                        phase: None,
-                        responses_raw_json: None,
-                    }),
-                    tau_proto::ContextItem::CompactionTrigger,
-                ],
-            },
-        )],
+        blocks: vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                    role: tau_proto::ContextRole::User,
+                    content: vec![tau_proto::ContentPart::Text {
+                        text: String::new(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            }),
+        ],
     };
     let empty_bytes =
         tau_provider::local_summary_compaction::historical_prefix_json_bytes(&context)
@@ -1329,7 +1329,7 @@ fn context_with_historical_prefix_bytes(target: tau_proto::ByteCount) -> tau_pro
         .expect("target admits the fixed prompt envelope")
         .get();
     let tau_proto::ContextBlock::UserInput(block) = &mut context.blocks[0] else {
-        unreachable!("fixture contains one user block")
+        unreachable!("fixture starts with a user block")
     };
     let tau_proto::ContextItem::Message(message) = &mut block.items[0] else {
         unreachable!("fixture starts with one message")
@@ -1796,6 +1796,89 @@ fn compact_exact_success_returns_one_item() {
     );
     assert!(trace.contains("outcome=\"completed\""), "{trace}");
     assert!(trace.contains("transport=\"websocket\""), "{trace}");
+}
+
+/// Both native wire modes reject malformed trigger blocks before any upgrade,
+/// without poisoning admission for the next valid standalone request.
+#[test]
+fn native_compact_rejects_malformed_triggers_before_dispatch() {
+    use tau_proto::{ContextBlock, ContextItem, UserInputBlock};
+
+    use crate::responses::ResponsesMode;
+
+    for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+        let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
+        let mut config = ResolvedConfig {
+            inner: native_compact_test_config(server.base_url()),
+        };
+        config.inner.mode = mode;
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("invalid-trigger-session").expect("session");
+        let agent = tau_proto::AgentId::parse("invalid-trigger-agent").expect("agent");
+        let valid = compact_mixed_prefix_context();
+        let mut missing = valid.clone();
+        missing.blocks.pop();
+        let mut duplicated = valid.clone();
+        duplicated
+            .blocks
+            .push(valid.blocks.last().expect("valid trigger block").clone());
+        let mut non_final = valid.clone();
+        non_final.blocks.push(valid.blocks[0].clone());
+        let mut mixed = valid.clone();
+        let ContextBlock::UserInput(block) = mixed.blocks.last_mut().expect("mixed trigger block")
+        else {
+            unreachable!()
+        };
+        let ContextBlock::UserInput(prefix) = &valid.blocks[0] else {
+            unreachable!()
+        };
+        block.items.insert(0, prefix.items[0].clone());
+        let mut assistant = missing.clone();
+        let ContextBlock::AssistantResponse(block) = &mut assistant.blocks[1] else {
+            unreachable!()
+        };
+        block.output_items.push(ContextItem::CompactionTrigger);
+        assistant
+            .blocks
+            .push(ContextBlock::UserInput(UserInputBlock { items: vec![] }));
+        for context in [missing, duplicated, non_final, mixed, assistant] {
+            let request = test_prompt_payload(&session, &agent, &context);
+            let CompactOutcome::Terminal {
+                error,
+                backend_reached: false,
+            } = runtime.compact("invalid-trigger", &config, &request, &mut NeverAbort)
+            else {
+                panic!("malformed native context must reject locally");
+            };
+            assert!(matches!(error.0, common::LlmError::InvalidResponse(_)));
+            assert_eq!(
+                server
+                    .counts()
+                    .ws_upgrade_requests
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        }
+        let request = test_prompt_payload(&session, &agent, &valid);
+        assert!(matches!(
+            runtime.compact("valid-trigger", &config, &request, &mut NeverAbort),
+            CompactOutcome::Finished { .. }
+        ));
+        let requests = server.counts.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        let input = requests[0]["input"].as_array().expect("input");
+        assert_eq!(
+            input.last().expect("final input")["type"],
+            "compaction_trigger"
+        );
+        assert_eq!(
+            input
+                .iter()
+                .filter(|item| item["type"] == "compaction_trigger")
+                .count(),
+            1
+        );
+    }
 }
 
 /// The catalog-enabled Astra route executes the existing native WebSocket

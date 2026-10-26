@@ -12,6 +12,14 @@ ChatGPT standalone compaction uses the ordinary Responses request shape plus a
 final `compaction_trigger`; these legacy fixtures are not its production
 contract.
 
+`responses-compact-ws-standard.json` and `responses-compact-ws-lite.json` freeze
+the production `response.create` envelope with synthetic opaque prior history
+and one separate final trigger block. They include routing and mode metadata,
+tools, assistant phase, system instructions, service tier, encrypted-reasoning
+inclusion, and stable prompt-cache identity. Neither includes a previous-response
+anchor.
+The historical unary fixtures remain unchanged.
+
 `responses-compact-output.json` is the canonical opaque response form. Its raw
 item JSON must survive parsing and later provider replay unchanged.
 

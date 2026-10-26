@@ -971,22 +971,23 @@ terminal silently no-op. See
   validation. Historical failed open-prefix starts remain replay-valid only for
   explicit recovery by a normalized successor; their immutable events are not
   rewritten.
-  Typed `transient_compaction_exhausted` and `local_summary_unusable` failures are
-  narrow exceptions when no successor is already pending:
-  after a fresh ordinary inference terminal on the matching model and lineage,
-  an automatic successor may select current provider-closed history while
-  preserving the old outcome and owed resume ancestry.
+  Historical fresh-terminal successors for typed `transient_compaction_exhausted`
+  and `local_summary_unusable` failures remain replay-valid, including their
+  selection of current provider-closed history and retention of resume ancestry.
+  The scheduler creates no such automatic successors after final failure.
 - **`agent.standalone_compaction_failed`** — Harness-owned terminal transaction
   failure with a safe categorical reason and retained resume obligation. The
   `transient_compaction_exhausted` reason records bounded retries before accepted
-  semantic output. Queue polling and restart do not retry it; fresh ordinary
-  inference terminal evidence can authorize one automatic successor. Historical
+  semantic output. Final failure pauses ordinary inference on the matching model
+  and lineage until explicit recovery succeeds. Fresh ordinary terminals, input,
+  queue polling, timers, and restart do not lift that pause. Historical
   `provider_error` failures remain unclassified and require explicit recovery.
   `local_summary_unusable` records a clean completed no-tool summary with no
   usable narrative. Its output-free canonical provider terminal commits first.
   It may pre-mint a smaller-prefix successor, with four such successors per
-  episode. Exhaustion or irreducibility blocks until explicit recovery or a fresh
-  ordinary terminal; a failed episode never dispatches inference to rearm itself.
+  episode. Once no durable successor remains, exhaustion or irreducibility
+  requires explicit recovery; a failed episode never dispatches inference to
+  rearm itself.
   A public Responses or Chat Completions local-summary output-limit failure also retains its typed partial output,
   usage, response id, attempt, and backend in a non-context projection; replay
   requires the matching `output_length_exceeded` reason and never treats that

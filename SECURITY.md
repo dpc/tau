@@ -1272,24 +1272,26 @@ attempts only before semantic compact output is accepted. An error processed
 first in an event accepts no content and remains retryable. Once compact output
 is accepted, any later failure discards that uncommitted output and terminalizes
 without automatic retry; recovery requires a distinct explicit request.
-Deterministic failures terminalize immediately. After terminal continuation or
-background completion, ordinary input proceeds, while durable failure history
-suppresses automatic threshold, policy, continuation, and reactive recovery for
-the same provider-qualified model and branch. Model or branch drift permits
-fresh independent work; returning restores suppression until a successful
-matching authorized successor clears the failed chain. Typed exhausted
-pre-output transient failures are the narrow exception: a fresh ordinary
-inference terminal on the matching model and lineage can authorize one automatic
-successor, including a canonical no-output context-window rejection. Polling,
-ingress, and restart alone cannot rearm it. Historical unclassified and
-post-progress failures retain explicit-only recovery.
+Deterministic failures terminalize immediately. Once no durable successor remains,
+final failure pauses ordinary inference and suppresses automatic threshold,
+policy, continuation, and reactive recovery for the same provider-qualified model
+and branch. Already accepted terminal/tool/background completion obligations
+still settle once. Model or branch drift permits fresh independent work;
+returning to the failed model and branch restores suppression until a successful
+matching authorized successor clears the failed chain. Exhausted pre-output
+transient and unusable local-summary failures retain their within-episode
+retry/retreat bounds, but final failure
+requires explicit recovery, as do historical unclassified and post-progress
+failures. Fresh ordinary terminals, ingress, timers, polling, and restart cannot
+rearm a final failed episode.
 
 An explicit successor may retreat its cut to retain more exact suffix, but it
 must preserve same-branch coverage of any resume watermark and cannot replace
 that watermark with an ancestor or sibling selected by later head navigation.
-The typed fresh-terminal automatic successor may instead select the current
-provider-closed prefix on that lineage while preserving the resume ancestry and
-post-cut suffix.
+Historical typed fresh-terminal automatic successors remain replay-valid,
+including selection of the current provider-closed prefix on that lineage while
+preserving resume ancestry and the post-cut suffix. The scheduler creates no
+such successors after final failure.
 Ordinary input and `:cancel` do not clear durable failure authority. Core
 validation and warm/cold exact-once replay regressions prevent duplicate provider
 dispatch, terminal delivery, and continuation checkpoints.

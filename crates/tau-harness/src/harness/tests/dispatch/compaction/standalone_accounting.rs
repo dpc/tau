@@ -38,7 +38,8 @@ fn report_standalone_retry(h: &mut Harness, prompt: &tau_proto::AgentPromptCreat
 }
 
 /// A failed standalone provider terminal must replace its retry snapshot for
-/// current and warm late watchers, while restart drops the runtime-only state.
+/// current and warm late watchers, while restart reconstructs the durable pause
+/// for cold late watchers.
 #[test]
 fn standalone_failure_terminalizes_warm_provider_watch_status() {
     let td = TempDir::new().expect("tempdir");

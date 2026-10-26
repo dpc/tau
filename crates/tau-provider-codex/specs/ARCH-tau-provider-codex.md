@@ -115,10 +115,12 @@ only while the attempt has accepted no semantic compact output. Once the parser
 accepts a compact item, any later failure discards the tentative item and
 terminalizes that logical request without another paid dispatch. An error event
 is processed before any item-shaped fields in that event, so such an error is
-non-progress and remains retry-eligible. After pre-output transient exhaustion,
-a fresh ordinary inference terminal may authorize a new transaction. Failures
-after accepted semantic output require an explicit request. Ordinary inference
-retry policy is unchanged.
+non-progress and remains retry-eligible. Final failures, including pre-output
+transient exhaustion and failures after accepted semantic output, pause ordinary
+inference on the matching model and lineage and require explicit recovery.
+Fresh ordinary terminals and restart do not lift that pause. Historical
+fresh-terminal successors remain replay-valid, but the scheduler creates none.
+Ordinary inference retry policy is unchanged.
 This boundary implements
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 The writer sends a 25-second `websocket_control_ping` WebSocket control frame
