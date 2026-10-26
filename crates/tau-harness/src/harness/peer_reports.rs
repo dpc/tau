@@ -1654,7 +1654,29 @@ impl Harness {
                 .status
                 .as_ref()
                 .and_then(|status| status.retry.as_ref())
-                .is_some_and(|retry| retry.attempt > tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS);
+                .is_some_and(|retry| {
+                    if !self
+                        .prompt_coordination
+                        .standalone_accounting
+                        .owners
+                        .contains_key(&updated.agent_prompt_id)
+                    {
+                        return false;
+                    }
+                    let previous = self
+                        .prompt_coordination
+                        .standalone_accounting
+                        .highest_retry_attempt
+                        .get(&updated.agent_prompt_id)
+                        .copied()
+                        .unwrap_or_default();
+                    retry.attempt < previous
+                        || retry.attempt == u32::MAX
+                        || retry.attempt
+                            > previous
+                                .checked_add(1)
+                                .expect("retry authority reserves the terminal")
+                });
         if let Some(retry) = updated
             .status
             .as_ref()

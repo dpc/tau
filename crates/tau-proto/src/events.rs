@@ -2308,11 +2308,6 @@ pub struct ProviderRetryStatus {
     pub next_retry_delay_secs: u32,
 }
 
-/// Maximum retry attempts that a standalone provider prompt may report.
-///
-/// Attempt 65 is reserved for the terminal backend result after these retries.
-pub const MAX_STANDALONE_RETRY_ATTEMPTS: u32 = 64;
-
 /// Invariant-preserving current state of watched provider work.
 ///
 /// The phase is the serde discriminator rather than an independent field, so

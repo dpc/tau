@@ -442,7 +442,8 @@ impl Harness {
                 .get(&response.agent_prompt_id)
                 .copied()
                 .unwrap_or_default()
-                + 1
+                .checked_add(1)
+                .expect("retry authority reserves the final representable terminal")
         } else {
             self.target_agent_id_for_agent(&cid)
                 .and_then(|agent_id| {
@@ -992,7 +993,8 @@ impl Harness {
             .get(&response.agent_prompt_id)
             .copied()
             .unwrap_or_default()
-            + 1;
+            .checked_add(1)
+            .expect("retry authority reserves the final representable terminal");
         response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
             .expect("standalone terminal attempt is one-based");
         normalize_finished_response_cached_usage(response);
@@ -3139,7 +3141,8 @@ impl Harness {
             .get(agent_prompt_id)
             .copied()
             .unwrap_or_default()
-            + 1;
+            .checked_add(1)
+            .expect("retry authority reserves the final representable terminal");
         let logical_attempt =
             tau_proto::ProviderAttempt::new(attempt).expect("bounded attempt is nonzero");
         let identity = (agent_prompt_id.clone(), logical_attempt);
@@ -3265,7 +3268,8 @@ impl Harness {
             .get(agent_prompt_id)
             .copied()
             .unwrap_or_default()
-            + 1;
+            .checked_add(1)
+            .expect("retry authority reserves the final representable terminal");
         let logical_attempt =
             tau_proto::ProviderAttempt::new(attempt).expect("bounded attempt is nonzero");
         let identity = (agent_prompt_id.clone(), logical_attempt);
@@ -3361,7 +3365,17 @@ impl Harness {
         {
             return;
         }
-        if attempt > tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS {
+        let previous = self
+            .prompt_coordination
+            .standalone_accounting
+            .highest_retry_attempt
+            .get(agent_prompt_id)
+            .copied()
+            .unwrap_or_default();
+        if attempt <= previous {
+            return;
+        }
+        if previous.checked_add(1) != Some(attempt) || attempt == u32::MAX {
             if self
                 .prompt_coordination
                 .standalone_accounting
@@ -3372,67 +3386,57 @@ impl Harness {
                     target: "tau_harness",
                     %agent_prompt_id,
                     attempt,
-                    maximum = tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS,
-                    "standalone provider retry status exceeds the accounting contract; retaining it only as transient provider diagnostics"
+                    previous,
+                    "standalone provider retry status is not a consecutive representable retry; retaining it only as transient provider diagnostics"
                 );
             }
             return;
         }
-        let previous = self
-            .prompt_coordination
+        self.prompt_coordination
             .standalone_accounting
             .highest_retry_attempt
-            .entry(agent_prompt_id.clone())
-            .or_default();
-        if attempt <= *previous {
+            .insert(agent_prompt_id.clone(), attempt);
+        let logical_attempt =
+            tau_proto::ProviderAttempt::new(attempt).expect("accepted retry is one-based");
+        let identity = (agent_prompt_id.clone(), logical_attempt);
+        if !self
+            .prompt_coordination
+            .standalone_accounting
+            .observed_attempts
+            .insert(identity.clone())
+        {
             return;
         }
-        let first = previous.saturating_add(1);
-        *previous = attempt;
-        for attempt in first..=attempt {
-            let Some(logical_attempt) = tau_proto::ProviderAttempt::new(attempt) else {
-                break;
-            };
-            let identity = (agent_prompt_id.clone(), logical_attempt);
-            if !self
-                .prompt_coordination
-                .standalone_accounting
-                .observed_attempts
-                .insert(identity.clone())
-            {
-                continue;
-            }
-            let key = (
-                identity.0.clone(),
-                identity.1,
-                StandaloneAccountingPublicationPhase::Initial,
-            );
-            self.publish_event_for_agent_with_completion(
-                &owner.cid,
-                Some(crate::harness::harness_connection_id()),
-                Event::ProviderStandaloneExecutionAccounted(
-                    tau_proto::ProviderStandaloneExecutionAccounted {
-                        session_id: owner.session_id.clone(),
-                        agent_id: owner.agent_id.clone(),
-                        agent_prompt_id: agent_prompt_id.clone(),
-                        logical_attempt,
-                        transaction_id: owner.transaction_id.clone(),
-                        model: owner.model.clone(),
-                        backend: None,
-                        usage: tau_proto::StandaloneExecutionUsage::Unknown,
-                        estimated_api_cost_rates: Some(owner.estimated_cost_rates),
-                        estimated_api_cost_increment: None,
-                        output: tau_proto::StandaloneExecutionOutput::Rejected,
-                        finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
-                    },
-                ),
-                Some(AgentPublishCompletion::StandaloneExecutionAccounting {
-                    key,
-                    owned_publication: None,
-                }),
-                false,
-            );
-        }
+        let key = (
+            identity.0.clone(),
+            identity.1,
+            StandaloneAccountingPublicationPhase::Initial,
+        );
+        self.publish_event_for_agent_with_completion(
+            &owner.cid,
+            Some(crate::harness::harness_connection_id()),
+            Event::ProviderStandaloneExecutionAccounted(
+                tau_proto::ProviderStandaloneExecutionAccounted {
+                    session_id: owner.session_id.clone(),
+                    agent_id: owner.agent_id.clone(),
+                    agent_prompt_id: agent_prompt_id.clone(),
+                    logical_attempt,
+                    transaction_id: owner.transaction_id.clone(),
+                    model: owner.model.clone(),
+                    backend: None,
+                    usage: tau_proto::StandaloneExecutionUsage::Unknown,
+                    estimated_api_cost_rates: Some(owner.estimated_cost_rates),
+                    estimated_api_cost_increment: None,
+                    output: tau_proto::StandaloneExecutionOutput::Rejected,
+                    finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+                },
+            ),
+            Some(AgentPublishCompletion::StandaloneExecutionAccounting {
+                key,
+                owned_publication: None,
+            }),
+            false,
+        );
     }
 
     /// Accounts for one accepted response increment and publishes affected live

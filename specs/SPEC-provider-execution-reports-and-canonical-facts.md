@@ -128,7 +128,7 @@ session token and cost accounting remains intentionally billable. Ordinary and
 reactive-recovery paths retain their canonical response behavior.
 Every report-derived alternative uses harness source.
 
-Every standalone backend attempt also derives one durable
+Each evidenced standalone backend attempt also derives one durable
 `provider.standalone_execution_accounted` fact before publishing the independent
 compaction outcome. Its idempotency key is the pair of prompt id and finite logical
 provider attempt. The fact carries the required session whose ledger owns the
@@ -139,10 +139,20 @@ increment when usage is known, and whether the compaction output was accepted or
 rejected. Unknown usage is a first-class value rather than an all-zero sample.
 Retry updates close preceding attempts with explicit unknown usage; the final
 terminal closes its finite attempt with normalized reported or unknown usage.
-Standalone retry accounting accepts attempts 1 through 64 and reserves logical
-attempt 65 for the terminal result. A retry status above 64 remains visible only
-in its transient `_reported` observation: the harness warns once per prompt and
-does not treat it as accounting or watcher-attempt authority.
+Standalone retry accounting has no lifetime 64-attempt ceiling. The harness
+starts with highest accepted retry ordinal zero. It closes one attempt and
+advances authority only for the next consecutive, correctly correlated report.
+Duplicate or stale reports add nothing and cannot regress watcher state. The
+harness warns at most once per prompt about gaps, without accounting, backfill,
+or structured watcher authority.
+Initial cooldown zero is not a completed attempt. The harness assigns the final
+terminal the next ordinal from this validated sequence, not the provider's
+terminal counter.
+Exact physical attempt counts require the complete valid report sequence;
+dropped reports leave accounting incomplete.
+The finite `u32` representation remains. Checked arithmetic reserves its last
+ordinal for a terminal and prevents wrapping, saturation into reused identities,
+and dispatch of an unrepresentable successor.
 Provider work rejected as invalid remains billable; cancellation or rejection
 before backend dispatch produces no accounting fact.
 

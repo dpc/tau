@@ -49,6 +49,8 @@ mod report_sink;
 mod responses;
 mod retry_status;
 mod setup_store;
+#[cfg(feature = "standalone-compaction-test-support")]
+mod standalone_compaction_test_support;
 mod startup;
 mod startup_identity;
 mod worker_report_sink;
@@ -121,6 +123,8 @@ use retry_status::{
     saturating_retry_delay,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "standalone-compaction-test-support")]
+pub use standalone_compaction_test_support::standalone_compaction_retry_frames;
 use startup::run_inner_with_executors_and_clock_with_settings;
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
@@ -2609,7 +2613,7 @@ where
     run_inner(reader, writer, profiles, move |_| prompt_profiles.clone())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "standalone-compaction-test-support"))]
 fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
     let provider = ProviderName::new(CHATGPT_PROVIDER_NAME);
     let mut providers = BTreeMap::new();
@@ -2772,7 +2776,7 @@ struct RuntimeStartup {
     publish_models_after_configure: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "standalone-compaction-test-support"))]
 fn run_inner_with_executors_and_clock<R, W, F>(
     reader: R,
     writer: W,
@@ -6322,7 +6326,21 @@ impl PromptRetryPolicy {
 
     /// Returns the complete scheduling disposition after one more failure.
     fn after_failure(self, previous_failures: u64, class: RetryClass) -> PromptRetryDisposition {
-        let failures = previous_failures.saturating_add(1);
+        if self == Self::UnboundedInference {
+            return PromptRetryDisposition::Retry;
+        }
+        let failures = previous_failures
+            .checked_add(1)
+            .and_then(|attempt| u32::try_from(attempt).ok())
+            .expect("standalone scheduler never dispatches an unrepresentable attempt");
+        let attempt =
+            tau_proto::ProviderAttempt::new(failures).expect("failure ordinal is nonzero");
+        // The last wire identity closes this attempt; it cannot authorize a
+        // successor or be reused by a saturated retry counter.
+        if failures == u32::MAX {
+            return PromptRetryDisposition::Terminal(attempt);
+        }
+        let failures = u64::from(failures);
         let limit = u64::from(STANDALONE_COMPACTION_ATTEMPT_LIMIT.get());
         match self {
             Self::UnboundedInference => PromptRetryDisposition::Retry,
@@ -6337,10 +6355,7 @@ impl PromptRetryPolicy {
                 }
             }
             Self::FiveAttemptStandaloneCompaction if limit <= failures => {
-                PromptRetryDisposition::Terminal(
-                    tau_proto::ProviderAttempt::new(u32::try_from(failures).unwrap_or(u32::MAX))
-                        .expect("failure ordinal is nonzero"),
-                )
+                PromptRetryDisposition::Terminal(attempt)
             }
             Self::FiveAttemptStandaloneCompaction => PromptRetryDisposition::Retry,
         }
@@ -6620,7 +6635,7 @@ enum SchedulerCommand {
     },
     /// Interrupts a timer wait after an injected clock advances.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "standalone-compaction-test-support")),
         expect(dead_code, reason = "constructed by injected virtual clocks")
     )]
     Wake {

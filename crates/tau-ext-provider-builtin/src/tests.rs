@@ -4013,6 +4013,23 @@ fn standalone_retry_budget_exhausts_without_bounding_inference() {
     }
 }
 
+/// The final representable compaction attempt may execute but must terminalize
+/// on failure rather than scheduling work with a wrapped or reused identity.
+#[test]
+fn standalone_retry_counter_endpoint_reserves_terminal_identity() {
+    let policy = PromptRetryPolicy::FiveAttemptStandaloneCompaction;
+    assert_eq!(
+        policy.after_failure(u64::from(u32::MAX) - 2, RetryClass::Transport),
+        PromptRetryDisposition::Retry
+    );
+    assert_eq!(
+        policy.after_failure(u64::from(u32::MAX) - 1, RetryClass::Transport),
+        PromptRetryDisposition::Terminal(
+            tau_proto::ProviderAttempt::new(u32::MAX).expect("final finite attempt")
+        )
+    );
+}
+
 /// Ensures prompts sharing one reset lower bound receive positive stable
 /// prompt-local jitter instead of stampeding at one identical instant.
 #[test]

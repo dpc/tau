@@ -4424,19 +4424,14 @@ impl AgentTree {
         &self,
         accounted: &tau_proto::ProviderStandaloneExecutionAccounted,
     ) -> Result<(), AgentEventValidationError> {
-        if accounted.logical_attempt.get() > tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS + 1 {
-            return Err(AgentEventValidationError::new(
-                "standalone execution accounting attempt exceeds the retry and terminal bound",
-            ));
-        }
         let previous_attempt = self
             .compaction_transactions
             .accounting
             .get(&accounted.agent_prompt_id)
             .map(|fold| fold.initial.logical_attempt);
         let expected_attempt =
-            previous_attempt.map_or(1, |attempt| attempt.get().saturating_add(1));
-        if accounted.logical_attempt.get() != expected_attempt {
+            previous_attempt.map_or(Some(1), |attempt| attempt.get().checked_add(1));
+        if Some(accounted.logical_attempt.get()) != expected_attempt {
             return Err(AgentEventValidationError::new(
                 "standalone execution accounting attempts must be consecutive and unique",
             ));

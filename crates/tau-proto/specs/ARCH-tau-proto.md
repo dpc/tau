@@ -283,8 +283,11 @@ Canonical standalone execution accounting is a separate durable fact. Its
 required session id selects the live and restored ledger; prompt and logical
 attempt form its idempotency key. Usage is a closed known-or-unknown value and
 accepted-or-rejected output disposition remains independent from billing.
-Standalone retry attempts are bounded at 64 and reserve attempt 65 for the
-terminal result. A cancellation-time initial observation can be marked awaiting;
+The harness accounts only for consecutive correlated standalone retry reports,
+with no lifetime 64-attempt ceiling. Duplicates add nothing, and gaps do not
+authorize backfill. The terminal uses the next validated ordinal. The last
+representable `u32` identity is terminal-only.
+A cancellation-time initial observation can be marked awaiting;
 one separate final correction event may then fill its absent usage/backend/cost
 without creating another logical attempt.
 

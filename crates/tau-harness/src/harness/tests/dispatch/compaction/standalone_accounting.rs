@@ -248,7 +248,9 @@ fn standalone_cancellation_retires_warm_provider_watch_status() {
         Some(&watched_id),
     );
     let prompt = read_nth_prompt_created(&h, 0);
-    report_standalone_retry(&mut h, &prompt, 1);
+    for attempt in 1..=70 {
+        report_standalone_retry(&mut h, &prompt, attempt);
+    }
     let watcher_provider_status_count = |h: &Harness| {
         session_agent_message_received_events(h)
             .into_iter()
@@ -258,7 +260,8 @@ fn standalone_cancellation_retires_warm_provider_watch_status() {
             })
             .count()
     };
-    assert_eq!(watcher_provider_status_count(&h), 1);
+    let retry_notifications = watcher_provider_status_count(&h);
+    assert!(retry_notifications > 0);
 
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
@@ -267,6 +270,16 @@ fn standalone_cancellation_retires_warm_provider_watch_status() {
             target_agent_id: Some(crate::parse_agent_id(&watched_id)),
             agent_prompt_id: Some(prompt.agent_prompt_id.clone()),
         },
+    );
+    for attempt in [70, 71, u32::MAX] {
+        report_standalone_retry(&mut h, &prompt, attempt);
+    }
+    assert_eq!(
+        h.prompt_coordination
+            .standalone_accounting
+            .awaiting_corrections[&prompt.agent_prompt_id]
+            .get(),
+        71
     );
 
     assert!(
@@ -278,7 +291,7 @@ fn standalone_cancellation_retires_warm_provider_watch_status() {
     );
     assert_eq!(
         watcher_provider_status_count(&h),
-        2,
+        retry_notifications + 1,
         "cancellation publishes one blocked transition"
     );
     h.set_agent_watch(
@@ -298,9 +311,8 @@ fn standalone_cancellation_retires_warm_provider_watch_status() {
     );
 }
 
-/// A standalone-capable model must bound retry accounting at 64, reserve
-/// attempt 65 for its terminal, and accept validated output as one replacement
-/// boundary.
+/// Standalone accounting accepts consecutive reports only, never fills gaps,
+/// and installs validated output as one replacement boundary.
 #[test]
 fn manual_standalone_compact_installs_one_boundary() {
     let td = TempDir::new().expect("tempdir");
@@ -364,7 +376,7 @@ fn manual_standalone_compact_installs_one_boundary() {
         .get(&prompt.agent_prompt_id)
         .cloned()
         .expect("provider owner");
-    for attempt in [1, 1, tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS, u32::MAX] {
+    for attempt in [0, 1, 1, 64, u32::MAX, 2, 1, 0] {
         let text = if attempt == u32::MAX {
             "retry-overbound"
         } else {
@@ -400,7 +412,7 @@ fn manual_standalone_compact_installs_one_boundary() {
             .standalone_accounting
             .highest_retry_attempt
             .get(&prompt.agent_prompt_id),
-        Some(&tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS),
+        Some(&2),
         "out-of-contract retry status must not become accounting authority"
     );
     assert!(
@@ -425,10 +437,7 @@ fn manual_standalone_compact_installs_one_boundary() {
                 status.agent_prompt_id == prompt.agent_prompt_id
                     && matches!(
                         status.state,
-                        tau_proto::AgentWatchProviderState::Retrying {
-                            attempt: tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS,
-                            ..
-                        }
+                        tau_proto::AgentWatchProviderState::Retrying { attempt: 2, .. }
                     )
             })
     );
@@ -495,8 +504,8 @@ fn manual_standalone_compact_installs_one_boundary() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(accounting.len(), 65);
-    for attempt in 1..=tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS {
+    assert_eq!(accounting.len(), 3);
+    for attempt in 1..=2 {
         assert!(accounting.iter().any(|accounted| {
             accounted.logical_attempt.get() == attempt
                 && accounted.usage == tau_proto::StandaloneExecutionUsage::Unknown
@@ -505,7 +514,7 @@ fn manual_standalone_compact_installs_one_boundary() {
     }
     let accounting = accounting
         .iter()
-        .find(|accounted| accounted.logical_attempt.get() == 65)
+        .find(|accounted| accounted.logical_attempt.get() == 3)
         .expect("terminal attempt accounting");
     assert_eq!(accounting.session_id, test_session_id("s1"));
     assert_eq!(accounting.transaction_id, started.transaction_id);
@@ -573,6 +582,166 @@ fn manual_standalone_compact_installs_one_boundary() {
     assert_eq!(
         resumed.session_runtime.current_session_state.token_usage, live_usage,
         "cold replay must rebuild the same standalone accounting ledger"
+    );
+    resumed.shutdown().expect("shutdown resumed harness");
+}
+
+/// Real production scheduler reports beyond the former 64-attempt ceiling must
+/// yield exactly one fact per evidenced attempt and identical cold ledgers.
+#[test]
+fn production_scheduler_seventy_retries_account_and_replay_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    let prompt = read_nth_prompt_created(&h, 0);
+    let provider = h.provider_runtime.pending_prompts[&prompt.agent_prompt_id].clone();
+    let mut terminal = strict_fake_compact_response(&prompt).expect("valid summary");
+    terminal.usage = Some(tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 1_000,
+        response_received_tokens: 100,
+        ..Default::default()
+    });
+    // A provider terminal counter cannot independently grant accounting
+    // authority.
+    terminal.provider_attempt = tau_proto::ProviderAttempt::new(u32::MAX).expect("finite claim");
+    let frames = tau_ext_provider_builtin::standalone_compaction_retry_frames(
+        prompt.clone(),
+        70,
+        terminal.into(),
+    );
+    let mut retry_ordinals = Vec::new();
+    for frame in frames {
+        let tau_proto::HarnessInputMessage::Emit(emit) = frame else {
+            continue;
+        };
+        if !matches!(
+            emit.event.as_ref(),
+            Event::ProviderPromptSubmittedReported(_)
+                | Event::ProviderResponseUpdatedReported(_)
+                | Event::ProviderResponseFinishedReported(_)
+        ) {
+            continue;
+        }
+        if let Event::ProviderResponseUpdatedReported(updated) = emit.event.as_ref()
+            && let Some(retry) = updated
+                .status
+                .as_ref()
+                .and_then(|status| status.retry.as_ref())
+        {
+            retry_ordinals.push(retry.attempt);
+        }
+        let terminal = matches!(
+            emit.event.as_ref(),
+            Event::ProviderResponseFinishedReported(_)
+        );
+        if terminal {
+            assert!(matches!(
+                h.agent_runtime.agent_watch.provider_status[agent_id.as_str()].state,
+                tau_proto::AgentWatchProviderState::Retrying { attempt: 70, .. }
+            ));
+        }
+        h.handle_extension_event(provider.as_str(), TestProtocolItem::Event(*emit.event))
+            .expect("ordinary authenticated report ingestion");
+    }
+    assert_eq!(retry_ordinals, (1..=70).collect::<Vec<_>>());
+    let events = event_log_events(&h);
+    let facts = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ProviderStandaloneExecutionAccounted(fact) => Some(fact.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(facts.len(), 71);
+    for (index, fact) in facts.iter().enumerate() {
+        assert_eq!(fact.logical_attempt.get() as usize, index + 1);
+        if index < 70 {
+            assert_eq!(fact.usage, tau_proto::StandaloneExecutionUsage::Unknown);
+            assert_eq!(fact.estimated_api_cost_increment, None);
+            assert_eq!(fact.output, tau_proto::StandaloneExecutionOutput::Rejected);
+        }
+    }
+    assert!(
+        matches!(&facts[70].usage, tau_proto::StandaloneExecutionUsage::Known(usage)
+        if usage.prompt_sent_tokens == 1_000 && usage.response_received_tokens == 100)
+    );
+    assert_eq!(
+        facts[70].output,
+        tau_proto::StandaloneExecutionOutput::Accepted
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentCompacted(_)))
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionFailed(_)))
+    );
+    assert!(
+        h.prompt_coordination
+            .standalone_accounting
+            .retained
+            .is_empty()
+    );
+    let live_usage = h.session_runtime.current_session_state.token_usage.clone();
+    assert_eq!(live_usage.total.requests, 71);
+    let live_cost = h
+        .agent_runtime
+        .agent_registry
+        .cost_ledger
+        .self_cost(&agent_id);
+    h.shutdown().expect("shutdown");
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("cold resume");
+    ensure_test_user_agent(&mut resumed);
+    assert_eq!(
+        resumed.session_runtime.current_session_state.token_usage,
+        live_usage
+    );
+    assert_eq!(
+        resumed
+            .agent_runtime
+            .agent_registry
+            .cost_ledger
+            .self_cost(&agent_id),
+        live_cost
+    );
+    let replayed = resumed
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(agent_id.as_str())
+        .expect("cold facts")
+        .into_iter()
+        .filter_map(|record| match record.event {
+            Event::ProviderStandaloneExecutionAccounted(fact) => Some(fact),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replayed, facts);
+    assert!(
+        !event_log_events(&resumed)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
     );
     resumed.shutdown().expect("shutdown resumed harness");
 }
@@ -1210,12 +1379,14 @@ fn retained_standalone_success_is_retired_only_by_committed_outcome() {
     }
 }
 
-/// An append-rejected cancellation observation must commit before its already
-/// received late-terminal correction, without blocking the Cancelled outcome.
+/// After seventy retries, an append-rejected cancellation freezes attempt 71
+/// before its late correction, without blocking cancellation or counting usage
+/// correction as another request. Replay must preserve that accounting.
 #[test]
 fn rejected_cancellation_accounting_orders_late_terminal_correction() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
         .provider_runtime
@@ -1232,6 +1403,9 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
         Some(agent_id.as_str()),
     );
     let compact = read_nth_prompt_created(&h, 0);
+    for attempt in 1..=70 {
+        report_standalone_retry(&mut h, &compact, attempt);
+    }
     reject_next_semantic_admission(&h);
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
@@ -1246,10 +1420,24 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
         Event::AgentStandaloneCompactionFailed(failed)
             if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
     )));
-    h.handle_provider_response_finished(
-        strict_fake_compact_response(&compact).expect("valid late terminal"),
-    )
-    .expect("queue correction behind rejected initial");
+    assert_eq!(
+        h.prompt_coordination
+            .standalone_accounting
+            .awaiting_corrections[&compact.agent_prompt_id]
+            .get(),
+        71
+    );
+    let mut terminal = strict_fake_compact_response(&compact).expect("valid late terminal");
+    terminal.provider_attempt = tau_proto::ProviderAttempt::new(u32::MAX).expect("provider claim");
+    terminal.usage = Some(tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 1_000,
+        response_received_tokens: 100,
+        ..Default::default()
+    });
+    h.handle_provider_response_finished(terminal.clone())
+        .expect("queue correction behind rejected initial");
+    h.handle_provider_response_finished(terminal)
+        .expect("duplicate correction cannot add a request");
     assert_eq!(
         h.prompt_coordination.standalone_accounting.retained.len(),
         1
@@ -1285,6 +1473,7 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
                 &record.event,
                 Event::ProviderStandaloneExecutionAccounted(accounted)
                     if accounted.agent_prompt_id == compact.agent_prompt_id
+                        && accounted.logical_attempt.get() == 71
             ))
             .count(),
         1
@@ -1313,6 +1502,7 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
                 &record.event,
                 Event::ProviderStandaloneExecutionAccounted(accounted)
                     if accounted.agent_prompt_id == compact.agent_prompt_id
+                        && accounted.logical_attempt.get() == 71
             )
         })
         .expect("committed initial");
@@ -1327,6 +1517,13 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
         })
         .expect("committed correction");
     assert!(initial < correction);
+    assert!(matches!(&events[correction].event,
+        Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+            if corrected.logical_attempt.get() == 71
+                && corrected.estimated_api_cost_increment.is_some()
+                && matches!(&corrected.usage, tau_proto::StandaloneExecutionUsage::Known(usage)
+                    if usage.prompt_sent_tokens == 1_000 && usage.response_received_tokens == 100)
+    ));
     assert_eq!(
         events
             .iter()
@@ -1336,7 +1533,7 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
                     if accounted.agent_prompt_id == compact.agent_prompt_id
             ))
             .count(),
-        1
+        71
     );
     assert_eq!(
         events
@@ -1355,9 +1552,25 @@ fn rejected_cancellation_accounting_orders_late_terminal_correction() {
             .token_usage
             .total
             .requests,
-        1
+        71
     );
+    let live_usage = h.session_runtime.current_session_state.token_usage.clone();
     h.shutdown().expect("shutdown");
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume after corrected cancellation");
+    ensure_test_user_agent(&mut resumed);
+    assert_eq!(
+        resumed.session_runtime.current_session_state.token_usage,
+        live_usage
+    );
+    assert!(
+        !event_log_events(&resumed)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_))),
+        "cold replay never resumes provider work"
+    );
+    resumed.shutdown().expect("shutdown resumed harness");
 }
 
 /// Seed one terminal standalone transaction and its session-correlated spend.

@@ -1341,13 +1341,32 @@ fn standalone_execution_accounting_is_idempotent_per_logical_attempt() {
         .expect_err("jumped accounting attempt must fail closed");
     assert!(error.to_string().contains("consecutive and unique"));
 
-    jumped.logical_attempt =
-        tau_proto::ProviderAttempt::new(tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS + 2)
-            .expect("finite attempt");
+    jumped.logical_attempt = tau_proto::ProviderAttempt::new(u32::MAX).expect("finite attempt");
     let error = tree
         .validate_event(&Event::ProviderStandaloneExecutionAccounted(jumped.clone()))
-        .expect_err("attempt beyond the reserved terminal must fail closed");
-    assert!(error.to_string().contains("exceeds"));
+        .expect_err("large gap must fail closed");
+    assert!(error.to_string().contains("consecutive and unique"));
+
+    // Seed only the arithmetic endpoint; billions of physical events would not
+    // strengthen the consecutive-key validator oracle.
+    let mut endpoint_tree = tree.clone();
+    endpoint_tree
+        .compaction_transactions
+        .accounting
+        .get_mut(&started.compact_prompt_id)
+        .expect("prior accounting")
+        .initial
+        .logical_attempt =
+        tau_proto::ProviderAttempt::new(u32::MAX - 1).expect("penultimate attempt");
+    jumped.estimated_api_cost_rates = Some(tau_proto::ESTIMATED_API_COST_FALLBACK);
+    endpoint_tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccounted(jumped.clone()))
+        .expect("last ordinal is representable");
+    endpoint_tree.apply_event(&Event::ProviderStandaloneExecutionAccounted(jumped.clone()));
+    let error = endpoint_tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccounted(jumped.clone()))
+        .expect_err("exhaustion cannot saturate into a duplicate terminal");
+    assert!(error.to_string().contains("consecutive and unique"));
 
     jumped.logical_attempt = tau_proto::ProviderAttempt::new(2).expect("finite attempt");
     jumped.session_id = tau_proto::SessionId::parse("other-session").expect("valid session id");

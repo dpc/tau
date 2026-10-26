@@ -20,6 +20,8 @@ workspace = true
 [features]
 # Narrow deterministic provider runner used only by cross-crate acceptance tests.
 quota-test-support = []
+# Production scheduler frames for cross-crate standalone accounting acceptance.
+standalone-compaction-test-support = []
 
 [dependencies]
 blake3.workspace = true

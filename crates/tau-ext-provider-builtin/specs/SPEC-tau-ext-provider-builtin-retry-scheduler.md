@@ -15,6 +15,12 @@ pre-output transport failure may retain the same logical job beyond the fifth
 attempt. Between exhausted bursts, the scheduler waits one, two, four, then at
 most five minutes. Later trusted timing hints and shared cooldowns still apply.
 Attempt ordinals remain cumulative; only the short cadence resets.
+Standalone retries have no lifetime 64-attempt accounting quota. The last
+representable `u32` attempt is terminal-only: after it fails, the scheduler
+dispatches no successor and emits no saturated retry identity. The harness
+accounts only for consecutive correlated reports and derives its terminal ordinal
+independently of the provider terminal counter, as specified in
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 Other retry classes terminalize at or beyond the fifth total attempt, including
 when they follow a transport burst. Their terminal evidence still extends the
 matching shared cooldown for other logical prompts. Deterministic failures and

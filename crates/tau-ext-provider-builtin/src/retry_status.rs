@@ -46,7 +46,14 @@ pub(super) fn emit_retry_status(
                 clear_response: true,
                 retry: Some(tau_proto::ProviderRetryStatus {
                     category: retry_class_provider_category(class),
-                    attempt: saturating_retry_attempt(job.retry_state.attempts),
+                    attempt: if job.prompt.operation
+                        == tau_proto::PromptOperation::StandaloneCompaction
+                    {
+                        u32::try_from(job.retry_state.attempts)
+                            .expect("standalone scheduler preserves representable retry identities")
+                    } else {
+                        saturating_retry_attempt(job.retry_state.attempts)
+                    },
                     next_retry_delay_secs: saturating_retry_delay(
                         due.checked_duration_since(now).unwrap_or(Duration::ZERO),
                     ),

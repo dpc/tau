@@ -1115,6 +1115,7 @@ dependencies = [
  "dpc-tau-config",
  "dpc-tau-core",
  "dpc-tau-delivery-memory",
+ "dpc-tau-ext-provider-builtin",
  "dpc-tau-ext-shell",
  "dpc-tau-proto",
  "dpc-tau-session-inspect",

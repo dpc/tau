@@ -77,7 +77,8 @@ pub(crate) struct StandaloneExecutionAccountingState {
     pub(crate) owners: HashMap<tau_proto::AgentPromptId, StandaloneExecutionAccountingOwner>,
     /// Attempt keys already published or awaiting an exact retained retry.
     pub(crate) observed_attempts: HashSet<(tau_proto::AgentPromptId, tau_proto::ProviderAttempt)>,
-    /// Highest retry attempt reported for each standalone prompt.
+    /// Highest consecutive retry ordinal accepted for each standalone prompt;
+    /// always below `u32::MAX` so the next terminal is representable.
     pub(crate) highest_retry_attempt: HashMap<tau_proto::AgentPromptId, u32>,
     /// Prompts whose out-of-contract retry count already emitted one warning.
     pub(crate) rejected_retry_bounds: HashSet<tau_proto::AgentPromptId>,

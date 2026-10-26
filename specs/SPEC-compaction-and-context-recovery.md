@@ -54,6 +54,16 @@ rearming in current scheduling; previously valid journals remain replayable.
 The user approved transport-only delayed retry bursts for `w7lq`, retaining the
 same live provider job without new durable recovery authority. Interrupted work
 after restart and historical exhausted failures still require explicit recovery.
+For `w4bh` R10, the user approved removing the lifetime 64-attempt accounting
+ceiling: count only consecutive correlated retry reports, ignore duplicates,
+diagnose gaps without inventing attempts, and derive the terminal ordinal from
+that sequence. Cancellation and restart behavior remain unchanged. Exact physical
+counts require the complete valid report sequence; dropped reports leave
+accounting incomplete. Checked finite-counter arithmetic reserves the last
+ordinal for a terminal and prevents wrapping, reused identities, and dispatch
+of an unrepresentable successor.
+This approval satisfies the persistence/interface gate above and grants no new
+recovery authority.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
