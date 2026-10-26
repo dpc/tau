@@ -307,6 +307,202 @@ fn compact_admission_coalesces_rejection_for_all_waiters() {
     ));
 }
 
+/// Cancellation of the actual first compact call must not turn a live,
+/// independent waiter's native request into an unsupported local fallback.
+#[test]
+fn compact_canceled_probe_owner_preserves_native_waiter() {
+    /// Pause the owner after admission, then cancel it before dispatch.
+    struct CancelAfterAdmission {
+        /// Whether admission has already checked cancellation.
+        admitted: bool,
+        /// Signals that the probe is owned outside the admission lock.
+        owned: path_std_sync_mpsc::Sender<()>,
+        /// Releases cancellation only after the independent waiter is waiting.
+        cancel: path_std_sync_mpsc::Receiver<()>,
+    }
+    impl TurnAbort for CancelAfterAdmission {
+        fn is_aborted(&mut self) -> bool {
+            if !self.admitted {
+                self.admitted = true;
+                return false;
+            }
+            self.owned.send(()).expect("report probe ownership");
+            self.cancel
+                .recv_timeout(Duration::from_secs(5))
+                .expect("release owner cancellation");
+            true
+        }
+
+        fn register_waker(
+            &mut self,
+            _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn TurnAbortWaker> {
+            Box::new(NeverAbortWaker)
+        }
+    }
+
+    let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
+    let config = ResolvedConfig {
+        inner: native_compact_test_config(server.base_url()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::parse("session-probe-cancel").expect("session");
+    let agent_id = tau_proto::AgentId::parse("agent-probe-cancel").expect("agent");
+    let context = compact_trigger_context();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+    let (owned_tx, owned_rx) = path_std_sync_mpsc::channel();
+    let (cancel_tx, cancel_rx) = path_std_sync_mpsc::channel();
+    let (entered_tx, entered_rx) = path_std_sync_mpsc::channel();
+    std::thread::scope(|scope| {
+        let owner = scope.spawn(|| {
+            runtime.compact(
+                "ap-canceled-probe-owner",
+                &config,
+                &request,
+                &mut CancelAfterAdmission {
+                    admitted: false,
+                    owned: owned_tx,
+                    cancel: cancel_rx,
+                },
+            )
+        });
+        owned_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner acquired probe");
+        let waiter = scope.spawn(|| {
+            runtime.compact(
+                "ap-independent-probe-waiter",
+                &config,
+                &request,
+                &mut AdmissionEntered(entered_tx),
+            )
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("waiter entered locked admission");
+        cancel_tx.send(()).expect("cancel owner");
+        assert!(matches!(
+            owner.join().expect("owner"),
+            CompactOutcome::Canceled {
+                backend_reached: false
+            }
+        ));
+        assert!(matches!(
+            waiter.join().expect("waiter"),
+            CompactOutcome::Finished { .. }
+        ));
+    });
+    assert_eq!(
+        server.counts().ws_upgrade_requests.load(Ordering::SeqCst),
+        1,
+        "only the independent waiter dispatches native work"
+    );
+    assert_eq!(server.counts().http_post_requests.load(Ordering::SeqCst), 0);
+}
+
+/// A canceled waiter must not reclaim abandoned work, and repeated abandonment
+/// must retain admission identity until explicit retirement revokes it.
+#[test]
+fn compact_admission_canceled_waiter_does_not_reclaim_abandoned_probe() {
+    /// Reports entry and cancels on the next admission check.
+    struct CancelOnWake(Option<path_std_sync_mpsc::Sender<()>>);
+    impl TurnAbort for CancelOnWake {
+        fn is_aborted(&mut self) -> bool {
+            if let Some(entered) = self.0.take() {
+                entered.send(()).expect("entered");
+                false
+            } else {
+                true
+            }
+        }
+
+        fn register_waker(
+            &mut self,
+            _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn TurnAbortWaker> {
+            Box::new(NeverAbortWaker)
+        }
+    }
+    let runtime = Arc::new(CodexRuntime::new(Arc::new(crate::test_network_policy())));
+    let identity = InferenceProfileIdentity(42);
+    let CompactAdmissionResult::Probe(owner) =
+        runtime.acquire_compact_probe(identity, &mut NeverAbort)
+    else {
+        panic!("initial owner");
+    };
+    let generation = owner.generation;
+    let waiter_runtime = Arc::clone(&runtime);
+    let (entered_tx, entered_rx) = path_std_sync_mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        matches!(
+            waiter_runtime.acquire_compact_probe(identity, &mut CancelOnWake(Some(entered_tx))),
+            CompactAdmissionResult::Canceled
+        )
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("waiter");
+    drop(owner);
+    assert!(waiter.join().expect("canceled waiter"));
+    for _ in 0..2 {
+        let CompactAdmissionResult::Probe(replacement) =
+            runtime.acquire_compact_probe(identity, &mut NeverAbort)
+        else {
+            panic!("abandoned probe must remain claimable");
+        };
+        assert_eq!(replacement.generation, generation);
+        drop(replacement);
+    }
+    runtime.retire_compact_identity(identity);
+    let CompactAdmissionResult::Probe(replacement) =
+        runtime.acquire_compact_probe(identity, &mut NeverAbort)
+    else {
+        panic!("retired identity starts a new admission lifetime");
+    };
+    assert_ne!(replacement.generation, generation);
+}
+
+/// Multiple surviving waiters must elect only one new probe owner after
+/// abandonment, even if that owner finishes before another waiter wakes.
+#[test]
+fn compact_admission_abandoned_probe_is_reclaimed_once() {
+    let runtime = Arc::new(CodexRuntime::new(Arc::new(crate::test_network_policy())));
+    let identity = InferenceProfileIdentity(43);
+    let CompactAdmissionResult::Probe(owner) =
+        runtime.acquire_compact_probe(identity, &mut NeverAbort)
+    else {
+        panic!("initial owner");
+    };
+    let (waiters, entered): (Vec<_>, Vec<_>) = (0..2)
+        .map(|_| {
+            let runtime = Arc::clone(&runtime);
+            let (entered_tx, entered_rx) = path_std_sync_mpsc::channel();
+            let waiter = std::thread::spawn(move || {
+                match runtime.acquire_compact_probe(identity, &mut AdmissionEntered(entered_tx)) {
+                    CompactAdmissionResult::Probe(probe) => {
+                        assert!(probe.complete(CompactRouteState::Available));
+                        true
+                    }
+                    CompactAdmissionResult::Admitted => false,
+                    _ => panic!("abandonment is not native absence or cancellation"),
+                }
+            });
+            (waiter, entered_rx)
+        })
+        .unzip();
+    for receiver in &entered {
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("waiter entered");
+    }
+    drop(owner);
+    let probe_count = waiters
+        .into_iter()
+        .map(|waiter| usize::from(waiter.join().expect("surviving waiter")))
+        .sum::<usize>();
+    assert_eq!(probe_count, 1);
+}
+
 /// Ensures the enabled real Codex response producer submits typed response
 /// metadata through the shared compressed-capture boundary.
 #[test]

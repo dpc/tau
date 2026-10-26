@@ -695,8 +695,8 @@ pub struct CodexRuntime {
 struct CompactAdmission {
     /// Current state by resolved profile generation.
     states: std::sync::Mutex<HashMap<InferenceProfileIdentity, CompactRouteObservation>>,
-    /// Monotonic owner generation for distinguishing replacement probes of the
-    /// same inference identity.
+    /// Monotonic admission generation distinguishing retired identities from
+    /// their replacements, including when an abandoned probe is reclaimed.
     next_probe_generation: AtomicU64,
     /// Wakes waiters after probe completion.
     changed: std::sync::Condvar,
@@ -705,6 +705,9 @@ struct CompactAdmission {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CompactRouteState {
     Probing,
+    /// The owner left without capability evidence. Another transaction may
+    /// probe within this admission generation; retirement still revokes it.
+    Abandoned,
     Available,
     Unavailable,
 }
@@ -765,7 +768,13 @@ impl Drop for CompactProbe<'_> {
                     state: CompactRouteState::Probing,
                 })
         {
-            routes.remove(&self.identity);
+            routes.insert(
+                self.identity,
+                CompactRouteObservation {
+                    generation: self.generation,
+                    state: CompactRouteState::Abandoned,
+                },
+            );
             self.runtime.compact_routes.changed.notify_all();
         }
     }
@@ -846,11 +855,18 @@ impl CodexRuntime {
                     routes = waited.0;
                 }
                 Some(CompactRouteState::Available) => return CompactAdmissionResult::Admitted,
-                None => {
-                    let generation = self
-                        .compact_routes
-                        .next_probe_generation
-                        .fetch_add(1, Ordering::Relaxed);
+                Some(CompactRouteState::Abandoned) | None => {
+                    // Keep surviving waiters bound to this admission lifetime.
+                    // Only retirement/replacement changes the generation; a
+                    // dropped owner supplies no evidence of native absence.
+                    let generation = observation.map_or_else(
+                        || {
+                            self.compact_routes
+                                .next_probe_generation
+                                .fetch_add(1, Ordering::Relaxed)
+                        },
+                        |observation| observation.generation,
+                    );
                     routes.insert(
                         identity,
                         CompactRouteObservation {
