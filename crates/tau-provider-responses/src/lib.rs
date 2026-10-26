@@ -1063,7 +1063,10 @@ fn run_attempt_with_capture_and_updates(
                     usage: state.usage,
                     provider_response_id: state.response_id,
                 })
-            } else if state.has_incomplete_reasoning() {
+            } else if state.has_incomplete_reasoning()
+                || (prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+                    && state.observed_function_call)
+            {
                 let progress = state.progress();
                 debug_capture.submit_error(
                     prompt,
@@ -1073,7 +1076,10 @@ fn run_attempt_with_capture_and_updates(
                     &progress,
                 );
                 terminal(Error::UnsupportedOutput, progress)
-            } else if !state.has_output_items() && stop_reason != ProviderStopReason::Length {
+            } else if !state.has_output_items()
+                && stop_reason != ProviderStopReason::Length
+                && prompt.operation != tau_proto::PromptOperation::StandaloneCompaction
+            {
                 let progress = state.progress();
                 debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
                 terminal(Error::EmptyResponse, progress)
@@ -1653,6 +1659,10 @@ fn slot_repetition_text(slot: &Slot) -> (StreamRepetitionKey, String) {
 
 #[derive(Debug, Default)]
 struct State {
+    /// Sticky no-tool evidence for local summaries, independent of
+    /// authoritative terminal slot replacement. Ordinary inference ignores
+    /// this policy fact.
+    observed_function_call: bool,
     /// Per-attempt bounded diagnostics for ignored provider additions.
     unknown: tau_provider::unknown_diagnostics::UnknownDiagnostics,
     /// Selected adapters require canonical completion rather than the legacy
@@ -1890,6 +1900,7 @@ impl State {
 
     /// Observe only item/part kinds and extra keys; never payload values.
     fn observe_item(&mut self, item: &Value) {
+        self.observed_function_call |= item["type"].as_str() == Some("function_call");
         if !known_output_item(item) {
             self.unknown
                 .observe("responses.output_item", item["type"].as_str());

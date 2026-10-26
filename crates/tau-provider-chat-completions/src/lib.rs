@@ -1848,7 +1848,15 @@ fn chat_completions_stream(
         provider_attempt,
         cache.map_or_else(|| 1.into(), |cache| cache.correlation()),
     );
-    ensure_non_empty_end_turn(state.validate_compaction()?)
+    // Local-summary nonemptiness belongs to the extension, which can assemble
+    // retained continuation fragments before classifying a clean empty tail.
+    let is_compaction = state.compact_validator.is_some();
+    let state = state.validate_compaction()?;
+    if is_compaction {
+        Ok(state)
+    } else {
+        ensure_non_empty_end_turn(state)
+    }
 }
 
 fn debug_capture_enabled_for_prompt(

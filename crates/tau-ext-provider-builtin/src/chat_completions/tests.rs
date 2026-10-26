@@ -1060,6 +1060,71 @@ fn local_summary_post_progress_capacity_error_revokes_recovery_authority() {
     assert!(updates.iter().all(|update| update.deltas.is_empty()));
 }
 
+/// Clean zero-output summaries reach typed recovery, while ordinary inference
+/// keeps its empty-response retry policy.
+#[test]
+fn clean_empty_summary_uses_summary_policy_only() {
+    let events = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let (outcome, updates) = run_scripted_summary_attempt(events, |_| {});
+    let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
+        panic!("empty summary must terminalize, not retry");
+    };
+    assert_eq!(
+        finished.failure_kind,
+        Some(tau_proto::ProviderFailureKind::LocalSummaryUnusable)
+    );
+    assert!(finished.output_items.is_empty());
+    assert!(updates.iter().all(|update| update.deltas.is_empty()));
+
+    let (outcome, _) = run_scripted_summary_attempt(events, |prompt| {
+        prompt.operation = tau_proto::PromptOperation::Inference;
+        prompt.context.blocks.pop();
+    });
+    assert!(matches!(outcome, PromptAttemptOutcome::Retry { .. }));
+}
+
+/// A real output-limited attempt followed by an empty clean tail must publish
+/// the retained narrative exactly once, without exposing provisional updates.
+#[test]
+fn clean_empty_summary_tail_completes_retained_narrative() {
+    let (first, updates) = run_scripted_summary_attempt(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"checkpoint\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+        |_| {},
+    );
+    assert!(updates.iter().all(|update| update.deltas.is_empty()));
+    let PromptAttemptOutcome::Finished(first) = first else {
+        panic!("length must retain a provisional response");
+    };
+    assert_eq!(first.stop_reason, tau_proto::ProviderStopReason::Length);
+    let (outcome, updates) = run_scripted_summary_attempt(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        |prompt| {
+            prompt.local_summary_continuation = vec![tau_proto::LocalSummaryContinuationStep {
+                response: tau_proto::AssistantResponseBlock {
+                    provider_response_id: first.provider_response_id,
+                    backend: first.backend,
+                    output_items: first.output_items,
+                    usage: first.usage,
+                },
+                steer: tau_proto::local_summary_continuation_steer(),
+            }];
+        },
+    );
+    let PromptAttemptOutcome::Finished(finished) = outcome else {
+        panic!("retained narrative must complete");
+    };
+    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+    assert_eq!(
+        finished.output_items,
+        vec![tau_proto::ContextItem::LocalCompactionNarrative(
+            tau_proto::LocalCompactionNarrativeItem {
+                narrative: "checkpoint".to_owned(),
+            }
+        )]
+    );
+    assert!(updates.iter().all(|update| update.deltas.is_empty()));
+}
+
 fn run_scripted_local_summary_attempt(
     events: &'static str,
 ) -> super::attempt::PromptAttemptOutcome {
@@ -1068,6 +1133,18 @@ fn run_scripted_local_summary_attempt(
 
 fn run_scripted_local_summary_attempt_with_updates(
     events: impl Into<String>,
+) -> (
+    super::attempt::PromptAttemptOutcome,
+    Vec<tau_proto::ProviderResponseUpdated>,
+) {
+    run_scripted_summary_attempt(events, |_| {})
+}
+
+/// Run the actual finite backend and extension policy with optional retained
+/// history or ordinary-inference control configuration.
+fn run_scripted_summary_attempt(
+    events: impl Into<String>,
+    configure: impl FnOnce(&mut tau_proto::AgentPromptCreated),
 ) -> (
     super::attempt::PromptAttemptOutcome,
     Vec<tau_proto::ProviderResponseUpdated>,
@@ -1103,7 +1180,7 @@ fn run_scripted_local_summary_attempt_with_updates(
         models: vec![model.clone()],
         ..ChatCompletionsProvider::default()
     };
-    let prompt = tau_proto::AgentPromptCreated {
+    let mut prompt = tau_proto::AgentPromptCreated {
         agent_prompt_id: tau_proto::AgentPromptId::parse("ap-summary-test").expect("prompt id"),
         agent_id: tau_proto::AgentId::parse("agent-summary-test").expect("agent id"),
         session_id: tau_proto::SessionId::parse("session-summary-test").expect("session id"),
@@ -1137,6 +1214,7 @@ fn run_scripted_local_summary_attempt_with_updates(
         compaction: None,
         operation: tau_proto::PromptOperation::StandaloneCompaction,
     };
+    configure(&mut prompt);
     let mut bytes = Vec::new();
     let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
     let outcome = super::attempt::run_prompt_attempt(

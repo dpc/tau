@@ -1562,6 +1562,110 @@ fn public_responses_empty_summary_preserves_recovery_classification() {
     );
 }
 
+/// A clean zero-output backend completion must reach summary recovery rather
+/// than the ordinary empty-inference guard; neither path returns a narrative.
+#[test]
+fn clean_empty_summary_reaches_extension_policy() {
+    for compact in [false, true] {
+        let outcome = run_summary_terminal_fixture(
+            compact,
+            "",
+            r#"{"type":"response.completed","response":{"id":"empty","output":[]}}"#,
+        );
+        let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
+            panic!("empty response must terminalize");
+        };
+        assert!(finished.output_items.is_empty());
+        if compact {
+            assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
+            assert_eq!(
+                finished.failure_kind,
+                Some(tau_proto::ProviderFailureKind::LocalSummaryUnusable)
+            );
+            assert_eq!(finished.provider_response_id.as_deref(), Some("empty"));
+        } else {
+            assert_ne!(
+                finished.failure_kind,
+                Some(tau_proto::ProviderFailureKind::LocalSummaryUnusable)
+            );
+        }
+    }
+}
+
+/// Terminal replacement may reconcile ordinary output, but must not erase a
+/// recognized tool attempt's compact-only rejection. Unknown additions remain
+/// compatible with both modes.
+#[test]
+fn summary_rejects_function_call_erased_by_terminal_replacement() {
+    for compact in [false, true] {
+        for item_type in ["function_call", "future_unknown_item"] {
+            let prefix = format!(
+                "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"{item_type}\",\"call_id\":\"c1\",\"name\":\"noop\",\"arguments\":\"\"}}}}\n\n"
+            );
+            let outcome = run_summary_terminal_fixture(
+                compact,
+                &prefix,
+                r#"{"type":"response.completed","response":{"id":"final","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"checkpoint"}]}]}}"#,
+            );
+            if compact && item_type == "function_call" {
+                let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
+                    panic!("observed tool must reject summary");
+                };
+                assert!(finished.error.is_some());
+                assert_eq!(
+                    finished.failure_kind,
+                    Some(tau_proto::ProviderFailureKind::RequestRejected)
+                );
+                assert!(finished.output_items.is_empty());
+            } else {
+                let PromptAttemptOutcome::Finished(finished) = outcome else {
+                    panic!("ordinary replacement and unknown additions remain accepted");
+                };
+                assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+                assert_eq!(finished.output_items.len(), 1);
+                if compact {
+                    assert!(matches!(
+                        &finished.output_items[0],
+                        tau_proto::ContextItem::LocalCompactionNarrative(item)
+                            if item.narrative == "checkpoint"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Feed exact SSE events through the finite backend and extension terminal
+/// policy, selecting only the existing ordinary or local-summary operation.
+fn run_summary_terminal_fixture(
+    compact: bool,
+    prefix: &str,
+    terminal: &str,
+) -> PromptAttemptOutcome {
+    let model: ResponsesModel =
+        serde_json::from_value(serde_json::json!({"id":"test-model"})).expect("model");
+    let mut prompt = crate::openai_tests::prompt();
+    if compact {
+        prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+        prompt.context = tau_proto::PromptContext {
+            blocks: vec![tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![tau_proto::ContextItem::CompactionTrigger],
+                },
+            )],
+        };
+    }
+    let body = format!("{prefix}data: {terminal}\n\n");
+    run_loopback_attempt(
+        &prompt,
+        &model,
+        &format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
 /// Public Responses summary dispatch must retain the ordinary request and add
 /// only the harness-authored instruction after its warmed context prefix.
 #[test]
