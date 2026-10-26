@@ -6,6 +6,7 @@ use crate::agent::LoopCycleState;
 
 mod acceptance_teardown;
 mod inline_wait;
+mod native_publication;
 mod restore_collision;
 mod role_drift;
 
@@ -8495,75 +8496,6 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
             .activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
-}
-
-/// Every rejected standalone terminal must preserve the pre-existing context
-/// baseline and durable transaction authority while recording one typed
-/// A canonical provider compaction item must become the durable replacement
-/// window unchanged so later replay can return it to the provider.
-#[test]
-fn standalone_compaction_accepts_canonical_opaque_provider_item() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
-    let info = h
-        .provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model");
-    info.supports_compaction = false;
-    info.supports_standalone_compaction = true;
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .agent_id
-        .clone()
-        .expect("durable agent");
-    h.handle_compact_request(
-        crate::harness::harness_connection_id(),
-        test_session_id("s1"),
-        Some(&agent_id),
-    );
-    let compact = read_nth_prompt_created(&h, 0);
-    let replacement = ContextItem::Compaction(
-        tau_proto::OpaqueProviderItem::from_raw_json(
-            r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#,
-        )
-        .expect("valid compaction item"),
-    );
-
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        // Display evidence alone cannot turn a successful terminal into failure.
-        error_category: Some(tau_proto::ProviderErrorCategory::Transport),
-        automatic_compaction_decision: None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
-        agent_prompt_id: compact.agent_prompt_id,
-        agent_id: crate::parse_agent_id(&agent_id),
-        output_items: vec![replacement.clone()],
-        stop_reason: tau_proto::ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("accept canonical compaction");
-
-    assert!(event_log_events(&h).iter().any(|event| {
-        matches!(event, Event::AgentCompacted(compacted)
-            if compacted.replacement_window == vec![replacement.clone()])
-    }));
-    h.shutdown().expect("shutdown");
 }
 
 /// Cold replay reconstructs an explicit pause without inventing active work.

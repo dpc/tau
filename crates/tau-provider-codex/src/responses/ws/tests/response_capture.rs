@@ -102,16 +102,26 @@ fn malformed_text_survives_decode_exit() {
 
 /// Successful compact output must retain original text and its terminal, rather
 /// than dropping debug evidence while projecting the compact result and usage.
+/// This proves parser acceptance only; the paired harness
+/// `standalone_compaction_accepts_canonical_opaque_provider_item` oracle
+/// rejects installation of this same item before releasing canonical admission.
 #[test]
 fn successful_compact_response_retains_exact_terminal() {
     let events = [
-        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","encrypted_content":"opaque"}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}}"#,
         r#"{ "type":"response.completed", "response":{"id":"resp_compact","usage":{"input_tokens":4,"output_tokens":2}} }"#,
     ];
     let (result, captures, progress) = captured_response(&events, ResponseMode::Compact, true);
     let result = result.expect("valid compact output");
     assert!(progress);
-    assert!(result.state.single_compaction_item().is_some());
+    assert_eq!(
+        result
+            .state
+            .single_compaction_item()
+            .expect("compact item")
+            .raw_json(),
+        r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#
+    );
     assert_eq!(
         result
             .state

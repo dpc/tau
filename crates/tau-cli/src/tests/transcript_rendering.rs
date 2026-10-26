@@ -4778,6 +4778,10 @@ fn three_prompts_during_streaming_all_render_correctly() {
 /// Ensures an independent standalone compaction terminal says `compact ok`,
 /// never uses a custom success verb, and keeps streamed compactor text out of
 /// the transcript and editor context.
+/// Paired with Codex `successful_compact_response_retains_exact_terminal` and
+/// harness `standalone_compaction_accepts_canonical_opaque_provider_item`: the
+/// same parser-accepted item cannot settle UI before canonical admission. This
+/// renderer oracle models delayed delivery; it does not run persistence itself.
 #[test]
 fn standalone_compaction_stream_is_hidden_from_cli_output() {
     let (_term, handle, vt) = setup(100, 24);
@@ -4843,16 +4847,25 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert!(!vt.screen_contains(100, "2/2"));
     assert!(!vt.screen_contains(100, "private compactor"));
 
+    let replacement = ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::from_raw_json(
+            r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#,
+        )
+        .expect("valid native item"),
+    );
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "ap-private",
-        Vec::new(),
+        vec![replacement.clone()],
     )));
     sync(&handle);
     assert!(renderer.agent_has_active_prompt_for_test(&agent_id("main")));
     assert!(renderer.main_agent_turn_active_for_test());
     assert!(vt.screen_contains(100, "Compacting… 2/?"));
     assert!(!vt.screen_contains(100, "2/2"));
+    assert!(!vt.screen_contains(100, " ok"));
+    assert!(!vt.screen_contains(100, "opaque"));
 
+    // The paired harness oracle withholds this fact while admission is Full.
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
@@ -4864,7 +4877,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
         compact_prompt_id: test_agent_prompt_id("ap-private"),
         model: "test/model".parse().expect("model id"),
         operation: tau_proto::PromptOperation::StandaloneCompaction,
-        replacement_window: vec![assistant_message_item("private checkpoint")],
+        replacement_window: vec![replacement],
     }));
     sync(&handle);
 
@@ -4878,7 +4891,15 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!vt.screen_contains(100, "private compactor answer"));
     assert!(!vt.screen_contains(100, "private compactor reasoning"));
-    assert!(!vt.screen_contains(100, "private checkpoint"));
+    assert!(!vt.screen_contains(100, "opaque"));
+    assert_eq!(
+        vt.screen_text(100)
+            .join("\n")
+            .matches("compact input #226.2k; context ? ok 2/2")
+            .count(),
+        1,
+        "one canonical outcome produces one successful row"
+    );
     assert!(!renderer.agent_has_active_prompt_for_test(&agent_id("main")));
     assert!(!renderer.main_agent_turn_active_for_test());
     assert!(
