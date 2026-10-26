@@ -673,6 +673,9 @@ pub(crate) enum AgentPublishCompletion {
     OwedCompactionFact {
         /// Exact semantic parent captured when the owed fact was derived.
         batch_parent: tau_proto::AgentHead,
+        /// Received provider terminal whose route this committed outcome
+        /// retires.
+        finished_prompt_to_clear: Option<tau_proto::AgentPromptId>,
         /// Exact interceptor-approved fact retained after rejection.
         owned_publication: Option<OwnedPublication>,
     },

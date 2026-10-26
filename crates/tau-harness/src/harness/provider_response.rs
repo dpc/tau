@@ -1947,6 +1947,7 @@ impl Harness {
                         unreachable!("standalone boundary always captures an explicit parent")
                     }
                 },
+                finished_prompt_to_clear: Some(response.agent_prompt_id.clone()),
                 owned_publication: None,
             }),
             false,
@@ -2342,6 +2343,7 @@ impl Harness {
             Event::AgentStandaloneCompactionFailed(failed),
             Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent,
+                finished_prompt_to_clear: None,
                 owned_publication: None,
             }),
             false,

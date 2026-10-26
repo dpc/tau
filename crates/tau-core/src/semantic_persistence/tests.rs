@@ -2760,6 +2760,145 @@ fn repeated_release_reuses_capacity_and_rejects_stale_generation() {
     ));
 }
 
+/// Failed byte extension must restore its provisional ledger without reporting
+/// recovery from its own rollback; independent reservation disposal still
+/// wakes.
+#[test]
+fn rejected_byte_extension_does_not_recover_its_own_pressure() {
+    let root = tempfile::tempdir().expect("root");
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(root.path(), owner.clone()).expect("store");
+    store
+        .prepare_session("extension-pressure", SessionPreparationMode::New)
+        .expect("prepare");
+    let lease = store.managed_persistence_leases("extension-pressure")[0].clone();
+    let blocker = lease
+        .try_reserve_frame()
+        .expect("blocker frame")
+        .reserve_bytes(RetentionCharge {
+            replacement: 128 * 1024 * 1024,
+            ..Default::default()
+        })
+        .expect("blocker bytes");
+    let baseline = owner.ledger_for_test();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    owner.drain_operational_status();
+    owner.set_operational_wake({
+        let wakes = wakes.clone();
+        Arc::new(move || {
+            wakes.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+    for attempt in 0..3 {
+        let scratch = lease
+            .try_reserve_frame()
+            .expect("scratch frame")
+            .reserve_bytes(RetentionCharge {
+                replacement: 1024,
+                ..Default::default()
+            })
+            .expect("scratch fits");
+        assert!(matches!(
+            scratch.extend_to(RetentionCharge {
+                replacement: 192 * 1024 * 1024,
+                ..Default::default()
+            }),
+            Err(super::PersistenceAdmissionError::Full)
+        ));
+        assert_eq!(owner.ledger_for_test(), baseline);
+        let status = owner.drain_operational_status();
+        assert_eq!(status.capacity_full.is_some(), attempt == 0);
+        assert!(status.recovered.is_none(), "rollback is not new capacity");
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    }
+    drop(blocker);
+    assert_eq!(wakes.load(Ordering::SeqCst), 2);
+    assert!(owner.drain_operational_status().recovered.is_some());
+    let retry = lease
+        .try_reserve_frame()
+        .expect("retry frame")
+        .reserve_bytes(RetentionCharge {
+            replacement: 1024,
+            ..Default::default()
+        })
+        .expect("retry scratch")
+        .extend_to(RetentionCharge {
+            replacement: 192 * 1024 * 1024,
+            ..Default::default()
+        })
+        .expect("independent release admits retry");
+    drop(retry);
+}
+
+/// Rollback must wake a different producer rejected while scratch was held,
+/// even when an older Full edge was already coalescing rejection reports.
+#[test]
+fn rejected_byte_extension_preserves_concurrent_producer_recovery() {
+    let root = tempfile::tempdir().expect("root");
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(root.path(), owner.clone()).expect("store");
+    store
+        .prepare_session("concurrent-pressure", SessionPreparationMode::New)
+        .expect("prepare");
+    let lease = store.managed_persistence_leases("concurrent-pressure")[0].clone();
+    owner.limit_available_bytes_for_test(100 * 1024);
+    let reserve_scratch = || {
+        lease
+            .try_reserve_frame()
+            .expect("frame")
+            .reserve_bytes(RetentionCharge {
+                replacement: 40 * 1024,
+                ..Default::default()
+            })
+            .expect("scratch fits")
+    };
+    let reject_extension = |scratch: super::owner::StagingReservation| {
+        assert!(matches!(
+            scratch.extend_to(RetentionCharge {
+                replacement: 120 * 1024,
+                ..Default::default()
+            }),
+            Err(super::PersistenceAdmissionError::Full)
+        ));
+    };
+    reject_extension(reserve_scratch());
+    let first = owner.drain_operational_status();
+    assert!(first.capacity_full.is_some());
+    assert!(first.recovered.is_none());
+
+    let scratch = reserve_scratch();
+    let competitor = RetentionCharge {
+        replacement: 70 * 1024,
+        ..Default::default()
+    };
+    assert!(matches!(
+        lease
+            .try_reserve_frame()
+            .expect("competitor frame")
+            .reserve_bytes(competitor),
+        Err(super::PersistenceAdmissionError::Full)
+    ));
+    let coalesced = owner.drain_operational_status();
+    assert!(coalesced.capacity_full.is_none());
+    assert!(coalesced.recovered.is_none());
+    reject_extension(scratch);
+    assert!(
+        owner.drain_operational_status().recovered.is_some(),
+        "rollback frees capacity for the independently rejected producer"
+    );
+    reject_extension(reserve_scratch());
+    assert!(
+        owner.drain_operational_status().recovered.is_none(),
+        "the next lone retry must not manufacture further recovery"
+    );
+    let admitted = lease
+        .try_reserve_frame()
+        .expect("retry frame")
+        .reserve_bytes(competitor)
+        .expect("competitor fits after scratch rollback");
+    drop(admitted);
+}
+
 /// Producer fold staging must outlive worker retirement without holding the
 /// global admission mutex. Finishing that fold wakes a byte-Full publisher even
 /// when the worker has already disposed of every frame.

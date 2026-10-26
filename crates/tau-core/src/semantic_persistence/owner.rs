@@ -245,6 +245,8 @@ pub(crate) struct FrameReservation {
     shared: Arc<Shared>,
     /// Allocation-free shared exact capability identity.
     identity: Arc<LeaseIdentity>,
+    /// Rejection generation when this provisional frame acquired capacity.
+    capacity_rejections_at_reservation: u64,
     /// Whether this permit transferred into a byte reservation.
     transferred: bool,
 }
@@ -272,13 +274,7 @@ impl FrameReservation {
         let bytes = caller_bytes
             .checked_add(internal_bytes)
             .ok_or(PersistenceAdmissionError::Full)?;
-        if bytes
-            > self
-                .shared
-                .capacity
-                .max_bytes
-                .saturating_sub(state.ledger.bytes)
-        {
+        if bytes > available_bytes(&self.shared, &state) {
             state.ledger.frames = state
                 .ledger
                 .frames
@@ -297,7 +293,8 @@ impl FrameReservation {
             charge,
             bytes,
             internal_bytes,
-            committed: false,
+            capacity_rejections_at_reservation: self.capacity_rejections_at_reservation,
+            settled: false,
         })
     }
 }
@@ -330,8 +327,10 @@ pub(crate) struct StagingReservation {
     bytes: usize,
     /// Foundation-owned fixed/key/handle/debt charge.
     internal_bytes: usize,
-    /// Whether permits transferred into the committed FIFO.
-    committed: bool,
+    /// Detects other admissions rejected while this attempt held capacity.
+    capacity_rejections_at_reservation: u64,
+    /// Whether permits transferred into the FIFO or were already rolled back.
+    settled: bool,
 }
 
 impl StagingReservation {
@@ -356,14 +355,18 @@ impl StagingReservation {
             &self.identity.stream,
             self.identity.generation,
         )?;
-        if additional
-            > self
-                .shared
-                .capacity
-                .max_bytes
-                .saturating_sub(state.ledger.bytes)
-        {
+        if additional > available_bytes(&self.shared, &state) {
+            // Roll back this attempt under the same lock as the Full edge.
+            // Its own scratch release must not wake an identical retry. But
+            // another producer rejected while we held capacity may now fit,
+            // even if its Full report coalesced with an older pressure edge.
+            self.release_staging(&mut state);
+            self.settled = true;
+            if state.capacity_rejections != self.capacity_rejections_at_reservation {
+                report_capacity_recovered(&self.shared, &mut state);
+            }
             report_capacity_full(&self.shared, &mut state, PersistenceCapacityLimit::Bytes);
+            self.shared.wake.notify_all();
             return Err(PersistenceAdmissionError::Full);
         }
         state.ledger.bytes += additional;
@@ -438,7 +441,7 @@ impl StagingReservation {
             .active_folds += 1;
         job.release_staging_replacement();
         state.frames.push_back(job);
-        self.committed = true;
+        self.settled = true;
         drop(state);
         self.shared.wake.notify_one();
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(fold)) {
@@ -475,14 +478,9 @@ impl StagingReservation {
             drop(replacement);
         })
     }
-}
 
-impl Drop for StagingReservation {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    /// Returns this provisional frame and its bytes without claiming recovery.
+    fn release_staging(&self, state: &mut AdmissionState) {
         state.ledger.frames = state
             .ledger
             .frames
@@ -493,6 +491,16 @@ impl Drop for StagingReservation {
             .bytes
             .checked_sub(self.bytes)
             .expect("staging bytes released exactly once");
+    }
+}
+
+impl Drop for StagingReservation {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.release_staging(&mut state);
         report_capacity_recovered(&self.shared, &mut state);
         self.shared.wake.notify_all();
     }
@@ -634,6 +642,13 @@ pub(crate) struct AdmissionState {
     pub(crate) rejected_admissions_remaining: usize,
     /// Successful admissions to allow before the injected rejection run.
     pub(crate) admissions_before_rejection: usize,
+    /// Test-only byte ceiling for exercising real two-stage admission cheaply.
+    #[cfg(any(test, feature = "test-persistence"))]
+    pub(crate) byte_capacity_for_test: Option<usize>,
+    /// Holds accepted FIFO frames before worker append, without holding the
+    /// mutex.
+    #[cfg(any(test, feature = "test-persistence"))]
+    pub(crate) frame_writes_paused_for_test: bool,
     /// Next generation allocated within this owner.
     pub(crate) next_generation: u64,
     /// Next owner-local authoritative FIFO acceptance token.
@@ -659,6 +674,9 @@ pub(crate) struct AdmissionState {
     rollback_failure_lifecycle_at_publication: Option<StreamLifecycle>,
     /// Active edge-triggered capacity pressure.
     capacity_pressure: Option<PersistenceCapacityPressure>,
+    /// Counts every Full report, including reports coalesced into an older
+    /// edge.
+    capacity_rejections: u64,
     /// Newly entered pressure edge awaiting observation.
     capacity_full_pending: Option<PersistenceCapacityPressure>,
     /// Most recent recovery edge awaiting observation.
@@ -771,6 +789,10 @@ impl SemanticPersistenceOwner {
                 worker_exited: false,
                 rejected_admissions_remaining: 0,
                 admissions_before_rejection: 0,
+                #[cfg(any(test, feature = "test-persistence"))]
+                byte_capacity_for_test: None,
+                #[cfg(any(test, feature = "test-persistence"))]
+                frame_writes_paused_for_test: false,
                 next_generation: 1,
                 next_frame_token: FrameAdmissionToken::FIRST,
                 last_admitted_frame: None,
@@ -786,6 +808,7 @@ impl SemanticPersistenceOwner {
                 #[cfg(test)]
                 rollback_failure_lifecycle_at_publication: None,
                 capacity_pressure: None,
+                capacity_rejections: 0,
                 capacity_full_pending: None,
                 capacity_recovered: None,
                 recovery_in_progress: false,
@@ -1222,6 +1245,31 @@ impl SemanticPersistenceOwner {
     #[doc(hidden)]
     pub fn reject_next_admission_for_test(&self) {
         self.reject_admissions_for_test(1);
+    }
+
+    /// Pauses or releases accepted worker frames before their first write.
+    #[cfg(any(test, feature = "test-persistence"))]
+    #[doc(hidden)]
+    pub fn pause_frame_writes_for_test(&self, paused: bool) {
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.frame_writes_paused_for_test = paused;
+        drop(state);
+        self.shared.wake.notify_all();
+    }
+
+    /// Sets a stable test byte ceiling above current usage. Worker retirement,
+    /// not resetting this ceiling, must provide the subsequent capacity wake.
+    #[cfg(any(test, feature = "test-persistence"))]
+    #[doc(hidden)]
+    pub fn limit_available_bytes_for_test(&self, remaining: usize) {
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let limit = state
+            .ledger
+            .bytes
+            .checked_add(remaining)
+            .expect("test limit");
+        assert!(limit <= self.shared.capacity.max_bytes);
+        state.byte_capacity_for_test = Some(limit);
     }
 
     /// Injects a bounded run of deterministic admission rejections.
@@ -1888,10 +1936,12 @@ impl PersistenceLease {
             return Err(PersistenceAdmissionError::Full);
         }
         state.ledger.frames += 1;
+        let capacity_rejections_at_reservation = state.capacity_rejections;
         drop(state);
         Ok(FrameReservation {
             shared,
             identity: Arc::clone(&self.identity),
+            capacity_rejections_at_reservation,
             transferred: false,
         })
     }
@@ -2085,12 +2135,24 @@ pub(crate) fn report_rollback_failure_and_poison(shared: &Shared, identity: Arc<
     notify_operational(shared);
 }
 
+/// Returns the unreserved portion of the aggregate byte ceiling.
+fn available_bytes(shared: &Shared, state: &AdmissionState) -> usize {
+    let maximum = shared.capacity.max_bytes;
+    #[cfg(any(test, feature = "test-persistence"))]
+    let maximum = state.byte_capacity_for_test.unwrap_or(maximum);
+    maximum.saturating_sub(state.ledger.bytes)
+}
+
 /// Records the first full edge until worker progress makes capacity available.
 pub(crate) fn report_capacity_full(
     shared: &Shared,
     state: &mut AdmissionState,
     limit: PersistenceCapacityLimit,
 ) {
+    state.capacity_rejections = state
+        .capacity_rejections
+        .checked_add(1)
+        .expect("capacity rejection generation exhausted");
     if state.capacity_pressure.is_none() {
         let pressure = PersistenceCapacityPressure {
             limit,

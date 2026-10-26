@@ -867,7 +867,7 @@ impl Harness {
     /// Mismatched prompt ids and standalone-compaction continuations retain
     /// their distinct durable recovery obligations.
     pub(super) fn finalize_canceled_in_flight_prompt(&mut self, cid: &AgentId) {
-        let Some((session_id, canceled_prompt_id, originator)) = self
+        let Some((canceled_prompt_id, originator)) = self
             .agent_runtime
             .agent_registry
             .agents
@@ -888,13 +888,7 @@ impl Harness {
                             .as_ref()
                             .and_then(|pending| pending.agent_prompt_id.clone())
                     })
-                    .map(|agent_prompt_id| {
-                        (
-                            conv.identity.session_id.clone(),
-                            agent_prompt_id,
-                            conv.identity.originator.clone(),
-                        )
-                    })
+                    .map(|agent_prompt_id| (agent_prompt_id, conv.identity.originator.clone()))
             })
         else {
             return;
@@ -1110,12 +1104,19 @@ impl Harness {
                     &policies,
                 )
             });
-        self.publish_prompt_terminated_with_decision(
-            session_id,
-            canceled_prompt_id.clone(),
-            AgentPromptTerminationReason::Canceled,
-            originator,
-            cancellation_decision,
+        // Cancellation may already have committed a standalone outcome and
+        // retired its finished provider route. This caller still owns the exact
+        // runtime agent, so do not rediscover it through that obsolete route.
+        self.publish_event_for_agent(
+            cid,
+            None,
+            Event::AgentPromptTerminated(AgentPromptTerminated {
+                agent_id: self.target_agent_id_for_agent(cid).expect("loaded agent"),
+                agent_prompt_id: canceled_prompt_id.clone(),
+                reason: AgentPromptTerminationReason::Canceled,
+                originator,
+                automatic_compaction_decision: cancellation_decision,
+            }),
         );
         if marked_owner {
             return;
@@ -1195,6 +1196,36 @@ impl Harness {
                 _ => None,
             });
         if let Some((agent_id, transaction_id, cut, resume_through)) = transaction {
+            // A previously received success may still own its provider route.
+            // Carry that cleanup through rejected (and repeated) cancellation,
+            // but never retire a route still awaiting its provider terminal.
+            let finished_prompt_to_clear = self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .get(cid)
+                .and_then(|completion| {
+                    let AgentPublishCompletion::OwedCompactionFact {
+                        finished_prompt_to_clear,
+                        owned_publication: Some(publication),
+                        ..
+                    } = completion
+                    else {
+                        return None;
+                    };
+                    let matches_transaction = match publication.approved_event.as_ref() {
+                        Event::AgentCompacted(outcome) => {
+                            outcome.agent_id == agent_id && outcome.transaction_id == transaction_id
+                        }
+                        Event::AgentStandaloneCompactionFailed(outcome) => {
+                            outcome.agent_id == agent_id && outcome.transaction_id == transaction_id
+                        }
+                        _ => false,
+                    };
+                    matches_transaction
+                        .then(|| finished_prompt_to_clear.clone())
+                        .flatten()
+                });
             self.publish_awaiting_cancelled_standalone_accounting(prompt_id);
             self.publish_event_for_agent_with_completion(
                 cid,
@@ -1215,6 +1246,7 @@ impl Harness {
                     batch_parent: self
                         .selected_head_for_agent(cid)
                         .unwrap_or(tau_proto::AgentHead::Root),
+                    finished_prompt_to_clear,
                     owned_publication: None,
                 }),
                 false,

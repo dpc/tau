@@ -457,6 +457,11 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
         if head.is_none() {
             head = state.frames.pop_front();
         }
+        #[cfg(any(test, feature = "test-persistence"))]
+        if head.is_some() && state.frame_writes_paused_for_test {
+            drop(shared.wake.wait(state).unwrap_or_else(|e| e.into_inner()));
+            continue;
+        }
         if head
             .as_ref()
             .and_then(|job| job.retry_at)

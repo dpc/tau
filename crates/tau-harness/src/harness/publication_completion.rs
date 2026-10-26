@@ -33,6 +33,41 @@ pub(super) enum StartPersistenceFailureScope {
 }
 
 impl Harness {
+    /// Retires a competing precommit outcome only after this transaction has a
+    /// canonical outcome. Rejected cancellation must keep its owed publication.
+    fn retire_retained_compaction_outcome(
+        &mut self,
+        cid: &AgentId,
+        agent_id: &tau_proto::AgentId,
+        transaction_id: &tau_proto::CompactionTransactionId,
+    ) {
+        let pending = &mut self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions;
+        let matches_transaction = pending.get(cid).is_some_and(|completion| {
+            let AgentPublishCompletion::OwedCompactionFact {
+                owned_publication: Some(publication),
+                ..
+            } = completion
+            else {
+                return false;
+            };
+            match publication.approved_event.as_ref() {
+                Event::AgentCompacted(outcome) => {
+                    &outcome.agent_id == agent_id && &outcome.transaction_id == transaction_id
+                }
+                Event::AgentStandaloneCompactionFailed(outcome) => {
+                    &outcome.agent_id == agent_id && &outcome.transaction_id == transaction_id
+                }
+                _ => false,
+            }
+        });
+        if matches_transaction {
+            pending.remove(cid);
+        }
+    }
+
     /// Drains content-free persistence diagnostics and retries exact retained
     /// runtime publication owners only after worker capacity returns.
     pub(super) fn observe_semantic_persistence_progress(&mut self) {
@@ -324,6 +359,7 @@ impl Harness {
             event,
             Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent,
+                finished_prompt_to_clear: None,
                 owned_publication: None,
             }),
             false,
@@ -973,6 +1009,7 @@ impl Harness {
                     Event::AgentStandaloneCompactionFailed(*failure),
                     Some(AgentPublishCompletion::OwedCompactionFact {
                         batch_parent: through,
+                        finished_prompt_to_clear: None,
                         owned_publication: None,
                     }),
                     false,
@@ -984,9 +1021,18 @@ impl Harness {
             self.reduce_committed_standalone_context_rejection(cid, reducer);
             return;
         }
-        if let AgentPublishCompletion::LocalDispatchFailure { .. }
-        | AgentPublishCompletion::OwedCompactionFact { .. } = completion
+        if let AgentPublishCompletion::OwedCompactionFact {
+            finished_prompt_to_clear,
+            ..
+        } = completion
         {
+            if let Some(prompt_id) = finished_prompt_to_clear {
+                self.clear_finished_response_prompt_route(&prompt_id);
+                self.clear_prompt_tool_snapshot(&prompt_id);
+            }
+            return;
+        }
+        if let AgentPublishCompletion::LocalDispatchFailure { .. } = completion {
             return;
         }
         if let AgentPublishCompletion::StandaloneExecutionAccounting { .. } = completion {
@@ -3218,6 +3264,7 @@ impl Harness {
                             ),
                             Some(AgentPublishCompletion::OwedCompactionFact {
                                 batch_parent,
+                                finished_prompt_to_clear: None,
                                 owned_publication: None,
                             }),
                             false,
@@ -3244,6 +3291,7 @@ impl Harness {
                                 batch_parent: append_outcome
                                     .and_then(|outcome| outcome.folded_node_id)
                                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                                finished_prompt_to_clear: None,
                                 owned_publication: None,
                             }),
                             false,
@@ -3502,6 +3550,7 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
         {
+            self.retire_retained_compaction_outcome(&cid, &failed.agent_id, &failed.transaction_id);
             self.retire_reactive_compaction_watch_state(&cid, &failed.transaction_id);
             let failed_prompt_id =
                 self.agent_runtime
@@ -3606,6 +3655,11 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
         {
+            self.retire_retained_compaction_outcome(
+                &cid,
+                &compacted.agent_id,
+                &compacted.transaction_id,
+            );
             self.clear_finished_response_prompt_route(&compacted.compact_prompt_id);
             self.clear_prompt_tool_snapshot(&compacted.compact_prompt_id);
             self.prompt_coordination

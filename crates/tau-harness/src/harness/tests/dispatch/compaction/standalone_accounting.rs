@@ -867,6 +867,348 @@ fn standalone_accounting_and_outcome_append_rejections_recover_independently() {
     h.shutdown().expect("shutdown");
 }
 
+/// A real byte-extension Full must quiesce the runtime command queue until an
+/// independent accepted worker frame retires; the provider terminal arrives
+/// once.
+#[test]
+fn standalone_byte_pressure_quiesces_until_worker_capacity_returns() {
+    assert_terminal_byte_pressure_recovers(true);
+}
+
+/// Ordinary gated completion must also quiesce under unchanged byte pressure
+/// and finish its outer turn once when accepted worker bytes are released.
+#[test]
+fn ordinary_byte_pressure_quiesces_until_worker_capacity_returns() {
+    assert_terminal_byte_pressure_recovers(false);
+}
+
+/// Exercises the shared staging rollback through each terminal owner.
+fn assert_terminal_byte_pressure_recovers(standalone: bool) {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let blocker_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let blocker_id = durable_agent_id_for_conversation(&h, &blocker_cid);
+    if standalone {
+        h.handle_compact_request(
+            crate::harness::harness_connection_id(),
+            test_session_id("s1"),
+            Some(agent_id.as_str()),
+        );
+    } else {
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("ordinary terminal".to_owned()))
+            .expect("dispatch");
+    }
+    let compact = read_nth_prompt_created(&h, 0);
+    let owner = h
+        .session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("owner")
+        .clone();
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(5)),
+        tau_core::DurabilityBarrierOutcome::Durable
+    );
+    drain_actual_persistence_commands(&mut h);
+    owner.pause_frame_writes_for_test(true);
+    h.publish_for_agent(
+        &blocker_cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: blocker_id,
+            text: "b".repeat(1024 * 1024),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    // The held accepted frame leaves ample room for accounting and sizing,
+    // but not for the replacement's complete validation/fold/frame charge.
+    owner.limit_available_bytes_for_test(256 * 1024);
+    h.handle_provider_response_finished(provider_text_response(
+        &compact.agent_prompt_id,
+        compact.agent_id.clone(),
+        &"s".repeat(128 * 1024),
+    ))
+    .expect("one successful provider terminal");
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
+    let terminal_count = |h: &Harness| {
+        event_log_events(h)
+            .iter()
+            .filter(|event| match event {
+                Event::AgentCompacted(outcome) => {
+                    outcome.compact_prompt_id == compact.agent_prompt_id
+                }
+                Event::ProviderResponseFinished(outcome) => {
+                    outcome.agent_prompt_id == compact.agent_prompt_id
+                }
+                _ => false,
+            })
+            .count()
+    };
+    assert_eq!(terminal_count(&h), 0);
+    assert!(
+        drain_actual_persistence_commands(&mut h) > 0,
+        "observe the real Full wake"
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
+    owner.pause_frame_writes_for_test(false);
+    assert_eq!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(5)),
+        tau_core::DurabilityBarrierOutcome::Durable
+    );
+    assert!(
+        drain_actual_persistence_commands(&mut h) > 0,
+        "worker release wakes retained publication"
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    assert_eq!(terminal_count(&h), 1);
+    if standalone {
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(event,
+                    Event::ProviderStandaloneExecutionAccounted(accounted)
+                        if accounted.agent_prompt_id == compact.agent_prompt_id
+                ))
+                .count(),
+            1
+        );
+    } else {
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(event, Event::AgentOuterTurnFinished(_)))
+                .count(),
+            1
+        );
+    }
+    h.shutdown().expect("shutdown");
+}
+
+/// Consumes queued runtime notifications, bounding a self-generated recovery
+/// chain without synthesizing a progress command or resending provider output.
+fn drain_actual_persistence_commands(h: &mut Harness) -> usize {
+    let mut progress = 0;
+    let mut served_clients = 0;
+    for _ in 0..64 {
+        let Ok(event) = h.runtime_io.rx.try_recv() else {
+            return progress;
+        };
+        let event = h.expand_component_ingress_wake(event);
+        if matches!(
+            event,
+            HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress)
+        ) {
+            progress += 1;
+        }
+        h.handle_runtime_event(event, &mut served_clients)
+            .expect("runtime command");
+    }
+    panic!("runtime did not quiesce without independent capacity progress");
+}
+
+/// A committed cancellation retires a previously rejected success, while a
+/// rejected cancellation keeps the last owed outcome and success-first wins.
+#[test]
+fn retained_standalone_success_is_retired_only_by_committed_outcome() {
+    for (cancel_rejected, success_first) in [(false, false), (true, false), (false, true)] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        seed_reactive_compaction_prefix(&mut h, &cid);
+        let initial_tree = agent_tree_for_conversation(&h, &cid).clone();
+        h.handle_compact_request(
+            crate::harness::harness_connection_id(),
+            test_session_id("s1"),
+            Some(agent_id.as_str()),
+        );
+        let compact = read_nth_prompt_created(&h, 0);
+        // Accounting succeeds; only the prepared replacement is rejected.
+        h.session_runtime
+            .persistence_owner
+            .as_ref()
+            .expect("owner")
+            .reject_admissions_after_for_test(1, 1);
+        h.handle_provider_response_finished(
+            strict_fake_compact_response(&compact).expect("valid response"),
+        )
+        .expect("retain successful terminal");
+        let agent = &h.agent_runtime.agent_registry.agents[&cid];
+        assert!(matches!(
+            &agent.dispatch.activation_dispatch,
+            ActivationDispatchState::Running { compact_prompt_id, .. }
+                if compact_prompt_id == &compact.agent_prompt_id
+        ));
+        assert_eq!(
+            agent.dispatch.in_flight_prompt.as_ref(),
+            Some(&compact.agent_prompt_id)
+        );
+        assert_eq!(
+            agent_tree_for_conversation(&h, &cid).current_branch(),
+            initial_tree.current_branch()
+        );
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&cid)
+        );
+        if success_first {
+            h.handle_publication_capacity_ready();
+        } else if cancel_rejected {
+            reject_next_semantic_admission(&h);
+        }
+        h.handle_cancel_prompt(
+            crate::harness::harness_connection_id(),
+            &tau_proto::UiCancelPrompt {
+                session_id: test_session_id("s1"),
+                target_agent_id: Some(agent_id.clone()),
+                agent_prompt_id: Some(compact.agent_prompt_id.clone()),
+            },
+        );
+        assert_eq!(
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&cid),
+            cancel_rejected,
+            "only a rejected cancellation may retain an owed outcome"
+        );
+        assert_eq!(
+            h.prompt_coordination
+                .prompt_runtime
+                .agents
+                .contains_key(&compact.agent_prompt_id),
+            cancel_rejected,
+            "finished provider route retires with its canonical outcome"
+        );
+        if cancel_rejected {
+            h.handle_cancel_prompt(
+                crate::harness::harness_connection_id(),
+                &tau_proto::UiCancelPrompt {
+                    session_id: test_session_id("s1"),
+                    target_agent_id: Some(agent_id.clone()),
+                    agent_prompt_id: Some(compact.agent_prompt_id.clone()),
+                },
+            );
+        }
+        for _ in 0..3 {
+            h.handle_publication_capacity_ready();
+        }
+        if !success_first {
+            assert_eq!(
+                agent_tree_for_conversation(&h, &cid).current_branch(),
+                initial_tree.current_branch()
+            );
+            assert!(
+                !h.agent_has_accepted_work(&cid, &agent_id),
+                "canceled compaction must not block unload"
+            );
+        }
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .is_empty()
+        );
+        let events = event_log_events(&h);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentCompacted(_)))
+                .count(),
+            usize::from(success_first)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+                    Event::AgentStandaloneCompactionFailed(failed)
+                        if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
+                ))
+                .count(),
+            usize::from(!success_first)
+        );
+        h.shutdown().expect("shutdown");
+        let mut resumed =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let resumed_cid = ensure_test_user_agent(&mut resumed);
+        if !success_first {
+            assert_eq!(
+                agent_tree_for_conversation(&resumed, &resumed_cid).current_branch(),
+                initial_tree.current_branch()
+            );
+        }
+        let records = resumed
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(agent_id.as_str())
+            .expect("cold records");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(&record.event, Event::AgentCompacted(_)))
+                .count(),
+            usize::from(success_first)
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(&record.event,
+                    Event::AgentStandaloneCompactionFailed(failed)
+                        if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
+                ))
+                .count(),
+            usize::from(!success_first)
+        );
+        resumed.shutdown().expect("shutdown resumed");
+    }
+}
+
 /// An append-rejected cancellation observation must commit before its already
 /// received late-terminal correction, without blocking the Cancelled outcome.
 #[test]
