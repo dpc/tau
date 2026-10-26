@@ -1704,16 +1704,30 @@ fn summary_prompt_appends_instruction_to_ordinary_prefix() {
     prompt.tools_ref = Some(tau_proto::PromptToolsRef {
         base_agent_prompt_id: "old-tools".parse().expect("prompt id"),
     });
+    prompt.context.blocks.insert(
+        0,
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::Developer,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: "frozen initialization".repeat(64),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }),
+    );
     let config = summary_config();
     let compact = materialize_summary_prompt(&prompt, config).expect("summary prompt");
     assert_eq!(compact.operation, prompt.operation);
     assert_eq!(compact.compaction, prompt.compaction);
     assert_eq!(compact.system_prompt, prompt.system_prompt);
-    assert_eq!(compact.context.blocks.len(), 1);
+    assert_eq!(compact.context.blocks.len(), 2);
+    assert_eq!(compact.context.blocks[0], prompt.context.blocks[0]);
     assert_eq!(compact.tools, prompt.tools);
     assert_eq!(compact.tools_ref, prompt.tools_ref);
     assert_eq!(compact.tool_choice, prompt.tool_choice);
-    let tau_proto::ContextBlock::UserInput(block) = &compact.context.blocks[0] else {
+    let tau_proto::ContextBlock::UserInput(block) = &compact.context.blocks[1] else {
         panic!("trailing instruction must be user input");
     };
     let [tau_proto::ContextItem::Message(message)] = block.items.as_slice() else {
@@ -1725,6 +1739,30 @@ fn summary_prompt_appends_instruction_to_ordinary_prefix() {
         [tau_proto::ContentPart::Text {
             text: tau_provider::local_summary_compaction::REQUEST.to_owned()
         }]
+    );
+    let exact =
+        tau_provider::local_summary_compaction::historical_prefix_json_bytes(&prompt.context)
+            .expect("canonical prefix");
+    let capped = |bytes| {
+        SummaryCompactionConfig::with_overrides(128_000, NonZeroU64::new(bytes), None, None)
+            .expect("valid limits")
+            .expect("positive window")
+    };
+    assert!(materialize_summary_prompt(&prompt, capped(exact.get())).is_ok());
+    assert_eq!(
+        materialize_summary_prompt(&prompt, capped(exact.get() - 1))
+            .expect_err("canonical prefix exceeds cap"),
+        "summary compaction prefix exceeds the published safe budget",
+    );
+    let uncapped = SummaryCompactionConfig::default_for(128_000).expect("context");
+    assert!(materialize_summary_prompt(&prompt, uncapped).is_ok());
+    prompt
+        .context
+        .blocks
+        .push(prompt.context.blocks.last().expect("trigger").clone());
+    assert_eq!(
+        materialize_summary_prompt(&prompt, uncapped).expect_err("duplicate trigger"),
+        "local compaction prompt must contain exactly one harness trigger",
     );
 }
 

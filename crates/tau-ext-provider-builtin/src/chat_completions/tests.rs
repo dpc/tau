@@ -980,6 +980,7 @@ fn canceled_local_summary_releases_no_content() {
     let outcome = super::attempt::run_prompt_attempt(
         &prompt.agent_prompt_id,
         &prompt,
+        None,
         &provider,
         &model,
         false,
@@ -1220,6 +1221,7 @@ fn run_scripted_summary_attempt(
     let outcome = super::attempt::run_prompt_attempt(
         &prompt.agent_prompt_id,
         &prompt,
+        None,
         &provider,
         &model,
         false,

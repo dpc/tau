@@ -187,7 +187,7 @@ impl ChatCompletionsModel {
 }
 
 /// Resolve an explicit profile or the generic no-byte-cap fallback.
-fn resolved_local_summary_compaction(
+pub(crate) fn resolved_local_summary_compaction(
     override_config: Option<LocalSummaryCompactionConfig>,
     model: &ChatCompletionsModel,
 ) -> Option<SummaryCompactionConfig> {

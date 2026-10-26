@@ -66,6 +66,7 @@ fn sol_toolless_route_rejects_history_before_dispatch() {
     let outcome = run_prompt_attempt(
         &prompt.agent_prompt_id,
         &prompt,
+        None,
         &provider,
         &model,
         false,

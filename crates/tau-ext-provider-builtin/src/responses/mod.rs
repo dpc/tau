@@ -828,14 +828,7 @@ fn materialize_summary_prompt(
     prompt: &tau_proto::AgentPromptCreated,
     config: SummaryCompactionConfig,
 ) -> Result<tau_proto::AgentPromptCreated, &'static str> {
-    let prefix_bytes =
-        tau_provider::local_summary_compaction::historical_prefix_json_bytes(&prompt.context);
-    if config
-        .max_input_bytes()
-        .is_some_and(|budget| prefix_bytes.is_none_or(|bytes| budget < bytes))
-    {
-        return Err("summary compaction prefix exceeds the published safe budget");
-    }
+    tau_provider::local_summary_compaction::validate_historical_prefix(&prompt.context, config)?;
     let mut compact = prompt.clone();
     tau_provider::local_summary_compaction::replace_trailing_trigger(&mut compact.context)?;
     Ok(compact)

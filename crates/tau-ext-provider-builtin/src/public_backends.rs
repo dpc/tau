@@ -15,9 +15,13 @@ use crate::{
 };
 
 /// Runs one Chat Completions attempt and reports its terminal or retry outcome.
+#[allow(clippy::too_many_arguments)] // Canonical admission and the resolved prompt have distinct ownership.
 pub(crate) fn handle_chat_completions_backend<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
+    canonical_prefix_admission: Option<
+        tau_provider::local_summary_compaction::CanonicalPrefixAdmission,
+    >,
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
     writer: &mut S,
@@ -40,6 +44,7 @@ where
     let outcome = run_prompt_attempt(
         agent_prompt_id,
         prompt,
+        canonical_prefix_admission,
         provider,
         model,
         context.debug_provider_requests,

@@ -238,6 +238,63 @@ pub fn validate_trailing_trigger(context: &tau_proto::PromptContext) -> Result<(
     Ok(())
 }
 
+/// Admission of one canonical prompt before private image materialization.
+///
+/// This is process-local evidence, not a wire or durable capability. It may be
+/// reused only for a private image-resolved copy of the same prompt.
+#[derive(Clone, Debug)]
+pub struct CanonicalPrefixAdmission {
+    /// Prompt whose original canonical history was checked.
+    prompt_id: tau_proto::AgentPromptId,
+    /// Exact limits under which that history was admitted.
+    config: Config,
+}
+
+impl CanonicalPrefixAdmission {
+    /// Validate original history before resolving any referenced image bytes.
+    pub fn new(
+        prompt: &tau_proto::AgentPromptCreated,
+        config: Config,
+    ) -> Result<Self, &'static str> {
+        validate_historical_prefix(&prompt.context, config)?;
+        Ok(Self {
+            prompt_id: prompt.agent_prompt_id.clone(),
+            config,
+        })
+    }
+
+    /// Check that private materialization retained prompt and policy identity.
+    #[must_use]
+    pub fn matches(&self, prompt: &tau_proto::AgentPromptCreated, config: Config) -> bool {
+        self.prompt_id == prompt.agent_prompt_id && self.config == config
+    }
+}
+
+/// Admit canonical history without cloning it or measuring uncapped prefixes.
+///
+/// Reference descriptors count as descriptors; already-inline images count as
+/// inline JSON. Private image expansion has separate resource/request limits.
+pub fn validate_historical_prefix(
+    context: &tau_proto::PromptContext,
+    config: Config,
+) -> Result<(), &'static str> {
+    validate_historical_prefix_with(context, config, historical_prefix_fits_json_budget)
+}
+
+fn validate_historical_prefix_with(
+    context: &tau_proto::PromptContext,
+    config: Config,
+    fits_budget: impl FnOnce(&tau_proto::PromptContext, tau_proto::ByteCount) -> Option<bool>,
+) -> Result<(), &'static str> {
+    validate_trailing_trigger(context)?;
+    if let Some(budget) = config.max_input_bytes()
+        && fits_budget(context, budget) != Some(true)
+    {
+        return Err("summary compaction prefix exceeds the published safe budget");
+    }
+    Ok(())
+}
+
 /// Checks whether the exact canonical historical prefix fits `budget` without
 /// cloning the context or materializing its serialized JSON.
 ///
@@ -257,13 +314,17 @@ pub fn historical_prefix_fits_json_budget(
     ) {
         return None;
     }
-    let mut writer = JsonBudgetWriter::new(budget);
-    let result = serde_json::to_writer(
-        &mut writer,
+    json_fits_budget(
         &HistoricalPromptContext {
             blocks: historical_blocks,
         },
-    );
+        budget,
+    )
+}
+
+fn json_fits_budget(value: &impl Serialize, budget: tau_proto::ByteCount) -> Option<bool> {
+    let mut writer = JsonBudgetWriter::new(budget);
+    let result = serde_json::to_writer(&mut writer, value);
     match result {
         Ok(()) => Some(true),
         Err(_) if writer.exceeded => Some(false),
@@ -316,8 +377,8 @@ impl Write for JsonBudgetWriter {
 /// standalone trigger.
 ///
 /// This is the adapter-side counterpart of the harness planner's published
-/// prefix-budget measurement. Adapters compare this fully materialized
-/// historical prefix only with the published historical-prefix byte budget.
+/// prefix-budget measurement. It counts the fully assembled canonical history
+/// before private image-reference resolution, not the expanded provider copy.
 /// Provider-specific whole-wire expansion requires an independent byte-domain
 /// limit and must never be compared with token-window metadata.
 #[must_use]

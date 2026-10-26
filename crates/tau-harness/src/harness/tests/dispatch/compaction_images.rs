@@ -140,6 +140,97 @@ impl Fixture {
     }
 }
 
+/// Fitting must charge the installed prepared-reference replacement and frozen
+/// initialization in their canonical representation, not private decoded bytes.
+/// A later oversized suffix must retreat only to the last fitting closed cut.
+#[test]
+fn prepared_reference_prefix_fitting_counts_canonical_replacement_and_initialization() {
+    let mut f = Fixture::new();
+    f.report();
+    f.complete();
+    assert_eq!(f.boundaries(), 1);
+    let agent_id = f.response.agent_id.clone();
+    f.h.publish_for_agent(
+        &f.cid,
+        Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_revision: 0,
+            discovery_refreshes: Vec::new(),
+            discovery_diagnostics: Vec::new(),
+            session_id: f.h.session_runtime.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            agent_initialization_id: "image-byte-fit-init".parse().expect("initialization"),
+            agents_message: Some("frozen initialization".repeat(32)),
+            effective_skills: Vec::new(),
+            agents_files: Vec::new(),
+        }),
+    );
+    super::compaction::append_byte_fit_text(&mut f.h, &f.cid, "closed text prefix".into());
+    let safe = f.h.agent_runtime.agent_registry.agents[&f.cid]
+        .identity
+        .head
+        .expect("safe cut");
+    super::compaction::append_byte_fit_text(&mut f.h, &f.cid, "later suffix".repeat(1024));
+    let incident = f.h.agent_runtime.agent_registry.agents[&f.cid]
+        .identity
+        .head
+        .expect("full cut");
+    let tree =
+        f.h.session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("tree");
+    let mut canonical = crate::prompt::assemble_prompt_context_prefix_from(
+        tree,
+        Some(incident),
+        tau_proto::AgentHead::Node(safe),
+    )
+    .expect("prefix")
+    .context;
+    canonical.blocks.insert(
+        0,
+        crate::prompt::initialization_agents_context_block(tree).expect("initialization"),
+    );
+    let canonical_json = serde_json::to_vec(&canonical).expect("canonical JSON");
+    assert!(String::from_utf8_lossy(&canonical_json).contains(f.blob.key.as_str()));
+    let mut expanded = canonical.clone();
+    let mut images = 0;
+    for block in &mut expanded.blocks {
+        let tau_proto::ContextBlock::UserInput(block) = block else {
+            continue;
+        };
+        for item in &mut block.items {
+            let ContextItem::ToolResult(result) = item else {
+                continue;
+            };
+            for part in &mut result.provider_content {
+                let tau_proto::ToolResultContentPart::ImageReference(reference) = part else {
+                    continue;
+                };
+                let mut image = reference.metadata_only_image();
+                image.data = dedup::encoded_test_png().into();
+                *part = tau_proto::ToolResultContentPart::Image(image);
+                images += 1;
+            }
+        }
+    }
+    assert_eq!(images, 1, "installed replacement remains reference-backed");
+    let expanded_bytes = serde_json::to_vec(&expanded).expect("expanded JSON").len();
+    assert!(expanded_bytes > canonical_json.len());
+    let cap = tau_proto::ByteCount::new(canonical_json.len() as u64);
+    assert_eq!(
+        f.h.fitting_standalone_compaction_cut(
+            agent_id.as_str(),
+            tau_proto::AgentHead::Node(incident),
+            cap
+        ),
+        Some(tau_proto::AgentHead::Node(safe)),
+    );
+    let measurements = crate::prompt::active_prompt_prefix_json_measurements(tree, Some(incident))
+        .expect("measurements");
+    assert!(measurements.contains(&(safe, cap)));
+    f.h.shutdown().expect("shutdown");
+}
+
 /// Drives unrelated commands while waiting for exactly one worker completion.
 pub(super) fn next_completion(h: &mut Harness) -> Box<ImageVerificationCompleted> {
     let deadline = Instant::now() + Duration::from_secs(5);

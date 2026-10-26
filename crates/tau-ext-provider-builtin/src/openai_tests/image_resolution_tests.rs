@@ -1,8 +1,175 @@
 //! Artifact responses cross the real provider loop before actual adapter
 //! egress.
 
+use std::num::NonZeroU64;
+
 use super::*;
 use crate::image_resolution::tests as images;
+
+/// A reference-backed prefix that fits the published cap must reach Chat with
+/// resolved image bytes even when its expanded inline JSON exceeds that cap.
+/// A genuine canonical overflow must fail before any Artifact RPC or HTTP work.
+#[test]
+fn chat_summary_admits_canonical_prefix_before_private_image_resolution() {
+    use std::io::BufRead as _;
+
+    for fits in [true, false] {
+        let mut request = prompt();
+        request.context = image_context();
+        request.context.blocks.insert(
+            0,
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                    role: tau_proto::ContextRole::User,
+                    content: vec![tau_proto::ContentPart::Text {
+                        text: "earlier closed prefix".into(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+        );
+        request.operation = tau_proto::PromptOperation::StandaloneCompaction;
+        request.model = model_id("chat", "model");
+        request
+            .context
+            .blocks
+            .push(tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![ContextItem::CompactionTrigger],
+                },
+            ));
+        let canonical_bytes =
+            tau_provider::local_summary_compaction::historical_prefix_json_bytes(&request.context)
+                .expect("canonical bytes");
+        let mut expanded = request.context.clone();
+        let tau_proto::ContextBlock::ToolResults(results) = &mut expanded.blocks[2] else {
+            panic!("closed image round");
+        };
+        let tau_proto::ToolResultContentPart::ImageReference(reference) =
+            &results.items[0].provider_content[0]
+        else {
+            panic!("reference");
+        };
+        let mut image = reference.metadata_only_image();
+        image.data = images::png().into();
+        results.items[0].provider_content[0] = tau_proto::ToolResultContentPart::Image(image);
+        assert!(
+            tau_provider::local_summary_compaction::historical_prefix_json_bytes(&expanded)
+                .expect("expanded bytes")
+                > canonical_bytes
+        );
+        let cap = canonical_bytes.get() - u64::from(!fits);
+        let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = fits.then(|| thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connect");
+            stream.set_read_timeout(Some(Duration::from_secs(5))).expect("deadline");
+            let mut reader = BufReader::new(&mut stream);
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("HTTP header");
+                if line == "\r\n" { break; }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = Some(value.trim().parse::<usize>().expect("length"));
+                }
+            }
+            let mut body = vec![0; length.expect("body length")];
+            reader.read_exact(&mut body).expect("HTTP body");
+            let body: serde_json::Value = serde_json::from_slice(&body).expect("request JSON");
+            let events = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"image checkpoint\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}", events.len()).expect("response");
+            body
+        }));
+
+        let mut model = chat_model("model");
+        model.input_modalities = vec![tau_proto::InputModality::Image];
+        model.tool_result_modalities = vec![tau_proto::InputModality::Image];
+        model.local_summary_compaction =
+            Some(crate::chat_completions::LocalSummaryCompactionConfig {
+                max_input_bytes: NonZeroU64::new(cap),
+                ..Default::default()
+            });
+        let mut profiles = BuiltinProviderProfiles::default();
+        profiles.providers.insert(
+            ProviderName::new("chat"),
+            BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+                base_url: format!("http://{address}/v1"),
+                models: vec![model],
+                ..Default::default()
+            }),
+        );
+        let prompt_profiles = profiles.clone();
+        let input = BlockingInput::default();
+        input.push(encode_frames(&[live_event(
+            11,
+            Event::AgentPromptCreated(request.clone()),
+        )]));
+        let output = SharedWriter::default();
+        let runtime_input = input.clone();
+        let runtime_output = output.clone();
+        let runtime = thread::spawn(move || {
+            run_inner_with_executors(
+                runtime_input,
+                runtime_output,
+                profiles,
+                move |_| prompt_profiles.clone(),
+                1,
+                production_prompt_executor(),
+                production_prewarm_executor(),
+            )
+            .expect("provider")
+        });
+        let mut seen = HashSet::new();
+        let frames = drive_artifacts(&input, &output, &mut seen, |frames| {
+            frames.iter().any(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseFinishedReported(_))
+                )
+            })
+        });
+        input.close();
+        runtime.join().expect("runtime");
+        let finished = frames
+            .iter()
+            .find_map(|frame| match input_event(frame) {
+                Some(Event::ProviderResponseFinishedReported(finished)) => Some(finished),
+                _ => None,
+            })
+            .expect("terminal");
+        if fits {
+            assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+            assert_eq!(finished.failure_kind, None);
+            assert_eq!(seen.len(), 3, "real Open/Read/Close resolution");
+            let wire = server
+                .expect("server")
+                .join()
+                .expect("HTTP request")
+                .to_string();
+            assert!(wire.contains("data:image/png;base64,"));
+            assert!(!wire.contains(images::descriptor(&images::png()).key.as_str()));
+            assert!(matches!(
+                finished.output_items.as_slice(),
+                [ContextItem::LocalCompactionNarrative(_)]
+            ));
+        } else {
+            assert_eq!(
+                finished.failure_kind,
+                Some(tau_proto::ProviderFailureKind::RequestRejected)
+            );
+            assert!(
+                seen.is_empty(),
+                "canonical overflow must precede image downloads"
+            );
+        }
+        assert!(
+            request.has_image_references(),
+            "retained prompt remains canonical"
+        );
+    }
+}
 
 /// Supplies a closed historical image round, with no synthetic user image.
 fn image_context() -> tau_proto::PromptContext {

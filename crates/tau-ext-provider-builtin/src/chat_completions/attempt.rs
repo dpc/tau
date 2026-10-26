@@ -156,6 +156,9 @@ pub fn models_for_provider(
 pub fn run_prompt_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
+    canonical_prefix_admission: Option<
+        tau_provider::local_summary_compaction::CanonicalPrefixAdmission,
+    >,
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
     debug_provider_requests: bool,
@@ -182,6 +185,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
         };
     }
     let config = tau_provider_chat_completions::AttemptConfig {
+        canonical_prefix_admission,
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
         max_output_tokens: model.requested_output_tokens(provider.max_output_tokens),

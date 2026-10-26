@@ -360,6 +360,11 @@ pub struct AttemptConfig {
     pub max_output_tokens: u32,
     /// Explicit Tau summary compactor limits, or `None` when unsupported.
     pub local_summary_compaction: Option<LocalSummaryCompactionConfig>,
+    /// Canonical admission performed before private referenced-image
+    /// resolution. Absent for callers supplying the original canonical
+    /// context directly.
+    pub canonical_prefix_admission:
+        Option<tau_provider::local_summary_compaction::CanonicalPrefixAdmission>,
     /// Non-standard, non-conflicting request members.
     pub extra_body: BTreeMap<String, serde_json::Value>,
     /// Optional OpenAI-compatible request fields supported by this route.
@@ -2254,7 +2259,21 @@ fn try_build_request(
     with_admitted_historical_prefix(
         summary_config,
         &prompt.context,
-        tau_provider::local_summary_compaction::historical_prefix_fits_json_budget,
+        |context, budget| {
+            if provider
+                .canonical_prefix_admission
+                .as_ref()
+                .is_some_and(|admission| {
+                    summary_config.is_some_and(|config| admission.matches(prompt, config))
+                })
+            {
+                Some(true)
+            } else {
+                tau_provider::local_summary_compaction::historical_prefix_fits_json_budget(
+                    context, budget,
+                )
+            }
+        },
         || {
             build_request_after_prefix_admission(
                 provider,

@@ -367,6 +367,7 @@ struct TestProvider {
 
 fn resolved_provider(provider: &TestProvider) -> AttemptConfig {
     AttemptConfig {
+        canonical_prefix_admission: None,
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
         max_output_tokens: provider.max_output_tokens,
@@ -2228,6 +2229,102 @@ fn local_summary_prefix_byte_cap_accepts_equality_and_rejects_plus_one() {
         Ok(_) => panic!("one byte above the independent cap must be rejected"),
     };
     assert!(matches!(error, LlmError::InvalidCompaction(_)));
+}
+
+/// Private image expansion may reuse admission only for its exact prompt and
+/// config. That handoff must never skip trigger validation or let direct inline
+/// callers avoid charging their canonical image bytes.
+#[test]
+fn local_summary_canonical_admission_preserves_identity_policy_and_trigger_checks() {
+    use tau_provider::local_summary_compaction::{
+        CanonicalPrefixAdmission, historical_prefix_json_bytes,
+    };
+
+    let mut expanded = prompt();
+    expanded.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    expanded
+        .context
+        .blocks
+        .push(image_tool_results_block("image", vec![255; 1024]));
+    let image_index = expanded.context.blocks.len() - 1;
+    expanded
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
+    let mut canonical = expanded.clone();
+    let tau_proto::ContextBlock::ToolResults(results) = &mut canonical.context.blocks[image_index]
+    else {
+        panic!("image result");
+    };
+    results.items[0].provider_content = vec![tau_proto::ToolResultContentPart::ImageReference(
+        tau_proto::ImageReference {
+            blob: tau_proto::ArtifactDescriptor::new(
+                format!("blake3:{}", "ab".repeat(32)).parse().expect("key"),
+                1024,
+            )
+            .expect("descriptor"),
+            media_type: tau_proto::ImageMediaType::Png,
+            width: 17,
+            height: 19,
+            detail: tau_proto::ImageDetail::High,
+        },
+    )];
+    let cap = historical_prefix_json_bytes(&canonical.context)
+        .expect("canonical bytes")
+        .get();
+    assert!(
+        historical_prefix_json_bytes(&expanded.context)
+            .expect("inline bytes")
+            .get()
+            > cap
+    );
+    let summary_config = |cap| {
+        LocalSummaryCompactionConfig::with_overrides(128_000, NonZeroU64::new(cap), None, None)
+            .expect("limits")
+            .expect("context")
+    };
+    let mut config = resolved_provider(&provider());
+    config.local_summary_compaction = Some(summary_config(cap));
+    let mut model = provider().models[0].clone();
+    model.supports_image_tool_results = true;
+    assert!(
+        matches!(
+            try_build_request(&config, &model, &expanded),
+            Err(LlmError::InvalidCompaction(_))
+        ),
+        "direct inline history must count its image bytes"
+    );
+    config.canonical_prefix_admission =
+        Some(CanonicalPrefixAdmission::new(&canonical, summary_config(cap)).expect("admission"));
+    assert!(try_build_request(&config, &model, &expanded).is_ok());
+
+    let mut other_prompt = expanded.clone();
+    other_prompt.agent_prompt_id = "other-image-prompt".parse().expect("prompt id");
+    assert!(matches!(
+        try_build_request(&config, &model, &other_prompt),
+        Err(LlmError::InvalidCompaction(_))
+    ));
+    let mut other_config = config.clone();
+    other_config.local_summary_compaction = Some(summary_config(cap - 1));
+    assert!(matches!(
+        try_build_request(&other_config, &model, &expanded),
+        Err(LlmError::InvalidCompaction(_))
+    ));
+    expanded
+        .context
+        .blocks
+        .push(expanded.context.blocks.last().expect("trigger").clone());
+    assert!(
+        matches!(
+            try_build_request(&config, &model, &expanded),
+            Err(LlmError::InvalidCompaction(_))
+        ),
+        "matching admission cannot authorize a malformed trigger"
+    );
 }
 
 /// The generic no-cap profile must not invoke prefix measurement, because doing

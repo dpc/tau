@@ -8,7 +8,7 @@ mod acceptance_teardown;
 mod restore_collision;
 mod role_drift;
 
-fn append_byte_fit_text(h: &mut Harness, cid: &AgentId, text: String) {
+pub(super) fn append_byte_fit_text(h: &mut Harness, cid: &AgentId, text: String) {
     let agent_id = durable_agent_id_for_conversation(h, cid);
     h.publish_for_agent(
         cid,

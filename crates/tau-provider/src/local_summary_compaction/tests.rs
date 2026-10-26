@@ -1,5 +1,48 @@
 use super::*;
 
+/// Uncapped admission still validates exact trigger ownership, but must not
+/// traverse history a second time solely for byte measurement.
+#[test]
+fn historical_prefix_uncapped_skips_measurement_but_validates_trigger() {
+    let config = Config::default_for(128_000).expect("context");
+    let mut context = tau_proto::PromptContext {
+        blocks: vec![tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            },
+        )],
+    };
+    validate_historical_prefix_with(&context, config, |_, _| panic!("uncapped measurement"))
+        .expect("valid trigger");
+    context.blocks.push(context.blocks[0].clone());
+    assert!(
+        validate_historical_prefix_with(&context, config, |_, _| {
+            panic!("malformed trigger must fail before measurement")
+        })
+        .is_err()
+    );
+}
+
+/// Capped counting must stop serialization at the first overflow, rather than
+/// visiting the rest of a potentially large prefix and measuring a full buffer.
+#[test]
+fn historical_prefix_counting_stops_before_serializing_tail() {
+    /// A tail whose traversal would prove that budget exhaustion was ignored.
+    struct UnvisitedTail;
+    impl Serialize for UnvisitedTail {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            panic!("serialization continued after budget exhaustion")
+        }
+    }
+    assert_eq!(
+        json_fits_budget(
+            &("prefix exceeds budget", UnvisitedTail),
+            tau_proto::ByteCount::new(2)
+        ),
+        Some(false)
+    );
+}
+
 /// Generic fallback inherits ordinary generation policy and publishes no
 /// fabricated prefix byte cap.
 #[test]
