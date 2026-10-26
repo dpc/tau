@@ -6151,6 +6151,26 @@ impl AgentTree {
                 "inference checkpoint is not on the compacted branch",
             ));
         }
+        // The original cut and resume watermark also occur on pre-compaction
+        // branches. Only the committed replacement owns this continuation.
+        let includes_boundary = std::iter::successors(
+            checkpoint
+                .through
+                .as_option()
+                .and_then(|head| self.node(head)),
+            |node| node.parent_id.and_then(|parent| self.node(parent)),
+        )
+        .any(|node| {
+            matches!(
+                &node.entry,
+                AgentEntry::Compaction { transaction_id: owner, .. } if owner == transaction_id
+            )
+        });
+        if !includes_boundary {
+            return Err(AgentEventValidationError::new(
+                "inference checkpoint does not include its successful compaction boundary",
+            ));
+        }
         if transaction
             .started
             .resume_through
@@ -6257,6 +6277,13 @@ impl AgentTree {
         if !self.active_provider_window_contains(compacted.suffix_end, compacted.cut) {
             return Err(AgentEventValidationError::new(
                 "compaction cut must occur in the source logical active window",
+            ));
+        }
+        // Historical open-cut starts and failures remain replayable, but a
+        // success must not consume calls while preserving their orphan results.
+        if self.closed_provider_prefix_at_or_before(compacted.cut) != compacted.cut {
+            return Err(AgentEventValidationError::new(
+                "successful compaction requires a provider-closed cut",
             ));
         }
         let transaction = self

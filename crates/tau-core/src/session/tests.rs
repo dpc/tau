@@ -2,6 +2,7 @@ use std::io as path_std_io;
 
 use super::*;
 
+mod compaction_guards;
 mod cross_model_recovery;
 mod fold_allocation;
 mod partial_provider_error;
@@ -3122,7 +3123,7 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
         agent_prompt_id: "ap-owned-inference"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
-        through: AgentHead::Root,
+        through: AgentHead::Node(tree.head().expect("successful boundary")),
         model: started.model,
         operation: tau_proto::PromptOperation::Inference,
         activation_cut: started.cut,
@@ -3486,7 +3487,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             agent_prompt_id: format!("ap-opaque-inference-{case}")
                 .parse()
                 .expect("bounded test prompt id"),
-            through: AgentHead::Root,
+            through: AgentHead::Node(NodeId::new(0)),
             model: started.model.clone(),
             operation: tau_proto::PromptOperation::Inference,
             activation_cut: started.cut,

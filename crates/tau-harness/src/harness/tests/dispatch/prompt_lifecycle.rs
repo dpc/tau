@@ -2987,7 +2987,8 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
             tau_proto::UnixMicros::now(),
         )
         .expect("seed start");
-    h.session_runtime
+    let boundary = h
+        .session_runtime
         .agent_store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -3014,7 +3015,16 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
             }),
             tau_proto::UnixMicros::now(),
         )
-        .expect("seed success");
+        .expect("seed success")
+        .folded_node_id
+        .expect("successful replacement boundary");
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .identity
+        .head = Some(boundary);
     h.agent_runtime
         .agent_registry
         .agents
@@ -3026,7 +3036,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
             id: transaction_id.clone(),
         },
         agent_prompt_id: checkpoint_prompt_id.clone(),
-        through: tau_proto::AgentHead::Root,
+        through: tau_proto::AgentHead::Node(boundary),
         dispatch: crate::agent::InferenceDispatchOwnership {
             model: model.clone(),
             operation: tau_proto::PromptOperation::Inference,
@@ -3067,7 +3077,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
                 && checkpoint.model == model
                 && checkpoint.operation == tau_proto::PromptOperation::Inference
                 && checkpoint.activation_cut == tau_proto::AgentHead::Root
-                && checkpoint.through == tau_proto::AgentHead::Root
+                && checkpoint.through == tau_proto::AgentHead::Node(boundary)
     )));
     assert!(!events.iter().any(|event| matches!(
         event,
