@@ -8,6 +8,12 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 - Prefer focused deterministic unit or lifecycle tests for state-machine changes.
   Assert replay and late-subscriber delivery as well as the immediate transition
   when diagnostics or state must remain observable after startup.
+- When changing callback or completion ordering, test completion immediately
+  before the caller returns and delayed completion after it returns. After
+  cleanup, assert that the last state delivered to subscribers converges with
+  the current snapshot; checking an intermediate snapshot is not enough.
+- For each identified lifecycle handoff risk, name a test that covers it or mark
+  the risk unresolved. Reducer-only checks do not establish delivery.
 - Follow the debug JSONL worker strategy in
   [`../../docs/testing.md`](../../docs/testing.md) when changing its queue,
   filesystem worker, failure handling, or diagnostics.

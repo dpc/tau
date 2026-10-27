@@ -5662,6 +5662,77 @@ fn agent_stats_keep_outer_turn_running_across_inner_tool_continuation() {
     h.shutdown().expect("shutdown");
 }
 
+/// An unsuccessful Working final takes the older accepted status-gated path.
+/// Its synchronous completion must leave live and late subscribers with the
+/// current activity, not the provider marker that cleanup has already retired.
+#[test]
+fn accepted_working_final_stats_converge_for_live_and_late_subscribers() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
+    let live = connect_test_tool(&mut h, "working-terminal-stats");
+    h.complete_subscription(
+        &crate::test_connection_id("working-terminal-stats"),
+        Vec::new(),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish".to_owned()))
+        .expect("dispatch");
+    let prompt = read_nth_prompt_created(&h, 0);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "finish".to_owned(),
+        )
+        .expect("working report"),
+    )
+    .expect("report working");
+    let mut response = provider_text_response(&prompt.agent_prompt_id, prompt.agent_id.clone(), "");
+    response.output_items.clear();
+    response.stop_reason = tau_proto::ProviderStopReason::Error;
+    response.error = Some("provider failed".to_owned());
+    response.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+    assert!(matches!(
+        h.prepare_final_status_provider_terminal(&cid, &response, false)
+            .0,
+        crate::harness::ProviderTerminalPlan::FinalStatusGated(
+            crate::harness::FinalStatusGatedPlan::Accept
+        )
+    ));
+    drain_stats_updated(&live);
+    // No interceptor: the accepted completion runs before publication returns.
+    h.handle_provider_response_finished(response)
+        .expect("finish");
+    let delivered = drain_stats_updated(&live).pop().expect("terminal stats");
+    let current = h.agent_stats_snapshot(&cid).expect("current stats");
+    assert_eq!(current.turn_activity, tau_proto::AgentTurnActivity::Idle);
+    assert_eq!(delivered.turn_activity, current.turn_activity);
+    assert_eq!(delivered.runtime_state, tau_proto::AgentRuntimeState::Idle);
+    assert_eq!(
+        delivered.work_status.phase(),
+        tau_proto::AgentWorkStatusPhase::Unknown
+    );
+
+    let late = connect_test_tool(&mut h, "working-terminal-stats-late");
+    h.complete_subscription(
+        &crate::test_connection_id("working-terminal-stats-late"),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+        Vec::new(),
+    )
+    .expect("late subscribe");
+    drive_harness_until_history_complete(&mut h);
+    let late_stats = drain_stats_updated(&late).pop().expect("late stats");
+    assert_eq!(late_stats.turn_activity, delivered.turn_activity);
+    assert_eq!(late_stats.work_status, delivered.work_status);
+    h.shutdown().expect("shutdown");
+}
+
 /// A completed Done response must refresh live activity after clearing its
 /// provider marker; late subscribers and cold resume must agree with that view.
 #[test]
