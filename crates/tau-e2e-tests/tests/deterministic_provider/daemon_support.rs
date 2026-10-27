@@ -238,6 +238,7 @@ pub(super) fn spawn_daemon_inner_with_cli_override(
     let stderr = path_std_fs::File::create(&stderr_path).expect("create daemon stderr");
     let child = Command::new(HARNESS_DAEMON)
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", fixture.root().join("home"))
         .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
         .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))
@@ -326,6 +327,7 @@ fn spawn_daemon_inner(
     let mut command = Command::new(HARNESS_DAEMON);
     command
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", fixture.root().join("home"))
         .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
         .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))

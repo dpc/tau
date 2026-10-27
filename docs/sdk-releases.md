@@ -20,10 +20,10 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.15.0 (not published)
+### Published SDK 0.15.0
 
 Protocol **15.0** adds `MessagePhase::PartialAnswer` and
-`ProviderStopReason::Continue`. The prepared proto/client packages are **0.15.0**
+`ProviderStopReason::Continue`. The published proto/client packages are **0.15.0**
 with an exact client-to-proto pin; the two leaf packages remain 0.1.0.
 Exhaustive enum matches must handle the new variants. A `Continue` response is
 not a completed outer turn, and partial-answer text must not become a final-answer
@@ -31,9 +31,10 @@ summary. Existing journals remain readable; old binaries cannot decode newly
 written enum values. There is no downgrade migration.
 
 Rebuild configured extensions and UI clients against this SDK before activation.
-Registry publication, registry-only consumer verification, external-project
-migrations, and downstream lock updates remain separate rollout gates.
-Preparing the source does not establish that any of these steps has occurred.
+Registry publication and registry-only consumer verification passed; see the
+acceptance record below. The Tau flake pins compatible, independently published
+peers; downstream lock updates and activation remain separate rollout gates. See the
+[protocol-15 rollout checklist](protocol-15-rollout.md).
 
 ### Published SDK 0.14.0
 
@@ -90,6 +91,38 @@ a new wire version. The 0.13.0 archive consumer check verified protocol 13.1 and
 typed failure variants under Rust 1.91; registry-only acceptance must follow
 publication before source-identifying package tags are created; this acceptance
 has passed for 0.13.0.
+
+## Protocol 15.0 release acceptance
+
+Both packages were published on October 27, 2026 from clean source revision
+`a82ab5f0e11a28997e93c56dc70059c6a7c24c1f`, after locked verified Cargo
+publish dry-runs and verification in dependency order. Both official sparse-index
+entries are unyanked; downloaded registry archives match their checksums and
+identify that clean revision and the correct crate subdirectories in Cargo VCS
+metadata.
+
+| Package | Registry archive SHA-256 |
+| --- | --- |
+| `dpc-tau-proto 0.15.0` | `727c730e075f8df6542fe5a0fba1ddc16e7b7a725670a863b9ae38d8badc1c04` |
+| `dpc-tau-client 0.15.0` | `37e525d9a495e4433dd847460f084914460bf5a5ffa698419114ad24fe580333` |
+
+The unchanged 0.1.0 leaf packages were not republished. Their source still matches
+`2243c6857446bd253a505ce1ba20671a445d899c`; their downloaded archives match
+official unyanked index checksums and original clean provenance.
+`./.config/selfci/check-sdk-packages.sh --registry` passed all seven consumer
+tests on Rust 1.91 with an isolated Cargo home and no local SDK patches.
+
+After acceptance, `dpc-tau-proto-v0.15.0` and `dpc-tau-client-v0.15.0` were
+published at the exact source revision on Radicle and the GitHub mirror.
+SDK publication did not advance application master. Consumers that require
+source-only validation may use the GitHub URL with this exact revision; fresh
+Cargo homes passed both default libgit2 and CLI locked-update checks there.
+Telegram retains its own-host namespace/tag validation source.
+Extensions use exact registry SDK 0.15.0 runtime dependencies, not these
+validation-only source dependencies.
+
+This acceptance does not publish an application release, activate a system,
+restart services, or authorize old readers to open new journal variants.
 
 ## Protocol 14.0 release acceptance
 

@@ -8,6 +8,16 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 15.0 adds `MessagePhase::PartialAnswer` and
+`ProviderStopReason::Continue`. The phase preserves partial-answer text without
+making it a final answer; only `Continue` requests another sample in the same
+outer turn. Configured extensions and UI peers must rebuild together with
+proto/client SDK 0.15.0. Neither variant grants extensions send, route, or
+scheduling authority. New readers accept older journals, but old readers cannot
+decode records containing the new enum values. Journal framing is unchanged;
+there is no downgrade migration. See
+[ARCH-tau-proto](../crates/tau-proto/specs/ARCH-tau-proto.md).
+
 Protocol 14.0 adds a distinct prepared-image reference content variant and a
 harness-authored per-invocation image-storage policy. Configured extensions must
 rebuild together with proto/client SDK 0.14.0; changing only an advertised version

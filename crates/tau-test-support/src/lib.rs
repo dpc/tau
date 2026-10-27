@@ -14,6 +14,16 @@ use tau_session_inspect::InspectError;
 use tau_socket::SocketListener;
 use tempfile::TempDir;
 
+/// Preserves only the test runner's LLVM profile sink for isolated
+/// subprocesses.
+///
+/// Apply after `Command::env_clear` so instrumented children contribute to the
+/// same coverage report instead of writing profiles into disposable fixture
+/// directories. This forwards no Tau configuration or credential environment.
+pub fn llvm_profile_environment() -> Option<(&'static str, std::ffi::OsString)> {
+    std::env::var_os("LLVM_PROFILE_FILE").map(|path| ("LLVM_PROFILE_FILE", path))
+}
+
 /// Completed causal quota fixture plus the exact harness-committed event trace.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CausalQuotaOutcome {

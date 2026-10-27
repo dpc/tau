@@ -130,6 +130,7 @@ fn cli_traces_completed_loaded_descendant_without_disrupting_parent() {
             "tau-jsonl",
         ])
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", temp.path())
         .output()
         .expect("run descendant trace");

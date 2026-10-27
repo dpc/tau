@@ -38,6 +38,7 @@ tau-core = { workspace = true, features = ["test-persistence"] }
 tau-harness.workspace = true
 tau-proto.workspace = true
 tau-socket.workspace = true
+tau-test-support.workspace = true
 tempfile.workspace = true
 
 [[bin]]

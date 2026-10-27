@@ -33,6 +33,7 @@ fn run_list(runtime: &Path, cwd: &Path, arguments: &[&str]) -> Output {
         .args(arguments)
         .current_dir(cwd)
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))

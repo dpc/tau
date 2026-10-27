@@ -18,9 +18,9 @@ revision used Tau protocol 9 and registry SDK 0.7.0, with the receiver-admission
 fix first published in Tau commit
 `30c8b43410a84294f31f74451f9f7f09a94df473`. That historical requirement is not a
 compatibility guarantee for newer harnesses. The standalone Zulip bridge uses
-exact registry `dpc-tau-client` and `dpc-tau-proto` 0.14.0 (protocol 14.0).
+exact registry `dpc-tau-client` and `dpc-tau-proto` 0.15.0 (protocol 15.0).
 Rebuild it with the compatible harness and configured peers before separately
-authorized activation. Protocol-13 binaries are rejected before configuration or
+authorized activation. Protocol-14 binaries are rejected before configuration or
 receiver registration; changing Zulip routes or registration settings does not
 repair a wire-version mismatch. Zulip remains an original-byte attachment bridge,
 not a prepared-image producer or model provider: attachment downloads return
@@ -28,6 +28,12 @@ original Artifact keys, and observed typed image references do not grant fetch,
 send, or route authority. This SDK migration does not add Zulip
 capabilities or change its snake_case keys, secret bindings, or catch-up checkpoint
 format, grants, routes, or artifact enumeration authority.
+
+Old readers cannot decode journal records containing the new
+`MessagePhase::PartialAnswer` or `ProviderStopReason::Continue` variants.
+Neither partial-answer text nor a continuation grants Zulip send, route, or
+scheduling authority. Continue is provider/harness turn control, not an
+instruction to the bridge.
 
 An immediate reply for an already queued event, or a non-blocking poll reply,
 may omit the queue-ID echo. The bridge accepts that omission only for its

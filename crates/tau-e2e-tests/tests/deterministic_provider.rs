@@ -188,6 +188,7 @@ fn deterministic_exact_saved_agent_unload_command() -> Result<(), Box<dyn std::e
     // the unload command's short exact-session discovery handshake.
     let output = Command::new(E2E_CLI)
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", fixture.root().join("home"))
         .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
         .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))

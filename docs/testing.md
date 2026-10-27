@@ -18,6 +18,13 @@ blocking CRAP gate still uses the coverage run under `TAU_CI_FULL=true`; its
 separate Markdown debt report now shows uncovered instrumented line ranges.
 See `.agents/skills/tau-cargo-crap/SKILL.md` for scope and triage guidance.
 
+Isolated CLI and E2E subprocess fixtures clear their environment, then restore
+only the runner's optional `LLVM_PROFILE_FILE` alongside fixture-owned settings.
+This directs instrumented child profiles to the collector's directory instead
+of disposable fixture directories. The fixtures forward no ambient Tau settings,
+credentials, or other configuration. Coverage runs use the same behavioral
+assertions.
+
 ## Durable Rostra notification worker
 
 The separately maintained `tau-ext-rostra` project owns `std-rostra`

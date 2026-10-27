@@ -752,6 +752,7 @@ dependencies = [
  "dpc-tau-harness",
  "dpc-tau-proto",
  "dpc-tau-socket",
+ "dpc-tau-test-support",
  "fs2",
  "nix",
  "rustix 1.1.4",

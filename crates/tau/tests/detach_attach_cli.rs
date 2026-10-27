@@ -35,6 +35,26 @@ use subreaper_controller::{
 };
 use support::bounded_runtime_tempdir;
 
+/// Resolves fixture utilities before subprocess environments are cleared.
+fn test_executable(name: &str) -> PathBuf {
+    let current_dir = std::env::current_dir().expect("test current directory");
+    std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+        .map(|directory| directory.join(name))
+        .map(|candidate| {
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                current_dir.join(candidate)
+            }
+        })
+        .find(|candidate| {
+            candidate.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .unwrap_or_else(|| panic!("find absolute {name} executable"))
+}
+
 /// Isolated process environment shared by every CLI in one lifecycle test.
 struct TestEnvironment {
     /// Scratch root that owns every test artifact.
@@ -85,6 +105,7 @@ impl TestEnvironment {
             Command::new(std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau"));
         command
             .env_clear()
+            .envs(tau_test_support::llvm_profile_environment())
             .env("HOME", self.temp.path().join("home"))
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("XDG_STATE_HOME", &self.state_home)
@@ -191,7 +212,7 @@ impl TestEnvironment {
         let release = self.temp.path().join("release-extension-wrapper");
         std::fs::write(
             &script,
-            "#!/bin/sh\n\"$1\" component ext-std-notifications\nstatus=$?\nprintf stopped > \"$2\"\nwhile [ ! -e \"$3\" ]; do sleep 0.01; done\nexit \"$status\"\n",
+            "#!/bin/sh\n\"$1\" component ext-std-notifications\nstatus=$?\nprintf stopped > \"$2\"\nwhile [ ! -e \"$3\" ]; do \"$4\" 0.01; done\nexit \"$status\"\n",
         )
         .expect("write shutdown canary");
         std::fs::set_permissions(&script, Permissions::from_mode(0o700))
@@ -201,6 +222,10 @@ impl TestEnvironment {
             std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau"),
             stopped.to_str().expect("UTF-8 stopped path").to_owned(),
             release.to_str().expect("UTF-8 release path").to_owned(),
+            test_executable("sleep")
+                .to_str()
+                .expect("UTF-8 sleep path")
+                .to_owned(),
         ])
         .expect("serialize canary command");
         std::fs::write(
@@ -221,7 +246,7 @@ impl TestEnvironment {
         let release = self.temp.path().join("release-stderr-extension");
         std::fs::write(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' \"$4\" >&2\n\"$1\" component ext-std-notifications\nstatus=$?\nprintf stopped > \"$2\"\nwhile [ ! -e \"$3\" ]; do sleep 0.01; done\nexit \"$status\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$4\" >&2\n\"$1\" component ext-std-notifications\nstatus=$?\nprintf stopped > \"$2\"\nwhile [ ! -e \"$3\" ]; do \"$5\" 0.01; done\nexit \"$status\"\n",
         )
         .expect("write stderr canary");
         std::fs::set_permissions(&script, Permissions::from_mode(0o700))
@@ -232,6 +257,10 @@ impl TestEnvironment {
             stopped.to_str().expect("UTF-8 stopped path").to_owned(),
             release.to_str().expect("UTF-8 release path").to_owned(),
             canary.to_owned(),
+            test_executable("sleep")
+                .to_str()
+                .expect("UTF-8 sleep path")
+                .to_owned(),
         ])
         .expect("serialize stderr canary command");
         std::fs::write(
@@ -265,36 +294,22 @@ impl TestEnvironment {
         let old_written = self.temp.path().join("respawn-old-written");
         let second_pid_staged = self.temp.path().join("respawn-second-pid-staged");
         let release_second_pid = self.temp.path().join("respawn-release-second-pid");
-        let current_dir = std::env::current_dir().expect("test current directory");
-        let mv = std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
-            .map(|directory| directory.join("mv"))
-            .map(|candidate| {
-                if candidate.is_absolute() {
-                    candidate
-                } else {
-                    current_dir.join(candidate)
-                }
-            })
-            .find(|candidate| {
-                candidate.metadata().is_ok_and(|metadata| {
-                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-                })
-            })
-            .expect("find absolute mv executable");
+        let mv = test_executable("mv");
+        let sleep = test_executable("sleep");
         std::fs::write(
             &script,
              "#!/bin/sh\n\
              if [ ! -e \"$2\" ]; then\n\
                printf '%s' \"$$\" > \"$2\"\n\
-               (while [ ! -e \"$3\" ]; do sleep 0.01; done; printf 'stdout-protocol-private') 2>/dev/null &\n\
-               (while [ ! -e \"$4\" ]; do sleep 0.01; done; printf 'old-late\\n' >&2; : > \"$6\") >/dev/null &\n\
+               (while [ ! -e \"$3\" ]; do \"${10}\" 0.01; done; printf 'stdout-protocol-private') 2>/dev/null &\n\
+               (while [ ! -e \"$4\" ]; do \"${10}\" 0.01; done; printf 'old-late\\n' >&2; : > \"$6\") >/dev/null &\n\
                exec \"$1\" component ext-std-notifications\n\
              fi\n\
              printf 'new-start\\n' >&2\n\
              pid_tmp=\"$5.pending.$$\"\n\
              printf '%s' \"$$\" > \"$pid_tmp\"\n\
              : > \"$7\"\n\
-             while [ ! -e \"$8\" ]; do sleep 0.01; done\n\
+             while [ ! -e \"$8\" ]; do \"${10}\" 0.01; done\n\
              \"$9\" \"$pid_tmp\" \"$5\"\n\
              exec \"$1\" component ext-std-notifications\n",
         )
@@ -327,6 +342,7 @@ impl TestEnvironment {
                 .expect("UTF-8 marker path")
                 .to_owned(),
             mv.to_str().expect("UTF-8 mv path").to_owned(),
+            sleep.to_str().expect("UTF-8 sleep path").to_owned(),
         ])
         .expect("serialize respawn overlap command");
         std::fs::write(
@@ -771,6 +787,7 @@ fn owned_process_group_broker_canary_worker() {
             "--exact",
             "owned_process_group_broker_canary_holder",
             "--nocapture",
+            "--quiet",
         ])
         .env("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_HOLDER", "1")
         .stdin(Stdio::from(OwnedFd::from(holder_endpoint)))
@@ -798,6 +815,7 @@ fn owned_process_group_broker_canary_worker() {
             "--exact",
             "owned_process_group_broker_canary_watcher",
             "--nocapture",
+            "--quiet",
         ])
         .env(
             "TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_MEMBER",
@@ -881,6 +899,7 @@ fn owned_process_group_broker_canary_holder() {
             "--exact",
             "owned_process_group_broker_canary_member",
             "--nocapture",
+            "--quiet",
         ])
         .env("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_MEMBER_PROCESS", "1")
         .stdin(Stdio::null())
@@ -1467,6 +1486,7 @@ fn run_isolated_controller(mode: Option<&str>) -> io::Result<()> {
         "--exact",
         "owned_process_group_cleanup_controller",
         "--nocapture",
+        "--quiet",
     ]);
     if let Some(mode) = mode {
         command
@@ -1509,6 +1529,7 @@ fn assert_owned_process_group_panic_cleanup(mode: &str) {
             "--exact",
             "owned_process_group_cleanup_worker",
             "--nocapture",
+            "--quiet",
         ])
         .env("TAU_OWNED_PROCESS_GROUP_WORKER", mode)
         .env("CARGO_BIN_EXE_tau", env!("CARGO_BIN_EXE_tau"));
@@ -1570,6 +1591,7 @@ fn assert_owned_process_group_worker_cleanup_in_controller(mode: &str) {
             "--exact",
             "owned_process_group_cleanup_worker",
             "--nocapture",
+            "--quiet",
         ])
         .env("TAU_OWNED_PROCESS_GROUP_WORKER", mode)
         .env("CARGO_BIN_EXE_tau", env!("CARGO_BIN_EXE_tau"));
@@ -1710,6 +1732,7 @@ fn spawn_controlled_broker_worker(
             "--exact",
             "owned_process_group_broker_canary_worker",
             "--nocapture",
+            "--quiet",
         ])
         .env("TAU_OWNED_PROCESS_GROUP_BROKER_CANARY_WORKER", "1");
     let worker = BrokeredCleanupWorker::spawn(command, deadline)?;
@@ -2244,6 +2267,7 @@ fn session_discovery_crosses_pid_and_proc_namespaces() {
             "--json",
         ])
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", environment.temp.path().join("home"))
         .env("XDG_CONFIG_HOME", &environment.config_home)
         .env("XDG_STATE_HOME", &environment.state_home)

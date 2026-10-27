@@ -71,6 +71,37 @@ fn supported_inspection_finishes_and_reaps() {
     assert!(before.elapsed() < Duration::from_secs(3));
 }
 
+/// A completed cooperative peer may still be finishing process teardown after
+/// its inventory frame; the collector must not immediately kill that teardown.
+#[test]
+fn completed_inspection_allows_cooperative_process_teardown() {
+    let root = tempfile::tempdir().expect("inspection teardown root");
+    let frames = root.path().join("frames");
+    let finished = root.path().join("finished");
+    std::fs::write(
+        &frames,
+        encoded_frames(&[
+            hello(true),
+            HarnessInputMessage::InspectionComplete(Default::default()),
+        ]),
+    )
+    .expect("inspection frames");
+    let mut extension = extension("cat \"$1\"; sleep 0.05; printf complete > \"$2\"".to_owned());
+    extension.args.extend([
+        "inspection-teardown".to_owned(),
+        frames.to_str().expect("UTF-8 frame path").to_owned(),
+        finished.to_str().expect("UTF-8 completion path").to_owned(),
+    ]);
+
+    let mut budget = MAX_COLLECTION_BYTES;
+    let result = collect(&extension, None, &mut budget);
+    assert_eq!(result.outcome, Outcome::CompleteDeclarations);
+    assert_eq!(
+        std::fs::read_to_string(finished).expect("peer finished teardown before it was reaped"),
+        "complete"
+    );
+}
+
 /// Unsupported peers and incompatible majors cannot enter ordinary startup.
 #[test]
 fn inspection_rejects_unsupported_and_major_skew() {

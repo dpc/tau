@@ -49,6 +49,7 @@ pub fn isolated_tau_command(program: impl AsRef<OsStr>, root: &Path) -> Command 
     let mut command = Command::new(program);
     command
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .current_dir(work)
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", config)

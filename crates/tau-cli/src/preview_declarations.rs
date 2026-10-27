@@ -222,7 +222,7 @@ fn collect(
     };
     let deadline = Instant::now() + extension.startup_timeout.min(MAX_EXTENSION_TIME);
     let result = inspect_child(&mut child, extension, config_root, remaining, deadline);
-    let cleaned = cleanup(&mut child);
+    let cleaned = cleanup(&mut child, result.is_ok());
     if !cleaned {
         return empty_preview(extension, Outcome::CleanupFailed);
     }
@@ -379,15 +379,21 @@ fn protocol_failure(deadline: Instant) -> Outcome {
     }
 }
 
-/// Bound cleanup even if an executable ignores EOF or retains protocol pipes.
-fn cleanup(child: &mut Child) -> bool {
+/// Let a completed peer finish teardown, retaining half the existing cleanup
+/// budget for forced termination if it ignores EOF or retains protocol pipes.
+fn cleanup(child: &mut Child, completed: bool) -> bool {
     drop(child.stdin.take());
     drop(child.stdout.take());
-    if matches!(child.try_wait(), Ok(Some(_))) {
+    let started = Instant::now();
+    if completed && reap_until(child, started + CLEANUP_TIME / 2) {
         return true;
     }
     let _ = child.kill();
-    let deadline = Instant::now() + CLEANUP_TIME;
+    reap_until(child, started + CLEANUP_TIME)
+}
+
+/// Poll child exit without extending the caller's absolute cleanup deadline.
+fn reap_until(child: &mut Child, deadline: Instant) -> bool {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => return true,

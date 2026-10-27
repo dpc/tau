@@ -29,9 +29,12 @@ frame limits also apply, and encoded Configure is checked before transmission.
 Each exchange uses the lesser of its configured startup timeout and ten seconds.
 Nonblocking pipes wait with OS readiness polling against that absolute deadline
 for both input and backpressured output; no reader thread can prevent return.
-Cleanup closes pipes, kills an unfinished child and checks reaping for at most one
-second, using short sleeps between `try_wait` calls; failure is explicit. Child
-stderr is discarded. These are cooperative configured-process bounds, not
+Cleanup closes pipes and uses a one-second budget to kill and reap the child,
+with short sleeps between `try_wait` calls. After a valid inspection completion,
+the collector allows up to half that budget for cooperative teardown, reserving
+the remaining half to kill and reap an unfinished child. After a failed inspection,
+it kills the child immediately. The collector reports reaping failures and discards
+child stderr. These are cooperative configured-process bounds, not
 adversarial descendant isolation or guarantees about uninterruptible kernel work.
 
 ## Architecture overview

@@ -203,6 +203,7 @@ fn cli(fixture: &DeterministicFixture) -> Command {
     let mut command = Command::new(E2E_CLI);
     command
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", fixture.root().join("home"))
         .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
         .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))

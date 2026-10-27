@@ -151,6 +151,9 @@ normal interactive startup availability in
 [SPEC-tau-harness-extension-lifecycle](../../tau-harness/specs/SPEC-tau-harness-extension-lifecycle.md);
 embedded launches do not scrub the ordinary child OS environment. Spawned daemon
 acceptance clears it and supplies private HOME/XDG roots plus a fixed locale.
+The fixture also preserves the test runner's optional `LLVM_PROFILE_FILE` for
+instrumented subprocess coverage collection. This narrow exception adds no Tau
+startup authority and permits no other ambient environment inheritance.
 The protocol-skew daemon case uses one fixture-authored socket UI Hello with the
 compiled major and a deliberately newer minor. It subscribes only to the
 harness-notice and provider-finish families and requires no peer-skew harness

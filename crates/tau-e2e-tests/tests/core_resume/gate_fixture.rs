@@ -303,6 +303,7 @@ impl GateFixture {
         let mut command = Command::new(&self.tau_bin);
         command
             .env_clear()
+            .envs(tau_test_support::llvm_profile_environment())
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("XDG_STATE_HOME", &self.state_home)
@@ -327,6 +328,7 @@ impl GateFixture {
         let mut command = Command::new(&self.tau_bin);
         command
             .env_clear()
+            .envs(tau_test_support::llvm_profile_environment())
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("XDG_STATE_HOME", &self.state_home)
@@ -346,6 +348,7 @@ impl GateFixture {
         let mut command = Command::new(daemon_bin);
         command
             .env_clear()
+            .envs(tau_test_support::llvm_profile_environment())
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("XDG_STATE_HOME", &self.state_home)

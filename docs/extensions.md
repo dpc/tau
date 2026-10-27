@@ -8,6 +8,10 @@ status: check their pinned revisions and owning projects before enabling them.
 Equal majors with different minors are admitted best-effort with a warning;
 Cargo SDK package versions do not identify wire revisions.
 
+See the [protocol-15 rollout checklist](protocol-15-rollout.md) for this
+checkout's seven compatible extension pins and the separate downstream activation
+requirements.
+
 ## Tau-state access
 
 Persistent supervised extensions receive the real Tau-state tree recursively
@@ -217,8 +221,8 @@ optional (`require: false`). Tau does not bundle its source or executable.
 Install `tau-ext-swarm`, ensure it is available through `PATH`, and then enable
 the instance. Its standalone project owns the authoritative configuration,
 bounds, retry, process-memory semantics, and implementation tests. The
-extension speaks Tau protocol 8.1 using registry SDK 0.6.0 and registers the agent-scoped
-`task_info`, `task_blocker`, and
+extension speaks Tau protocol 15.0 using exact registry SDK 0.15.0 and registers
+the agent-scoped `task_info`, `task_blocker`, and
 `task_update` tools, but none is model-visible by default even after the
 extension starts. Opt in deliberately for selected roles:
 
@@ -305,8 +309,8 @@ prefixing, network policy, and stdio supervision semantics. Running a separate
 executable does not widen its ingress, reply, reaction, proactive-send, or
 dynamic-DM authority. The standalone project owns the detailed setup,
 migration, security, routing, testing, and troubleshooting documentation.
-The pinned executable speaks Tau protocol 8.1 using registry SDK 0.6.0. The removed
-`prefix_agent_id` option is rejected; replies and proactive sends use the
+The pinned executable speaks Tau protocol 15.0 using exact registry SDK 0.15.0.
+The removed `prefix_agent_id` option is rejected; replies and proactive sends use the
 agent-supplied message unchanged.
 
 The separately maintained `std-telegram` instance is disabled by default. Tau
@@ -327,7 +331,8 @@ supervision semantics. Running a separate executable does not widen Telegram
 sender, chat, registration, reply, gateway endpoint, or gateway-client access
 authority. The standalone project owns detailed setup, migration, security,
 gateway, testing, and troubleshooting documentation.
-The pinned executable speaks Tau protocol 8.1 using registry SDK 0.6.0. Its
+The pinned executable speaks Tau protocol 15.0 using exact registry SDK 0.15.0.
+The separate authenticated gateway protocol remains 0. Telegram's
 `gateway_fixed_chat_send` mode uses an already-declared gateway client secret
 and the gateway's fixed chat to provide send-only access to an exact agent
 allowlist without receiving or polling.

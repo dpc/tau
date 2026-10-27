@@ -14,8 +14,9 @@ The deterministic and VCR fixture families have different trust boundaries.
 The CLI-message fixture adds two closed fake-provider actions. They accept only
 one exact live, harness-authored CLI receipt for an already seeded lane and reply
 through the production `message` tool to its typed final-response address.
-Prompt text does not mint reply authority. The CLI subprocesses inherit only
-fixture-owned paths and locale; no sender agent, credential, real session, or
+Prompt text does not mint reply authority. The CLI subprocesses receive only
+fixture-owned paths and locale, plus the test runner's optional
+`LLVM_PROFILE_FILE` profiling sink; no sender agent, credential, real session, or
 production messaging endpoint participates.
 
 `ProviderBuiltinFixture` is a separate hermetic production-provider
@@ -240,7 +241,9 @@ journal remain non-transactional.
 The Unix-only core-resume gate is narrower and stronger at the public UI
 boundary. It launches the exact built universal Tau executable with `env_clear`,
 private owner-only HOME/XDG roots, a fixed working directory and PTY, and only
-the fake provider plus the built-in no-side-effect test dummy. The fixture owns
+the fake provider plus the built-in no-side-effect test dummy. After clearing
+the environment, the fixture preserves only the runner's optional
+`LLVM_PROFILE_FILE` profiling sink alongside its own settings. The fixture owns
 the child process session/process group, verifies it disappears after bounded
 TERM-to-KILL escalation, bounds its reader shutdown, and verifies runtime socket
 metadata and the durable session lock are released before Boot B. Captured PTY bytes and frames are bounded; generated configuration is
@@ -249,7 +252,8 @@ quiescent completed-tool cold-resume projection, not arbitrary terminal fidelity
 crash consistency, filesystem sandboxing, or safe execution of other tools.
 Its live-attach case concurrently owns a second exact public CLI and fixed PTY
 against the first CLI's daemon. The second process receives only the same private
-HOME/XDG inputs and explicit session identity; it cannot reconfigure the daemon.
+HOME/XDG inputs, explicit session identity, and the runner's optional
+`LLVM_PROFILE_FILE` profiling sink; it cannot reconfigure the daemon.
 Both process groups and bounded PTY readers are independently reaped before the
 fixture checks that runtime discovery artifacts and the session lock disappeared.
 The closed surface permits one fake-provider text action for text-only attach or
@@ -284,7 +288,9 @@ the universal PTY resume. It enables only the synthetic fake provider, exposes
 only harness-owned `agent_start` to the fixed main role, and exposes no tools to
 the fixed worker role. Prompts, roles, provider output, and lane bindings are
 closed scenario data; private `env_clear` HOME/XDG roots provide the only config,
-state, runtime, and checkpoint inputs. The fixture owns the daemon/provider
+state, runtime, and checkpoint inputs. The only ambient environment exception
+is the runner's optional `LLVM_PROFILE_FILE` profiling sink. The fixture owns
+the daemon/provider
 process group and generation socket through bounded TERM/KILL cleanup, retains
 only bounded stderr/observer/PTY diagnostics, and verifies the socket, lock, and
 process group disappear before reuse. This adds no network, credential, shell,

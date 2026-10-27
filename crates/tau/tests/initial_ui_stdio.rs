@@ -108,6 +108,7 @@ fn initial_ui_stdio_command(
     let mut command = Command::new(tau_bin);
     command
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .arg("component")
         .arg("harness")
         .arg("--initial-ui-stdio")

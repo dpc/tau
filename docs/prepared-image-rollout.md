@@ -9,6 +9,11 @@ The protocol 14.0 / SDK 0.14.0 source and registry publication is now
 [verified and recorded](sdk-releases.md#protocol-140-release-acceptance).
 External rebuilds and activation are not implied by that acceptance.
 
+This checklist records the protocol-14 prepared-image introduction. For the
+current protocol-15 / SDK 0.15.0 package pins and deployment handoff, use the
+[coordinated rollout checklist](protocol-15-rollout.md); the image-storage
+requirements below still apply.
+
 ## Compatibility boundary
 
 | Surface | Required treatment |

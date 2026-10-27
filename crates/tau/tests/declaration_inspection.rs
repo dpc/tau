@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 fn inspect(root: &Path, extension: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tau"))
         .env_clear()
+        .envs(tau_test_support::llvm_profile_environment())
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))

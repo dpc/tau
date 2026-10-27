@@ -138,11 +138,14 @@ impl OwnedProcessGroup {
             .write_all(format!("leader {pgid}:{leader_start_time}\n").as_bytes())?;
 
         let mut watchdog = Command::new(watchdog_exe);
+        // Libtest's unterminated test-name banner must not prefix a concurrent
+        // worker's readiness record on this inherited stdout pipe.
         watchdog
             .args([
                 "--exact",
                 "owned_process_group_watchdog_worker",
                 "--nocapture",
+                "--quiet",
             ])
             .env("TAU_OWNED_PROCESS_GROUP_WATCHDOG_PGID", pgid.to_string())
             .env("TAU_OWNED_PROCESS_GROUP_WATCHDOG_ROOT", temp_root)

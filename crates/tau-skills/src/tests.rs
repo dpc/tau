@@ -1034,17 +1034,17 @@ fn built_in_skill_sources_load_with_matching_frontmatter_names() {
     }
 }
 
-/// Keeps bundled Slack guidance aligned with the published protocol-14 bridge,
+/// Keeps bundled Slack guidance aligned with the published protocol-15 bridge,
 /// rather than implying an older harness can admit the current executable.
 #[test]
-fn slack_self_knowledge_requires_protocol_fourteen_compatibility() {
+fn slack_self_knowledge_requires_protocol_fifteen_compatibility() {
     let source = BUILT_IN_SKILL_SOURCES
         .iter()
         .find(|source| source.diagnostic_path == "tau-self-knowledge-ext-slack.md")
         .expect("embedded Slack self-knowledge");
     for token in [
-        "The current executable speaks Tau protocol 14.0",
-        "requires a protocol-14-compatible harness.",
+        "The executable speaks Tau protocol 15.0",
+        "requires a protocol-15-compatible harness.",
     ] {
         assert!(
             source.content.contains(token),
