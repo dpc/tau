@@ -4258,11 +4258,11 @@
         "nixpkgs-unstable": "nixpkgs-unstable"
       },
       "locked": {
-        "lastModified": 1787439117,
-        "narHash": "sha256-rrF5lmYOruM79hZptepsUcEWVocpRDmZgAGCsKab5yM=",
+        "lastModified": 1792695764,
+        "narHash": "sha256-3VvPv8YJu++eelqFC7QTaDmutZjkWCGAdnfRf3+S6j8=",
         "ref": "refs/heads/master",
-        "rev": "7b59399d2f4bb55af42c488f5b8b8ab740d4647b",
-        "revCount": 138,
+        "rev": "884fa54abc900c2d13f4d32d4968e69c67465cc6",
+        "revCount": 140,
         "type": "git",
         "url": "https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git"
       },
