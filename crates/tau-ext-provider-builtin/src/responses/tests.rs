@@ -1635,6 +1635,176 @@ fn summary_rejects_function_call_erased_by_terminal_replacement() {
     }
 }
 
+/// Original known refusal parts must reject summaries even if final projection
+/// erases them; ordinary reconciliation and unknown additions stay compatible.
+#[test]
+fn summary_rejects_refusal_part_erased_by_terminal_replacement() {
+    for compact in [false, true] {
+        for event_type in ["response.content_part.added", "response.content_part.done"] {
+            for part_type in ["refusal", "future_unknown_part"] {
+                let prefix = format!(
+                    "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[]}}}}\n\n\
+                     data: {{\"type\":\"{event_type}\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"part\":{{\"type\":\"{part_type}\",\"refusal\":\"private refusal\"}}}}\n\n"
+                );
+                let outcome = run_summary_terminal_fixture(
+                    compact,
+                    &prefix,
+                    r#"{"type":"response.completed","response":{"id":"final","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"checkpoint"}]}]}}"#,
+                );
+                if compact && part_type == "refusal" {
+                    let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
+                        panic!("known original refusal must reject summary");
+                    };
+                    assert_eq!(
+                        finished.failure_kind,
+                        Some(tau_proto::ProviderFailureKind::RequestRejected)
+                    );
+                    assert!(finished.output_items.is_empty());
+                } else {
+                    let PromptAttemptOutcome::Finished(finished) = outcome else {
+                        panic!("ordinary reconciliation and unknown parts remain accepted");
+                    };
+                    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+                    assert_eq!(finished.output_items.len(), 1);
+                    if compact {
+                        assert!(matches!(
+                            &finished.output_items[0],
+                            tau_proto::ContextItem::LocalCompactionNarrative(item)
+                                if item.narrative == "checkpoint"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Plan-route incomplete summaries must release no private prose in the actual
+/// Emit frame, while preserving accounting and ordinary partial-output policy.
+/// Public Responses Length and validated summary success remain separate paths.
+#[test]
+fn summary_failure_report_contains_no_private_partial_output() {
+    let model: ResponsesModel =
+        serde_json::from_value(serde_json::json!({"id":"test-model"})).expect("model");
+    for (compact, plan, complete) in [
+        (true, true, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let mut prompt = crate::openai_tests::prompt();
+        if compact {
+            prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+            prompt.context = tau_proto::PromptContext {
+                blocks: vec![tau_proto::ContextBlock::UserInput(
+                    tau_proto::UserInputBlock {
+                        items: vec![tau_proto::ContextItem::CompactionTrigger],
+                    },
+                )],
+            };
+        }
+        let body = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": if complete { "response.completed" } else { "response.incomplete" },
+                "response": {
+                    "id": "partial-summary-id",
+                    "output": [{"type":"message","role":"assistant","content":[
+                        {"type":"output_text","text":"private partial summary"}
+                    ]}],
+                    "incomplete_details":{"reason":"max_output_tokens"},
+                    "usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}
+                }
+            })
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let route = if plan {
+            Route::ChatGptPlan
+        } else {
+            Route::Generic
+        };
+        let (outcome, _) = run_loopback_route(&prompt, &model, route, &response, &mut || false);
+        let finished = match outcome {
+            PromptAttemptOutcome::Terminal { finished, progress } => {
+                assert!(!complete && plan);
+                assert!(progress.has_timed_semantic_output);
+                finished
+            }
+            PromptAttemptOutcome::Finished(finished) => {
+                assert!(complete || !plan);
+                finished
+            }
+            _ => panic!("finite terminal must not retry"),
+        };
+        let mut bytes = Vec::new();
+        crate::emit_finished_backend_response(
+            &mut tau_proto::PeerOutputWriter::new(&mut bytes),
+            *finished,
+        )
+        .expect("emit terminal");
+        let mut reader =
+            tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes.as_slice()));
+        let Some(tau_proto::HarnessInputMessage::Emit(emit)) =
+            reader.read_message().expect("read report")
+        else {
+            panic!("terminal Emit")
+        };
+        let tau_proto::Event::ProviderResponseFinishedReported(report) = *emit.event else {
+            panic!("finished report")
+        };
+        assert!(reader.read_message().expect("end of reports").is_none());
+        assert_eq!(report.agent_prompt_id, prompt.agent_prompt_id);
+        assert_eq!(
+            report.provider_response_id.as_deref(),
+            Some("partial-summary-id")
+        );
+        let usage = report.usage.expect("terminal usage");
+        assert_eq!(usage.prompt_sent_tokens, 11);
+        assert_eq!(usage.response_received_tokens, 7);
+        assert_eq!(report.provider_attempt, tau_proto::ProviderAttempt::ONE);
+        assert!(report.backend.is_some());
+        if compact && plan && !complete {
+            assert!(report.output_items.is_empty());
+            assert_eq!(report.stop_reason, tau_proto::ProviderStopReason::Error);
+            assert_eq!(
+                report.recovery_disposition,
+                tau_proto::ContextRecoveryDisposition::None
+            );
+            assert_eq!(
+                report.output_length_disposition,
+                tau_proto::OutputLengthDisposition::None
+            );
+            assert!(
+                !bytes
+                    .windows(b"private partial summary".len())
+                    .any(|window| window == b"private partial summary")
+            );
+        } else if complete {
+            assert!(matches!(
+                report.output_items.as_slice(),
+                [tau_proto::ContextItem::LocalCompactionNarrative(item)]
+                    if item.narrative == "private partial summary"
+            ));
+        } else {
+            assert!(matches!(
+                report.output_items.as_slice(),
+                [tau_proto::ContextItem::Message(_)]
+            ));
+            assert_eq!(
+                report.stop_reason,
+                if plan {
+                    tau_proto::ProviderStopReason::Error
+                } else {
+                    tau_proto::ProviderStopReason::Length
+                }
+            );
+        }
+    }
+}
+
 /// Feed exact SSE events through the finite backend and extension terminal
 /// policy, selecting only the existing ordinary or local-summary operation.
 fn run_summary_terminal_fixture(

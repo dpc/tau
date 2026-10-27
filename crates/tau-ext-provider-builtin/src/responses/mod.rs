@@ -777,10 +777,16 @@ fn terminal_failure(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,
-    failure: tau_provider_responses::AttemptFailure,
+    mut failure: tau_provider_responses::AttemptFailure,
     backend_reached: bool,
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
+    // Failure reports are observable before the harness classifies standalone
+    // compaction. Keep private summary prose out of that report; successful
+    // Length outcomes retain their separate, approved accounting path.
+    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
+        failure.output_items.clear();
+    }
     PromptAttemptOutcome::Terminal {
         finished: Box::new(finished(
             agent_prompt_id,

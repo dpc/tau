@@ -1093,7 +1093,7 @@ fn run_attempt_with_capture_and_updates(
                 })
             } else if state.has_incomplete_reasoning()
                 || (prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
-                    && state.observed_function_call)
+                    && state.observed_forbidden_summary_output)
             {
                 let progress = state.progress();
                 debug_capture.submit_error(
@@ -1687,10 +1687,10 @@ fn slot_repetition_text(slot: &Slot) -> (StreamRepetitionKey, String) {
 
 #[derive(Debug, Default)]
 struct State {
-    /// Sticky no-tool evidence for local summaries, independent of
+    /// Sticky forbidden-output evidence for local summaries, independent of
     /// authoritative terminal slot replacement. Ordinary inference ignores
     /// this policy fact.
-    observed_function_call: bool,
+    observed_forbidden_summary_output: bool,
     /// Per-attempt bounded diagnostics for ignored provider additions.
     unknown: tau_provider::unknown_diagnostics::UnknownDiagnostics,
     /// Selected adapters require canonical completion rather than the legacy
@@ -1928,7 +1928,7 @@ impl State {
 
     /// Observe only item/part kinds and extra keys; never payload values.
     fn observe_item(&mut self, item: &Value) {
-        self.observed_function_call |= item["type"].as_str() == Some("function_call");
+        self.observed_forbidden_summary_output |= item["type"].as_str() == Some("function_call");
         if !known_output_item(item) {
             self.unknown
                 .observe("responses.output_item", item["type"].as_str());
@@ -2172,6 +2172,14 @@ impl State {
         data: &str,
     ) -> Result<bool, Error> {
         let event = decoded.value();
+        // Content-part notifications are otherwise compatibility-only events.
+        // Preserve known refusal evidence before a clean terminal can replace
+        // the provisional output. Unknown additions remain compatible.
+        self.observed_forbidden_summary_output |= matches!(
+            event["type"].as_str(),
+            Some("response.content_part.added" | "response.content_part.done")
+        ) && event["part"]["type"].as_str()
+            == Some("refusal");
         self.unknown.fields(
             "responses.event",
             event,
