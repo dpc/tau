@@ -263,7 +263,9 @@ pub(crate) struct AuthenticatedExtensionPublication {
     pub(super) admission: ExtensionFrameAdmission,
     /// Activation-stage reservation made before interception.
     pub(crate) activation_reservation: Option<ActivationReservation>,
-    /// Exact provider prompt route owned when a terminal report was admitted.
+    /// Exact ordinary inference route owned when a terminal report was
+    /// admitted. Standalone terminals always require their provider
+    /// generation to stay live.
     pub(crate) provider_terminal_prompt_owner:
         Option<(tau_proto::AgentId, tau_proto::AgentPromptId)>,
 }
@@ -3039,6 +3041,20 @@ impl Harness {
                             == Some(&entry.connection_id) =>
                     {
                         self.agent_id_for_prompt(&response.agent_prompt_id)
+                            // Only checkpoint-governed inference owns the stale-source
+                            // exception in SPEC-provider-execution-reports-and-canonical-facts.
+                            .filter(|cid| {
+                                self.agent_runtime
+                                    .agent_registry
+                                    .agents
+                                    .get(cid)
+                                    .and_then(|agent| agent.identity.agent_id.as_deref())
+                                    .and_then(|id| self.session_runtime.agent_store.agent(id))
+                                    .is_some_and(|tree| {
+                                        tree.marked_inference_checkpoint(&response.agent_prompt_id)
+                                            .is_some()
+                                    })
+                            })
                             .map(|cid| (cid, response.agent_prompt_id.clone()))
                     }
                     _ => None,

@@ -754,18 +754,20 @@ fn parked_provider_terminal_report_wins_before_human_ui_supersession() {
         )
         .expect("drain later notice interception");
     }
-    assert!(
+    assert_eq!(
         h.session_runtime
             .agent_store
             .snapshot_agent_events_for_test(&durable_agent_id)
             .expect("records")
             .iter()
-            .any(|record| matches!(
+            .filter(|record| matches!(
                 &record.event,
                 Event::ProviderResponseFinished(response)
                     if response.agent_prompt_id == old_prompt_id
-            )),
-        "the admitted report remains canonical terminal authority"
+            ))
+            .count(),
+        1,
+        "the admitted report remains exactly-once canonical terminal authority"
     );
     assert!(
         h.session_runtime
