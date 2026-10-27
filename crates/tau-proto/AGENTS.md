@@ -9,9 +9,8 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
   durability aligned.
 - Read the applicable trust-boundary records in the repository-root `specs/` directory before changing event routing, custom event validation, tool-result/error payloads, or any field that can carry extension-provided data.
 - Keep `docs/events.md` aligned when changing event names or selected event semantics.
-- Event-persistence and harness-extension protocol changes are governed by
-  `../../specs/GATE-persistence-and-extension-interface-change-approval.md`;
-  obtain explicit user or maintainer confirmation of the exact semantics before
-  functional changes.
+- For event-persistence and harness-extension protocol changes, follow the
+  significant-change approval threshold and correctness exemptions in
+  `../../specs/GATE-persistence-and-extension-interface-change-approval.md`.
 
 - Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

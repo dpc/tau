@@ -13,8 +13,8 @@ selection, debug logging, semantic stores, broadcast, replay, and downstream
 domain consumers. No one owning module can state the complete commit and
 persistence contract coherently.
 
-Changes to event persistence, sequencing authority, replay, or logging behavior
-are subject to
+For changes to event persistence, sequencing authority, replay, or logging
+behavior, follow the approval requirements in
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 ## Operator saved-agent unload

@@ -1,7 +1,6 @@
 # SPEC-tau-harness-extension-lifecycle: Extension Lifecycle
 
-Architectural or externally meaningful functional changes to this
-harness-extension contract are subject to
+For changes to this harness-extension contract, follow the approval requirements in
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 ## Record justification

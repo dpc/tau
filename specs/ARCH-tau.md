@@ -78,8 +78,8 @@ turning robustness observations into feature-blocking security requirements.
 
 Dependency direction is inward toward shared protocol/core/client libraries: the harness composes them, the CLI and extensions communicate through protocol/client APIs, and transport bridges translate external systems without granting external payloads internal authority. Provider adapters classify and stream backend results, but the harness retains session, routing, recovery, and durable-state authority.
 
-Architectural or externally meaningful functional changes to event logs or
-journals and harness-extension interfaces are gated by
+For changes to event logs or journals and harness-extension interfaces, follow
+the approval requirements in
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 Extension-owned durable state that can be reconstructed from committed facts follows
 [GATE-event-log-first-extension-state](GATE-event-log-first-extension-state.md).

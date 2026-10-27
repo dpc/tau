@@ -7,7 +7,7 @@ validation, canonicalization and persistence, plus Slack, Telegram, XMPP, and Zu
 producers and tool-completion integration. No one implementation area owns the
 complete ordering, identity, replay, and failure behavior.
 
-Architectural or externally meaningful functional changes are governed by
+For changes to this report-to-fact contract, follow the approval requirements in
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 The underlying publication contract is specified by
 [SPEC-peer-event-publication](SPEC-peer-event-publication.md).

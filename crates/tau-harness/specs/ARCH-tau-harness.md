@@ -301,9 +301,8 @@ ordinary interception and commit before live subscribers react. They never enter
 semantic replay. See
 [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 
-Architectural or externally meaningful functional changes to harness event
-logs/journals or interfaces with extensions require the explicit confirmation
-mandated by
+For changes to harness event logs/journals or interfaces with extensions, follow
+the approval requirements in
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 Provider prompt materialization crosses the semantic-store and extension-route

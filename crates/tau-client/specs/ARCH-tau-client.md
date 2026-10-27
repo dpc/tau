@@ -13,8 +13,8 @@ original size and digest before exposing bytes. They provide no direct operation
 filesystem access. See
 [SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
 
-Architectural or externally meaningful functional changes to this shared
-harness-extension interface require the explicit confirmation mandated by
+For changes to this shared harness-extension interface, follow the approval
+requirements in
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 `tau-client` is the shared runtime for Tau extension protocol peers. It sits

@@ -2,19 +2,30 @@
 
 ## Gate
 
-Changes to existing documented event-log, journal, or harness-extension
-interface semantics require explicit user or maintainer confirmation of their
-exact semantics before implementation. So do new semantics with materially
-consequential or surprising choices, including data-loss, durability, or replay
-risks, duplicate paid work, or expansion of authority or trust boundaries.
-Agents must not choose these semantics inside unrelated work.
+Before implementing significant changes to existing documented event-log,
+journal, or harness-extension interface semantics, agents must obtain explicit
+user or maintainer confirmation of the exact semantics. Agents must also obtain
+confirmation for new semantics with materially consequential or surprising choices,
+including data-loss, durability, or replay risks, duplicate paid work, or
+expansion of authority or trust boundaries. Agents must not choose these
+semantics as part of unrelated work.
 
-An additive user-requested feature with sensible, low-risk defaults that
-preserve existing behavior does not require separate confirmation merely
-because it adds a persistence record or provider-internal interface. For
-example, adding a credential record for a requested provider with the existing
-credential handling defaults need not trigger approval; changing how existing
-credentials are recovered or who can access them does.
+Routine fixes, refactors, editorial corrections, and obvious additive
+correctness improvements do not require separate confirmation. This includes
+recognizing an established provider message phase, preserving available usage
+or response identity, adding optional stored fields, and minor turn-handling
+adjustments that follow an established provider contract. Touching
+stored state, replay, shared types, or turn handling does not by itself make a
+change significant. This exemption does not authorize materially changing
+existing history interpretation, durability or recovery guarantees, retry or
+paid-work policy, or extension authority and trust boundaries.
+
+Agents do not need separate confirmation for an additive user-requested feature
+with sensible, low-risk defaults that preserve existing behavior just because
+it adds a persistence record or provider-internal interface. For example, adding
+a credential record for a requested provider with the existing credential
+handling defaults need not trigger approval; changing how the system recovers
+existing credentials or who can access them does.
 
 Native Codex standalone compaction may automatically retry a transient failure
 only before it accepts semantic compact output. Once it accepts semantic compact
@@ -25,12 +36,12 @@ failure requires a distinct explicit request.
 
 ## Justification
 
-The user wants to catch harmful changes they might otherwise miss, without
-rubber-stamping routine defaults for requested new features. Review remains
-deliberate for changes to existing persistence schema, ordering, durability,
-replay, recovery, or indexing and shared protocol, capability, lifecycle, tool
-naming, routing, authority, or trust boundaries. Pure bug fixes, refactors, and
-editorial corrections remain exempt when they preserve documented semantics.
+The user wants review of significant changes they might otherwise miss, not
+approval interruptions for obvious correctness improvements or routine defaults.
+Significance depends on the consequences of a change, not on which files,
+fields, or state machines it touches. Compatibility analysis and focused
+live/replay, restart, cancellation, and accounting tests still apply where
+relevant; needing those checks does not itself create an approval requirement.
 
 The native Codex boundary retains resilience when no semantic work has been
 accepted, while preventing automatic duplicate paid work after the provider has

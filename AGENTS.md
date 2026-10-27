@@ -15,15 +15,13 @@
   inter-harness peers, and genuinely untrusted external ingress are distinct.
   Do not expand an unrelated feature into adversarial local-IPC hardening without
   an approved threat-model change.
-- Before changing existing documented event-log/journal or harness-extension
-  interface semantics, or introducing materially consequential or surprising
-  new semantics, read
-  `specs/GATE-persistence-and-extension-interface-change-approval.md`. Obtain
-  explicit user or maintainer confirmation of the exact semantics before
-  implementation; do not hide the choice in unrelated work or create another
-  gate unless the user explicitly requests one. Additive user-requested features
-  with sensible, low-risk defaults preserving existing behavior do not need
-  separate confirmation merely for adding a record or provider-internal interface.
+- Before changing event-log/journal or harness-extension interface semantics,
+  read `specs/GATE-persistence-and-extension-interface-change-approval.md` and
+  follow its significant-change approval threshold and correctness exemptions.
+  Do not require separate confirmation just because a routine correctness fix
+  touches stored state, replay, shared types, or turn handling. Do not hide
+  significant semantic choices in unrelated work or create another gate unless
+  the user explicitly requests one.
 - Before designing a multi-stage event-log operation, read
   `specs/GATE-atomic-event-log-publication.md`.
 - Treat logging and `tracing` sink I/O under

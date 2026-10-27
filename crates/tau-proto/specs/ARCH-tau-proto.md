@@ -244,9 +244,8 @@ publisher provenance but never requests execution. See
 [SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md)
 governs publication metadata and persistence classification.
 
-Architectural or externally meaningful functional changes to protocol-facing
-event persistence or the harness-extension interface require the explicit
-confirmation mandated by
+For changes to protocol-facing event persistence or the harness-extension
+interface, follow the approval requirements in
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 The shared Hello advertises the explicit protocol revision governed by

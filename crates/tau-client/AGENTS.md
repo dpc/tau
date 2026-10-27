@@ -14,9 +14,8 @@ When changing this crate:
 - add focused unit tests for new handler or protocol lifecycle behavior;
 - update `specs/ARCH-tau-client.md` when changing lifecycle, replay, writer-thread,
   config, or intercept semantics.
-- Harness-extension interface changes are governed by
-  `../../specs/GATE-persistence-and-extension-interface-change-approval.md`;
-  obtain explicit user or maintainer confirmation of the exact semantics before
-  functional changes.
+- For harness-extension interface changes, follow the significant-change
+  approval threshold and correctness exemptions in
+  `../../specs/GATE-persistence-and-extension-interface-change-approval.md`.
 
 - Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.
