@@ -548,6 +548,7 @@ impl Harness {
                 AgentPublishCompletion::UncertainSupersession { .. }
                 | AgentPublishCompletion::ToolTerminal { .. }
                 | AgentPublishCompletion::InitialPromptSubmission { .. }
+                | AgentPublishCompletion::InlineCompactionDispatch
                 | AgentPublishCompletion::OutputLengthSteer { .. }
                 | AgentPublishCompletion::OutputLengthDormantRepair { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
@@ -831,6 +832,10 @@ impl Harness {
         completion: AgentPublishCompletion,
         through: tau_proto::AgentHead,
     ) {
+        if matches!(completion, AgentPublishCompletion::InlineCompactionDispatch) {
+            self.dispatch_prompt_after_publish_idle(cid);
+            return;
+        }
         if let AgentPublishCompletion::UncertainSupersession {
             agent_prompt_id, ..
         } = completion
@@ -1241,6 +1246,11 @@ impl Harness {
         }) else {
             return;
         };
+        if matches!(completion, AgentPublishCompletion::InlineCompactionDispatch) {
+            // Inline compatibility has no durable request or retained retry.
+            // The ordinary publication failure notice remains its diagnostic.
+            return;
+        }
         if let AgentPublishCompletion::InitialPromptSubmission { correlation } = completion {
             self.runtime_io
                 .publication
@@ -1259,7 +1269,7 @@ impl Harness {
         }
         let owning_branch = completion
             .owned_publication_branch()
-            .expect("only initial prompt submissions lack owned publication");
+            .expect("non-retained completions return before ownership capture");
         *completion
             .owned_publication_mut()
             .expect("owed completion must expose publication ownership") = Some(OwnedPublication {

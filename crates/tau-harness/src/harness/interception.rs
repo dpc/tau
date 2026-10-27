@@ -566,6 +566,9 @@ pub(crate) struct OrdinarySteerBatchId(pub(crate) u64);
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
+    /// Dispatch inline compaction only after its trigger commits. Rejection
+    /// abandons this process-local intent rather than creating retry ownership.
+    InlineCompactionDispatch,
     /// Retain a local pre-delivery failure until its terminal fact commits.
     LocalDispatchFailure {
         /// Exact prompt that was never sent to the provider.
@@ -779,7 +782,7 @@ impl AgentPublishCompletion {
             | Self::StandaloneContinuation {
                 owned_publication, ..
             } => owned_publication.as_ref(),
-            Self::InitialPromptSubmission { .. } => None,
+            Self::InitialPromptSubmission { .. } | Self::InlineCompactionDispatch => None,
         }
     }
 
@@ -833,7 +836,7 @@ impl AgentPublishCompletion {
             | Self::StandaloneContinuation {
                 owned_publication, ..
             } => Some(owned_publication),
-            Self::InitialPromptSubmission { .. } => None,
+            Self::InitialPromptSubmission { .. } | Self::InlineCompactionDispatch => None,
         }
     }
 
@@ -860,7 +863,7 @@ impl AgentPublishCompletion {
             | Self::StandaloneExecutionAccounting { .. }
             | Self::RollingCompactionStart { .. }
             | Self::OrdinarySteer { .. } => Some(OwnedPublicationBranch::SemanticParent),
-            Self::InitialPromptSubmission { .. } => None,
+            Self::InitialPromptSubmission { .. } | Self::InlineCompactionDispatch => None,
         }
     }
 
@@ -919,6 +922,7 @@ impl AgentPublishCompletion {
             | Self::ToolTerminal { .. }
             | Self::UncertainSupersession { .. }
             | Self::InitialPromptSubmission { .. }
+            | Self::InlineCompactionDispatch
             | Self::GatedFinal { .. }
             | Self::OutputLengthSteer { .. }
             | Self::OutputLengthDormantRepair { .. }
@@ -959,7 +963,8 @@ impl AgentPublishCompletion {
             | Self::StandaloneExecutionAccounting { .. }
             | Self::RollingCompactionStart { .. }
             | Self::OrdinarySteer { .. }
-            | Self::InitialPromptSubmission { .. } => {
+            | Self::InitialPromptSubmission { .. }
+            | Self::InlineCompactionDispatch => {
                 unreachable!("non-standalone completions do not own compaction transactions")
             }
         }
@@ -2074,6 +2079,7 @@ impl Harness {
             AgentPublishCompletion::StandaloneExecutionAccounting { .. } => false,
             AgentPublishCompletion::RollingCompactionStart { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
+            AgentPublishCompletion::InlineCompactionDispatch => false,
         };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agent_runtime

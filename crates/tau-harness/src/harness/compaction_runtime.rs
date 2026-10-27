@@ -555,15 +555,17 @@ impl Harness {
             );
             return;
         }
-        self.publish_for_agent(
+        self.publish_event_for_agent_with_completion(
             cid,
+            None,
             Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
                 agent_id,
                 originator: conv.identity.originator.clone(),
                 resume_inference: false,
             }),
+            Some(AgentPublishCompletion::InlineCompactionDispatch),
+            false,
         );
-        self.dispatch_prompt_after_publish_idle(cid);
     }
 
     /// Validate and durably accept a model-authorized standalone compaction.

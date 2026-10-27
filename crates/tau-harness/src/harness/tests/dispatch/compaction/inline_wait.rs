@@ -2,6 +2,153 @@
 
 use super::*;
 
+/// Check the trigger's admission boundary independently of wait cancellation.
+/// Successful inline work remains ordinary inference, but must carry its
+/// trigger.
+fn check_inline_trigger_admission(after_wait: bool, intercepted: bool, reject: bool) {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.config
+        .available_roles
+        .get_mut(&h.config.selected_role)
+        .expect("selected role")
+        .inference_compaction = Some(path_tau_config_settings::RoleCompaction::Threshold(1200));
+    let wait = wait_input_call("inline-trigger-wait");
+    if after_wait {
+        assert!(intercepted, "park the trigger after cancellation commits");
+        seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+        seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+        h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+            .expect("install waiter");
+    }
+    if intercepted {
+        connect_test_tool(&mut h, "inline-trigger-interceptor");
+        h.handle_extension_event(
+            "inline-trigger-interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_COMPACTION_TRIGGERED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("intercept trigger");
+    } else if reject {
+        reject_next_semantic_admission(&h);
+    }
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    if intercepted {
+        let events = event_log_events(&h);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            Event::AgentCompactionTriggered(_) | Event::AgentPromptCreated(_)
+        )));
+        if after_wait {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        Event::ToolCancelled(cancelled) if cancelled.call_id == wait.id
+                    ))
+                    .count(),
+                1,
+                "reject the trigger only after the wait cancellation commits"
+            );
+            assert!(matches!(
+                h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+                AgentTurnState::Idle
+            ));
+        }
+        if reject {
+            reject_next_semantic_admission(&h);
+        }
+        h.handle_extension_event(
+            "inline-trigger-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("resolve trigger admission");
+    }
+    let events = event_log_events(&h);
+    let triggers = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::AgentCompactionTriggered(trigger) if trigger.agent_id == agent_id
+            )
+        })
+        .count();
+    let prompts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(triggers, usize::from(!reject));
+    assert_eq!(prompts.len(), usize::from(!reject));
+    for prompt in prompts {
+        assert_eq!(prompt.operation, tau_proto::PromptOperation::Inference);
+        assert!(
+            prompt
+                .context
+                .flatten()
+                .contains(&ContextItem::CompactionTrigger)
+        );
+    }
+    if reject {
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::HarnessNotice(notice)
+                if notice.kind.as_str() == tau_proto::notice_kind::HARNESS_FAILURE
+        )));
+        assert!(
+            !h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&cid)
+        );
+    }
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentManualCompactionRequested(_) | Event::AgentStandaloneCompactionStarted(_)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A transient admission rejection must not release a trigger-free idle prompt.
+#[test]
+fn inline_idle_trigger_admission_gates_dispatch() {
+    for reject in [false, true] {
+        check_inline_trigger_admission(false, false, reject);
+        check_inline_trigger_admission(false, true, reject);
+    }
+}
+
+/// Settled wait cancellation does not authorize the compact command's dispatch
+/// when its later trigger rejects, including after asynchronous interception.
+#[test]
+fn inline_post_wait_trigger_admission_gates_dispatch() {
+    for reject in [false, true] {
+        check_inline_trigger_admission(true, true, reject);
+    }
+}
+
 /// Ordinary arbitration that must survive a rejected cancellation claim.
 #[derive(Clone, Copy, Debug)]
 enum Wake {
