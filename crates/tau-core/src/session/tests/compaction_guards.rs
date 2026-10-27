@@ -1,5 +1,125 @@
 use super::*;
 
+/// Cold recovery must own the successful boundary, not merely the original
+/// activation watermark, even when navigation selects a pre-boundary branch.
+#[test]
+fn cold_checkpoint_recovery_retains_successful_boundary() {
+    for selected in ["root", "resume", "sibling", "boundary", "descendant"] {
+        let mut tree = AgentTree::from_events(agent_id(), &[]);
+        let mut records = Vec::new();
+        let resume = append(
+            &mut tree,
+            &mut records,
+            AgentEventParent::Root,
+            prompt_event(agent_id()),
+        );
+        let mut started = compaction_start("ct-cold-checkpoint");
+        started.cut = resume;
+        started.resume_through = Some(resume);
+        append(
+            &mut tree,
+            &mut records,
+            AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionStarted(started.clone()),
+        );
+        let boundary = append(
+            &mut tree,
+            &mut records,
+            AgentEventParent::InheritHead,
+            success(&started, resume),
+        );
+        let descendant = append(
+            &mut tree,
+            &mut records,
+            AgentEventParent::InheritHead,
+            prompt_event(agent_id()),
+        );
+        let sibling = append(
+            &mut tree,
+            &mut records,
+            AgentEventParent::from_head(resume),
+            prompt_event(agent_id()),
+        );
+        let head = match selected {
+            "root" => AgentHead::Root,
+            "resume" => resume,
+            "sibling" => sibling,
+            "boundary" => boundary,
+            "descendant" => descendant,
+            _ => unreachable!(),
+        };
+        append(
+            &mut tree,
+            &mut records,
+            AgentEventParent::InheritHead,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: agent_id(),
+                head,
+            }),
+        );
+        let mut cold = AgentTree::try_from_events(agent_id(), &records).expect("valid cold prefix");
+        let recovery = cold
+            .standalone_compaction_recovery()
+            .expect("owed recovery");
+        assert_eq!(
+            tree.standalone_compaction_recovery(),
+            Some(recovery.clone())
+        );
+        let crate::StandaloneCompactionRecovery::AwaitingCheckpoint {
+            transaction_id,
+            cut,
+            model,
+            through,
+            ..
+        } = recovery
+        else {
+            panic!("expected pending checkpoint");
+        };
+        assert_eq!(
+            through,
+            if selected == "descendant" {
+                descendant
+            } else {
+                boundary
+            },
+            "selected {selected}"
+        );
+        append(
+            &mut cold,
+            &mut records,
+            AgentEventParent::InheritHead,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: agent_id(),
+                head: through,
+            }),
+        );
+        let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id(),
+            transaction_id: Some(transaction_id),
+            agent_prompt_id: "ap-cold-checkpoint".parse().expect("id"),
+            through,
+            model,
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: cut,
+            output_length_continuation: None,
+        };
+        append(
+            &mut cold,
+            &mut records,
+            AgentEventParent::InheritHead,
+            Event::AgentInferenceDispatchStarted(checkpoint.clone()),
+        );
+        let replay = AgentTree::try_from_events(agent_id(), &records).expect("checkpoint replay");
+        for tree in [&cold, &replay] {
+            assert!(matches!(
+                tree.standalone_compaction_recovery(),
+                Some(crate::StandaloneCompactionRecovery::DispatchUncertain(owner))
+                    if owner == checkpoint
+            ));
+        }
+    }
+}
+
 /// Builds a contiguous canonical record without changing the tree.
 fn record(tree: &AgentTree, parent: AgentEventParent, event: Event) -> PersistedAgentEvent {
     PersistedAgentEvent {

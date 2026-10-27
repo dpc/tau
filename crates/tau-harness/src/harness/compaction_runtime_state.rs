@@ -129,6 +129,10 @@ pub(crate) struct CompactionRuntimeState {
     /// Standalone inference checkpoints currently queued through publication.
     pub(super) enqueued_inference_checkpoints:
         HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    /// Previously authorized checkpoints rejected by semantic capacity. Cold
+    /// owners awaiting provider discovery do not acquire this retry marker.
+    pub(super) capacity_rejected_inference_checkpoints:
+        HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
 }
 
 impl CompactionRuntimeState {

@@ -1190,7 +1190,7 @@ fn assert_terminal_byte_pressure_recovers(standalone: bool) {
 
 /// Consumes queued runtime notifications, bounding a self-generated recovery
 /// chain without synthesizing a progress command or resending provider output.
-fn drain_actual_persistence_commands(h: &mut Harness) -> usize {
+pub(super) fn drain_actual_persistence_commands(h: &mut Harness) -> usize {
     let mut progress = 0;
     let mut served_clients = 0;
     for _ in 0..64 {

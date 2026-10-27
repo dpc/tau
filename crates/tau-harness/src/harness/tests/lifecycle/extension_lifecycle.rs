@@ -7866,6 +7866,7 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
         TestMessage::Ready(Default::default()),
     )
     .expect("tool Ready waits on provider");
+    h.handle_publication_capacity_ready();
     assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentInferenceDispatchStarted(checkpoint)

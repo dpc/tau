@@ -242,6 +242,12 @@ impl Harness {
                 .any(|(target, _)| target == agent_id)
             || self
                 .prompt_coordination
+                .compaction_runtime
+                .capacity_rejected_inference_checkpoints
+                .iter()
+                .any(|(target, _)| target == agent_id)
+            || self
+                .prompt_coordination
                 .standalone_accounting
                 .owners
                 .values()

@@ -5,6 +5,7 @@ use super::*;
 use crate::agent::LoopCycleState;
 
 mod acceptance_teardown;
+mod checkpoint_recovery;
 mod inline_wait;
 mod native_publication;
 mod restore_collision;

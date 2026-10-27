@@ -1817,6 +1817,10 @@ impl Harness {
                 .compaction_runtime
                 .enqueued_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloading_agent_id_proto);
+            self.prompt_coordination
+                .compaction_runtime
+                .capacity_rejected_inference_checkpoints
+                .retain(|(agent_id, _)| agent_id != &unloading_agent_id_proto);
             self.peer_messaging
                 .peer_input_rate
                 .remove(&unloading_agent_id_proto);

@@ -206,6 +206,7 @@ impl Harness {
             self.retry_pending_agent_publish_completion(&cid);
         }
         self.retry_pending_standalone_accounting_publications();
+        self.retry_pending_standalone_inference_checkpoints();
     }
 
     /// Terminalize only starts owned by the exact failed persistence scope.
@@ -1520,6 +1521,7 @@ impl Harness {
             self.retry_pending_agent_publish_completion(&cid);
         }
         self.retry_pending_standalone_accounting_publications();
+        self.retry_pending_standalone_inference_checkpoints();
         let pending_finishes = self
             .agent_runtime
             .agent_registry
@@ -1840,8 +1842,51 @@ impl Harness {
         }
     }
 
-    /// Retry the exact standalone-owned inference checkpoint after branch
-    /// reselection, retaining `AwaitingCheckpoint` until a commit succeeds.
+    /// Retry retained standalone checkpoints on external capacity/progress
+    /// wakes, never from their own rejection. Only previously attempted owners
+    /// qualify; an unresolved cold owner still waits for discovery authority.
+    fn retry_pending_standalone_inference_checkpoints(&mut self) {
+        if !self.session_initialized(&self.session_runtime.current_session_id) {
+            return;
+        }
+        let retained = &mut self
+            .prompt_coordination
+            .compaction_runtime
+            .capacity_rejected_inference_checkpoints;
+        let registry = &self.agent_runtime.agent_registry;
+        retained.retain(|(agent_id, transaction_id)| {
+            registry
+                .agent_routes
+                .get(agent_id)
+                .and_then(|cid| registry.agents.get(cid))
+                .is_some_and(|agent| {
+                    agent.identity.agent_id.as_ref() == Some(agent_id)
+                        && matches!(
+                            &agent.dispatch.activation_dispatch,
+                            path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                                owner: path_crate_agent::InferenceCheckpointOwner::Standalone { id },
+                                ..
+                            } if id == transaction_id
+                        )
+                })
+        });
+        let pending = self
+            .prompt_coordination
+            .compaction_runtime
+            .capacity_rejected_inference_checkpoints
+            .iter()
+            .filter_map(|(agent_id, _)| {
+                self.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            })
+            .collect::<Vec<_>>();
+        for cid in pending {
+            self.retry_standalone_inference_checkpoint(&cid);
+        }
+    }
+
+    /// Retry the exact standalone-owned inference checkpoint after capacity
+    /// recovery, runtime progress, or branch reselection, retaining
+    /// `AwaitingCheckpoint` until a commit succeeds.
     pub(super) fn retry_standalone_inference_checkpoint(&mut self, cid: &AgentId) {
         let Some((agent_id, transaction_id, agent_prompt_id, through, dispatch)) =
             self.agent_runtime
@@ -1980,13 +2025,20 @@ impl Harness {
         self.set_agent_turn_state(&cid, AgentTurnState::Idle);
     }
 
-    /// Retains one ordinary durable activation after its synchronized
+    /// Retains one durable activation after its synchronized
     /// inference checkpoint was rejected before canonical admission.
     pub(super) fn retain_admission_rejected_activation_successor(&mut self, event: &Event) {
         let Event::AgentInferenceDispatchStarted(started) = event else {
             return;
         };
-        if started.transaction_id.is_some() || started.output_length_continuation.is_some() {
+        if let Some(transaction_id) = &started.transaction_id {
+            self.prompt_coordination
+                .compaction_runtime
+                .capacity_rejected_inference_checkpoints
+                .insert((started.agent_id.clone(), transaction_id.clone()));
+            return;
+        }
+        if started.output_length_continuation.is_some() {
             return;
         }
         let Some(cid) = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
@@ -3844,6 +3896,10 @@ impl Harness {
                 .compaction_runtime
                 .enqueued_inference_checkpoints
                 .remove(&(started.agent_id.clone(), transaction_id.clone()));
+            self.prompt_coordination
+                .compaction_runtime
+                .capacity_rejected_inference_checkpoints
+                .remove(&(started.agent_id.clone(), transaction_id.clone()));
         }
         if let Event::AgentInferenceDispatchStarted(started) = event
             && let Some(cid) =
@@ -4313,6 +4369,10 @@ impl Harness {
             self.prompt_coordination
                 .compaction_runtime
                 .enqueued_inference_checkpoints
+                .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);
+            self.prompt_coordination
+                .compaction_runtime
+                .capacity_rejected_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);
             self.tombstone_ephemeral_provider_prompts_for_agent(&cid);
             self.runtime_io

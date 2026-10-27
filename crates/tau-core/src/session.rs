@@ -1197,24 +1197,34 @@ impl AgentTree {
                 }
             }
             (Some(CompactionTransactionOutcome::Succeeded(_)), None) => {
-                transaction.started.resume_through.map(|resume| {
+                transaction.started.resume_through.and_then(|_| {
+                    // The owed watermark can precede the replacement, including
+                    // on a sibling branch. Recovery must retain the committed
+                    // boundary even while the selected head is elsewhere.
+                    let boundary = self.nodes.iter().rev().find_map(|node| {
+                        matches!(
+                            &node.entry,
+                            AgentEntry::Compaction { transaction_id, .. } if transaction_id == id
+                        )
+                        .then_some(tau_proto::AgentHead::Node(node.id))
+                    })?;
                     let current = self
                         .head
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-                    StandaloneCompactionRecovery::AwaitingCheckpoint {
+                    Some(StandaloneCompactionRecovery::AwaitingCheckpoint {
                         transaction_id: id.clone(),
                         cut: transaction.started.cut,
                         model: transaction.started.model.clone(),
-                        through: if self.is_ancestor_head(resume, current) {
+                        through: if self.is_ancestor_head(boundary, current) {
                             current
                         } else {
-                            resume
+                            boundary
                         },
                         automatic: matches!(
                             transaction.started.trigger,
                             tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
                         ),
-                    }
+                    })
                 })
             }
             (Some(CompactionTransactionOutcome::Succeeded(_)), Some(checkpoint))
