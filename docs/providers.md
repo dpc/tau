@@ -1404,6 +1404,35 @@ replay sidecars. It deliberately omits `previous_response_id`, `store`,
 hosted/custom tools, image/file inputs, and public compaction. Existing
 `openrouter` profiles remain Chat Completions profiles.
 
+### GPT-6.1 Terra
+
+Select `chatgpt/gpt-6.1-terra` (or your ChatGPT namespace) for the existing
+Standard coding-agent workflow, with Function/Custom tools, parallel calls,
+native image tool results, and local-summary standalone compaction.
+Tau keeps `gpt-6-sol` as the default and preserves existing role choices.
+Private effort choices are `low`, `medium`, `high`, `xhigh`, and `max`.
+Tau does not adopt upstream's Lite/code-mode workflow or `ultra` delegation.
+It does not advertise native compaction or phase support for this model.
+
+Tau applies its shared local budget to Terra: 1,050,000 total tokens,
+997,500 effective input tokens, and 128,000 maximum output tokens.
+These limits do not establish private-route capacity. The October 27, 2026
+upstream Codex catalog selects a 500,000-token default and lists an
+872,000-token maximum. The provider may reject larger private requests.
+The public API documents a 1,050,000-token window and 128,000 output tokens.
+
+For public API coding, use a `responses` profile with the tested
+[Terra 6.1 model entry](../crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-terra.json).
+Public Responses also supports effort `none`, which the private catalog omits.
+The official Chat Completions endpoint does not support Terra tool traffic;
+Tau suppresses tool capabilities and rejects tool history there, as for Sol.
+Tau's equivalent API estimates per million tokens are `$1` ordinary input, `$0.05`
+cached input, `$1.25` 30-minute cache writes, and `$5` output. These exclude
+long-context, retention, service-tier, and regional adjustments.
+
+Sources: [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6.1-terra)
+and [audited Codex catalog](https://github.com/openai/codex/blob/19d730175f68d56aba23eae6c765b4e133299069/codex-rs/models-manager/models.json).
+
 ### GPT-6.1 Sol
 
 Select `chatgpt/gpt-6.1-sol` (or your ChatGPT namespace) for Tau's existing
@@ -1717,7 +1746,7 @@ prewarm response id. The real request must retain the warmed lowered input as an
 exact prefix; a changed fingerprint, divergent prefix, stale generation, or
 invalidation discards the anchor and sends full context.
 The known ChatGPT GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna, and GPT-6.1
-Sol models share Tau's 1,050,000-token total-window default and 997,500-token
+Sol/Terra models share Tau's 1,050,000-token total-window default and 997,500-token
 effective input ceiling. These are local budgeting defaults, not verified
 private-backend capacities; unknown and legacy models retain the conservative
 272,000-token total and 258,400-token effective fallback.

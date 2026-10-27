@@ -8,11 +8,13 @@ hard-coded production rate in `tau-provider-codex::estimated_api_prices`,
 ## OpenAI standard short-context rates
 
 Each model link is the provider-owned source for that exact ID. No older
-OpenAI base rates needed changing; Sol 6.1 adds a new row.
+OpenAI base rates needed changing; this table adds Sol 6.1 and Terra 6.1.
+Terra row verification date: October 27, 2026.
 
 | Model | Ordinary input | Cached input | Cache write | Output |
 | --- | ---: | ---: | ---: | ---: |
 | [gpt-6.1-sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) | 2 | 0.10 | 2.50 | 10 |
+| [gpt-6.1-terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra) | 1 | 0.05 | 1.25 | 5 |
 | [gpt-6-astra](https://developers.openai.com/api/docs/models/gpt-6-astra) | 10 | 1 | 12.50 | 50 |
 | [gpt-6-sol](https://developers.openai.com/api/docs/models/gpt-6-sol) | 2 | 0.20 | 2.50 | 10 |
 | [gpt-6-luna](https://developers.openai.com/api/docs/models/gpt-6-luna) | 0.10 | 0.01 | 0.125 | 0.50 |
@@ -31,10 +33,11 @@ API table's cache prices. Public API caching does not prove private
 subscription billing. The GPT-5.6 Sol base price is promotional through at
 least November 21, 2026 and needs another audit when that offer changes.
 
-Sol 6.1 input above 272,000 tokens uses 2× ordinary/read/write and 1.5× output
-rates for the **entire request**. Fast uses 2×, Batch/Flex 0.5×, and regional
-processing adds 10%. These conditional rates are not represented by the
-current scalar estimate fields. Other models can also have conditional tiers.
+For Sol/Terra 6.1 requests above 272,000 input tokens, the **entire request**
+costs 2× ordinary/read/write rates and 1.5× output rates. Fast uses 2×,
+Batch/Flex 0.5×, and regional processing adds 10%. Tau's current scalar
+estimate fields do not represent these conditional rates. Other models can
+also have conditional tiers.
 The private subscription route's actual accounting is not established by
 public API prices. Missing cache-write counts are not inferred: unmatched
 input is priced as ordinary input, which can underestimate write-heavy use.

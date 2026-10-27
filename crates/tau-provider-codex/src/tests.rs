@@ -634,6 +634,7 @@ fn gpt_6_aliases_publish_all_standard_short_context_prices() {
             ),
             ("gpt-6-sol", (2_000_000, 200_000, 2_500_000, 10_000_000)),
             ("gpt-6.1-sol", (2_000_000, 100_000, 2_500_000, 10_000_000)),
+            ("gpt-6.1-terra", (1_000_000, 50_000, 1_250_000, 5_000_000)),
             ("gpt-6-luna", (100_000, 10_000, 125_000, 500_000)),
         ] {
             let model = models
@@ -2873,64 +2874,66 @@ fn cache_diagnostics_pre_dispatch_cancel_is_zero() {
     assert!(rows[0]["successful_dispatch_index"].is_null());
 }
 
-/// Sol 6.1 must retain coding tools and local-summary compaction without
+/// Sol/Terra 6.1 must retain coding tools and local-summary compaction without
 /// claiming unverified private-route native compaction, phase, or Lite.
 #[test]
-fn gpt_6_1_sol_publishes_conservative_private_capabilities() {
-    let models = models_for_provider(&ProviderName::new("chatgpt"));
-    let model = models
-        .iter()
-        .find(|model| model.id.model.as_str() == "gpt-6.1-sol")
-        .expect("Sol 6.1");
-    assert_eq!(model.context_window.get(), 1_050_000);
-    assert_eq!(
-        model.max_input_tokens.map(|tokens| tokens.get()),
-        Some(997_500)
-    );
-    assert_eq!(
-        model.max_output_tokens.map(|tokens| tokens.get()),
-        Some(128_000)
-    );
-    for level in [
-        NativeReasoningEffort::Low,
-        NativeReasoningEffort::Medium,
-        NativeReasoningEffort::High,
-        NativeReasoningEffort::XHigh,
-        NativeReasoningEffort::Max,
-    ] {
-        assert!(model.efforts.contains(level));
-    }
-    assert!(!model.efforts.contains(NativeReasoningEffort::None));
-    assert!(!model.efforts.contains(NativeReasoningEffort::Minimal));
-    assert_eq!(
-        model.supported_tool_types,
-        vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom]
-    );
-    assert!(model.supports_parallel_tool_calls);
-    assert!(model.supports_standalone_compaction);
-    assert!(!model.supports_compaction);
-    assert!(model.standalone_compaction_threshold.is_none());
-    assert!(!supports_native_standalone_compaction("gpt-6.1-sol"));
-    assert_eq!(
-        model.input_modalities,
-        vec![
-            tau_proto::InputModality::Text,
-            tau_proto::InputModality::Image
-        ]
-    );
-    assert_eq!(
-        model.tool_result_modalities,
-        vec![
-            tau_proto::InputModality::Text,
-            tau_proto::InputModality::Image
-        ]
-    );
-    for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
-        let config = config_for_model_mode(&model.id.model, "token".into(), None, mode);
-        assert_eq!(config.mode, CodexMode::Standard);
-        assert!(!config.supports_phase);
-        assert!(!config.supports_verbosity);
-        assert!(!config.supports_compaction);
+fn gpt_6_1_models_publish_conservative_private_capabilities() {
+    for model_id in ["gpt-6.1-sol", "gpt-6.1-terra"] {
+        let models = models_for_provider(&ProviderName::new("chatgpt"));
+        let model = models
+            .iter()
+            .find(|model| model.id.model.as_str() == model_id)
+            .expect("GPT-6.1 model");
+        assert_eq!(model.context_window.get(), 1_050_000);
+        assert_eq!(
+            model.max_input_tokens.map(|tokens| tokens.get()),
+            Some(997_500)
+        );
+        assert_eq!(
+            model.max_output_tokens.map(|tokens| tokens.get()),
+            Some(128_000)
+        );
+        for level in [
+            NativeReasoningEffort::Low,
+            NativeReasoningEffort::Medium,
+            NativeReasoningEffort::High,
+            NativeReasoningEffort::XHigh,
+            NativeReasoningEffort::Max,
+        ] {
+            assert!(model.efforts.contains(level));
+        }
+        assert!(!model.efforts.contains(NativeReasoningEffort::None));
+        assert!(!model.efforts.contains(NativeReasoningEffort::Minimal));
+        assert_eq!(
+            model.supported_tool_types,
+            vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom]
+        );
+        assert!(model.supports_parallel_tool_calls);
+        assert!(model.supports_standalone_compaction);
+        assert!(!model.supports_compaction);
+        assert!(model.standalone_compaction_threshold.is_none());
+        assert!(!supports_native_standalone_compaction(model_id));
+        assert_eq!(
+            model.input_modalities,
+            vec![
+                tau_proto::InputModality::Text,
+                tau_proto::InputModality::Image
+            ]
+        );
+        assert_eq!(
+            model.tool_result_modalities,
+            vec![
+                tau_proto::InputModality::Text,
+                tau_proto::InputModality::Image
+            ]
+        );
+        for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+            let config = config_for_model_mode(&model.id.model, "token".into(), None, mode);
+            assert_eq!(config.mode, CodexMode::Standard);
+            assert!(!config.supports_phase);
+            assert!(!config.supports_verbosity);
+            assert!(!config.supports_compaction);
+        }
     }
 }
 
@@ -2951,6 +2954,7 @@ fn publishes_chatgpt_model_metadata() {
         vec![
             "work-chatgpt/gpt-6-sol",
             "work-chatgpt/gpt-6.1-sol",
+            "work-chatgpt/gpt-6.1-terra",
             "work-chatgpt/gpt-6-luna",
             "work-chatgpt/gpt-5.6-sol",
             "work-chatgpt/gpt-5.6-terra",
@@ -3052,7 +3056,7 @@ fn publishes_chatgpt_model_metadata() {
             .filter(|model| {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
                     && model.id.model.as_str() != "gpt-6-astra"
-                    && !is_gpt_6_sol_or_luna(model.id.model.as_str())
+                    && !is_gpt_6_workhorse(model.id.model.as_str())
             })
             .all(|model| model.supports_compaction)
     );
@@ -3111,7 +3115,7 @@ fn publishes_chatgpt_model_metadata() {
             .filter(|model| {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
                     && model.id.model.as_str() != "gpt-6-astra"
-                    && !is_gpt_6_sol_or_luna(model.id.model.as_str())
+                    && !is_gpt_6_workhorse(model.id.model.as_str())
             })
             .all(|model| !model.efforts.contains(NativeReasoningEffort::Max))
     );
@@ -3241,6 +3245,7 @@ fn context_defaults_align_metadata_and_request_configuration() {
                 ("gpt-6-sol", 1_050_000, 997_500, None),
                 ("gpt-6-luna", 1_050_000, 997_500, None),
                 ("gpt-6.1-sol", 1_050_000, 997_500, None),
+                ("gpt-6.1-terra", 1_050_000, 997_500, None),
                 ("gpt-5.5", 272_000, 258_400, None),
                 ("gpt-5.4", 272_000, 258_400, None),
                 ("gpt-5.4-mini", 272_000, 258_400, None),
@@ -3248,6 +3253,7 @@ fn context_defaults_align_metadata_and_request_configuration() {
                 ("gpt-5.6-experimental", 272_000, 258_400, None),
                 ("gpt-6-astra-experimental", 272_000, 258_400, None),
                 ("gpt-6.1-sol-experimental", 272_000, 258_400, None),
+                ("gpt-6.1-terra-experimental", 272_000, 258_400, None),
                 ("gpt-6", 272_000, 258_400, None),
                 ("unknown", 272_000, 258_400, None),
             ] {

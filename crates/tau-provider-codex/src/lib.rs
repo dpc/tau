@@ -48,6 +48,7 @@ const EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const CHATGPT_MODELS: &[&str] = &[
     "gpt-6-sol",
     "gpt-6.1-sol",
+    "gpt-6.1-terra",
     "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -1897,7 +1898,7 @@ fn model_info(
         default_affinity: default_affinity_for_model(model),
         context_window: raw_context_window_for_model(model),
         max_input_tokens: Some(effective_context_window_for_model(model)),
-        max_output_tokens: is_gpt_6_sol_or_luna(model).then_some(GPT_6_SOL_LUNA_MAX_OUTPUT_TOKENS),
+        max_output_tokens: is_gpt_6_workhorse(model).then_some(GPT_6_SOL_LUNA_MAX_OUTPUT_TOKENS),
         efforts: tau_proto::ReasoningEffortCapability::mapped(efforts_for_model(model)),
         verbosities: verbosities_for_model(model),
         thinking_summaries: vec![
@@ -1964,6 +1965,7 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
 
     let (uncached, cached, output) = match model {
         "gpt-6.1-sol" => (2_000_000, 100_000, 10_000_000),
+        "gpt-6.1-terra" => (1_000_000, 50_000, 5_000_000),
         "gpt-6-astra" => (10_000_000, 1_000_000, 50_000_000),
         "gpt-6-sol" => (2_000_000, 200_000, 10_000_000),
         "gpt-6-luna" => (100_000, 10_000, 500_000),
@@ -1996,6 +1998,7 @@ fn default_affinity_for_model(model: &str) -> i32 {
         "gpt-6-sol" => 900,
         // Adding a model must not silently change the default selection.
         "gpt-6.1-sol" => 850,
+        "gpt-6.1-terra" => 825,
         "gpt-6-luna" => 800,
         "gpt-5.6-sol" => 700,
         "gpt-5.6-terra" => 600,
@@ -2049,6 +2052,7 @@ fn supports_image_tool_results(model: &str) -> bool {
         model,
         "gpt-6-sol"
             | "gpt-6.1-sol"
+            | "gpt-6.1-terra"
             | "gpt-6-luna"
             | "gpt-6-astra"
             | "gpt-5.6-sol"
@@ -2061,12 +2065,15 @@ fn supports_image_tool_results(model: &str) -> bool {
     )
 }
 
-fn is_gpt_6_sol_or_luna(model: &str) -> bool {
-    matches!(model, "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna")
+fn is_gpt_6_workhorse(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna"
+    )
 }
 
 fn is_gpt_6(model: &str) -> bool {
-    model == "gpt-6-astra" || is_gpt_6_sol_or_luna(model)
+    model == "gpt-6-astra" || is_gpt_6_workhorse(model)
 }
 
 /// Exact audited models using the native Responses `compaction_trigger`
@@ -2081,7 +2088,7 @@ fn supports_inline_compaction(model: &str) -> bool {
 }
 
 fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {
-    if matches!(model, "gpt-6-astra" | "gpt-6.1-sol") {
+    if matches!(model, "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.1-terra") {
         return vec![
             NativeReasoningEffort::Low,
             NativeReasoningEffort::Medium,
@@ -2090,7 +2097,7 @@ fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {
             NativeReasoningEffort::Max,
         ];
     }
-    if is_gpt_6_sol_or_luna(model) {
+    if is_gpt_6_workhorse(model) {
         return vec![
             NativeReasoningEffort::None,
             NativeReasoningEffort::Low,

@@ -419,6 +419,19 @@ cache reads, cache writes, output, and reported token-time storage into this
 deliberately rough equivalent-API estimate per agent for the current runtime
 only.
 
+Select `chatgpt/gpt-6.1-terra` without changing the `gpt-6-sol` default
+or existing role selections. It uses the same conservative Standard tool
+workflow and local-summary compaction as Sol 6.1, with image tool results
+and `low`/`medium`/`high`/`xhigh`/`max` efforts. Tau's shared local budget
+does not establish private capacity: upstream Codex selects a 500,000-token
+default and lists an 872,000-token maximum, while Tau retains its
+1,050,000-token total and 997,500-token input convention.
+Use the tested `crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-terra.json`
+entry for public Responses; that route also supports effort `none`.
+Public Chat Completions cannot carry Terra tool traffic. Terra's four base
+API-equivalent rates are `$1` input, `$0.05` cached input, `$1.25` cache writes,
+and `$5` output per million tokens. See `docs/providers.md` for route and price caveats.
+
 `chatgpt/gpt-6.1-sol` is selectable without changing the `gpt-6-sol` default.
 It offers Function/Custom tools and local-summary standalone compaction, a
 1,050,000-token window, and low/medium/high/xhigh/max efforts. Private native

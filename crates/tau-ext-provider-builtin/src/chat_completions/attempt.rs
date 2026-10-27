@@ -7,10 +7,13 @@ use super::{ChatCompletionsModel, ChatCompletionsProvider};
 use crate::local_summary_validation_error::LocalSummaryValidationError;
 use crate::report_sink::ProviderReportSink;
 
-/// The official Sol 6.1 Chat Completions surface is text-only for tool traffic;
-/// compatible proxies retain their separately configured contract.
-fn is_toolless_sol_route(provider: &ChatCompletionsProvider, model: &ChatCompletionsModel) -> bool {
-    model.id.as_str() == "gpt-6.1-sol"
+/// The official Sol/Terra 6.1 Chat Completions surface is text-only for tool
+/// traffic; compatible proxies retain their separately configured contract.
+fn is_toolless_openai_route(
+    provider: &ChatCompletionsProvider,
+    model: &ChatCompletionsModel,
+) -> bool {
+    matches!(model.id.as_str(), "gpt-6.1-sol" | "gpt-6.1-terra")
         && provider.base_url.trim_end_matches('/') == "https://api.openai.com/v1"
 }
 
@@ -35,13 +38,14 @@ fn has_tool_traffic(prompt: &tau_proto::AgentPromptCreated) -> bool {
 }
 
 /// Resolve profile controls while omitting unsupported tool selectors on the
-/// official Sol 6.1 route, including `None` used by local-summary compaction.
+/// official Sol/Terra 6.1 route, including `None` used by local-summary
+/// compaction.
 fn model_compat(
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
 ) -> tau_provider_chat_completions::AttemptCompat {
     let mut compat = lower_compat(model.compat.as_ref().unwrap_or(&provider.compat));
-    if is_toolless_sol_route(provider, model) {
+    if is_toolless_openai_route(provider, model) {
         compat.tool_choice = false;
         compat.parallel_tool_calls = false;
     }
@@ -68,9 +72,10 @@ pub fn models_for_provider(
             let builtin_uncached = builtin.map(|prices| prices.0);
             let builtin_cached = builtin.map(|prices| prices.1);
             let builtin_output = builtin.map(|prices| prices.2);
-            // Sol 6.1 supports tools on Responses, not public Chat Completions.
-            // Do not impose OpenAI's endpoint contract on third-party proxies.
-            let tools_supported = !is_toolless_sol_route(provider, model);
+            // Sol/Terra 6.1 support tools on Responses, not public Chat
+            // Completions. Do not impose OpenAI's endpoint contract
+            // on third-party proxies.
+            let tools_supported = !is_toolless_openai_route(provider, model);
             tau_proto::ProviderModelInfo {
                 id: tau_proto::ModelId::new(provider_name.clone(), model.id.clone()),
                 display_name: model.display_name.clone(),
@@ -167,7 +172,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
     network: &tau_provider::OutboundNetworkPolicy,
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
-    if is_toolless_sol_route(provider, model) && has_tool_traffic(prompt) {
+    if is_toolless_openai_route(provider, model) && has_tool_traffic(prompt) {
         return PromptAttemptOutcome::Terminal {
             finished: Box::new(finished(
                 agent_prompt_id,
@@ -175,7 +180,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 &provider.base_url,
                 Vec::new(),
                 tau_proto::ProviderStopReason::Error,
-                Some("GPT-6.1 Sol tool traffic requires a Responses profile, not public Chat Completions".to_owned()),
+                Some("GPT-6.1 Sol/Terra tool traffic requires a Responses profile, not public Chat Completions".to_owned()),
                 Some(tau_proto::ProviderFailureKind::RequestRejected),
                 None,
                 false,

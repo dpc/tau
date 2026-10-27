@@ -1347,26 +1347,27 @@ fn partially_priced_model_uses_per_category_fallbacks() {
     assert_eq!(rates.output, tau_proto::ESTIMATED_API_COST_FALLBACK.output);
 }
 
-/// Public Sol 6.1 Chat Completions must not advertise its default Function
+/// Public Sol/Terra 6.1 Chat Completions must not advertise default Function
 /// tools; Responses is the supported tool route. Proxies retain their contract.
 #[test]
-fn gpt_6_1_sol_public_chat_completions_has_no_tools() {
-    for (base_url, tools_supported) in [
-        ("https://api.openai.com/v1", false),
-        ("https://api.openai.com/v1/", false),
-        ("https://proxy.example/v1", true),
-    ] {
-        let model =
-            serde_json::from_value(serde_json::json!({"id": "gpt-6.1-sol"})).expect("Sol model");
-        let provider = ChatCompletionsProvider {
-            base_url: base_url.into(),
-            models: vec![model],
-            ..ChatCompletionsProvider::default()
-        };
-        let models = models_for_provider(&tau_proto::ProviderName::new("openai"), &provider);
-        assert_eq!(!models[0].supported_tool_types.is_empty(), tools_supported);
-        assert_eq!(models[0].supports_parallel_tool_calls, tools_supported);
-        assert!(models[0].hosted_tool_capabilities.is_empty());
+fn gpt_6_1_public_chat_completions_has_no_tools() {
+    for model_id in ["gpt-6.1-sol", "gpt-6.1-terra"] {
+        for (base_url, tools_supported) in [
+            ("https://api.openai.com/v1", false),
+            ("https://api.openai.com/v1/", false),
+            ("https://proxy.example/v1", true),
+        ] {
+            let model = serde_json::from_value(serde_json::json!({"id": model_id})).expect("model");
+            let provider = ChatCompletionsProvider {
+                base_url: base_url.into(),
+                models: vec![model],
+                ..ChatCompletionsProvider::default()
+            };
+            let models = models_for_provider(&tau_proto::ProviderName::new("openai"), &provider);
+            assert_eq!(!models[0].supported_tool_types.is_empty(), tools_supported);
+            assert_eq!(models[0].supports_parallel_tool_calls, tools_supported);
+            assert!(models[0].hosted_tool_capabilities.is_empty());
+        }
     }
 }
 

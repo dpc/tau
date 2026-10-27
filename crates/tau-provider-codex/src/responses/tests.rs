@@ -714,7 +714,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
 /// the exact subscription model slug without changing the existing default.
 #[test]
 fn build_request_lowers_new_model_ids_verbatim() {
-    for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+    for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"] {
         let config =
             crate::config_for_model(&tau_proto::ModelName::new(model), "token".to_owned(), None);
         let body = serde_json::to_value(build_request(&config, &basic_prompt_payload(), None))

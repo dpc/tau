@@ -32,7 +32,7 @@ and ordinary tool lifecycle. Both Standard and Lite profiles may opt in, without
 claiming account entitlement or probing it.
 
 All currently published ChatGPT/Codex models explicitly publish image input and
-image tool-result support: GPT-6 Sol, Sol 6.1, Luna, and Astra; GPT-5.6 Sol,
+image tool-result support: GPT-6 Sol, Sol 6.1, Terra 6.1, Luna, and Astra; GPT-5.6 Sol,
 Terra, and Luna; GPT-5.5, GPT-5.4, GPT-5.4 Mini, and GPT-5.3 Codex.
 One exact-model predicate controls both publication and wire lowering; catalog
 addition alone does not grant image disclosure. Successful typed function
@@ -55,6 +55,12 @@ checks model image-input metadata and emits native `function_call_output` image
 content, with no GPT-5.6-only wire restriction. This is source/metadata evidence,
 not a live account-entitlement or visual-fidelity test. Unknown/experimental
 model IDs remain text-only; Lite, phase, and compaction support remain separate.
+
+The Terra 6.1 audit uses the same modality and native function-output evidence from
+[Codex revision 19d730175](https://github.com/openai/codex/tree/19d730175f68d56aba23eae6c765b4e133299069)
+(October 27, 2026). Tau keeps its Standard client-tool workflow despite the
+catalog's Lite/code-mode preference. Tau does not advertise native compaction,
+phase, or `ultra` delegation for Terra.
 
 Normal inference, WebSocket, replay, and standalone compaction share this item
 converter. Each request admits at most 24 MiB of canonical image bytes and 32
@@ -259,7 +265,7 @@ bounded provider-owned opaque replay data and never enter Tau tool dispatch.
 
 ChatGPT model metadata publishes Tau's raw context-window default as the total
 window and a 95-percent effective ceiling as the separate input maximum.
-Known GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna, and GPT-6.1 Sol share a
+Known GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna, and GPT-6.1 Sol/Terra share a
 1,050,000-token raw default; unknown and legacy models retain 272,000 tokens.
 These are local budgeting defaults, not verified private-backend capacities.
 Native standalone compaction thresholds derive from 90 percent of the raw window,
