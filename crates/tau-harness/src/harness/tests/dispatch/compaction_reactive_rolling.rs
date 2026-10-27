@@ -3,6 +3,8 @@
 
 use super::*;
 
+mod reserved_ids;
+
 /// Build one clean local-summary length terminal without publishing context.
 fn local_summary_length_response(
     prompt: &tau_proto::AgentPromptCreated,

@@ -2731,6 +2731,17 @@ impl Harness {
                 Event::AgentStandaloneCompactionStarted(started) => {
                     Some(started.transaction_id.to_string())
                 }
+                Event::AgentStandaloneCompactionFailed(failed) => failed
+                    .context_retreat
+                    .as_ref()
+                    .map(|plan| &plan.transaction_id)
+                    .or_else(|| {
+                        failed
+                            .output_length_continuation
+                            .as_ref()
+                            .map(|plan| &plan.transaction_id)
+                    })
+                    .map(ToString::to_string),
                 _ => None,
             })
             .filter_map(|id| id.rsplit('-').next()?.parse::<u64>().ok())

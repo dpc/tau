@@ -32,8 +32,8 @@ pub(super) struct AgentHistory {
     /// Exact distinct internal-message texts across all accepted branches.
     /// Live notice deduplication must survive replay-cache eviction.
     pub(super) internal_prompt_texts: HashSet<String>,
-    /// First unused numeric suffix across all four persisted prompt-id
-    /// families.
+    /// First unused numeric suffix across persisted prompt/transaction ids,
+    /// including successors reserved by failure records.
     pub(super) next_prompt_index: u64,
     /// Accepted record count, independent of the resident record vector.
     pub(super) accepted_count: u64,
@@ -227,6 +227,22 @@ impl AgentHistory {
             Event::AgentInferenceDispatchStarted(checkpoint) => checkpoint.agent_prompt_id.as_str(),
             Event::AgentStandaloneCompactionStarted(started) => {
                 transaction_id = started.transaction_id.to_string();
+                &transaction_id
+            }
+            Event::AgentStandaloneCompactionFailed(failed) => {
+                // A committed reservation consumes its identity even when the
+                // successor start has not reached the journal yet.
+                transaction_id = failed
+                    .context_retreat
+                    .as_ref()
+                    .map(|plan| &plan.transaction_id)
+                    .or_else(|| {
+                        failed
+                            .output_length_continuation
+                            .as_ref()
+                            .map(|plan| &plan.transaction_id)
+                    })?
+                    .to_string();
                 &transaction_id
             }
             _ => return None,

@@ -1061,8 +1061,8 @@ impl AgentStore {
     /// journal.
     ///
     /// The cursor includes normal prompts, provider responses, dispatch starts,
-    /// and standalone-compaction transaction ids, including unselected
-    /// branches.
+    /// and standalone-compaction transaction ids (started or reserved by a
+    /// failure), including unselected branches.
     #[must_use]
     pub fn loaded_next_prompt_index(&self, agent_id: &AgentId) -> Option<u64> {
         self.managed_projections

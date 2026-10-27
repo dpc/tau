@@ -590,8 +590,9 @@ fn managed_history_facts_do_not_depend_on_resident_records() {
     );
 }
 
-/// Every historical prompt-id family participates in collision avoidance, while
-/// malformed numeric suffixes are ignored and the maximum u64 saturates.
+/// Every historical prompt-id family and unstarted successor reservation
+/// participates in collision avoidance, while malformed numeric suffixes are
+/// ignored and the maximum u64 saturates.
 #[test]
 fn managed_history_prompt_cursor_covers_all_id_families() {
     let agent_id = AgentId::parse("history-cursor").expect("agent id");
@@ -632,12 +633,40 @@ fn managed_history_prompt_cursor_covers_all_id_families() {
             supersedes: None,
             trigger: tau_proto::StandaloneCompactionTrigger::Manual,
         });
+    let mut failed = tau_proto::AgentStandaloneCompactionFailed {
+        agent_id: agent_id.clone(),
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-40").expect("transaction"),
+        cut: tau_proto::AgentHead::Root,
+        reason: tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded,
+        resume_through: None,
+        context_retreat: None,
+        output_length_continuation: Some(tau_proto::LocalSummaryContinuationPlan {
+            transaction_id: tau_proto::CompactionTransactionId::parse("ct-50")
+                .expect("transaction"),
+            compact_prompt_id: "ap-history-cursor-50".parse().expect("prompt"),
+        }),
+        incomplete_response: None,
+    };
+    let length = Event::AgentStandaloneCompactionFailed(failed.clone());
+    failed.reason = tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded;
+    failed.output_length_continuation = None;
+    failed.context_retreat = Some(tau_proto::ContextRetreatPlan {
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-60").expect("transaction"),
+        compact_prompt_id: "ap-history-cursor-60".parse().expect("prompt"),
+        cut: tau_proto::AgentHead::Root,
+        roll_through: tau_proto::AgentHead::Root,
+        model: "test/model".into(),
+        originator: Default::default(),
+        resume_through: None,
+    });
     let mut history = AgentHistory::default();
     for (index, event) in [
         prompt("prompt-10"),
         history_response(&agent_id, "response-20"),
         dispatch,
         compact,
+        length,
+        Event::AgentStandaloneCompactionFailed(failed),
     ]
     .into_iter()
     .enumerate()
@@ -649,11 +678,13 @@ fn managed_history_prompt_cursor_covers_all_id_families() {
             history.next_prompt_index
         );
     }
-    history.push(history_record(4, prompt("prompt-not_numeric")), 0);
-    assert_eq!(history.next_prompt_index, 41);
-    history.push(history_record(5, prompt("prompt-18446744073709551615")), 0);
+    history.evict_before(6);
+    assert_eq!(history.next_prompt_index, 61);
+    history.push(history_record(6, prompt("prompt-not_numeric")), 0);
+    assert_eq!(history.next_prompt_index, 61);
+    history.push(history_record(7, prompt("prompt-18446744073709551615")), 0);
     assert_eq!(history.next_prompt_index, u64::MAX);
-    history.push(history_record(6, prompt("prompt-2")), 0);
+    history.push(history_record(8, prompt("prompt-2")), 0);
     assert_eq!(history.next_prompt_index, u64::MAX);
 }
 
