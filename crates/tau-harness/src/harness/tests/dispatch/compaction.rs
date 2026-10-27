@@ -10,6 +10,7 @@ mod inline_wait;
 mod native_publication;
 mod restore_collision;
 mod role_drift;
+mod self_terminal_recovery;
 mod stale_terminal;
 
 pub(super) fn append_byte_fit_text(h: &mut Harness, cid: &AgentId, text: String) {

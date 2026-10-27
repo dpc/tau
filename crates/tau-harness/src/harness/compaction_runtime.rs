@@ -2335,7 +2335,12 @@ impl Harness {
                         }
                         None => continue,
                     };
-                    if let Some(agent) = self
+                    if matches!(
+                        outcome.as_deref(),
+                        Some(tau_core::ManualCompactionOutcome::Succeeded(_))
+                    ) {
+                        self.restore_self_compaction_continuation(&target_cid, &started, terminal);
+                    } else if let Some(agent) = self
                         .agent_runtime
                         .agent_registry
                         .agents
@@ -2345,13 +2350,7 @@ impl Harness {
                             .dispatch
                             .pending_prompts
                             .push_back(self_compaction_terminal_pending_prompt(terminal));
-                    }
-                    self.fold_pending_prompts_as_steered(&caller_cid);
-                    if matches!(
-                        outcome.as_deref(),
-                        Some(tau_core::ManualCompactionOutcome::Succeeded(_))
-                    ) {
-                        self.stage_restored_manual_checkpoint(&target_cid, &started);
+                        self.fold_pending_prompts_as_steered(&caller_cid);
                     }
                 }
                 continue;
@@ -2418,29 +2417,19 @@ impl Harness {
                         self.consume_wait_background_completion(
                             &request.required_tool_source().initiating_tool_call_id,
                         );
-                        if let Some(agent) = self
-                            .agent_runtime
-                            .agent_registry
-                            .agents
-                            .get_mut(&target_cid)
-                        {
-                            agent.dispatch.pending_prompts.push_back(
-                                self_compaction_terminal_pending_prompt(
-                                    tau_proto::SelfCompactionTerminal {
-                                        request_id: request.request_id.clone(),
-                                        tool_call_id: request
-                                            .required_tool_source()
-                                            .initiating_tool_call_id
-                                            .clone(),
-                                        transaction_id: Some(started.transaction_id.clone()),
-                                        outcome:
-                                            tau_proto::SelfCompactionTerminalOutcome::Compacted,
-                                    },
-                                ),
-                            );
-                        }
-                        self.fold_pending_prompts_as_steered(&target_cid);
-                        self.stage_restored_manual_checkpoint(&target_cid, &started);
+                        self.restore_self_compaction_continuation(
+                            &target_cid,
+                            &started,
+                            tau_proto::SelfCompactionTerminal {
+                                request_id: request.request_id.clone(),
+                                tool_call_id: request
+                                    .required_tool_source()
+                                    .initiating_tool_call_id
+                                    .clone(),
+                                transaction_id: Some(started.transaction_id.clone()),
+                                outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
+                            },
+                        );
                     }
                 }
                 Some(tau_core::ManualCompactionOutcome::Failed(failed)) => {
@@ -2576,51 +2565,65 @@ impl Harness {
             .is_some_and(|tree| tree.self_compaction_delivery(&request.request_id).is_some())
     }
 
-    /// Stages an exact manual-compaction continuation for the common
-    /// provider-discovery reconciliation path.
-    pub(super) fn stage_restored_manual_checkpoint(
+    /// Retain a missing self-terminal on its successful replacement branch.
+    /// Only its committed steer may stage the continuation checkpoint; cold
+    /// discovery and ordinary retained-publication retries then share live
+    /// rules.
+    fn restore_self_compaction_continuation(
         &mut self,
         target_cid: &AgentId,
         started: &tau_proto::AgentStandaloneCompactionStarted,
+        terminal: tau_proto::SelfCompactionTerminal,
     ) {
-        let Some((agent_prompt_id, through)) = self
+        let Some(batch_parent) = self
             .agent_runtime
             .agent_registry
             .agents
             .get(target_cid)
             .and_then(|agent| {
-                let agent_id = agent.identity.agent_id.clone()?;
-                Some((
-                    tau_proto::AgentPromptId::parse(format!(
-                        "ap-{agent_id}-{}",
-                        agent.dispatch.next_prompt_index
-                    ))
-                    .expect("known-safe AgentPromptId must be valid"),
-                    agent
-                        .identity
-                        .head
-                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                ))
+                let tree = self
+                    .session_runtime
+                    .agent_store
+                    .agent(agent.identity.agent_id.as_deref()?)?;
+                tree.nodes().iter().rev().find_map(|node| {
+                    matches!(&node.entry, tau_core::AgentEntry::Compaction { transaction_id, .. }
+                        if transaction_id == &started.transaction_id)
+                    .then_some(tau_proto::AgentHead::Node(node.id))
+                })
             })
         else {
             return;
         };
+        // Match live success while the terminal is still owed. The retained
+        // publication alone does not block ordinary queue/input dispatch.
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(target_cid) {
-            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
             agent.dispatch.activation_dispatch =
-                path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
-                    owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
-                        id: started.transaction_id.clone(),
-                    },
-                    agent_prompt_id: agent_prompt_id.clone(),
-                    through,
-                    dispatch: crate::agent::InferenceDispatchOwnership {
-                        model: started.model.clone(),
-                        operation: tau_proto::PromptOperation::Inference,
-                        activation_cut: started.cut,
-                    },
+                path_crate_agent::ActivationDispatchState::Running {
+                    id: started.transaction_id.clone(),
+                    cut: started.cut,
+                    resume_through: started.resume_through,
+                    model: started.model.clone(),
+                    branch_generation: agent.identity.branch_generation,
+                    compact_prompt_id: started.compact_prompt_id.clone(),
                 };
         }
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .insert(
+                target_cid.clone(),
+                AgentPublishCompletion::StandaloneContinuation {
+                    transaction_id: started.transaction_id.clone(),
+                    model: started.model.clone(),
+                    activation_cut: started.cut,
+                    batch_parent,
+                    source: None,
+                    retry_prompts: vec![self_compaction_terminal_pending_prompt(terminal)],
+                    complete_on_commit: true,
+                    owned_publication: None,
+                },
+            );
+        self.retry_pending_agent_publish_completion(target_cid);
     }
 
     pub(super) fn is_pending_manual_compaction_call(&self, call_id: &ToolCallId) -> bool {

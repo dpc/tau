@@ -1147,6 +1147,11 @@ impl Harness {
                     },
                 };
         }
+        // Cold self-terminal repair uses the same continuation as live success,
+        // but must leave its checkpoint staged until discovery has authority.
+        if !self.session_initialized(&self.session_runtime.current_session_id) {
+            return;
+        }
         self.prompt_coordination
             .compaction_runtime
             .enqueued_inference_checkpoints
@@ -1375,6 +1380,31 @@ impl Harness {
         else {
             return;
         };
+        // A cold continuation has not passed interception yet, so it has no
+        // OwnedPublication. Its successful boundary still owns the entire
+        // batch.
+        if let AgentPublishCompletion::StandaloneContinuation { batch_parent, .. } = &completion
+            && !self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.identity.agent_id.as_deref())
+                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+                .is_some_and(|tree| {
+                    tree.is_ancestor_head(
+                        *batch_parent,
+                        self.selected_head_for_agent(cid)
+                            .unwrap_or(tau_proto::AgentHead::Root),
+                    )
+                })
+        {
+            self.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .insert(cid.clone(), completion);
+            return;
+        }
         if let AgentPublishCompletion::UncertainSupersession {
             agent_prompt_id, ..
         } = &completion
