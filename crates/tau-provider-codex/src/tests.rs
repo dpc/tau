@@ -792,7 +792,7 @@ enum LoopbackResponseMode {
     CloseWithoutResponse,
     ContextWindowExceeded,
     DirectContextWindowExceeded,
-    DirectRequestRejected(&'static str),
+    DirectProviderError(&'static str),
     SemanticThenClose,
     CompactErrorWithEmbeddedItem,
     CompactItemThenClose,
@@ -872,7 +872,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     | LoopbackResponseMode::RepairThenUpgradeFailure
                     | LoopbackResponseMode::ContextWindowExceeded
                     | LoopbackResponseMode::DirectContextWindowExceeded
-                    | LoopbackResponseMode::DirectRequestRejected(_)
+                    | LoopbackResponseMode::DirectProviderError(_)
                     | LoopbackResponseMode::SemanticThenClose
                     | LoopbackResponseMode::CompactErrorWithEmbeddedItem
                     | LoopbackResponseMode::CompactItemThenClose
@@ -1054,11 +1054,16 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     ));
                     continue;
                 }
-                if let LoopbackResponseMode::DirectRequestRejected(code) = mode {
+                if let LoopbackResponseMode::DirectProviderError(code) = mode {
                     let _ = socket.send(tungstenite::Message::Text(
                         serde_json::json!({
                             "type": "error",
-                            "error": {"code": code, "message": "private backend detail canary"}
+                            "headers": {"Retry-After": "99"},
+                            "error": {
+                                "code": code,
+                                "message": "private backend detail canary",
+                                "headers": {"Retry-After": "12"}
+                            }
                         })
                         .to_string()
                         .into(),
@@ -1232,7 +1237,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 | LoopbackResponseMode::RepairThenSuccess
                 | LoopbackResponseMode::RepairThenUpgradeFailure
                 | LoopbackResponseMode::DirectContextWindowExceeded
-                | LoopbackResponseMode::DirectRequestRejected(_)
+                | LoopbackResponseMode::DirectProviderError(_)
                 | LoopbackResponseMode::SemanticThenClose
                 | LoopbackResponseMode::CompactErrorWithEmbeddedItem
                 | LoopbackResponseMode::CompactItemThenClose
@@ -3381,12 +3386,17 @@ fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
     assert!(older_info.supports_parallel_tool_calls);
 }
 
-/// A streaming policy rejection must leave the finite attempt as a typed
+/// A streaming request rejection must leave the finite attempt as a typed
 /// terminal error, never a scheduled retry or transparent socket repair.
 #[test]
-fn websocket_policy_error_terminalizes_after_one_dispatch() {
-    for code in ["cyber_policy", "invalid_prompt", "bio_policy"] {
-        let server = spawn_loopback_server(LoopbackResponseMode::DirectRequestRejected(code));
+fn websocket_request_error_terminalizes_after_one_dispatch() {
+    for code in [
+        "cyber_policy",
+        "invalid_prompt",
+        "bio_policy",
+        "model_not_found",
+    ] {
+        let server = spawn_loopback_server(LoopbackResponseMode::DirectProviderError(code));
         let config = ResolvedConfig {
             inner: test_config(server.base_url()),
         };
@@ -3421,6 +3431,63 @@ fn websocket_policy_error_terminalizes_after_one_dispatch() {
             error.to_string(),
             format!("provider rejected the request ({code})")
         );
+        assert_eq!(
+            server
+                .counts()
+                .ws_upgrade_requests
+                .load(path_std_sync_atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            server
+                .counts()
+                .http_post_requests
+                .load(path_std_sync_atomic::Ordering::SeqCst),
+            0
+        );
+    }
+}
+
+/// Structured capacity/throttle errors must reach the scheduler with validated
+/// nested retry advice, without spending a transparent socket repair or
+/// exposing private provider prose.
+#[test]
+fn websocket_retry_advice_reaches_scheduler_after_one_dispatch() {
+    use tau_provider::retry_policy::RetryClass;
+
+    for (code, expected_class) in [
+        ("policy_capacity_unavailable", RetryClass::Overload),
+        ("rate_limit_exceeded", RetryClass::Throttle),
+    ] {
+        let server = spawn_loopback_server(LoopbackResponseMode::DirectProviderError(code));
+        let config = ResolvedConfig {
+            inner: test_config(server.base_url()),
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session_id = tau_proto::SessionId::parse("session-retry-advice").expect("session");
+        let agent_id = tau_proto::AgentId::parse("agent-retry-advice").expect("agent");
+        let context = tau_proto::PromptContext::default();
+        let request = test_prompt_payload(&session_id, &agent_id, &context);
+        let outcome = runtime.run_attempt(
+            "ap-retry-advice",
+            &config,
+            &request,
+            &mut NeverAbort,
+            &mut |_| {},
+        );
+        let AttemptOutcome::Retry {
+            decision,
+            progress,
+            canonical_unauthorized,
+            ..
+        } = outcome
+        else {
+            panic!("{code} must reach the scheduler");
+        };
+        assert_eq!(decision.class, expected_class);
+        assert_eq!(decision.retry_after, Some(Duration::from_secs(12)));
+        assert_eq!(progress, SemanticProgress::None);
+        assert!(!canonical_unauthorized);
         assert_eq!(
             server
                 .counts()

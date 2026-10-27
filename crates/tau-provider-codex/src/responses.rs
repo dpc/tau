@@ -2354,7 +2354,7 @@ fn response_failed_error(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
         );
     }
-    if let Some(reason) = RequestRejectionReason::from_code(code.as_deref()) {
+    if let Some(reason) = event_request_rejection(event, code.as_deref()) {
         return LlmError::RequestRejected {
             reason,
             detail: body,
@@ -2371,27 +2371,56 @@ fn response_failed_error(
     .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
+/// Model absence is terminal only in upstream's documented status shapes.
+/// Other recognized request rejections retain their existing event policy.
+fn event_request_rejection(
+    event: &serde_json::Value,
+    code: Option<&str>,
+) -> Option<RequestRejectionReason> {
+    let reason = RequestRejectionReason::from_code(code)?;
+    if reason == RequestRejectionReason::ModelNotFound
+        && event
+            .get("status")
+            .is_some_and(|status| !matches!(status.as_u64(), Some(400 | 403 | 404)))
+    {
+        return None;
+    }
+    Some(reason)
+}
+
 /// Prefer validated nested HTTP retry advice to canonical structured reset
 /// metadata. Unlike Codex, Tau deliberately does not derive delays from prose.
 fn failed_response_retry_hint(event: &serde_json::Value, now: SystemTime) -> Option<Duration> {
-    event["response"]["error"]["headers"]
-        .as_object()
-        .and_then(|headers| {
-            headers.iter().find_map(|(name, value)| {
-                let name = path_reqwest_header::HeaderName::from_bytes(name.as_bytes()).ok()?;
-                if name != path_reqwest_header::RETRY_AFTER {
-                    return None;
-                }
-                let value = match value {
-                    serde_json::Value::String(value) => value.clone(),
-                    serde_json::Value::Number(value) => value.to_string(),
-                    serde_json::Value::Bool(value) => value.to_string(),
-                    _ => return None,
-                };
-                let value = path_reqwest_header::HeaderValue::from_str(&value).ok()?;
-                tau_provider::retry_policy::parse_retry_after(value.to_str().ok()?, now)
-            })
+    json_retry_after(&event["response"]["error"]["headers"], now)
+        .or_else(|| canonical_event_reset_hint(event, now))
+}
+
+/// Validate retry advice from an already bounded provider event. Preserve the
+/// existing first-valid-header policy, including case-insensitive duplicates.
+fn json_retry_after(headers: &serde_json::Value, now: SystemTime) -> Option<Duration> {
+    headers.as_object().and_then(|headers| {
+        headers.iter().find_map(|(name, value)| {
+            let name = path_reqwest_header::HeaderName::from_bytes(name.as_bytes()).ok()?;
+            if name != path_reqwest_header::RETRY_AFTER {
+                return None;
+            }
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                serde_json::Value::Number(value) => value.to_string(),
+                serde_json::Value::Bool(value) => value.to_string(),
+                _ => return None,
+            };
+            let value = path_reqwest_header::HeaderValue::from_str(&value).ok()?;
+            tau_provider::retry_policy::parse_retry_after(value.to_str().ok()?, now)
         })
+    })
+}
+
+/// Nested HTTP advice wins over top-level advice and structured reset fields.
+/// Invalid or absent advice falls through; provider-authored prose never does.
+fn stream_error_retry_hint(event: &serde_json::Value, now: SystemTime) -> Option<Duration> {
+    json_retry_after(&event["error"]["headers"], now)
+        .or_else(|| json_retry_after(&event["headers"], now))
         .or_else(|| canonical_event_reset_hint(event, now))
 }
 
@@ -2429,7 +2458,7 @@ fn stream_error_event(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
         );
     }
-    if let Some(reason) = RequestRejectionReason::from_code(error_code.as_deref()) {
+    if let Some(reason) = event_request_rejection(event, error_code.as_deref()) {
         return LlmError::RequestRejected {
             reason,
             detail: body,
@@ -2438,7 +2467,7 @@ fn stream_error_event(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
         );
     }
-    let reset_hint = canonical_event_reset_hint(event, path_std_time::SystemTime::now());
+    let reset_hint = stream_error_retry_hint(event, path_std_time::SystemTime::now());
     LlmError::StreamError {
         body,
         code: error_code,

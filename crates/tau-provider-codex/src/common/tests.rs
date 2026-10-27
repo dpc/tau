@@ -130,6 +130,70 @@ fn produced_tool_call_matches_materialized_output() {
     }
 }
 
+/// Canonical HTTP model absence must terminalize 400/403/404 without confusing
+/// bearer recovery, overload, contradictory transient codes, or echoed prose.
+#[test]
+fn http_model_not_found_preserves_status_and_identifier_precedence() {
+    for body in [
+        r#"{"error":{"code":"model_not_found","type":"invalid_request_error"}}"#,
+        r#"{"code":"unknown_outer","response":{"error":{"code":"model_not_found"}}}"#,
+    ] {
+        for status in [400, 403, 404] {
+            for error in [
+                LlmError::HttpStatus(status, body.to_owned()),
+                LlmError::HttpStatusRetryAfter(status, body.to_owned(), Duration::from_secs(12)),
+            ] {
+                assert_eq!(error.retry_decision(), None);
+                assert_eq!(
+                    error.failure_kind(),
+                    Some(ProviderFailureKind::RequestRejected)
+                );
+                assert_eq!(
+                    error.error_category(),
+                    tau_proto::ProviderErrorCategory::RequestRejected
+                );
+                assert!(!error.is_canonical_unauthorized());
+            }
+        }
+        for (status, class) in [(401, RetryClass::Auth), (503, RetryClass::Overload)] {
+            let error = LlmError::HttpStatus(status, body.to_owned());
+            assert_eq!(error.retry_decision().expect("retry").class, class);
+            assert_eq!(error.failure_kind(), None);
+            assert_eq!(error.is_canonical_unauthorized(), status == 401);
+        }
+    }
+    for body in [
+        r#"{"message":"model_not_found"}"#,
+        r#"{"echo":{"code":"model_not_found"}}"#,
+        r#"{"error":{"code":"model_not_found_extra"}}"#,
+    ] {
+        let error = LlmError::HttpStatus(403, body.to_owned());
+        assert_eq!(
+            error.retry_decision().expect("auth retry").class,
+            RetryClass::Auth
+        );
+        assert_eq!(error.failure_kind(), None);
+    }
+    let transient = LlmError::HttpStatus(
+        403,
+        r#"{"code":"model_not_found","error":{"type":"policy_capacity_unavailable"}}"#.to_owned(),
+    );
+    assert_eq!(
+        transient.retry_decision().expect("capacity retry").class,
+        RetryClass::Overload
+    );
+    assert_eq!(transient.failure_kind(), None);
+    let context = LlmError::HttpStatus(
+        403,
+        r#"{"code":"model_not_found","error":{"code":"context_length_exceeded"}}"#.to_owned(),
+    );
+    assert_eq!(context.retry_decision(), None);
+    assert_eq!(
+        context.failure_kind(),
+        Some(ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
 /// Only the canonical HTTP status can authorize credential recovery; provider
 /// prose and structured stream codes cannot impersonate a 401.
 #[test]

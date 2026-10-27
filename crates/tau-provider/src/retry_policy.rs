@@ -174,9 +174,11 @@ pub fn classify_error_code(code: &str) -> RetryClass {
         | "invalid_authentication"
         | "token_expired"
         | "unauthorized" => RetryClass::Auth,
-        "overloaded_error" | "server_error" | "server_is_overloaded" | "upstream_timeout" => {
-            RetryClass::Overload
-        }
+        "overloaded_error"
+        | "server_error"
+        | "server_is_overloaded"
+        | "upstream_timeout"
+        | "policy_capacity_unavailable" => RetryClass::Overload,
         _ => RetryClass::Unknown,
     }
 }

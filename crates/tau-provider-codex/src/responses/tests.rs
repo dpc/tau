@@ -5837,6 +5837,7 @@ fn response_failed_retry_headers_preserve_failure_classification() {
     for code in [
         "rate_limit_exceeded",
         "server_is_overloaded",
+        "policy_capacity_unavailable",
         "unknown_future_error",
         "insufficient_quota",
         "usage_limit_reached",
@@ -5846,6 +5847,7 @@ fn response_failed_retry_headers_preserve_failure_classification() {
         "bio_policy",
         "misalignment_policy_violation",
         "invalid_prompt",
+        "model_not_found",
     ] {
         let mut event = serde_json::json!({
             "type": "response.failed",
@@ -5868,6 +5870,185 @@ fn response_failed_retry_headers_preserve_failure_classification() {
             decisions => panic!("changed retry disposition for {code}: {decisions:?}"),
         }
         assert!(state.output_items.is_empty());
+    }
+}
+
+/// Generic error envelopes must preserve nested/top-level HTTP advice with
+/// validated fallback, without deriving a delay from prose or unrelated fields.
+#[test]
+fn stream_error_retry_headers_preserve_precedence_and_validation() {
+    use tau_provider::retry_policy::RetryClass;
+
+    for (nested, top, expected) in [
+        (
+            serde_json::json!({"Retry-After": "12"}),
+            serde_json::json!({"retry-after": "17"}),
+            12,
+        ),
+        (
+            serde_json::json!({"retry-after": 0}),
+            serde_json::json!({"retry-after": "17"}),
+            0,
+        ),
+        (
+            serde_json::json!({"Retry-After": "5", "retry-after": "30"}),
+            serde_json::json!({}),
+            5,
+        ),
+        (
+            serde_json::json!({"Retry-After": "invalid", "retry-after": "30"}),
+            serde_json::json!({}),
+            30,
+        ),
+        (
+            serde_json::json!({"retry-after": "12\r\n"}),
+            serde_json::json!({"retry-after": "17"}),
+            17,
+        ),
+        (
+            serde_json::json!({"retry-after\n": "12"}),
+            serde_json::json!({"retry-after": "17"}),
+            17,
+        ),
+        (
+            serde_json::json!({"retry-after": "18446744073709551616"}),
+            serde_json::json!({"retry-after": "17"}),
+            17,
+        ),
+        (
+            serde_json::json!({"retry-after": ["12"]}),
+            serde_json::json!({"retry-after": "17"}),
+            17,
+        ),
+        (
+            serde_json::json!(null),
+            serde_json::json!({"retry-after": "17"}),
+            17,
+        ),
+        (
+            serde_json::json!([]),
+            serde_json::json!({"retry-after": "17"}),
+            17,
+        ),
+        (
+            serde_json::json!({}),
+            serde_json::json!({"retry-after": "-1"}),
+            90,
+        ),
+        (
+            serde_json::json!({}),
+            serde_json::json!({"retry-after": true}),
+            90,
+        ),
+        (serde_json::json!({}), serde_json::json!([]), 90),
+    ] {
+        let event = serde_json::json!({
+            "type": "error",
+            "headers": top,
+            "error": {
+                "code": "policy_capacity_unavailable",
+                "headers": nested,
+                "resets_in_seconds": 90,
+                "message": "Try again in 999 seconds"
+            }
+        });
+        let mut state = path_crate_common::StreamState::new();
+        let error = apply_event(&mut state, &event, &mut |_| {}).expect_err("provider failure");
+        let decision = error.retry_decision().expect("capacity remains retryable");
+        assert_eq!(decision.class, RetryClass::Overload);
+        assert_eq!(
+            decision.retry_after,
+            Some(Duration::from_secs(expected)),
+            "{event}"
+        );
+        assert_eq!(error.failure_kind(), None);
+        assert!(state.output_items.is_empty());
+    }
+
+    let event = serde_json::json!({
+        "type": "error",
+        "message": "Retry-After: 999",
+        "error": {"code": "policy_capacity_unavailable",
+            "unrelated": {"headers": {"Retry-After": "19"}, "resets_in_seconds": 21}}
+    });
+    let error = apply_event(
+        &mut path_crate_common::StreamState::new(),
+        &event,
+        &mut |_| {},
+    )
+    .expect_err("provider failure");
+    assert_eq!(error.retry_decision().expect("retry").retry_after, None);
+}
+
+/// Model absence is a terminal request rejection only for canonical error
+/// fields and upstream-supported status shapes, never provider prose.
+#[test]
+fn model_not_found_events_terminalize_only_supported_shapes() {
+    for base in [
+        serde_json::json!({"type": "error", "code": "model_not_found"}),
+        serde_json::json!({"type": "error", "code": "unknown_outer",
+            "error": {"code": "model_not_found", "type": "invalid_request_error"}}),
+        serde_json::json!({"type": "response.failed",
+            "response": {"error": {"code": "model_not_found"}}}),
+    ] {
+        for status in [
+            None,
+            Some(serde_json::json!(400)),
+            Some(serde_json::json!(403)),
+            Some(serde_json::json!(404)),
+        ] {
+            let mut event = base.clone();
+            if let Some(status) = status {
+                event["status"] = status;
+            }
+            event["headers"] = serde_json::json!({"Retry-After": "12"});
+            let error = apply_event(
+                &mut path_crate_common::StreamState::new(),
+                &event,
+                &mut |_| {},
+            )
+            .expect_err("model missing");
+            assert_eq!(error.retry_decision(), None, "{event}");
+            assert_eq!(
+                error.failure_kind(),
+                Some(tau_proto::ProviderFailureKind::RequestRejected)
+            );
+            assert_eq!(
+                error.error_category(),
+                tau_proto::ProviderErrorCategory::RequestRejected
+            );
+        }
+        for status in [
+            serde_json::json!(401),
+            serde_json::json!(503),
+            serde_json::json!("403"),
+            serde_json::json!(null),
+        ] {
+            let mut event = base.clone();
+            event["status"] = status;
+            let error = apply_event(
+                &mut path_crate_common::StreamState::new(),
+                &event,
+                &mut |_| {},
+            )
+            .expect_err("provider failure");
+            assert!(error.retry_decision().is_some(), "{event}");
+            assert_eq!(error.failure_kind(), None);
+        }
+    }
+    for event in [
+        serde_json::json!({"type": "error", "message": "model_not_found"}),
+        serde_json::json!({"type": "error", "echo": {"code": "model_not_found"}}),
+        serde_json::json!({"type": "error", "code": "model_not_found_extra"}),
+    ] {
+        let error = apply_event(
+            &mut path_crate_common::StreamState::new(),
+            &event,
+            &mut |_| {},
+        )
+        .expect_err("provider failure");
+        assert!(error.retry_decision().is_some());
+        assert_eq!(error.failure_kind(), None);
     }
 }
 

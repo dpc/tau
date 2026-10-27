@@ -8,8 +8,9 @@ use tau_provider::retry_policy::{RetryClass, classify_error_code};
 /// Precedence is root `code`, root `type`, `error.code`, `error.type`,
 /// `response.error.code`, then `response.error.type`. Classification scans the
 /// whole family: context exhaustion wins over every other identifier, then the
-/// first known transient class, then the first identifier is retained as opaque
-/// operation-specific evidence. Retry policy interprets that final identifier.
+/// first known transient class, then model absence, then the first identifier
+/// is retained as opaque operation-specific evidence. Retry policy interprets
+/// that final identifier.
 pub(crate) struct CanonicalIdentifierFamily<'a> {
     /// Ordered identifier candidates borrowed from one provider envelope.
     identifiers: Vec<&'a str>,
@@ -65,6 +66,10 @@ impl<'a> CanonicalIdentifierFamily<'a> {
             .or_else(|| {
                 self.iter()
                     .find(|identifier| classify_error_code(identifier) != RetryClass::Unknown)
+            })
+            .or_else(|| {
+                self.iter()
+                    .find(|identifier| *identifier == "model_not_found")
             })
             .or_else(|| self.iter().next())
     }
