@@ -378,7 +378,8 @@ pub(crate) fn validate_event(event: &serde_json::Value) -> Result<(), LlmError> 
 fn valid_summary_item(item: &serde_json::Value) -> bool {
     match item["type"].as_str() {
         Some("reasoning") => {
-            reasoning_item_bytes(item) <= tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES
+            !tau_provider::local_summary_compaction::reasoning_has_refusal(item)
+                && reasoning_item_bytes(item) <= tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES
         }
         Some("message") => {
             item["role"].as_str() == Some("assistant")

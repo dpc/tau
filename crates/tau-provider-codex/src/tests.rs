@@ -799,6 +799,18 @@ enum LoopbackResponseMode {
     CompactRepairThenSuccess,
     CompactItemThenCloseThenSuccess,
     LocalSummarySuccess,
+    /// Clean narrative followed by reasoning whose direct parts test evidence
+    /// loss.
+    LocalSummaryReasoning {
+        /// Reasoning array carrying the tested part.
+        field: &'static str,
+        /// Known refusal, valid reasoning, or future-compatible part
+        /// discriminator.
+        kind: &'static str,
+        /// Retain the reasoning as opaque replay instead of dropping its
+        /// projection.
+        encrypted: bool,
+    },
     CompactUnavailable,
     CompactItemThenUnavailable,
     /// Accepted native or local output followed by a canonical capacity error.
@@ -867,6 +879,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                     | LoopbackResponseMode::CompactRepairThenSuccess
                     | LoopbackResponseMode::CompactItemThenCloseThenSuccess
                     | LoopbackResponseMode::LocalSummarySuccess
+                    | LoopbackResponseMode::LocalSummaryReasoning { .. }
                     | LoopbackResponseMode::CompactUnavailable
                     | LoopbackResponseMode::CompactItemThenUnavailable
                     | LoopbackResponseMode::CompactOutputThenCapacity { .. }
@@ -941,6 +954,31 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                         event["output_index"] = 0.into();
                     }
                     let _ = socket.send(tungstenite::Message::Text(event.to_string().into()));
+                    continue;
+                }
+                if let LoopbackResponseMode::LocalSummaryReasoning {
+                    field,
+                    kind,
+                    encrypted,
+                } = mode
+                {
+                    let reasoning = local_summary_reasoning_item(field, kind, encrypted);
+                    for event in [
+                        serde_json::json!({
+                            "type": "response.output_item.done", "output_index": 0,
+                            "item": {"type": "message", "id": "m1", "role": "assistant",
+                                "content": [{"type": "output_text", "text": "checkpoint"}]}
+                        }),
+                        serde_json::json!({
+                            "type": "response.output_item.done", "output_index": 1,
+                            "item": reasoning
+                        }),
+                        serde_json::json!({
+                            "type": "response.completed", "response": {"id": "final"}
+                        }),
+                    ] {
+                        let _ = socket.send(tungstenite::Message::Text(event.to_string().into()));
+                    }
                     continue;
                 }
                 if matches!(mode, LoopbackResponseMode::LocalSummarySuccess) {
@@ -1201,6 +1239,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 | LoopbackResponseMode::CompactRepairThenSuccess
                 | LoopbackResponseMode::CompactItemThenCloseThenSuccess
                 | LoopbackResponseMode::LocalSummarySuccess
+                | LoopbackResponseMode::LocalSummaryReasoning { .. }
                 | LoopbackResponseMode::CompactUnavailable
                 | LoopbackResponseMode::CompactItemThenUnavailable
                 | LoopbackResponseMode::CompactOutputThenCapacity { .. }
@@ -1662,6 +1701,115 @@ fn codex_local_summary_preserves_ordinary_prefix_and_usage() {
             requests[0].get("max_output_tokens").is_none(),
             "Codex has no supported remote generation-cap field"
         );
+    }
+}
+
+/// Construct exact reasoning bytes shared by the loopback peer and replay
+/// oracle.
+fn local_summary_reasoning_item(field: &str, kind: &str, encrypted: bool) -> serde_json::Value {
+    let part = match kind {
+        "refusal" => serde_json::json!({"type": "refusal", "refusal": "no"}),
+        "valid" => serde_json::json!({
+            "type": if field == "content" { "reasoning_text" } else { "summary_text" },
+            "text": "private reasoning"
+        }),
+        _ => serde_json::json!({
+            "type": kind, "payload": {"type": "refusal", "refusal": "opaque"}
+        }),
+    };
+    let mut item = serde_json::json!({"type": "reasoning", "id": "r1", field: [part]});
+    if encrypted {
+        item["encrypted_content"] = "opaque reasoning".into();
+    }
+    item
+}
+
+/// LocalSummary must reject direct refusal parts before reasoning is dropped or
+/// retained opaquely. The identical wire stream stays compatible in ordinary
+/// inference, and unknown nested payloads and valid reasoning remain accepted.
+#[test]
+fn codex_local_summary_rejects_reasoning_refusal_before_projection() {
+    for field in ["content", "summary"] {
+        for kind in ["refusal", "future_reasoning", "valid"] {
+            for encrypted in [false, true] {
+                for compact in [false, true] {
+                    let server =
+                        spawn_loopback_server(LoopbackResponseMode::LocalSummaryReasoning {
+                            field,
+                            kind,
+                            encrypted,
+                        });
+                    let mut config = resolved_config_for_model(
+                        &ModelName::new("gpt-5.3-codex"),
+                        ResolvedCredentials::new("token".to_owned(), None),
+                        CodexMode::Standard,
+                    );
+                    config.inner.base_url = server.base_url();
+                    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+                    let session =
+                        tau_proto::SessionId::parse("reasoning-session").expect("session");
+                    let agent = tau_proto::AgentId::parse("reasoning-agent").expect("agent");
+                    let context = if compact {
+                        compact_trigger_context()
+                    } else {
+                        tau_proto::PromptContext::default()
+                    };
+                    let request = test_prompt_payload(&session, &agent, &context);
+                    if compact {
+                        let outcome = runtime.compact(
+                            "reasoning-summary",
+                            &config,
+                            &request,
+                            &mut NeverAbort,
+                        );
+                        if kind == "refusal" {
+                            assert!(
+                                matches!(outcome, CompactOutcome::Terminal { .. }),
+                                "reasoning {field} refusal accepted (encrypted={encrypted})"
+                            );
+                        } else {
+                            let CompactOutcome::Finished { output_items, .. } = outcome else {
+                                panic!("compatible reasoning rejected: {field}/{kind}/{encrypted}");
+                            };
+                            assert!(matches!(output_items.as_slice(),
+                                [tau_proto::ContextItem::LocalCompactionNarrative(item)]
+                                if item.narrative == "checkpoint"));
+                        }
+                    } else {
+                        let AttemptOutcome::Finished(result) = runtime.run_attempt(
+                            "reasoning-ordinary",
+                            &config,
+                            &request,
+                            &mut NeverAbort,
+                            &mut |_| {},
+                        ) else {
+                            panic!("ordinary reasoning compatibility changed");
+                        };
+                        assert!(result.state.output_items.iter().any(|item| matches!(
+                            item, crate::common::OutputItemAccumulator::Message(message)
+                                if message.text == "checkpoint"
+                        )));
+                        if encrypted {
+                            let expected =
+                                local_summary_reasoning_item(field, kind, encrypted).to_string();
+                            assert!(result.state.output_items.iter().any(|item| matches!(
+                                item, crate::common::OutputItemAccumulator::Reasoning(item)
+                                    if item.raw_json() == expected
+                            )));
+                        }
+                    }
+                    let requests = server.counts.requests.lock().expect("requests");
+                    assert_eq!(requests.len(), 1, "no retry or native compact probe");
+                    assert!(
+                        requests[0]["input"]
+                            .as_array()
+                            .expect("input")
+                            .iter()
+                            .all(|item| item["type"] != "compaction_trigger")
+                    );
+                }
+            }
+        }
     }
 }
 

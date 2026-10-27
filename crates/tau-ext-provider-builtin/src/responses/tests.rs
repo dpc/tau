@@ -1836,6 +1836,65 @@ fn run_summary_terminal_fixture(
     )
 }
 
+/// Known refusal evidence must survive discarded reasoning in local summaries,
+/// without tightening ordinary inference or rejecting genuine future additions.
+#[test]
+fn local_summary_rejects_reasoning_refusal_before_projection() {
+    for field in ["content", "summary"] {
+        for kind in ["refusal", "future_reasoning", "valid"] {
+            let part = match kind {
+                "refusal" => serde_json::json!({"type": "refusal", "refusal": "no"}),
+                "valid" => serde_json::json!({
+                    "type": if field == "content" { "reasoning_text" } else { "summary_text" },
+                    "text": "private reasoning"
+                }),
+                _ => serde_json::json!({
+                    "type": kind, "payload": {"type": "refusal", "refusal": "opaque"}
+                }),
+            };
+            let reasoning = serde_json::json!({"type": "reasoning", "id": "r1", field: [part]});
+            let terminal = serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": "final", "output": [
+                    reasoning,
+                    {"type": "message", "role": "assistant", "content":
+                        [{"type": "output_text", "text": "checkpoint"}]}
+                ], "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}
+            })
+            .to_string();
+            for compact in [false, true] {
+                let outcome = run_summary_terminal_fixture(compact, "", &terminal);
+                if compact && kind == "refusal" {
+                    let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
+                        panic!("reasoning {field} refusal accepted");
+                    };
+                    assert_eq!(
+                        finished.failure_kind,
+                        Some(tau_proto::ProviderFailureKind::RequestRejected)
+                    );
+                    assert!(finished.output_items.is_empty());
+                } else {
+                    let PromptAttemptOutcome::Finished(finished) = outcome else {
+                        panic!("compatible reasoning rejected: {field}/{kind}/{compact}");
+                    };
+                    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+                    if compact {
+                        assert!(matches!(finished.output_items.as_slice(),
+                            [tau_proto::ContextItem::LocalCompactionNarrative(item)]
+                            if item.narrative == "checkpoint"));
+                    } else {
+                        let expected = reasoning.to_string();
+                        assert!(finished.output_items.iter().any(|item| matches!(
+                            item, tau_proto::ContextItem::Reasoning(item)
+                                if item.raw_json() == expected
+                        )));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Public Responses summary dispatch must retain the ordinary request and add
 /// only the harness-authored instruction after its warmed context prefix.
 #[test]

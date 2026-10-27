@@ -1928,7 +1928,8 @@ impl State {
 
     /// Observe only item/part kinds and extra keys; never payload values.
     fn observe_item(&mut self, item: &Value) {
-        self.observed_forbidden_summary_output |= item["type"].as_str() == Some("function_call");
+        self.observed_forbidden_summary_output |= item["type"].as_str() == Some("function_call")
+            || tau_provider::local_summary_compaction::reasoning_has_refusal(item);
         if !known_output_item(item) {
             self.unknown
                 .observe("responses.output_item", item["type"].as_str());

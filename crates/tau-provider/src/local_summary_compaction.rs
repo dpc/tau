@@ -6,6 +6,25 @@ use std::sync::LazyLock;
 
 use serde::Serialize;
 
+/// Detect known refusal evidence before a Responses reasoning item is
+/// discarded.
+///
+/// Inspect only direct parts of recognized reasoning `content` and `summary`
+/// arrays. Unknown item/part kinds and arbitrary nested payloads retain their
+/// compatibility behavior; this is local-summary evidence, not schema
+/// validation.
+#[must_use]
+pub fn reasoning_has_refusal(item: &serde_json::Value) -> bool {
+    item["type"].as_str() == Some("reasoning")
+        && ["content", "summary"].iter().any(|field| {
+            item[*field].as_array().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|part| part["type"].as_str() == Some("refusal"))
+            })
+        })
+}
+
 /// Invalid Tau-owned summary compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigError {

@@ -89,6 +89,10 @@ fn local_summary_rejects_forbidden_original_events_before_projection() {
         serde_json::json!({"type": "message", "role": "user"}),
         serde_json::json!({"type": "message", "role": "assistant",
             "content": [{"type": "refusal", "refusal": "no"}]}),
+        serde_json::json!({"type": "reasoning",
+            "content": [{"type": "refusal", "refusal": "no"}]}),
+        serde_json::json!({"type": "reasoning",
+            "summary": [{"type": "refusal", "refusal": "no"}]}),
     ] {
         assert!(
             validate_event(&serde_json::json!({
