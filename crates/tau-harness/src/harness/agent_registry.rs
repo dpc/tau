@@ -2727,29 +2727,45 @@ impl Harness {
             .ok()
             .into_iter()
             .flatten()
-            .filter_map(|record| match record.event {
-                Event::AgentPromptStarted(prompt) => Some(prompt.agent_prompt_id.to_string()),
-                Event::ProviderResponseFinished(response) => {
-                    Some(response.agent_prompt_id.to_string())
+            .flat_map(|record| {
+                let decision = match &record.event {
+                    Event::ProviderResponseFinished(response) => {
+                        response.automatic_compaction_decision.as_ref()
+                    }
+                    Event::AgentPromptTerminated(terminated) => {
+                        terminated.automatic_compaction_decision.as_ref()
+                    }
+                    _ => None,
                 }
-                Event::AgentInferenceDispatchStarted(checkpoint) => {
-                    Some(checkpoint.agent_prompt_id.to_string())
-                }
-                Event::AgentStandaloneCompactionStarted(started) => {
-                    Some(started.transaction_id.to_string())
-                }
-                Event::AgentStandaloneCompactionFailed(failed) => failed
-                    .context_retreat
-                    .as_ref()
-                    .map(|plan| &plan.transaction_id)
-                    .or_else(|| {
-                        failed
-                            .output_length_continuation
-                            .as_ref()
-                            .map(|plan| &plan.transaction_id)
-                    })
-                    .map(ToString::to_string),
-                _ => None,
+                .map(|decision| decision.transaction_id.to_string());
+                let primary = match record.event {
+                    Event::AgentPromptStarted(prompt) => Some(prompt.agent_prompt_id.to_string()),
+                    Event::ProviderResponseFinished(response) => {
+                        Some(response.agent_prompt_id.to_string())
+                    }
+                    Event::AgentPromptTerminated(terminated) => {
+                        Some(terminated.agent_prompt_id.to_string())
+                    }
+                    Event::AgentInferenceDispatchStarted(checkpoint) => {
+                        Some(checkpoint.agent_prompt_id.to_string())
+                    }
+                    Event::AgentStandaloneCompactionStarted(started) => {
+                        Some(started.transaction_id.to_string())
+                    }
+                    Event::AgentStandaloneCompactionFailed(failed) => failed
+                        .context_retreat
+                        .as_ref()
+                        .map(|plan| &plan.transaction_id)
+                        .or_else(|| {
+                            failed
+                                .output_length_continuation
+                                .as_ref()
+                                .map(|plan| &plan.transaction_id)
+                        })
+                        .map(ToString::to_string),
+                    _ => None,
+                };
+                primary.into_iter().chain(decision)
             })
             .filter_map(|id| id.rsplit('-').next()?.parse::<u64>().ok())
             .max()

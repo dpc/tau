@@ -2874,6 +2874,7 @@ mod agent_runtime;
 mod cancellation_and_background;
 mod compaction;
 mod compaction_agent_scope;
+mod compaction_automatic_reservations;
 mod compaction_failure_recovery;
 mod compaction_fresh_usage;
 mod compaction_generation_negative;

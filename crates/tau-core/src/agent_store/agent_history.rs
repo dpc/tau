@@ -220,10 +220,32 @@ impl AgentHistory {
     /// Extracts one checked numeric suffix using the existing saturating cursor
     /// rule.
     fn prompt_index(record: &PersistedAgentEvent) -> Option<u64> {
+        // A terminal reserves the eager transaction before any standalone
+        // start, including when off-branch recovery closes it without
+        // starting.
+        let decision = match &record.event {
+            Event::ProviderResponseFinished(response) => {
+                response.automatic_compaction_decision.as_ref()
+            }
+            Event::AgentPromptTerminated(terminated) => {
+                terminated.automatic_compaction_decision.as_ref()
+            }
+            _ => None,
+        };
+        let reserved_index = decision.and_then(|decision| {
+            decision
+                .transaction_id
+                .to_string()
+                .rsplit('-')
+                .next()?
+                .parse::<u64>()
+                .ok()
+        });
         let transaction_id;
         let prompt_id = match &record.event {
             Event::AgentPromptStarted(prompt) => prompt.agent_prompt_id.as_str(),
             Event::ProviderResponseFinished(response) => response.agent_prompt_id.as_str(),
+            Event::AgentPromptTerminated(terminated) => terminated.agent_prompt_id.as_str(),
             Event::AgentInferenceDispatchStarted(checkpoint) => checkpoint.agent_prompt_id.as_str(),
             Event::AgentStandaloneCompactionStarted(started) => {
                 transaction_id = started.transaction_id.to_string();
@@ -251,6 +273,9 @@ impl AgentHistory {
             .rsplit('-')
             .next()
             .and_then(|suffix| suffix.parse::<u64>().ok())
+            .into_iter()
+            .chain(reserved_index)
+            .max()
             .map(|index| index.saturating_add(1))
     }
 }

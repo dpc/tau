@@ -688,6 +688,59 @@ fn managed_history_prompt_cursor_covers_all_id_families() {
     assert_eq!(history.next_prompt_index, u64::MAX);
 }
 
+/// Both canonical terminal carriers reserve an automatic transaction even when
+/// no start follows. Eviction must not forget it, nor may a lower or nonnumeric
+/// reservation hide the ordinary prompt's numeric suffix.
+#[test]
+fn managed_history_cursor_preserves_automatic_terminal_reservations() {
+    let agent_id = AgentId::parse("automatic-cursor").expect("agent");
+    let mut history = AgentHistory::default();
+    for (seq, (canceled, prompt, transaction, expected)) in [
+        (false, "ap-1", "ct-10", 11),
+        (true, "ap-2", "ct-20", 21),
+        (false, "ap-30", "ct-3", 31),
+        (true, "ap-40", "ct-nonnumeric", 41),
+        (false, "ap-5", "ct-18446744073709551615", u64::MAX),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let decision = Some(tau_proto::AutomaticCompactionDecision {
+            transaction_id: tau_proto::CompactionTransactionId::parse(transaction)
+                .expect("transaction"),
+            outer_turn_id: "ot-test".parse().expect("turn"),
+            model: "test/model".into(),
+            threshold: tau_proto::TokenCount::new(100),
+            evidence: None,
+        });
+        let event = if canceled {
+            Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+                agent_id: agent_id.clone(),
+                agent_prompt_id: prompt.parse().expect("prompt"),
+                reason: tau_proto::AgentPromptTerminationReason::Canceled,
+                originator: Default::default(),
+                automatic_compaction_decision: decision,
+            })
+        } else {
+            let Event::ProviderResponseFinished(mut response) = history_response(&agent_id, prompt)
+            else {
+                unreachable!("response fixture")
+            };
+            response.automatic_compaction_decision = decision;
+            Event::ProviderResponseFinished(response)
+        };
+        history.push(history_record(seq as u64, event), 0);
+        assert_eq!(history.next_prompt_index, expected);
+        assert_eq!(
+            AgentHistory::next_prompt_index_in(&history.records),
+            expected
+        );
+        history.evict_before(seq as u64 + 1);
+        assert!(history.records.is_empty());
+        assert_eq!(history.next_prompt_index, expected);
+    }
+}
+
 /// An invalid append cannot leak declaration or cursor facts, and successful
 /// raw message appends advance the same accepted count used by structured
 /// appends.
