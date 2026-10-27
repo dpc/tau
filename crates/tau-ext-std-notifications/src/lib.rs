@@ -7,8 +7,8 @@
 //! for:
 //! - `agent.prompt_submitted`
 //! - final `provider.response_finished` (only when `stop_reason` does not
-//!   request tools and no backgrounded tools for the triggering agent remain
-//!   active)
+//!   request tools or continuation and no backgrounded tools for the triggering
+//!   agent remain active)
 //! - idle deadlines after a final response
 //!
 //! A per-agent idle timer resets on that agent's user-originated
@@ -414,7 +414,9 @@ fn response_text(items: &[tau_proto::ContextItem]) -> String {
         let tau_proto::ContextItem::Message(message) = item else {
             continue;
         };
-        if message.role != tau_proto::ContextRole::Assistant {
+        if message.role != tau_proto::ContextRole::Assistant
+            || message.phase == Some(tau_proto::MessagePhase::PartialAnswer)
+        {
             continue;
         }
         for part in &message.content {
@@ -939,7 +941,9 @@ impl NotificationLoop {
                     .insert(accepted.query_id.clone(), accepted.agent_id.clone());
             }
             Event::ProviderResponseFinished(finished)
-                if finished.originator.is_user() && !finished.stop_reason.requests_tool_calls() =>
+                if finished.originator.is_user()
+                    && !finished.stop_reason.requests_tool_calls()
+                    && finished.stop_reason != tau_proto::ProviderStopReason::Continue =>
             {
                 let user_prompt = self
                     .agent_turns
@@ -1234,7 +1238,9 @@ impl NotificationLoop {
         &self,
         finished: &tau_proto::ProviderResponseFinished,
     ) -> bool {
-        if finished.stop_reason.requests_tool_calls() {
+        if finished.stop_reason.requests_tool_calls()
+            || finished.stop_reason == tau_proto::ProviderStopReason::Continue
+        {
             tracing::trace!(target: LOG_TARGET, stop_reason = ?finished.stop_reason, "skipping mid-turn ProviderResponseFinished");
             return true;
         }

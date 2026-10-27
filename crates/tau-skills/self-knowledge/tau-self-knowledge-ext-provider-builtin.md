@@ -6,6 +6,19 @@ advertise: false
 
 # Tau provider-builtin extension self-knowledge
 
+## Codex partial answers
+
+Codex `partial_answer` text is visible answer text, not a final-answer summary.
+Tau preserves an observed partial phase through saved history and request replay,
+including model switches; it does not infer broader phase support for new models
+or change the missing/unknown-phase fallback. A phase alone never requests more
+sampling. When a completed response explicitly sets `end_turn=false`, Tau continues
+the same outer turn through normal checkpointed inference without synthetic input,
+with at most 16 additional no-tool samplings. Further nonterminal output stops with
+an error, but Tau keeps its text and usage. Tools retain their usual round ownership.
+Cancellation and restart use durable continuation/checkpoint state, not an
+adapter-local loop.
+
 ## Public Sign in with ChatGPT
 
 `tau provider add chatgpt-plan` is the separate public Responses/SSE plan-sharing

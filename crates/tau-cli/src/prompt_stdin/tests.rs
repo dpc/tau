@@ -529,6 +529,35 @@ fn one_shot_output_waits_through_tool_calls_and_keeps_final_snapshots() {
     assert_eq!(output.final_response.as_deref(), Some("final answer"));
 }
 
+/// Explicit nonterminal responses keep one-shot clients waiting; stable partial
+/// text is never substituted for the final-answer summary, even from deltas.
+#[test]
+fn one_shot_waits_for_explicit_continuation_and_excludes_partial_summary() {
+    let mut output = OneShotOutput::default();
+    output.capture_update(&user_update("sp-partial", "Stable fragment", None));
+    let mut partial = assistant_finished(
+        "sp-partial",
+        "Stable fragment",
+        ProviderStopReason::Continue,
+    );
+    if let ContextItem::Message(message) = &mut partial.output_items[0] {
+        message.phase = Some(tau_proto::MessagePhase::PartialAnswer);
+    }
+    assert!(!output.capture_finished(&partial));
+    assert!(output.final_response.is_none());
+    // Phase is not lifecycle authority: a genuine end-turn still ends the wait,
+    // but cannot label partial text as its final summary.
+    partial.stop_reason = ProviderStopReason::EndTurn;
+    assert!(output.capture_finished(&partial));
+    assert!(output.final_response.is_none());
+    assert!(output.capture_finished(&assistant_finished(
+        "sp-final",
+        "Final",
+        ProviderStopReason::EndTurn
+    )));
+    assert_eq!(output.final_response.as_deref(), Some("Final"));
+}
+
 /// A planned output-length source is an intermediate boundary, while the
 /// successor's incomplete terminal ends the one-shot wait without inventing a
 /// successful assistant answer.

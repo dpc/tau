@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, Once};
 
 use tau_proto::{
     AgentPromptSubmitted, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage,
-    HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, MessageItem,
+    HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, MessageItem, PromptOriginator,
     ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem, ToolRequest,
     ToolResult,
 };
@@ -1117,6 +1117,58 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
         next.is_none(),
         "no further OSC events expected after mid-turn finish, got {next:?}",
     );
+}
+
+/// A no-tool continuation must stay silent until a genuine final response,
+/// and partial text must not enter final notification summaries.
+#[test]
+fn explicit_continuation_waits_for_final_notification() {
+    for finish in [false, true] {
+        let mut input = Vec::new();
+        let mut writer = EventWriter::new(&mut input);
+        writer
+            .write_frame(&default_notifications_config_frame())
+            .expect("config");
+        writer
+            .write_event(&user_prompt_submitted("hello", PromptOriginator::User))
+            .expect("prompt");
+        let mut partial =
+            assistant_finished_response("sp-partial", "Stable partial", PromptOriginator::User);
+        partial.stop_reason = ProviderStopReason::Continue;
+        if let ContextItem::Message(message) = &mut partial.output_items[0] {
+            message.phase = Some(tau_proto::MessagePhase::PartialAnswer);
+        }
+        assert_eq!(response_text(&partial.output_items), "");
+        writer
+            .write_event(&Event::ProviderResponseFinished(partial))
+            .expect("partial");
+        if finish {
+            writer
+                .write_event(&Event::ProviderResponseFinished(
+                    assistant_finished_response("sp-final", "Final", PromptOriginator::User),
+                ))
+                .expect("final");
+        }
+        writer
+            .write_frame(&disconnect_frame(None))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+        let output = run_with_idle_output(input, Duration::from_secs(3600));
+        let mut reader = EventReader::new(Cursor::new(output));
+        drain_lifecycle(&mut reader);
+        let mut values = Vec::new();
+        while let Some(event) = reader.read_event().expect("event") {
+            if let Event::Osc1337SetUserVar(osc) = event {
+                values.push(osc.value);
+            }
+        }
+        let expected = if finish {
+            vec![VALUE_AGENT_START, VALUE_AGENT_END]
+        } else {
+            vec![VALUE_AGENT_START]
+        };
+        assert_eq!(values, expected);
+    }
 }
 
 /// A tool request must provide enough explicit ownership to defer a final

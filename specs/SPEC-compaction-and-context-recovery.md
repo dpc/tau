@@ -138,6 +138,18 @@ cancellation, and timeout/retry classification remain unchanged.
 
 ## Recovery authority
 
+For explicit ordinary provider response continuation, the harness retains the same
+outer turn without inserting input. After committing the response, it runs ordinary
+activation preflight, allowing standalone compaction before the successor
+checkpoint. It does not create a settled-final eager compaction decision. Direct
+successor dispatch retains the source activation cut and captured model. If
+standalone compaction interleaves, its established transaction-owned cut and resume
+semantics remain authoritative. Compaction does not reset the durable bound of 16
+additional samplings. A committed checkpoint remains uncertain after
+restart rather than authorizing duplicate paid work. This behavior is independent
+of message phase and does not give standalone compact responses continuation
+authority.
+
 The CLI `:compact` command is human/UI authority. The model-callable `compact`
 tool is a separate, enabled-by-default self-compaction authority, while
 `agent_compact` is an independently opted-in authority over any *other loaded

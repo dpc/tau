@@ -24,6 +24,30 @@ fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
 
+/// Partial-answer text stays renderable as ordinary answer text while editor
+/// final-answer summaries omit it, including after durable decoding.
+#[test]
+fn partial_answer_is_visible_but_not_a_final_summary() {
+    let message = tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![tau_proto::ContentPart::Text {
+            text: "Stable fragment".to_owned(),
+        }],
+        phase: Some(tau_proto::MessagePhase::PartialAnswer),
+        responses_raw_json: None,
+    };
+    let cold: tau_proto::MessageItem =
+        serde_json::from_value(serde_json::to_value(&message).expect("encode")).expect("decode");
+    assert_eq!(
+        assistant_text_from_message_item(&cold, &mut 0).as_deref(),
+        Some("Stable fragment")
+    );
+    assert!(
+        assistant_text_from_output_items(&[tau_proto::ContextItem::Message(cold)], &mut 0)
+            .is_none()
+    );
+}
+
 /// Finished live and replayed messages use typed citation metadata for links
 /// and retain the fixed visible diagnostic for malformed provider annotations.
 #[test]
@@ -104,7 +128,7 @@ fn citation_projection_preserves_canonical_url_authority() {
     assert!(tau_proto::UrlCitation::try_new(0, 1, "https://example.com/a b", "space").is_err());
 }
 
-fn renderer_for_agent_id_tests() -> super::EventRenderer {
+pub(super) fn renderer_for_agent_id_tests() -> super::EventRenderer {
     let (_term, handle, _input) = Term::new_virtual(
         80,
         24,

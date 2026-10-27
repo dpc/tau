@@ -1196,8 +1196,9 @@ fn assistant_text_from_output_items<'a>(
                 ContextItem::Message(MessageItem {
                     role: ContextRole::Assistant,
                     content,
+                    phase,
                     ..
-                }) => content.as_slice(),
+                }) if *phase != Some(tau_proto::MessagePhase::PartialAnswer) => content.as_slice(),
                 _ => &[],
             })
             .map(content_part_text),

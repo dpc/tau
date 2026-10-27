@@ -357,6 +357,7 @@ impl Harness {
             return;
         };
         let retained_terminal_prompt_id = self.pending_provider_terminal_prompt_id(&cid);
+        let response_continuation_pending = self.has_pending_response_continuation(&cid);
         let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) else {
             self.send_ui_error_response(client_id, "cancel request targets an unloaded agent");
             return;
@@ -377,7 +378,10 @@ impl Harness {
                 | path_crate_agent::OutputLengthContinuationState::OwnerPending(_)
                 | path_crate_agent::OutputLengthContinuationState::Active(_)
         );
-        if matches!(conv.turn.turn_state, AgentTurnState::Idle) && !output_length_pending {
+        if matches!(conv.turn.turn_state, AgentTurnState::Idle)
+            && !output_length_pending
+            && !response_continuation_pending
+        {
             self.send_ui_error_response(client_id, "no active turn to cancel");
             return;
         }
@@ -676,6 +680,36 @@ impl Harness {
         };
         match turn_state {
             AgentTurnState::Idle => {
+                if self.has_pending_response_continuation(cid) {
+                    let unclaimed = self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get(cid)
+                        .is_some_and(|agent| {
+                            matches!(
+                                agent.dispatch.activation_dispatch,
+                                path_crate_agent::ActivationDispatchState::None
+                            )
+                        });
+                    if unclaimed {
+                        self.runtime_io
+                            .publication
+                            .idle_dispatches
+                            .retain(|entry| &entry.cid != cid);
+                        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+                            agent.dispatch.pending_cancel = None;
+                            agent.dispatch.clear_pending_prompts();
+                            agent.turn.terminal_notice_eligible = false;
+                        }
+                        // Finishing the existing outer turn retires this
+                        // durable source; no second source terminal is emitted.
+                        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+                    }
+                    // A write-pending checkpoint keeps cancellation until its
+                    // ordinary post-commit arbitration claims the successor.
+                    return;
+                }
                 let continuation_state = self
                     .agent_runtime
                     .agent_registry

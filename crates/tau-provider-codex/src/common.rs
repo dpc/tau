@@ -551,6 +551,9 @@ pub struct StreamState {
     /// populated by the Responses backend; the Chat Completions
     /// backend leaves this `None`.
     pub(crate) response_id: Option<String>,
+    /// Explicit completed-response turn ownership. Missing values retain the
+    /// historical output-derived stop policy; only `Some(false)` requests more.
+    pub(crate) end_turn: Option<bool>,
     /// Raw terminal provider event for Responses streams (`response.completed`
     /// / `response.done`), retained for per-session debug captures. Other
     /// backends leave this empty.
@@ -941,6 +944,7 @@ impl StreamState {
             thinking: None,
             thinking_output_index: None,
             response_id: None,
+            end_turn: None,
             provider_terminal_event: None,
             transport_response_bytes: 0,
             stale_chain_fallback: false,
@@ -1013,6 +1017,12 @@ impl StreamState {
     #[must_use]
     pub fn response_id(&self) -> Option<&str> {
         self.response_id.as_deref()
+    }
+
+    /// Whether this completed response explicitly requests another sampling.
+    /// Message phase alone never supplies this authority.
+    pub fn requests_continuation(&self) -> bool {
+        self.end_turn == Some(false)
     }
 
     /// Constructs synthetic terminal facts for compatibility snapshot tests.

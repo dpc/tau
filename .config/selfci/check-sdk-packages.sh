@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.14.0",
+        "dpc-tau-proto": "=0.15.0",
     },
 }
 
@@ -162,8 +162,22 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(14, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(15, 0));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// Consumers decode stable partial answer history and nonterminal response
+/// ownership instead of treating every completed response as a finished turn.
+#[test]
+fn packaged_sdk_round_trips_explicit_response_continuation() {
+    let phase = tau_proto::MessagePhase::PartialAnswer;
+    let stop = tau_proto::ProviderStopReason::Continue;
+    let bytes = tau_proto::encode_message_to_vec(&(phase, stop)).expect("encode");
+    let decoded: (tau_proto::MessagePhase, tau_proto::ProviderStopReason) =
+        tau_proto::decode_message_from_slice(&bytes).expect("decode");
+    assert_eq!(decoded, (phase, stop));
+    assert_eq!(phase.as_openai_wire(), "partial_answer");
+    assert!(!stop.requests_tool_calls());
 }
 
 /// New consumers distinguish prepared references and default to inline output.

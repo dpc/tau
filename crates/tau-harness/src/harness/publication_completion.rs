@@ -894,7 +894,8 @@ impl Harness {
                         );
                         return;
                     }
-                    if !matches!(terminal.reducer, CommittedGatedFinalReducer::Ordinary)
+                    if terminal.response.stop_reason != ProviderStopReason::Continue
+                        && !matches!(terminal.reducer, CommittedGatedFinalReducer::Ordinary)
                         && self
                             .agent_runtime
                             .agent_registry
@@ -2062,6 +2063,14 @@ impl Harness {
             return;
         }
         self.discard_finished_response_prompt_tracking(&started.agent_prompt_id);
+        if self.has_pending_response_continuation(&cid) {
+            // Rejected checkpoint admission has not consumed its durable
+            // source. Keep the outer turn and queued branch obligation alive.
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
+                agent.turn.turn_state = AgentTurnState::Idle;
+            }
+            return;
+        }
         self.set_agent_turn_state(&cid, AgentTurnState::Idle);
     }
 
@@ -4056,6 +4065,19 @@ impl Harness {
                     .get(&cid)
                     .is_some_and(|agent| agent.dispatch.pending_cancel.is_some())
                 {
+                    if let Some(pending) = self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get_mut(&cid)
+                        .and_then(|agent| agent.dispatch.pending_cancel.as_mut())
+                        && pending.agent_prompt_id.is_none()
+                    {
+                        // Cancellation between responses had no provider job
+                        // to name. The committed checkpoint now owns its exact
+                        // no-delivery cancellation terminal.
+                        pending.agent_prompt_id = Some(started.agent_prompt_id.clone());
+                    }
                     self.finalize_canceled_in_flight_prompt(&cid);
                     return;
                 }
@@ -4848,6 +4870,15 @@ impl Harness {
         let model = output_length
             .as_ref()
             .map(|continuation| continuation.plan.dispatch.model.clone())
+            .or_else(|| {
+                agent
+                    .identity
+                    .agent_id
+                    .as_deref()
+                    .and_then(|id| self.session_runtime.agent_store.agent(id))
+                    .and_then(tau_core::AgentTree::pending_response_continuation)
+                    .map(|source| source.model.clone())
+            })
             .or_else(|| self.model_for_agent_role(agent))
             .ok_or(InferenceDispatchSelectionError::MissingModel)?;
         let operation = output_length

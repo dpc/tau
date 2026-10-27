@@ -20,6 +20,21 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Prepared SDK 0.15.0 (not published)
+
+Protocol **15.0** adds `MessagePhase::PartialAnswer` and
+`ProviderStopReason::Continue`. The prepared proto/client packages are **0.15.0**
+with an exact client-to-proto pin; the two leaf packages remain 0.1.0.
+Exhaustive enum matches must handle the new variants. A `Continue` response is
+not a completed outer turn, and partial-answer text must not become a final-answer
+summary. Existing journals remain readable; old binaries cannot decode newly
+written enum values. There is no downgrade migration.
+
+Rebuild configured extensions and UI clients against this SDK before activation.
+Registry publication, registry-only consumer verification, external-project
+migrations, and downstream lock updates remain separate rollout gates.
+Preparing the source does not establish that any of these steps has occurred.
+
 ### Published SDK 0.14.0
 
 Protocol **14.0** uses published `dpc-tau-proto` and `dpc-tau-client` **0.14.0**,

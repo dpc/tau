@@ -1,5 +1,32 @@
 # ARCH-tau-provider-codex: tau-provider-codex architecture
 
+## Partial answers and explicit response continuation
+
+Assistant `partial_answer` is stable answer text, not commentary or a final-answer
+summary. Its typed phase survives streaming, durable history, and raw or typed
+request replay. The phase neither completes a turn nor requests more sampling.
+Unknown or absent phases keep their existing fallback.
+Tau replays an observed explicit partial phase even when the static model catalog
+does not advertise phase support, including after a model switch. This exception
+preserves authoritative history without adding phase defaults or claiming broader
+support for new model families.
+
+For ordinary inference, the harness treats completed/done response envelopes with
+boolean `response.end_turn=false` as requests for another sampling through its
+ordinary committed activation and dispatch-checkpoint path. Missing, malformed,
+or true values retain output-derived completion. Actual tool calls take precedence and
+use their ordinary closed tool round; standalone compaction gains no continuation
+authority from this flag. The harness commits and accounts for each completed
+response once. The adapter does not loop sampling or synthesize user or tool input.
+
+The harness permits at most 16 additional no-tool samplings per outer turn.
+The next nonterminal response settles with a visible limit error, preserving
+accepted output and usage. The count derives from selected durable response and
+outer-turn records, so restart and compaction do not reset it. An unclaimed
+committed response may resume after restart; a committed successor checkpoint
+uses existing uncertain-dispatch recovery rather than repeating paid work.
+Cancellation and final outer-turn completion retire continuation authority.
+
 Provider output is constrained by
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 Curated provider wire evidence follows

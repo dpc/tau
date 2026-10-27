@@ -9724,7 +9724,14 @@ fn finish_stream<S: ProviderReportSink>(
     );
     let usage = state.usage();
     let provider_response_id = state.response_id().map(str::to_owned);
+    let requests_continuation = state.requests_continuation();
     let output_items = state.into_output_items();
+    // Executable calls retain the ordinary closed tool-round continuation.
+    // A message phase never supplies response-level continuation authority.
+    let stop_reason = match stop_reason_from_output_items(&output_items) {
+        ProviderStopReason::EndTurn if requests_continuation => ProviderStopReason::Continue,
+        stop_reason => stop_reason,
+    };
     let finished = ProviderResponseFinishedReport {
         error_category: None,
         automatic_compaction_decision: None,
@@ -9733,7 +9740,7 @@ fn finish_stream<S: ProviderReportSink>(
 
         agent_prompt_id: agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
-        stop_reason: stop_reason_from_output_items(&output_items),
+        stop_reason,
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,

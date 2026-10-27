@@ -1,6 +1,6 @@
 # Configuring extensions
 
-This checkout declares protocol **10.4** in `crates/tau-proto/src/lib.rs`.
+This checkout declares protocol **15.0** in `crates/tau-proto/src/lib.rs`.
 Configured extensions must use a compatible protocol major; an executable
 built for an older major is rejected before configuration. Separately
 maintained extension inputs may have their own release and compatibility

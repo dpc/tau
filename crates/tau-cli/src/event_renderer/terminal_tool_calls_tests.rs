@@ -42,7 +42,7 @@ fn legacy_cloned_calls(output_items: &[ContextItem]) -> Vec<ToolCallItem> {
 }
 
 /// Wraps output items in the self-contained terminal shape used by dispatch.
-fn finished(
+pub(super) fn finished(
     output_items: Vec<ContextItem>,
     stop_reason: ProviderStopReason,
 ) -> ProviderResponseFinished {

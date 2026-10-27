@@ -1017,6 +1017,15 @@ terminal silently no-op. See
 
 ## Provider repetition stop reason
 
+`provider.response_finished.stop_reason` may be `continue` for a successfully
+completed response that explicitly requests another sampling in the same outer
+turn. It records one canonical response/accounting fact, not an outer-turn
+finish. Clients must not treat it as final-answer completion. The harness commits
+the ordinary successor dispatch checkpoint without synthetic input and limits
+additional samplings to 16 using durable selected-branch history.
+`MessagePhase::PartialAnswer` (`partial_answer`) independently labels stable
+answer text; it does not authorize continuation or finish a turn.
+
 `provider.response_finished.stop_reason` may be `repetition_detected` when a provider aborts a tight exact streaming loop. Such responses have no tool request, use empty `output_items`, and carry a bounded display-only `error`; clients should treat prior transient deltas as cleared when the preceding status update has `clear_response: true`.
 
 ## Watched provider status

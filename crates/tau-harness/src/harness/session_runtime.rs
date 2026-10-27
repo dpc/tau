@@ -2455,6 +2455,11 @@ impl Harness {
                 .agent_store
                 .agent(agent_id.as_str())
                 .and_then(tau_core::AgentTree::inference_dispatch_recovery);
+            let restored_response_turn = self
+                .session_runtime
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(tau_core::AgentTree::response_continuation_outer_turn);
             let restored_output_length = self
                 .session_runtime
                 .agent_store
@@ -2543,6 +2548,9 @@ impl Harness {
             }
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 conv.identity.restored_tool_backed_start = tool_backed_start;
+                if let Some(turn) = restored_response_turn {
+                    conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(turn);
+                }
                 if dormant_output_length_repair.is_none()
                     && let Some(outer_turn_id) = restored_output_length_spent
                 {
@@ -3049,7 +3057,10 @@ impl Harness {
                 .session_runtime
                 .agent_store
                 .agent(agent_id.as_str())
-                .and_then(tau_core::AgentTree::output_length_outer_turn_finish_repair);
+                .and_then(|tree| {
+                    tree.output_length_outer_turn_finish_repair()
+                        .or_else(|| tree.response_continuation_finish_repair())
+                });
             if dormant_output_length_repair.is_none()
                 && let Some(outer_turn_id) = finish_repair
             {
@@ -3102,6 +3113,16 @@ impl Harness {
                         },
                     ),
                 );
+            }
+            // A source terminal without a successor checkpoint is safe to
+            // resume; a committed checkpoint or compaction owner keeps its
+            // established recovery path and never replays ambiguous paid work.
+            if matches!(
+                restored_inference,
+                None | Some(tau_core::InferenceDispatchRecovery::CompletedThrough(_))
+            ) && !compaction_blocks_ordinary_inference
+            {
+                self.continue_after_explicit_response(&cid);
             }
         }
         for (child_cid, parent_agent_id) in restored_parent_edges {

@@ -41,6 +41,7 @@ impl Harness {
         response: &mut ProviderResponseFinished,
         projection: &mut terminal_response_projection::TerminalResponseProjection,
     ) -> PreparedOrdinaryProviderTerminal {
+        self.normalize_response_continuation(cid, response, !projection.tool_calls.is_empty());
         let missing_tool_calls =
             response_requests_tool_calls(response) && projection.tool_calls.is_empty();
         let tool_calls_with_non_tool_stop =
@@ -125,6 +126,7 @@ impl Harness {
                 is_non_tool_ext_query,
             );
         let eager_decision_eligible = !final_status_challenged
+            && response.stop_reason != ProviderStopReason::Continue
             && !requested_tool_calls
             && !projection.contains_compaction
             && !continues_for_pending_message_wake

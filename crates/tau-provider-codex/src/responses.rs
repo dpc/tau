@@ -1272,6 +1272,7 @@ pub(super) fn apply_parsed_json_event_observed(
             "background",
             "max_tool_calls",
             "prompt_cache_key",
+            "end_turn",
         ],
     );
 
@@ -2267,6 +2268,7 @@ fn is_known_output_item_type(item_type: &str) -> bool {
 }
 
 fn apply_terminal_event(state: &mut StreamState, event: &serde_json::Value) {
+    state.end_turn = event["response"]["end_turn"].as_bool();
     state.provider_terminal_event = Some(event.clone());
     if state.input_tokens.is_none() {
         state.input_tokens = terminal_usage_u64(event, "input_tokens");
@@ -3286,6 +3288,7 @@ fn parse_phase_from_item(item: &serde_json::Value) -> Option<tau_proto::MessageP
     }
     match item.get("phase")?.as_str()? {
         "commentary" => Some(tau_proto::MessagePhase::Commentary),
+        "partial_answer" => Some(tau_proto::MessagePhase::PartialAnswer),
         "final_answer" => Some(tau_proto::MessagePhase::FinalAnswer),
         _ => None,
     }
@@ -3693,6 +3696,13 @@ fn rebuilt_output_text_part(text: &str) -> serde_json::Value {
 }
 
 fn assistant_message_phase_wire(msg: &MessageItem, supports_phase: bool) -> Option<&'static str> {
+    // Explicit partial-answer history is stronger evidence than the static
+    // capability catalog (which may lag new models). Never silently turn it
+    // into final/unspecified history, including after a model switch. This does
+    // not infer a capability or stamp a default on unphased messages.
+    if msg.phase == Some(tau_proto::MessagePhase::PartialAnswer) {
+        return Some(tau_proto::MessagePhase::PartialAnswer.as_openai_wire());
+    }
     // `phase` (when the backend supports it): stamp every assistant `message`
     // item we replay. The stored `msg.phase` is preferred; turns from before
     // this field existed (or from non-Codex paths) get the doc-recommended

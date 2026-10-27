@@ -4667,6 +4667,73 @@ fn apply_raw_json_event_preserves_assistant_message_raw_json_for_replay() {
     );
 }
 
+/// Partial answers survive item-start streaming, completion, durable encoding,
+/// and raw/typed history replay without becoming final-answer fallback text.
+#[test]
+fn partial_answer_survives_streaming_and_cold_history_replay() {
+    let mut state = path_crate_common::StreamState::new();
+    for kind in ["added", "done"] {
+        let raw = format!(
+            r#"{{"type":"response.output_item.{kind}","output_index":0,"item":{{"type":"message","id":"msg_partial","role":"assistant","phase":"partial_answer","content":[{{"type":"output_text","text":"Stable answer","annotations":[]}}]}}}}"#
+        );
+        apply_raw_json_event(&mut state, &raw, &mut |update| {
+            let path_crate_common::OutputItemAccumulator::Message(message) =
+                &update.output_items[0]
+            else {
+                panic!("assistant message");
+            };
+            assert_eq!(message.phase, Some(tau_proto::MessagePhase::PartialAnswer));
+        })
+        .expect("message event");
+    }
+    assert!(!state.requests_continuation(), "phase is not authority");
+    let items = state.into_output_items();
+    let cold: Vec<ContextItem> =
+        serde_json::from_value(serde_json::to_value(&items).expect("encode")).expect("cold decode");
+    for strip_raw in [false, true] {
+        let mut items = cold.clone();
+        if strip_raw && let ContextItem::Message(message) = &mut items[0] {
+            message.responses_raw_json = None;
+        }
+        for config in [phase_test_config(), chain_test_config()] {
+            let request = request_for_items(&items);
+            let body =
+                serde_json::to_value(build_request(&config, &request, None)).expect("request");
+            assert_eq!(body["input"][0]["phase"], "partial_answer");
+        }
+    }
+}
+
+/// Only a boolean false on a successful response terminal authorizes sampling;
+/// absent, malformed, true, and phase-only signals retain existing stop policy.
+#[test]
+fn completed_end_turn_is_explicit_response_continuation_authority() {
+    for kind in ["response.completed", "response.done"] {
+        for flag in [
+            None,
+            Some(serde_json::json!(false)),
+            Some(serde_json::json!(true)),
+            Some(serde_json::json!("false")),
+        ] {
+            let mut state = path_crate_common::StreamState::new();
+            let mut event = serde_json::json!({
+                "type": kind,
+                "response": {"id": "resp_partial", "usage": {"input_tokens": 11, "output_tokens": 7}}
+            });
+            if let Some(flag) = &flag {
+                event["response"]["end_turn"] = flag.clone();
+            }
+            assert!(apply_event(&mut state, &event, &mut |_| {}).expect("completed"));
+            assert_eq!(
+                state.requests_continuation(),
+                flag == Some(serde_json::json!(false))
+            );
+            assert_eq!(state.response_id(), Some("resp_partial"));
+            assert_eq!(state.token_counts().output, Some(7));
+        }
+    }
+}
+
 /// The parser should not persist raw sidecars for non-assistant `message`
 /// items. Sidecars must remain subordinate to typed Tau assistant semantics
 /// even before they reach request replay.

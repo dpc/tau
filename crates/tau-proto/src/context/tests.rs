@@ -23,10 +23,14 @@ fn compaction_window_accepts_provider_item_and_rejects_harness_trigger() {
     );
 }
 
-/// Provider message phases retain only the two supported OpenAI wire values.
+/// Provider message phases retain the supported OpenAI wire values.
 #[test]
 fn message_phases_have_only_provider_supported_wire_values() {
     assert_eq!(MessagePhase::Commentary.as_openai_wire(), "commentary");
+    assert_eq!(
+        MessagePhase::PartialAnswer.as_openai_wire(),
+        "partial_answer"
+    );
     assert_eq!(MessagePhase::FinalAnswer.as_openai_wire(), "final_answer");
 }
 

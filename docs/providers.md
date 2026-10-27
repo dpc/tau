@@ -211,6 +211,18 @@ adapters and per-item attribution are not yet supported. See
 
 ## Exact Codex response diagnostics
 
+Codex partial answers remain visible as answer text and retain their
+`partial_answer` phase in saved history. A phase alone does not finish the turn
+or request another response. When a completed response explicitly says
+`end_turn=false`, Tau continues the same turn without fabricating user or tool
+input. Tool calls still use the normal tool workflow.
+
+Tau accounts for each response separately and allows 16 additional no-tool samplings
+per turn; another nonterminal result stops with a visible limit error while
+keeping its answer text and usage. Cancellation stops this work, and a restart
+does not repeat a response whose dispatch checkpoint already committed. Protocol
+15 requires compatible rebuilds of the harness, UI, and extension binaries.
+
 Codex WebSocket attempts, including native standalone compaction, retain received
 text **before** JSON decoding and compact-shape validation. Look in the existing
 private `debug/provider-requests/<provider-instance>/*-websocket-response.json.zst`

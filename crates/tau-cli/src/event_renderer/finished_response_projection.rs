@@ -3,6 +3,9 @@
 use super::*;
 use crate::turn_stats_projection::{PreviousTurnUsageProjection, TurnStatsUsageProjection};
 
+#[cfg(test)]
+mod tests;
+
 /// Expensive, immutable presentation work prepared before a final is published.
 pub(super) struct FinishedResponseProjection {
     /// Final reasoning text and its settled history block.
@@ -180,9 +183,8 @@ impl EventRenderer {
             });
         #[cfg(test)]
         let mut assistant_concat_allocations = 0;
-        let editor_response = finished
-            .originator
-            .is_user()
+        let editor_response = (finished.originator.is_user()
+            && finished.stop_reason != tau_proto::ProviderStopReason::Continue)
             .then(|| {
                 assistant_text_from_output_items(
                     &finished.output_items,
@@ -625,7 +627,9 @@ impl EventRenderer {
     ) -> Option<tau_cli_term::StyledBlock> {
         use tau_themes::names;
 
-        let text = if finished.stop_reason == tau_proto::ProviderStopReason::Length
+        let text = if let Some(error) = finished.error.as_deref() {
+            error
+        } else if finished.stop_reason == tau_proto::ProviderStopReason::Length
             && finished.output_items.is_empty()
         {
             "Output-token limit reached. No output was produced; check the request and server generation limits."

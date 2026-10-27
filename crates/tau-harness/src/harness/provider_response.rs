@@ -424,6 +424,7 @@ impl Harness {
             && matches!(
                 response.stop_reason,
                 ProviderStopReason::EndTurn
+                    | ProviderStopReason::Continue
                     | ProviderStopReason::ToolCalls
                     | ProviderStopReason::Length
             );
@@ -717,6 +718,7 @@ impl Harness {
         }
         if !requested_tool_calls
             && !final_status_challenged
+            && response.stop_reason != ProviderStopReason::Continue
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
         {
             agent.turn.terminal_notice_eligible = successful;
@@ -4209,7 +4211,8 @@ impl Harness {
                 // tool continuation. A ToolCalls stop with zero calls is
                 // reconciled to end_turn and owes its finish; an EndTurn
                 // with calls dispatches them and owes none.
-                outer_turn_finish_owed: !requested_tool_calls,
+                outer_turn_finish_owed: !requested_tool_calls
+                    && response.stop_reason != ProviderStopReason::Continue,
             };
             return prepared;
         }
@@ -4428,7 +4431,7 @@ impl Harness {
         response: &ProviderResponseFinished,
         requested_tool_calls: bool,
     ) -> (ProviderTerminalPlan, Option<bool>) {
-        if requested_tool_calls {
+        if requested_tool_calls || response.stop_reason == ProviderStopReason::Continue {
             return (ProviderTerminalPlan::Other, None);
         }
         let successful = response.error.is_none()
@@ -4642,6 +4645,13 @@ impl Harness {
                 input_tokens,
                 &context_size_alerts,
             );
+        }
+        // A completed nonterminal response owns another ordinary inference, not
+        // a final-status challenge, watcher final, or side-conversation result.
+        // Publication/cancellation arbitration has already fixed this terminal.
+        if response.stop_reason == ProviderStopReason::Continue && !requested_tool_calls {
+            self.continue_after_explicit_response(cid);
+            return;
         }
         let assistant_text = assistant_text_from_output_items(&response.output_items);
         let notify_watchers = !matches!(

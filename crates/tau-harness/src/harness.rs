@@ -1428,8 +1428,9 @@ pub(crate) fn assistant_text_from_output_items(output_items: &[ContextItem]) -> 
             ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content,
+                phase,
                 ..
-            }) => Some(
+            }) if *phase != Some(tau_proto::MessagePhase::PartialAnswer) => Some(
                 content
                     .iter()
                     .map(|part| match part {
@@ -1641,6 +1642,7 @@ mod publication;
 mod publication_completion;
 mod publication_state;
 mod reactive_context_recovery_reducer;
+mod response_continuation;
 mod retained_tool_terminal;
 mod runtime_io_state;
 mod runtime_loop;
@@ -2460,6 +2462,7 @@ impl Harness {
                             &mut observations.tool_calls,
                         );
                         if tool_calls_from_output_items(&response.output_items).is_empty()
+                            && response.stop_reason != ProviderStopReason::Continue
                             && response.originator.is_user()
                         {
                             observations.final_text =

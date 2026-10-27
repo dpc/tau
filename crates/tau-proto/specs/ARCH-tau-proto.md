@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 15.0 adds `MessagePhase::PartialAnswer` and
+`ProviderStopReason::Continue`. `PartialAnswer` preserves the answer phase; only
+`Continue` requests sampling in the same outer turn. Rebuild configured extensions
+and UI peers together. New readers accept older journals, but old readers cannot
+decode the new enum values; journal framing is unchanged and there is no downgrade
+migration. See the Codex provider architecture for the bounded continuation contract.
+
 Protocol 14.0 introduces typed prepared-image references and captured image-storage
 policy. Inline remains the DTO default; the harness selects Artifact only for
 durable persistent image invocations with scoped authority. References identify

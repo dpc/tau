@@ -1217,6 +1217,7 @@ impl DaemonTraceState<'_> {
     /// Return whether a provider terminal belongs to the bound prompt chain.
     fn owns_finished(&self, finished: &tau_proto::ProviderResponseFinished) -> bool {
         tool_calls_from_output_items(&finished.output_items).is_empty()
+            && finished.stop_reason != tau_proto::ProviderStopReason::Continue
             && self.created_agent_id.as_ref() == Some(&finished.agent_id)
             && self.our_spid_counter.is_some_and(|ours| {
                 parse_agent_prompt_index(finished.agent_prompt_id.as_ref())

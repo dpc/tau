@@ -607,6 +607,9 @@ struct InferenceDispatchFold {
     provider_attempt: Option<tau_proto::ProviderAttempt>,
     /// Canonical provider stop reason retained for cold terminal projection.
     provider_stop_reason: Option<tau_proto::ProviderStopReason>,
+    /// Whether this terminal is a challenged candidate rather than an accepted
+    /// final answer; cold continuation repair must not settle it.
+    final_status_challenged: bool,
     /// Exact provider-reported ordinary input retained as proactive authority.
     provider_input_tokens: Option<tau_proto::TokenCount>,
     /// Whether this ordinary response opened a foreground tool round and
@@ -3361,6 +3364,7 @@ impl AgentTree {
                         output_length_disposition: tau_proto::OutputLengthDisposition::None,
                         provider_attempt: None,
                         provider_stop_reason: None,
+                        final_status_challenged: false,
                         provider_input_tokens: None,
                         rearms_output_length: false,
                         output_length_plan_node: None,
@@ -3391,6 +3395,8 @@ impl AgentTree {
                     dispatch.output_length_disposition = response.output_length_disposition.clone();
                     dispatch.provider_attempt = Some(response.provider_attempt);
                     dispatch.provider_stop_reason = Some(response.stop_reason);
+                    dispatch.final_status_challenged = response.final_status_disposition
+                        == tau_proto::FinalStatusDisposition::Challenged;
                     dispatch.provider_input_tokens = response.usage.as_ref().and_then(|usage| {
                         (usage.prompt_sent_tokens > 0)
                             .then(|| tau_proto::TokenCount::new(usage.prompt_sent_tokens))
@@ -6385,6 +6391,28 @@ impl AgentTree {
         &self,
         response: &tau_proto::ProviderResponseFinished,
     ) -> Result<(), AgentEventValidationError> {
+        if response.stop_reason == tau_proto::ProviderStopReason::Continue
+            && (response.error.is_some()
+                || response.failure_kind.is_some()
+                || response
+                    .output_items
+                    .iter()
+                    .any(|item| matches!(item, ContextItem::ToolCall(_)))
+                || !self
+                    .prompt_starts
+                    .get(&response.agent_prompt_id)
+                    .is_some_and(|started| {
+                        started.operation == tau_proto::PromptOperation::Inference
+                            && started
+                                .outer_turn_id
+                                .as_ref()
+                                .is_some_and(|turn| self.outer_turn_is_open(turn))
+                    }))
+        {
+            return Err(AgentEventValidationError::new(
+                "explicit response continuation requires a successful no-tool ordinary response in an open outer turn",
+            ));
+        }
         if let Some(decision) = &response.automatic_compaction_decision {
             let prompt_owns_outer_turn = self
                 .prompt_starts
@@ -6574,6 +6602,7 @@ impl AgentTree {
                             response.stop_reason,
                             tau_proto::ProviderStopReason::EndTurn
                                 | tau_proto::ProviderStopReason::ToolCalls
+                                | tau_proto::ProviderStopReason::Continue
                         ) && response.error.is_none()
                             && response.failure_kind.is_none()
                     }
@@ -6599,6 +6628,7 @@ impl AgentTree {
                 let finish_bit_valid = !*outer_turn_finish_owed
                     || (response.recovery_disposition
                         == tau_proto::ContextRecoveryDisposition::None
+                        && response.stop_reason != tau_proto::ProviderStopReason::Continue
                         && (response.stop_reason != tau_proto::ProviderStopReason::ToolCalls
                             || !response
                                 .output_items
@@ -7249,5 +7279,6 @@ pub struct SessionMeta {
 }
 
 mod fold_allocation;
+mod response_continuation;
 #[cfg(test)]
 mod tests;

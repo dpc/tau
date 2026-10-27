@@ -2281,6 +2281,9 @@ pub struct ToolResultsBlock {
 pub enum MessagePhase {
     /// Intermediate progress / preliminary notes.
     Commentary,
+    /// Stable answer text that permits subsequent assistant output or tools.
+    /// This label neither completes a turn nor authorizes another sampling.
+    PartialAnswer,
     /// Final completed response.
     FinalAnswer,
 }
@@ -2292,6 +2295,7 @@ impl MessagePhase {
     pub const fn as_openai_wire(self) -> &'static str {
         match self {
             Self::Commentary => "commentary",
+            Self::PartialAnswer => "partial_answer",
             Self::FinalAnswer => "final_answer",
         }
     }
