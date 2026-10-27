@@ -2531,6 +2531,13 @@ impl Harness {
                     .agents
                     .insert(cid.clone(), conv);
             }
+            // Restoration can synchronously publish successor starts and watch
+            // projections. Put the runtime behind discovery before either can
+            // initialize context or dispatch against startup's empty routes.
+            self.agent_runtime
+                .agent_registry
+                .session_loaded
+                .insert(agent_id.clone());
             if let Some(parent_agent) = parent_agent {
                 restored_parent_edges.push((cid.clone(), parent_agent));
             }
@@ -3017,10 +3024,6 @@ impl Harness {
                         },
                     );
             }
-            self.agent_runtime
-                .agent_registry
-                .session_loaded
-                .insert(agent_id.clone());
             if let Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
                 decision,
                 cut,

@@ -2260,6 +2260,13 @@ impl Harness {
                 .agent_registry
                 .session_loaded
                 .contains(&agent_id);
+            // Restored watch projections only need the durable identity. Do
+            // not let them initialize discovery from an incomplete session
+            // baseline and release owned dispatch before provider startup.
+            // complete_session_init explicitly initializes every loaded agent.
+            if was_loaded && !self.session_initialized(&self.session_runtime.current_session_id) {
+                return Some(agent_id);
+            }
             self.ensure_loaded_agent_for_agent(cid, &agent_id);
             if !self.agent_runtime.agent_registry.agents.contains_key(cid) {
                 return None;

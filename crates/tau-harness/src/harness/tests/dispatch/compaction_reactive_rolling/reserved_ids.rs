@@ -1,22 +1,20 @@
 //! Durable successor reservations must survive cold numeric cursor
-//! reconstruction.
+//! reconstruction and normal startup discovery.
 
 use super::*;
 
 /// Exercise real failure shaping, optionally restore a complete failure/start
 /// prefix, then require the next transition to pass canonical admission.
-fn reserved_successor_sequence(length: bool, crash_cut: Option<&str>, succeed: bool) {
+fn reserved_successor_sequence(
+    length: bool,
+    crash_cut: Option<&str>,
+    succeed: bool,
+    missing_route: bool,
+) {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
-    // Use the supported role prerequisite barrier so cold restore runs with a
-    // ready provider. Early restoration without that barrier is a separate
-    // route-availability concern, not the allocator transition under test.
-    std::fs::create_dir_all(state.join("config")).expect("config directory");
-    std::fs::write(
-        state.join("config/harness.yaml"),
-        "agents:\n  default_role: fixture\n  role_groups:\n    fixture:\n      roles:\n        fixture:\n          required_tools: [wait]\n",
-    )
-    .expect("role prerequisites");
+    // No required-tools role: restore must run before provider readiness, just
+    // as it does in the normal constructor without startup prerequisites.
     let mut h = quiet_provider_harness(&state).expect("start");
     enable_backend_capacity_compaction(&mut h);
     let cid = ensure_test_user_agent(&mut h);
@@ -79,6 +77,16 @@ fn reserved_successor_sequence(length: bool, crash_cut: Option<&str>, succeed: b
         let end =
             if cut == "failure" {
                 failure_index
+            } else if cut == "owner" {
+                records
+                    .iter()
+                    .position(|record| {
+                        matches!(&record.event,
+                            Event::AgentStandaloneCompactionStarted(started)
+                                if &started.transaction_id == transaction_id
+                        )
+                    })
+                    .expect("successor owner")
             } else {
                 records
                 .iter()
@@ -103,11 +111,42 @@ fn reserved_successor_sequence(length: bool, crash_cut: Option<&str>, succeed: b
         );
         assert_eq!(h.next_prompt_index_from_log(agent_id.as_str()), number + 1);
         drop(h);
-        h = quiet_standalone_provider_harness_for_with_start_reason_and_storage_mode(
+        let restored_agent_id = agent_id.clone();
+        let restored_transaction_id = transaction_id.clone();
+        let unstarted = cut == "failure";
+        h = quiet_standalone_provider_harness_for_with_start_reason_storage_mode_and_hook(
             "s1",
             &state,
             tau_proto::SessionStartReason::Resume,
             crate::HarnessStorageMode::Durable,
+            Some(Box::new(move |h| {
+                assert!(
+                    h.required_tool_roles_before_restore()
+                        .expect("restore roles")
+                        .is_empty()
+                );
+                assert!(!h.agent_context_ready_for_loaded_agent(&restored_agent_id));
+                let events = event_log_events(h);
+                assert_eq!(
+                    events.iter().filter(|event| matches!(event,
+                        Event::AgentStandaloneCompactionStarted(started)
+                            if started.transaction_id == restored_transaction_id
+                    )).count(),
+                    usize::from(unstarted),
+                );
+                assert!(!events.iter().any(|event| matches!(event,
+                    Event::AgentPromptCreated(_) | Event::AgentPromptStarted(_)
+                )), "restored work must wait for discovery");
+                assert!(!events.iter().any(|event| matches!(event,
+                    Event::AgentStandaloneCompactionFailed(failed)
+                        if failed.transaction_id == restored_transaction_id
+                            && failed.reason == tau_proto::StandaloneCompactionFailureReason::RouteFailed
+                )), "startup route absence must not terminalize the successor");
+                assert!(h.provider_runtime.model_routes.contains_key(&"test/model".into()));
+                if missing_route {
+                    h.provider_runtime.model_routes.remove(&"test/model".into());
+                }
+            })),
         )
         .expect("resume");
         let events = event_log_events(&h);
@@ -121,13 +160,42 @@ fn reserved_successor_sequence(length: bool, crash_cut: Option<&str>, succeed: b
                 .count(),
             usize::from(cut == "failure"),
         );
-        if cut == "start" {
+        if cut != "failure" {
             assert!(
                 !events
                     .iter()
                     .any(|event| matches!(event, Event::AgentPromptCreated(_))),
                 "ambiguous started work must not be replayed"
             );
+            h.shutdown().expect("shutdown");
+            return;
+        }
+        assert!(h.agent_context_ready_for_loaded_agent(&agent_id));
+        assert_eq!(
+            events.iter().filter(|event| matches!(event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if &failed.transaction_id == transaction_id
+                        && failed.reason == tau_proto::StandaloneCompactionFailureReason::RouteFailed
+            )).count(),
+            usize::from(missing_route),
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+                    Event::AgentPromptStarted(started) if &started.agent_prompt_id == prompt_id
+                ))
+                .count(),
+            usize::from(!missing_route),
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+                .count(),
+            usize::from(!missing_route),
+        );
+        if missing_route {
             h.shutdown().expect("shutdown");
             return;
         }
@@ -235,14 +303,14 @@ fn reserved_successor_sequence(length: bool, crash_cut: Option<&str>, succeed: b
 /// before the next Length response reserves and starts another successor.
 #[test]
 fn numeric_length_reservation_restores_next_transition() {
-    reserved_successor_sequence(true, Some("failure"), false);
+    reserved_successor_sequence(true, Some("failure"), false, false);
 }
 
 /// Capacity retreat must restore its reservation before a second reducible
 /// rejection; sufficient closed cuts distinguish collisions from exhaustion.
 #[test]
 fn numeric_retreat_reservation_restores_next_transition() {
-    reserved_successor_sequence(false, Some("failure"), false);
+    reserved_successor_sequence(false, Some("failure"), false, false);
 }
 
 /// Successful restored compaction must allocate a fresh ordinary prompt and
@@ -250,7 +318,7 @@ fn numeric_retreat_reservation_restores_next_transition() {
 /// materialization.
 #[test]
 fn numeric_length_reservation_restores_successful_inference() {
-    reserved_successor_sequence(true, Some("failure"), true);
+    reserved_successor_sequence(true, Some("failure"), true, false);
 }
 
 /// Uninterrupted failure application already consumes the reservation;
@@ -258,14 +326,24 @@ fn numeric_length_reservation_restores_successful_inference() {
 /// progression.
 #[test]
 fn numeric_reservations_live_transition_control() {
-    reserved_successor_sequence(true, None, false);
-    reserved_successor_sequence(false, None, false);
+    reserved_successor_sequence(true, None, false, false);
+    reserved_successor_sequence(false, None, false, false);
 }
 
 /// Once a reserved successor has started, cold recovery must count its identity
 /// but must not replay its ambiguous paid work for either successor category.
 #[test]
 fn numeric_reservations_started_restart_control() {
-    reserved_successor_sequence(true, Some("start"), false);
-    reserved_successor_sequence(false, Some("start"), false);
+    reserved_successor_sequence(true, Some("start"), false, false);
+    reserved_successor_sequence(false, Some("start"), false, false);
+    reserved_successor_sequence(true, Some("owner"), false, false);
+    reserved_successor_sequence(false, Some("owner"), false, false);
+}
+
+/// Normal startup discovery releases reserved successors, but cannot make a
+/// genuinely absent captured route usable or silently switch their model.
+#[test]
+fn reserved_successors_fail_missing_route_after_startup_discovery() {
+    reserved_successor_sequence(true, Some("failure"), false, true);
+    reserved_successor_sequence(false, Some("failure"), false, true);
 }
