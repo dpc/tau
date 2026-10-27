@@ -3057,12 +3057,21 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
 /// Plain terminals without status or compaction policy must retain their exact
 /// completion through admission rejection. Initial and post-tool responses may
 /// settle (or cancel) only after commit, and replay must not repeat either
-/// fact.
+/// fact. Delivered activity must converge with the cleared provider owner.
 #[test]
 fn ordinary_terminal_admission_rejection_retains_completion_until_commit() {
     for (post_tool, cancel) in [(false, false), (true, false), (false, true), (true, true)] {
         let td = TempDir::new().expect("tempdir");
         let mut h = quiet_provider_harness(td.path()).expect("start");
+        let live = connect_test_tool(&mut h, "retained-terminal-stats");
+        h.complete_subscription(
+            &crate::test_connection_id("retained-terminal-stats"),
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("subscribe to retained terminal stats");
         let cid = ensure_test_user_agent(&mut h);
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("ordinary terminal".to_owned()))
             .expect("dispatch");
@@ -3199,6 +3208,22 @@ fn ordinary_terminal_admission_rejection_retains_completion_until_commit() {
             .expect("committed response");
         assert_eq!(response.error.as_deref(), cancel.then_some("cancelled"));
         assert_eq!(response.output_items.is_empty(), cancel);
+        let current = h.agent_stats_snapshot(&cid).expect("current stats");
+        let delivered = live
+            .lock()
+            .expect("frames")
+            .iter()
+            .rev()
+            .find_map(|routed| match peel_inner_event(&routed.frame) {
+                Some(Event::AgentStatsUpdated(stats)) if stats.agent_id == prompt.agent_id => {
+                    Some(stats.clone())
+                }
+                _ => None,
+            })
+            .expect("delivered stats");
+        assert_eq!(current.turn_activity, tau_proto::AgentTurnActivity::Idle);
+        assert_eq!(delivered.turn_activity, current.turn_activity);
+        assert_eq!(delivered.runtime_state, current.runtime_state);
         h.shutdown().expect("shutdown");
         drop(h);
         wait_for_session_unlock(td.path(), "s1");

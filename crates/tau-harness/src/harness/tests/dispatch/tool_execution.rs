@@ -5662,6 +5662,187 @@ fn agent_stats_keep_outer_turn_running_across_inner_tool_continuation() {
     h.shutdown().expect("shutdown");
 }
 
+/// A completed Done response must refresh live activity after clearing its
+/// provider marker; late subscribers and cold resume must agree with that view.
+#[test]
+fn finished_response_stats_converge_for_live_late_and_resumed_subscribers() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
+    let live = connect_test_tool(&mut h, "terminal-stats");
+    h.complete_subscription(
+        &crate::test_connection_id("terminal-stats"),
+        Vec::new(),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish".to_owned()))
+        .expect("dispatch");
+    let prompt = read_nth_prompt_created(&h, 0);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(tau_proto::AgentWorkStatusPhase::Done, "finish".to_owned())
+            .expect("done report"),
+    )
+    .expect("report done");
+    drain_stats_updated(&live);
+    h.handle_provider_response_finished(provider_text_response(
+        &prompt.agent_prompt_id,
+        prompt.agent_id.clone(),
+        "done",
+    ))
+    .expect("finish");
+    let delivered = drain_stats_updated(&live).pop().expect("terminal stats");
+    let current = h.agent_stats_snapshot(&cid).expect("current stats");
+    assert_eq!(current.turn_activity, tau_proto::AgentTurnActivity::Idle);
+    assert_eq!(delivered.turn_activity, current.turn_activity);
+    assert_eq!(delivered.runtime_state, tau_proto::AgentRuntimeState::Idle);
+    assert_eq!(
+        delivered.work_status.phase(),
+        tau_proto::AgentWorkStatusPhase::Done
+    );
+
+    let late = connect_test_tool(&mut h, "terminal-stats-late");
+    h.complete_subscription(
+        &crate::test_connection_id("terminal-stats-late"),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+        Vec::new(),
+    )
+    .expect("late subscribe");
+    drive_harness_until_history_complete(&mut h);
+    let late_stats = drain_stats_updated(&late).pop().expect("late stats");
+    assert_eq!(late_stats.turn_activity, delivered.turn_activity);
+    assert_eq!(late_stats.work_status, delivered.work_status);
+    h.shutdown().expect("shutdown");
+    drop(h);
+    wait_for_session_unlock(td.path(), "s1");
+    let mut resumed =
+        echo_harness_with_start_reason("s1", td.path(), tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let cold = connect_test_tool(&mut resumed, "terminal-stats-cold");
+    resumed
+        .complete_subscription(
+            &crate::test_connection_id("terminal-stats-cold"),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+            Vec::new(),
+        )
+        .expect("cold subscribe");
+    drive_harness_until_history_complete(&mut resumed);
+    let cold_stats = drain_stats_updated(&cold)
+        .into_iter()
+        .find(|stats| stats.agent_id == prompt.agent_id)
+        .expect("cold stats");
+    assert_eq!(cold_stats.turn_activity, tau_proto::AgentTurnActivity::Idle);
+    resumed.shutdown().expect("shutdown resumed");
+}
+
+/// Real tool dispatch must replace Responding with Manipulating while an
+/// extension holds the call open, without waiting for another tool transition.
+#[test]
+fn finished_response_stats_show_active_manipulator() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
+    let tool = connect_ready_configured_extension(
+        &mut h,
+        "stats-slow",
+        "configured-stats-slow",
+        tau_proto::ClientKind::Tool,
+    );
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("stats-slow"),
+        shared_test_tool_spec("slow"),
+    );
+    let live = connect_test_tool(&mut h, "tool-stats");
+    h.complete_subscription(
+        &crate::test_connection_id("tool-stats"),
+        Vec::new(),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("run slow".to_owned()))
+        .expect("dispatch");
+    let prompt = read_nth_prompt_created(&h, 0);
+    drain_stats_updated(&live);
+    h.handle_provider_response_finished(provider_tool_response(
+        &prompt,
+        "slow-call",
+        "slow",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("dispatch tool");
+    assert!(h.agent_has_open_foreground_tool_round(&cid));
+    let delivered = drain_stats_updated(&live).pop().expect("tool stats");
+    assert_eq!(delivered.tools.in_flight, 1);
+    assert_eq!(
+        delivered.turn_activity,
+        tau_proto::AgentTurnActivity::Manipulating
+    );
+    assert_eq!(
+        delivered.turn_activity,
+        h.agent_stats_snapshot(&cid).expect("stats").turn_activity
+    );
+    drop(tool);
+    h.shutdown().expect("shutdown");
+}
+
+/// A synchronous internal tool can dispatch the next prompt before old-response
+/// cleanup returns; that cleanup must preserve the successor's Responding
+/// state.
+#[test]
+fn finished_response_stats_preserve_synchronous_successor() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
+    let live = connect_test_tool(&mut h, "successor-stats");
+    h.complete_subscription(
+        &crate::test_connection_id("successor-stats"),
+        Vec::new(),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("inspect".to_owned()))
+        .expect("dispatch");
+    let initial = read_nth_prompt_created(&h, 0);
+    drain_stats_updated(&live);
+    h.handle_provider_response_finished(provider_tool_response(
+        &initial,
+        "info-call",
+        "self_info",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("complete synchronous tool");
+    let successor = read_nth_prompt_created(&h, 1);
+    assert_ne!(initial.agent_prompt_id, successor.agent_prompt_id);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .in_flight_prompt
+            .as_ref(),
+        Some(&successor.agent_prompt_id),
+    );
+    let delivered = drain_stats_updated(&live).pop().expect("successor stats");
+    assert_eq!(
+        delivered.turn_activity,
+        tau_proto::AgentTurnActivity::Responding
+    );
+    assert_eq!(
+        delivered.turn_activity,
+        h.agent_stats_snapshot(&cid).expect("stats").turn_activity
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// The central detailed-activity reducer must apply the approved precedence
 /// without changing the binary runtime projection.
 #[test]

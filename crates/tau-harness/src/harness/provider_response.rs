@@ -3643,6 +3643,11 @@ impl Harness {
             && conv.dispatch.in_flight_prompt.as_ref() == Some(&response.agent_prompt_id)
         {
             conv.dispatch.in_flight_prompt = None;
+            // Canonical publication may synchronously settle the turn or start
+            // tools while the old prompt still makes stats report Responding.
+            // Refresh only after clearing that exact owner; a newer synchronous
+            // successor must retain its own marker and activity.
+            self.emit_agent_stats_updated(cid);
         }
     }
 
