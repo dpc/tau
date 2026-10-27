@@ -2751,12 +2751,13 @@ fn finished_response_injects_crossed_context_size_alert() {
     h.shutdown().expect("shutdown");
 }
 
-/// Terminal provider errors may report usage for diagnostics, but must not turn
-/// an advisory context alert into autonomous retry work.
+/// Failed terminals retain ID and usage exactly once across duplicate delivery
+/// and cold replay, without turning accounting into autonomous continuation.
 #[test]
 fn failed_response_does_not_inject_context_size_alert() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     h.config
         .available_roles
@@ -2784,23 +2785,90 @@ fn failed_response_does_not_inject_context_size_alert() {
     response.stop_reason = tau_proto::ProviderStopReason::Error;
     response.error = Some("terminal failure".to_owned());
     response.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+    response.provider_response_id = Some("resp_failed_accounting".to_owned());
     response.usage = Some(tau_proto::ProviderTokenUsage {
         model: None,
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
         prompt_cache_read_ceiling_tokens: None,
         cache: None,
-        response_received_tokens: 0,
+        response_received_tokens: 7,
         stats: Default::default(),
     });
-    h.handle_provider_response_finished(response)
+    h.handle_provider_response_finished(response.clone())
         .expect("finish response");
+    let accounted = h.session_runtime.current_session_state.token_usage.clone();
+    assert_eq!(accounted.total.sent_tokens, 101);
+    assert_eq!(accounted.total.received_tokens, 7);
+    h.handle_provider_response_finished(response.clone())
+        .expect("duplicate failure");
+    assert_eq!(
+        h.session_runtime.current_session_state.token_usage,
+        accounted
+    );
+    let durable_agent = response.agent_id.clone();
+    let assert_terminal = |h: &Harness| {
+        let records = h
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(durable_agent.as_str())
+            .expect("records");
+        let terminals: Vec<_> = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::ProviderResponseFinished(finished)
+                    if finished.agent_prompt_id == response.agent_prompt_id =>
+                {
+                    Some(finished)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(
+            terminals[0].provider_response_id,
+            response.provider_response_id
+        );
+        assert_eq!(
+            terminals[0].stop_reason,
+            tau_proto::ProviderStopReason::Error
+        );
+        assert_eq!(
+            terminals[0]
+                .usage
+                .as_ref()
+                .expect("usage")
+                .response_received_tokens,
+            7
+        );
+        assert_eq!(terminals[0].usage.as_ref().expect("usage").stats, accounted);
+    };
+    assert_terminal(&h);
 
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptSubmitted(submitted) if submitted.text == "must not continue"
     )));
     h.shutdown().expect("shutdown");
+    wait_for_session_unlock(&state, "s1");
+    let mut restored =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("restore");
+    assert_terminal(&restored);
+    let cold_totals = restored
+        .session_runtime
+        .current_session_state
+        .token_usage
+        .clone();
+    restored
+        .handle_provider_response_finished(response.clone())
+        .expect("cold duplicate");
+    assert_eq!(
+        restored.session_runtime.current_session_state.token_usage,
+        cold_totals
+    );
+    assert_terminal(&restored);
+    restored.shutdown().expect("shutdown restored");
 }
 /// Cold replay must not apply usage from an unqualified or different model,
 /// and a live per-agent model change clears already-restored usage.

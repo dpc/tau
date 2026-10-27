@@ -292,6 +292,7 @@ fn compact_fallback_is_one_attempt_only_for_definitive_native_absence() {
         CompactOutcome::Retry {
             decision: RetryDecision::new(RetryClass::Transport),
             backend_reached: true,
+            accounting: None,
         },
     ] {
         compact_with_local_fallback(

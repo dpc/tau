@@ -1512,6 +1512,7 @@ fn compact_same_event_error_first_remains_retryable() {
     let CompactOutcome::Retry {
         decision,
         backend_reached,
+        ..
     } = runtime.compact("ap-compact-error-first", &config, &request, &mut NeverAbort)
     else {
         panic!("error-first event must remain retryable");
@@ -1603,7 +1604,7 @@ fn compact_post_progress_capacity_error_revokes_recovery_authority() {
             Some(tau_proto::ProviderFailureKind::Unknown)
         );
         assert!(
-            matches!(&error.0, common::LlmError::ProviderFailure(_, message)
+            matches!(error.0.root_error(), common::LlmError::ProviderFailure(_, message)
                 if message == "compaction capacity error after semantic output"),
             "expected accepted progress for local={local}: {error:?}"
         );
@@ -1872,6 +1873,7 @@ fn codex_local_summary_request_transport_failure_is_retryable() {
     let CompactOutcome::Retry {
         decision,
         backend_reached,
+        ..
     } = runtime.compact("local-transport", &config, &request, &mut NeverAbort)
     else {
         panic!("pre-dispatch request transport failure must reach the scheduler");

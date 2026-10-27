@@ -176,6 +176,7 @@ where
             )
         }
         PromptBackend::Unavailable { .. } => Ok(Some(PromptAttemptRetry {
+            terminal_accounting: None,
             decision: RetryDecision::new(RetryClass::Auth),
             live_detail: None,
             canonical_unauthorized: false,

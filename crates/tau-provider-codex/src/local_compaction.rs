@@ -159,6 +159,7 @@ impl CodexRuntime {
                         CompactOutcome::Retry {
                             decision,
                             backend_reached,
+                            accounting: error.response_accounting().cloned(),
                         }
                     }
                     _ => CompactOutcome::Terminal {

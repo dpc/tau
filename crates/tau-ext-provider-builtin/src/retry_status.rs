@@ -19,6 +19,10 @@ pub(super) fn emit_compaction_retry_exhausted(
     finished.provider_attempt = attempt;
     finished.failure_kind = Some(tau_proto::ProviderFailureKind::TransientCompactionExhausted);
     finished.backend = job.observed_backend;
+    if let Some(accounting) = job.terminal_accounting {
+        finished.usage = accounting.usage;
+        finished.provider_response_id = accounting.provider_response_id;
+    }
     handle.send(HarnessInputMessage::emit_transient(
         Event::ProviderResponseFinishedReported(finished),
     ))

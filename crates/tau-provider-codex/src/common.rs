@@ -88,6 +88,8 @@ pub enum LlmError {
         source: Box<LlmError>,
         /// Opaque bounded parser/transport observation used by diagnostics.
         evidence: Box<crate::attempt_failure::AttemptFailureEvidence>,
+        /// Functional accounting, independent of optional diagnostic capture.
+        accounting: Option<Box<crate::ResponseAccounting>>,
     },
     /// Shared outbound policy or route failure with a redacted projection.
     Outbound(tau_provider::OutboundError),
@@ -204,9 +206,44 @@ impl LlmError {
 
     /// Attach opaque evidence without changing the underlying policy error.
     pub(crate) fn observed(self, evidence: crate::attempt_failure::AttemptFailureEvidence) -> Self {
+        self.observed_response(evidence, None)
+    }
+
+    /// Attach failure accounting without changing classification or granting
+    /// response completion authority.
+    pub(crate) fn observed_response(
+        self,
+        evidence: crate::attempt_failure::AttemptFailureEvidence,
+        accounting: Option<crate::ResponseAccounting>,
+    ) -> Self {
         Self::Observed {
             source: Box::new(self),
             evidence: Box::new(evidence),
+            accounting: accounting.map(Box::new),
+        }
+    }
+
+    /// Borrow functional accounting independently of diagnostic evidence.
+    pub(crate) fn response_accounting(&self) -> Option<&crate::ResponseAccounting> {
+        match self {
+            Self::Observed { accounting, .. } => accounting.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Replace policy authority while retaining observed failure accounting.
+    pub(crate) fn replace_policy_error(self, replacement: Self) -> Self {
+        match self {
+            Self::Observed {
+                source,
+                evidence,
+                accounting,
+            } => Self::Observed {
+                source: Box::new(source.replace_policy_error(replacement)),
+                evidence,
+                accounting,
+            },
+            _ => replacement,
         }
     }
 
@@ -1683,6 +1720,7 @@ impl StreamState {
     pub fn usage(&self) -> Option<ProviderTokenUsage> {
         if self.input_tokens.is_none()
             && self.cached_tokens.is_none()
+            && self.cache_write_tokens.is_none()
             && self.output_tokens.is_none()
         {
             return None;

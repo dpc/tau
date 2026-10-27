@@ -11,6 +11,7 @@ use crate::common::LlmError;
 use crate::{attempt_failure as path_crate_attempt_failure, common as path_crate_common};
 
 mod compatibility;
+mod failure_accounting;
 mod output_index;
 
 use tau_proto::{

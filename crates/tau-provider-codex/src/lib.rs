@@ -68,6 +68,7 @@ pub(crate) mod common;
 pub mod oauth;
 pub(crate) mod quota;
 mod request_rejection_reason;
+mod response_accounting;
 pub(crate) mod responses;
 
 pub use attempt_failure::{LogicalAttempt, RedactedProviderDetail};
@@ -75,6 +76,7 @@ pub use common::{ProviderTokenCounts, StreamDeltaEmitter, StreamState};
 pub use quota::{
     FullQuotaSnapshot, QuotaWindowObservation, RollingQuotaObservation, UsageFetchError,
 };
+pub use response_accounting::ResponseAccounting;
 
 /// Parses one synthetic WebSocket quota event for cross-crate tests.
 #[cfg(feature = "test-support")]
@@ -429,6 +431,13 @@ pub enum SemanticProgress {
 pub struct CodexError(common::LlmError);
 
 impl CodexError {
+    /// Returns accounting from a failed response without granting success,
+    /// continuation, or retry authority.
+    #[must_use]
+    pub fn response_accounting(&self) -> Option<&ResponseAccounting> {
+        self.0.response_accounting()
+    }
+
     /// Revoke capacity-retreat authority after private compact output was
     /// accepted. Ordinary inference and clean unusable local summaries never
     /// pass through this error-only boundary.
@@ -436,10 +445,11 @@ impl CodexError {
         if progress != SemanticProgress::None
             && error.failure_kind() == Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
         {
-            Self(common::LlmError::ProviderFailure(
+            let replacement = common::LlmError::ProviderFailure(
                 tau_proto::ProviderFailureKind::Unknown,
                 "compaction capacity error after semantic output".to_owned(),
-            ))
+            );
+            Self(error.replace_policy_error(replacement))
         } else {
             Self(error)
         }
@@ -596,6 +606,8 @@ pub enum CompactOutcome {
         decision: tau_provider::retry_policy::RetryDecision,
         /// Whether a request crossed the provider egress boundary.
         backend_reached: bool,
+        /// Final-attempt accounting if the scheduler exhausts its retry budget.
+        accounting: Option<ResponseAccounting>,
     },
     /// Trusted local cancellation ended the joined operation.
     Canceled {
@@ -1601,6 +1613,7 @@ impl CodexRuntime {
                         CompactOutcome::Retry {
                             decision,
                             backend_reached,
+                            accounting: error.response_accounting().cloned(),
                         }
                     }
                     _ => CompactOutcome::Terminal {

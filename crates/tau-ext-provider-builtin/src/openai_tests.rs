@@ -19,6 +19,7 @@ use crate::tests::SharedTraceWriter;
 
 mod cache_refresh_admission_tests;
 mod compaction_transport_retry_tests;
+mod failure_accounting_tests;
 mod image_resolution_tests;
 mod responses_retry_hint_tests;
 
@@ -1589,6 +1590,7 @@ pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
         profile_identity: None,
         retry_state: PromptRetryState::default(),
         observed_backend: None,
+        terminal_accounting: None,
         cancel_generation: 0,
         manual_cooldown_bypass: false,
         cooldown_probe: None,

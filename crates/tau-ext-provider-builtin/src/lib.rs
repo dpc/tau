@@ -4092,6 +4092,7 @@ where
             profile_identity,
             retry_state: PromptRetryState::default(),
             observed_backend: None,
+            terminal_accounting: None,
             cancel_generation: self.cancel_generation,
             manual_cooldown_bypass: false,
             cooldown_probe: None,
@@ -6013,6 +6014,9 @@ struct PromptJob {
     retry_state: PromptRetryState,
     /// Backend reached by any finite attempt in this logical provider turn.
     observed_backend: Option<ProviderBackend>,
+    /// Accounting from only the latest failed attempt, used solely when its
+    /// retry disposition terminalizes the logical prompt.
+    terminal_accounting: Option<tau_provider_codex::ResponseAccounting>,
     /// Runtime global-cancel generation at logical prompt creation.
     cancel_generation: u64,
     /// Lets one manually released job pass a still-active shared cooldown once.
@@ -7813,7 +7817,7 @@ fn debug_provider_requests_for(
 }
 
 fn production_prompt_executor() -> PromptExecutor {
-    Arc::new(|execution| {
+    Arc::new(|mut execution| {
         let agent_prompt_id = execution.job.agent_prompt_id.clone();
         let model = execution.job.prompt.model.clone();
         let profile_identity = match &execution.job.backend {
@@ -7877,6 +7881,7 @@ fn production_prompt_executor() -> PromptExecutor {
         };
         match result {
             Ok(Some(retry)) => {
+                execution.job.terminal_accounting = retry.terminal_accounting;
                 let _ = send_worker_message(
                     &execution.output_tx,
                     &execution.output_waker,
@@ -8917,6 +8922,7 @@ fn finish_retry_attempt<S: ProviderReportSink>(
         live_detail: None,
         canonical_unauthorized: false,
         terminal_backend,
+        terminal_accounting: None,
     }))
 }
 
@@ -9038,6 +9044,8 @@ struct PromptAttemptRetry {
     canonical_unauthorized: bool,
     /// Backend reached by this attempt for a synthesized retry-budget terminal.
     terminal_backend: Option<ProviderBackend>,
+    /// Last-attempt accounting, never an accumulated retry total.
+    terminal_accounting: Option<tau_provider_codex::ResponseAccounting>,
 }
 
 fn handle_compact_prompt<R, S: ProviderReportSink>(
@@ -9098,10 +9106,12 @@ where
         CompactOutcome::Retry {
             decision,
             backend_reached,
+            accounting,
         } => Ok(Some(PromptAttemptRetry {
             decision,
             live_detail: None,
             canonical_unauthorized: false,
+            terminal_accounting: accounting,
             terminal_backend: observed_backend(
                 backend_reached.then(|| {
                     backend_descriptor(config, ProviderBackendTransport::Websocket, false)
@@ -9381,6 +9391,7 @@ where
                 decision,
                 live_detail,
                 canonical_unauthorized,
+                terminal_accounting: None,
                 terminal_backend: observed_backend(
                     backend_reached.then(|| {
                         backend_descriptor(config, ProviderBackendTransport::Websocket, false)
@@ -9823,6 +9834,7 @@ fn finish_error<S: ProviderReportSink>(
     provider_attempt: tau_proto::ProviderAttempt,
     writer: &mut S,
 ) -> Result<(), Box<dyn Error>> {
+    let accounting = error.response_accounting().cloned().unwrap_or_default();
     let finished = ProviderResponseFinishedReport {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -9843,12 +9855,12 @@ fn finish_error<S: ProviderReportSink>(
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: prompt.originator.clone(),
-        usage: None,
+        usage: accounting.usage,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
         backend: backend.cloned(),
         provider_attempt,
-        provider_response_id: None,
+        provider_response_id: accounting.provider_response_id,
         ws_pool_delta,
     };
     maybe_debug_submit_provider_response(

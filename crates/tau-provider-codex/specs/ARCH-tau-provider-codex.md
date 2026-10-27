@@ -32,6 +32,24 @@ Provider output is constrained by
 Curated provider wire evidence follows
 [SPEC-tau-provider-codex-curated-vcr](SPEC-tau-provider-codex-curated-vcr.md).
 
+## Failed response accounting
+
+The provider extension preserves the response ID and available usage from Codex
+`response.incomplete` and `response.failed` envelopes when they represent the
+logical prompt's final error. It normalizes usage counters as it does for
+successful responses, including known-zero versus absent usage and cache
+reads/writes. It uses the existing finished-report fields, preserving exactly-once
+ownership for durable accounting and replay. The extension discards failure
+output; `end_turn=false` does not make a failed response a successful continuation
+or a reusable response chain.
+
+Retry classification does not change. The final report excludes usage and
+identities from intermediate retry attempts; there is no per-attempt usage
+ledger. If standalone compaction exhausts its finite retry policy, the extension
+includes only the final attempt's available accounting in the existing
+exhausted-failure terminal. It does not fill missing final metadata with metadata
+from an earlier attempt.
+
 ## Account quota telemetry
 
 This adapter owns the isolated ChatGPT `/wham/usage` full-snapshot and WebSocket

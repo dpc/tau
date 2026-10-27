@@ -2270,6 +2270,21 @@ fn is_known_output_item_type(item_type: &str) -> bool {
 fn apply_terminal_event(state: &mut StreamState, event: &serde_json::Value) {
     state.end_turn = event["response"]["end_turn"].as_bool();
     state.provider_terminal_event = Some(event.clone());
+    apply_terminal_accounting(state, event);
+}
+
+/// Extract only accounting; failed envelopes never set continuation or terminal
+/// success state and never admit their output items.
+fn response_failure_accounting(event: &serde_json::Value) -> crate::ResponseAccounting {
+    let mut state = StreamState::new();
+    apply_terminal_accounting(&mut state, event);
+    crate::ResponseAccounting {
+        usage: state.usage(),
+        provider_response_id: state.response_id,
+    }
+}
+
+fn apply_terminal_accounting(state: &mut StreamState, event: &serde_json::Value) {
     if state.input_tokens.is_none() {
         state.input_tokens = terminal_usage_u64(event, "input_tokens");
     }
@@ -2322,7 +2337,10 @@ fn response_incomplete_error(
         tau_proto::ProviderFailureKind::RequestRejected,
         format!("response incomplete: {reason}"),
     )
-    .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
+    .observed_response(
+        path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+        Some(response_failure_accounting(event)),
+    )
 }
 
 fn response_failed_error(
@@ -2352,8 +2370,9 @@ fn response_failed_error(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
         )
-        .observed(
+        .observed_response(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+            Some(response_failure_accounting(event)),
         );
     }
     if let Some(reason) = event_request_rejection(event, code.as_deref()) {
@@ -2361,8 +2380,9 @@ fn response_failed_error(
             reason,
             detail: body,
         }
-        .observed(
+        .observed_response(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+            Some(response_failure_accounting(event)),
         );
     }
     LlmError::StreamError {
@@ -2370,7 +2390,10 @@ fn response_failed_error(
         code,
         retry_after: failed_response_retry_hint(event, SystemTime::now()),
     }
-    .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
+    .observed_response(
+        path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+        Some(response_failure_accounting(event)),
+    )
 }
 
 /// Model absence is terminal only in upstream's documented status shapes.
