@@ -13,11 +13,11 @@ through the normal supervised stdio extension route. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r)
 owns its source and detailed operational documentation; its Cargo README
 installation instructions remain conditional on a future registry publication.
-For Tau protocol 15.0, rebuild the bridge and gateway with exact registry SDK
-`dpc-tau-client`/`dpc-tau-proto` 0.15.0 and update them together with the
-compatible harness before separately authorized activation. Protocol-14 bridge
-binaries are rejected before configuration. The separate authenticated gateway
-protocol remains 0.
+For Tau protocol 16.0, rebuild the bridge and gateway with registry SDK crates
+`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update them with the
+compatible harness before separately authorized activation. Older-protocol bridge
+binaries are rejected before configuration; changing the advertised version alone
+is not a migration. The separate authenticated gateway protocol remains 0.
 
 Local-poll mode requires a named bot-token secret, a nonempty numeric
 `allowed_user_ids` list, and an optional exact `chat_id`. Without `chat_id`, an

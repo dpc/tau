@@ -13,9 +13,9 @@ example `TAU_ENABLE_EXTENSIONS=std-xmpp tau`). It launches as a supervised
 stdio extension with an empty Tau default configuration; do not infer account,
 room, or gateway settings from that empty default.
 
-For Tau protocol 15.0, rebuild with exact registry SDK
-`dpc-tau-client`/`dpc-tau-proto` 0.15.0 and update the extension together with the
-harness before separately authorized activation. Protocol-14 binaries are
+For Tau protocol 16.0, rebuild with registry SDK crates
+`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update the extension with the
+harness before separately authorized activation. Older-protocol binaries are
 rejected before configuration.
 
 Tau owns the instance name, managed-secret delivery, per-instance state,

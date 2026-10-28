@@ -12,12 +12,12 @@ tools such as `email_list_folders`, `email_read`, `email_send`,
 `calendar_search`, and `calendar_create`, and publishes `:email` and `:calendar`
 user actions.
 
-For Tau protocol 15.0, rebuild the extension with exact registry SDK
-`dpc-tau-client`/`dpc-tau-proto` 0.15.0 and update it together with the harness
+For Tau protocol 16.0, rebuild the extension with registry SDK crates
+`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update it with the harness
 before separately authorized activation.
-Protocol-14 binaries are rejected before configuration; changing the advertised
-version alone is not a migration. The old
-`std-email` standard-instance alias is removed; rename it to `std-pim`. PIM
+Older-protocol binaries are rejected before configuration; changing the advertised
+version alone is not a migration. The old `std-email` standard-instance alias
+is removed; rename it to `std-pim`. PIM
 configuration accepts only the nested `config.email` and `config.calendar`
 module keys.
 

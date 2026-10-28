@@ -18,9 +18,9 @@ revision used Tau protocol 9 and registry SDK 0.7.0, with the receiver-admission
 fix first published in Tau commit
 `30c8b43410a84294f31f74451f9f7f09a94df473`. That historical requirement is not a
 compatibility guarantee for newer harnesses. The standalone Zulip bridge uses
-exact registry `dpc-tau-client` and `dpc-tau-proto` 0.15.0 (protocol 15.0).
+registry crates `dpc-tau-client` and `dpc-tau-proto` pinned to 0.16.0 (protocol 16.0).
 Rebuild it with the compatible harness and configured peers before separately
-authorized activation. Protocol-14 binaries are rejected before configuration or
+authorized activation. Older-protocol binaries are rejected before configuration or
 receiver registration; changing Zulip routes or registration settings does not
 repair a wire-version mismatch. Zulip remains an original-byte attachment bridge,
 not a prepared-image producer or model provider: attachment downloads return
