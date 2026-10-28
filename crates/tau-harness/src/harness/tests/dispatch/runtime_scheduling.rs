@@ -2782,12 +2782,19 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
 }
 
 /// Production timeout publication adds one advisory on the third consecutive
-/// activating-input timeout and leaves later timeouts in that run unadorned.
+/// activating-input timeout even without a declared status tool, and leaves
+/// later timeouts in that run unadorned.
 #[test]
 fn repeated_input_wait_timeouts_add_one_advisory() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
+    assert!(
+        !h.gather_tool_definitions_for_role(h.config.selected_role.as_str())
+            .iter()
+            .any(|tool| tool.name.as_str() == "status"),
+        "exercise advice when the model cannot call status"
+    );
     let advice = |h: &Harness, call_id: &str| {
         event_log_contains_any_source(h, |event| {
             matches!(
@@ -2800,7 +2807,7 @@ fn repeated_input_wait_timeouts_add_one_advisory() {
                                 if entries.contains(&(
                                     CborValue::Text("advice".to_owned()),
                                     CborValue::Text(
-                                        "Seems like you're waiting in a loop. Call `status` with `waiting`, then finish the current turn—status alone does not finish it. Rely on a message or trigger to wake you.".to_owned()
+                                        "Seems like you're waiting in a loop. Finish the current turn and rely on a message or trigger to wake you instead of repeatedly calling `wait`.".to_owned()
                                     )
                                 ))
                         )

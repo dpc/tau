@@ -273,6 +273,16 @@ fn required_tools_disconnect_blocks_new_agents_not_running_agents() {
             .agents
             .contains_key(&existing)
     );
+    let persistence = h
+        .session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("persistence owner");
+    // Finish setup writes before comparing physical journals across rejections.
+    assert_eq!(
+        persistence.wait_for_latest_durability_for_test(Duration::from_secs(5)),
+        tau_core::DurabilityBarrierOutcome::Durable
+    );
     let before = journal_bytes(tmp.path());
     let sink = connect_ready_configured_extension(
         &mut h,
@@ -318,6 +328,15 @@ fn required_tools_disconnect_blocks_new_agents_not_running_agents() {
         .try_create_durable_user_agent("s1".parse().expect("session"), "bot")
         .expect_err("direct creation rejected");
     assert!(error.to_string().contains("required_tools"));
+    // Include any mistakenly admitted asynchronous writes in the comparison.
+    assert_eq!(
+        h.session_runtime
+            .persistence_owner
+            .as_ref()
+            .expect("persistence owner")
+            .wait_for_latest_durability_for_test(Duration::from_secs(5)),
+        tau_core::DurabilityBarrierOutcome::Durable
+    );
     assert_eq!(journal_bytes(tmp.path()), before);
     h.create_durable_user_agent("s1".parse().expect("session"), "engineer");
     register_bot_tool(&mut h);

@@ -28,11 +28,11 @@ and input for another agent do not wake it. If its deadline is processed first,
 it instead completes normally with `timed_out: true` and warning/`timeout` UI
 metadata. After the third consecutive activating-input timeout without a status
 report or substantive tool admission, that result also carries one bounded
-`advice` string telling the agent to call `status` with `waiting`, finish the
-current turn (status alone does not finish it), and rely on a message or
-trigger for an event-driven wake. The advisory is one-shot for that no-progress
-run, and current Waiting status
-suppresses it. It never rejects or shortens a wait. Event-loop processing order
+`advice` string telling the agent to finish the current turn and rely on a
+message or trigger to wake it instead of repeatedly calling `wait`. This advice
+does not require a status tool. The harness emits it once per no-progress run
+unless the agent has a current Waiting status. It never rejects or shortens a
+wait. Event-loop processing order
 decides races exactly once.
 
 The provider-owned generic tool display shows the effective bound as compact

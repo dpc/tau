@@ -191,9 +191,13 @@ changing cwd does not avoid contention on an absolute patch target. Creating a
 file under a missing parent may lock the deepest existing ancestor. Create the
 dedicated scratch directory before editing files inside it.
 
-When a call reports `waiting for directory lock`, the progress text identifies
-the requested directories, not the blocking owner or running call. Check known
-active operations with their owners rather than assuming an unlock failed.
+When a call reports `waiting for directory lock`, its progress text lists the
+requested directories and, when available, a best-effort snapshot of the blocker:
+the owner agent, blocking directory, and blocker kind (manual lock, automatic
+lock, or earlier queued request). The snapshot does not identify the running tool
+call and may change before the next update. Contact the reported owner and check
+active operations. A successful manual unlock does not release a running tool's
+automatic guard.
 An interrupted `wait` is not the operation's terminal result; use the
 background call's completion to establish its outcome. Following this guidance
 does not change lock ownership, cancellation, or lease semantics.
