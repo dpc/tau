@@ -1110,7 +1110,7 @@ pub(crate) fn watch_provider_status_text(
         }
         tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
             crate::internal_envelope::frame(&format!(
-                "Watched agent {sender_label} provider status: terminal error ({})",
+                "Watched agent {sender_label} provider operation ended with an error ({}); this does not establish that the agent stopped.",
                 failure_kind.as_str()
             ))
         }
@@ -1148,7 +1148,10 @@ pub(crate) fn watch_provider_status_summary(state: &tau_proto::AgentWatchProvide
             format!("dispatch uncertain ({})", category.as_str())
         }
         tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
-            format!("terminal error ({})", failure_kind.as_str())
+            format!(
+                "provider operation ended with an error ({}); this does not establish that the agent stopped",
+                failure_kind.as_str()
+            )
         }
         tau_proto::AgentWatchProviderState::TerminalIncomplete { category, .. } => {
             format!("terminal incomplete ({})", category.as_str())
@@ -2004,7 +2007,7 @@ fn assemble_prompt_context_window(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: crate::internal_envelope::frame(&format!(
-                                            "Watched agent {sender_id} has spent over {} minutes waiting.",
+                                            "Watched agent {sender_id} has accumulated over {} minutes across waits in its current Working period; this is not the runtime of its current tool.",
                                             wait.threshold_minutes
                                         )),
                                     }],

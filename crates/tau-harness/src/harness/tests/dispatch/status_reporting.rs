@@ -2230,7 +2230,9 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     assert_eq!(
         h.agent_watch_provider_status_summary(&watched_id)
             .as_deref(),
-        Some("terminal error (context_window_exceeded)")
+        Some(
+            "provider operation ended with an error (context_window_exceeded); this does not establish that the agent stopped"
+        )
     );
     h.set_agent_watch(
         &late_id,

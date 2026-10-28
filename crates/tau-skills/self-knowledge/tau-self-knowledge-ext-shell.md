@@ -170,6 +170,13 @@ locks. Neither action cancels running tools or releases their automatic guards.
 Other owners can remain blocked until those operations finish, even after a
 successful manual unlock. Backgrounding a call does not end its operation.
 
+The extension also releases manual reservations when a tracked delegate or side
+agent's start operation finishes, whether it succeeds or fails, even if the agent
+remains loaded. If you resume work on that agent after cleanup, acquire a fresh
+reservation before mutating files. Do not rely on a recovery or compaction summary
+as proof of current lock ownership or force-unlock another owner to recover a
+stale reservation.
+
 For an immutable long-running test or campaign that does not need the source
 checkout, launch the built executable with a call-local cwd in a
 dedicated task directory outside the source-update tree. Put its writable

@@ -80,9 +80,10 @@ behavior, which does not roll back effects.
 
 ## Cleanup, recovery, and UI
 
-Manual locks are released when a tracked delegate or side agent starts, the
-owner unloads, or the session ends through shutdown, disconnect, or EOF.
-Session cleanup also cancels queued waiters.
+The extension releases manual locks when a tracked delegate or side agent's
+start operation finishes, whether it succeeds or fails. It also releases them
+when the owner unloads or the session ends through shutdown, disconnect, or EOF.
+During session cleanup, the extension also cancels queued waiters.
 
 The `:shell-dir-force-unlock DIRECTORY` UI action releases all overlapping
 manual locks regardless of owner. It neither cancels nor releases automatic

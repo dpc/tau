@@ -555,6 +555,7 @@ fn additional_prompt_template_unknown_variable_fails_render() {
 
 /// Provider summaries cover every tagged state, while long-delay summaries and
 /// live model-visible notifications share readable, provider-content-free text.
+/// Failed operations must not be mistaken for stopped agent endpoints.
 #[test]
 fn watch_provider_status_text_is_concise_readable_and_safe() {
     for (state, expected) in [
@@ -595,7 +596,7 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
                 failure_kind: tau_proto::ProviderFailureKind::RequestRejected,
                 attempt: 1,
             },
-            "terminal error (request_rejected)",
+            "provider operation ended with an error (request_rejected); this does not establish that the agent stopped",
         ),
     ] {
         let summary = watch_provider_status_summary(&state);
@@ -625,6 +626,21 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
         "<tau_internal>Watched agent worker provider status: retrying (usage_window, attempt 1, next retry about 4d 20h)</tau_internal>"
     );
     assert!(!text.contains("419322s"));
+
+    let failed_status = tau_proto::AgentWatchProviderStatusNotification {
+        state: tau_proto::AgentWatchProviderState::TerminalError {
+            failure_kind: tau_proto::ProviderFailureKind::RequestRejected,
+            attempt: 1,
+        },
+        ..status
+    };
+    let text = watch_provider_status_text("worker", &failed_status);
+    assert_eq!(
+        text,
+        crate::internal_envelope::frame(
+            "Watched agent worker provider operation ended with an error (request_rejected); this does not establish that the agent stopped."
+        )
+    );
 }
 use crate::discovery::DiscoveredAgentsFile;
 fn assistant_message(text: &str) -> ContextItem {
@@ -3507,6 +3523,9 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
 /// Ensures both semantic watch payloads survive validated durable folding into
 /// provider context while initial work snapshots remain non-activating and
 /// invisible to the model.
+/// Typed watch facts retain their activation and live/replay envelope
+/// boundaries. Long-wait text must describe accumulated Working-period waits,
+/// not tool runtime.
 #[test]
 fn semantic_watch_payloads_replay_with_activation_boundaries() {
     let watcher = tau_proto::AgentId::parse("watcher").expect("valid watcher");
@@ -3625,7 +3644,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
     let replay = assemble_conversation_from(&replay_tree, replay_tree.head());
     let expected_text = [
         "<tau_internal>Watched agent watched status: working on trace restore</tau_internal>",
-        "<tau_internal>Watched agent watched has spent over 30 minutes waiting.</tau_internal>",
+        "<tau_internal>Watched agent watched has accumulated over 30 minutes across waits in its current Working period; this is not the runtime of its current tool.</tau_internal>",
         "<tau_internal>Watched agent watched stopped: unexpected unload</tau_internal>",
         "<tau_internal>Watched agent watched stopped: restored delegation lost its completion route</tau_internal>",
     ];
