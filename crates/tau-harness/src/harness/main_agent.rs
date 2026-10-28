@@ -3,6 +3,14 @@
 use super::*;
 
 impl Harness {
+    /// Whether initial UI main demand leaves the implicit ordinary role unused.
+    /// Explicit ordinary selection and headless startup keep their preflight.
+    pub(super) fn startup_ordinary_role_is_unused(&self) -> bool {
+        self.ui_runtime.initial_main_requested
+            && self.config.accepted_harness_settings.startup_role.is_none()
+            && self.config.accepted_harness_settings.main_role().is_some()
+    }
+
     /// Approves exactly one immutable retained peer review. `true` means its
     /// worker receipt already exists; `false` means commit owns tool
     /// completion.

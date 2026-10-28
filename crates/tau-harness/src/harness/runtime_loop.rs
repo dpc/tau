@@ -116,6 +116,9 @@ impl Harness {
     pub(super) fn ensure_selected_role_available_after_required_skill_validation(
         &self,
     ) -> Result<(), HarnessError> {
+        if self.startup_ordinary_role_is_unused() {
+            return Ok(());
+        }
         if self
             .config
             .available_roles

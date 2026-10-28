@@ -1650,6 +1650,11 @@ impl Harness {
             return Ok(());
         }
 
+        // A conversational UI has requested main before session readiness. Its
+        // implicit ordinary composer role is unused; validate main through the
+        // normal creation path instead. Explicit roles and headless startup
+        // still require their selected ordinary role.
+        let unused_ordinary_fallback = self.startup_ordinary_role_is_unused();
         let selected_role = self.config.selected_role.clone();
         let mut selected_role_error = None;
         for (role_name, message) in disabled {
@@ -1667,7 +1672,7 @@ impl Harness {
                 tau_proto::NoticePurpose::Alert,
                 &message,
             );
-            if role_name == selected_role {
+            if role_name == selected_role && !unused_ordinary_fallback {
                 selected_role_error = Some(message);
             }
         }

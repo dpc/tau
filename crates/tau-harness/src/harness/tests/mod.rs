@@ -2813,6 +2813,7 @@ mod image_admission;
 mod interception;
 mod lifecycle;
 mod main_agent;
+mod main_startup;
 mod mode;
 mod model;
 mod protocol_items;

@@ -147,6 +147,11 @@ their existing failure responses and the rejected runtime is unloaded. Other
 agents and the harness remain operational. Session-level selected/default-role
 preflight failure remains a fresh-session startup error. Resume preserves role
 definitions and defers validation to each agent's restored project context.
+If a conversational UI requests a configured canonical main before readiness,
+the harness disables an unused implicit ordinary role with missing required
+skills without aborting startup. Explicit `--role` and headless startup retain
+their preflight failures. Main creation validates the winning role without
+selecting another candidate.
 Previously initialized agents remain loaded with explicit missing-required-skill
 diagnostics so they can repair an unavailable cwd; repair clears those diagnostics.
 

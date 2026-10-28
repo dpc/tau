@@ -641,6 +641,11 @@ read/frontmatter rules as the `skill` tool. Roles with missing, hidden, or
 unreadable required skills are removed from role selection/delegation and get a
 mandatory replayable `harness.config_error` notice; if the selected/default
 startup role is removed, startup fails rather than falling back silently.
+If a conversational UI requests a configured canonical main before readiness,
+the harness disables an unused implicit ordinary role with missing required
+skills without aborting startup. Main creation validates the winning role
+without selecting another candidate. Explicit `--role` and headless startup
+retain their preflight failures.
 Session registration, complete source snapshots, and readiness cross ordinary
 interception and commit before they atomically update projections or release the
 barrier. Finalization stores one durable replaceable bootstrap side-state fact;

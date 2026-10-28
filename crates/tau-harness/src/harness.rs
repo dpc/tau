@@ -3231,6 +3231,9 @@ impl Harness {
             }
             HarnessInputMessage::UiEnsureMainAgent => {
                 if self.is_ui_client(client_id) {
+                    if !self.session_initialized(&self.session_runtime.current_session_id) {
+                        self.ui_runtime.initial_main_requested = true;
+                    }
                     self.ui_runtime
                         .main_demand_clients
                         .insert(client_id.clone());

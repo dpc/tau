@@ -28,6 +28,10 @@ pub(super) struct UiSessionAdmission {
 /// side effect. This state does not own the generic event bus.
 #[derive(Default)]
 pub(crate) struct UiRuntimeState {
+    /// An initial UI requested main before session readiness. Retained after
+    /// replay completes so startup validation does not require its unused
+    /// implicit ordinary composer role.
+    pub(super) initial_main_requested: bool,
     /// UI main demands waiting for session readiness or canonical main binding.
     pub(super) main_demand_clients: HashSet<tau_proto::ConnectionId>,
     /// Suppresses nested load callbacks while synchronous demand owns replay.
