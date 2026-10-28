@@ -20,6 +20,33 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Unpublished SDK 0.16.0
+
+Protocol **16.0** and proto/client SDK **0.16.0** add an optional canonical session
+main identity and peer-message review. The client pins proto `=0.16.0`; the two
+leaf packages remain 0.1.0. SDK 0.16.0 is ready in source but remains unpublished
+and has not passed registry acceptance.
+
+Consumers must update struct literals for `AgentMessageSent.review_recipient`,
+`AgentMessageReceived.peer_review`, `SessionAgentLoaded.main`,
+`SessionReplayComplete.main_agent_id`, and
+`ExternalAgentMessageResult.review_recipient`. They must handle
+`Event::AgentRuntimeUnavailable`, `HarnessInputMessage::UiEnsureMainAgent`, and
+`UnloadSessionAgentOutcome::MainAgent`. Runtime unavailability does not unload
+session membership. `PeerMessageReview::Pending` names the intended worker;
+`Released` retains a `PeerMessageReviewReference` identifying main and the durable
+event sequence. An acknowledgement naming main with `review_recipient` confirms
+acceptance for review; it does not confirm delivery to the intended worker.
+Client function signatures are unchanged.
+
+Run `./.config/selfci/check-sdk-packages.sh` for archive-source acceptance on Rust
+1.91 before publication. Run locked verified Cargo publish dry-runs in dependency
+order and publish proto before client. After publication, run the same check with
+`--registry` from an isolated Cargo home without local SDK patches. Verify registry
+checksums and clean archive provenance before creating source-identifying package
+tags. Compatible external rebuilds and activation remain separate gates.
+See [SPEC-session-main-agent](../specs/SPEC-session-main-agent.md).
+
 ### Published SDK 0.15.0
 
 Protocol **15.0** adds `MessagePhase::PartialAnswer` and

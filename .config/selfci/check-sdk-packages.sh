@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.15.0",
+        "dpc-tau-proto": "=0.16.0",
     },
 }
 
@@ -162,8 +162,112 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(15, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 0));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// Consumers must distinguish review acceptance from worker delivery and retain
+/// the durable review reference when main releases the original message.
+#[test]
+fn packaged_sdk_preserves_peer_review_routing() {
+    use tau_proto::*;
+    let main: AgentId = "main".parse().expect("main");
+    let worker: AgentId = "worker".parse().expect("worker");
+    let ack = ExternalAgentMessageResult {
+        request_id: "request".into(),
+        failure: None,
+        recipient_id: Some(main.clone()),
+        review_recipient: Some(worker.clone()),
+        started: false,
+    };
+    let bytes = encode_message_to_vec(&ack).expect("encode ack");
+    let decoded: ExternalAgentMessageResult = decode_message_from_slice(&bytes).expect("decode ack");
+    assert_eq!(decoded.recipient_id, Some(main.clone()));
+    assert_eq!(decoded.review_recipient, Some(worker.clone()));
+    assert_ne!(decoded.recipient_id, decoded.review_recipient);
+    let sent = Event::AgentMessageSent(AgentMessageSent {
+        message_id: "message".parse().expect("message"),
+        sender_id: "sender".parse().expect("sender"),
+        recipient: AgentMessageRecipient::ExternalAgent {
+            session_id: "session".parse().expect("session"),
+            agent_id: main.clone(),
+        },
+        kind: AgentMessageKind::default(),
+        sender_notice: None,
+        review_recipient: Some(worker.clone()),
+        message: "review me".into(),
+    });
+    let bytes = encode_message_to_vec(&sent).expect("encode sent");
+    let decoded: Event = decode_message_from_slice(&bytes).expect("decode sent");
+    assert_eq!(decoded, sent);
+
+    for review in [
+        PeerMessageReview::Pending { intended_recipient: worker.clone() },
+        PeerMessageReview::Released {
+            source: PeerMessageReviewReference { main_agent_id: main.clone(), durable_event_seq: 42 },
+        },
+    ] {
+        let recipient_id = match &review {
+            PeerMessageReview::Pending { .. } => main.clone(),
+            PeerMessageReview::Released { .. } => worker.clone(),
+        };
+        let received = Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: "message".parse().expect("message"),
+            sender_id: "sender".parse().expect("sender"),
+            sender_session_id: Some("sender-session".parse().expect("sender session")),
+            cli_origin: None,
+            recipient_id,
+            kind: AgentMessageKind::default(),
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            sender_notice: None,
+            recipient_notice: None,
+            peer_review: Some(review),
+            message: "review me".into(),
+        });
+        let bytes = encode_message_to_vec(&received).expect("encode receive");
+        let decoded: Event = decode_message_from_slice(&bytes).expect("decode receive");
+        assert_eq!(decoded, received);
+    }
+}
+
+/// Main ownership survives runtime unavailability; SDK consumers need the
+/// distinct event, replay identity, UI request and protected-unload outcome.
+#[test]
+fn packaged_sdk_preserves_main_agent_lifecycle() {
+    use tau_proto::*;
+    let session_id: SessionId = "session".parse().expect("session");
+    let agent_id: AgentId = "main".parse().expect("main");
+    for event in [
+        Event::SessionAgentLoaded(SessionAgentLoaded {
+            main: true,
+            session_id: session_id.clone(),
+            agent_id: agent_id.clone(),
+            agent_initialization_id: "initialization".parse().expect("initialization"),
+            ephemeral: false,
+        }),
+        Event::AgentRuntimeUnavailable(AgentRuntimeUnavailable {
+            session_id: session_id.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        Event::SessionReplayComplete(SessionReplayComplete {
+            main_agent_id: Some(agent_id),
+            session_id,
+            error: None,
+        }),
+    ] {
+        let bytes = encode_message_to_vec(&event).expect("encode main event");
+        let decoded: Event = decode_message_from_slice(&bytes).expect("decode main event");
+        assert_eq!(decoded, event);
+    }
+    let bytes = encode_message_to_vec(&HarnessInputMessage::UiEnsureMainAgent).expect("encode ensure");
+    let decoded: HarnessInputMessage = decode_message_from_slice(&bytes).expect("decode ensure");
+    assert!(matches!(decoded, HarnessInputMessage::UiEnsureMainAgent));
+    let bytes = encode_message_to_vec(&UnloadSessionAgentOutcome::MainAgent).expect("encode outcome");
+    let decoded: UnloadSessionAgentOutcome = decode_message_from_slice(&bytes).expect("decode outcome");
+    assert_eq!(decoded, UnloadSessionAgentOutcome::MainAgent);
 }
 
 /// Consumers decode stable partial answer history and nonterminal response

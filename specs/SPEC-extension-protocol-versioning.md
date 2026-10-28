@@ -8,6 +8,17 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.0 adds an optional canonical session main identity, distinct runtime
+unavailability, UI main demand, protected main unload, and peer review metadata.
+Configured extensions must rebuild with proto/client SDK 0.16.0. A peer review
+acknowledgement identifies main as the recipient and names the intended worker
+separately. Consumers must not treat it as confirmation of worker delivery.
+Main ownership survives runtime unavailability. New readers accept older mainless
+history; old readers cannot decode the new variants. Journal framing is unchanged.
+Source readiness does not imply SDK publication or activation. See
+[SPEC-session-main-agent](SPEC-session-main-agent.md) and
+[SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
+
 Protocol 15.0 adds `MessagePhase::PartialAnswer` and
 `ProviderStopReason::Continue`. The phase preserves partial-answer text without
 making it a final answer; only `Continue` requests another sample in the same
