@@ -534,6 +534,8 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "metadata_unset_request");
     pub const AGENT_REPLAY_COMPLETE: Self =
         Self::from_static(EventCategory::Agent, "replay_complete");
+    pub const AGENT_RUNTIME_UNAVAILABLE: Self =
+        Self::from_static(EventCategory::Agent, "runtime_unavailable");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
     pub const SESSION_SHUTDOWN: Self = Self::from_static(EventCategory::Session, "shutdown");
     pub const SESSION_AGENT_LOADED: Self =

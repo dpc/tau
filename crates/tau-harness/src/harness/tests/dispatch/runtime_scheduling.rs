@@ -3197,7 +3197,7 @@ fn activating_wait_settlement_dispatches_once_and_preserves_next_input() {
 fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", true);
+    configure_main_role(&mut h, "engineer");
     let received = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "peer-activating-wait".to_owned(),
@@ -3411,7 +3411,7 @@ fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
     let state = td.path().join("state");
     let agent_id = {
         let mut h = quiet_provider_harness(&state).expect("start");
-        configure_inter_session_receiver(&mut h, "engineer", true);
+        configure_main_role(&mut h, "engineer");
         let received = h.handle_external_agent_message_request_without_auth_for_test(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "peer-activating-wait-restart".to_owned(),
@@ -3747,6 +3747,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("test-message-to-target-owner")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
@@ -3774,6 +3775,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("test-message-to-wait-owner")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
@@ -3834,6 +3836,7 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
         (
             "typed message deferred Q",
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse("typed-deferred-q")
                     .expect("message id"),
                 sender_id: tau_proto::AgentId::parse("sender").expect("sender"),

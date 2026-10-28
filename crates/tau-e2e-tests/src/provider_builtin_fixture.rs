@@ -317,10 +317,11 @@ impl ProviderBuiltinFixture {
         Ok(format!(
             concat!(
                 "agents:\n",
-                "  default_role: {role}\n",
+                "  enable: false\n",
                 "  id_template: main\n",
                 "  role_groups:\n",
                 "    e2e:\n",
+                "      enable: true\n",
                 "      roles:\n",
                 "        {role}:\n",
                 "          model: {model}\n",

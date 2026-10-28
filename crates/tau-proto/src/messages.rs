@@ -555,6 +555,10 @@ pub struct ExternalAgentMessageResult {
     /// Canonical resolved recipient on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_id: Option<AgentId>,
+    /// Authenticated original exact worker when acceptance is for main review.
+    /// `recipient_id` then names main, not a delivered worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_recipient: Option<AgentId>,
     /// Whether resolving this request started the recipient.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub started: bool,
@@ -1045,6 +1049,8 @@ pub struct UnloadSessionAgent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnloadSessionAgentOutcome {
+    /// The session-owned main identity cannot be unloaded by an operator.
+    MainAgent,
     /// The unload committed and the live route was retired.
     Unloaded,
     /// The request named a different session.
@@ -1072,6 +1078,7 @@ impl UnloadSessionAgentOutcome {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::MainAgent => "main_agent",
             Self::Unloaded => "unloaded",
             Self::StaleSession => "stale_session",
             Self::MembershipUnavailable => "membership_unavailable",
@@ -1677,6 +1684,8 @@ pub enum HarnessInputMessage {
     UiQuitRequest(UiQuitRequest),
     UiTreeRequest(UiTreeRequest),
     UiRetryExtensionRequest(UiRetryExtensionRequest),
+    /// UI demand for the optional session main; never submits model input.
+    UiEnsureMainAgent,
     ProviderDebugCapture(ProviderDebugCapture),
     ExtensionDataRequest(ExtensionDataRequest),
     /// Private ordinary receiver selection for configured message bridges.

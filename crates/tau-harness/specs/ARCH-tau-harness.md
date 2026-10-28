@@ -572,15 +572,18 @@ approved older-target degradation. After authentication, the target snapshots it
 optional incoming recipient notice before durable receive publication. The
 directional facts retain these distinct advisory values for exact replay;
 recipient-local text is never returned to the sender.
-The same event loop owns inter-session receiver admission and fair live
-selection restricted to instances of the single configured session receiver
-role. When its session-level auto-start switch is enabled, Tau may start only
-that role. The event loop admits bounded count/bytes/rate before creation,
-treats accepted startup placeholders and busy eligible agents as reusable
-endpoints, and
-releases sender success only from the receive projection's post-commit
-continuation. This state is generation-bound and in-memory; crash ambiguity
-follows best-effort at-least-once semantics.
+The same event loop owns optional canonical main construction and bounded peer
+admission under
+[SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md).
+Bare input uses the bound main rather than a pool of matching-role workers.
+Exact-worker review defaults to enabled, runs after original-target callback
+authentication, and commits to main only. Its ACK and sender history distinguish
+accepted review from worker delivery. The narrow `message_release` host derives immutable facts
+from main's retained occurrence and publishes a linked worker receipt. Precommit
+checks cover original target, canonical main, tool ownership, and current
+admission; postcommit completion never waits for model execution. In-memory
+continuations are generation-bound. Receipt replay provides source-local retry
+idempotency, while transport and writeback retain best-effort crash ambiguity.
 The committed directional facts, sequence-aware semantic placement, runtime-only
 recipient wake, branch acknowledgement, canonical provider rendering, and
 replay boundary are specified across harness and core by

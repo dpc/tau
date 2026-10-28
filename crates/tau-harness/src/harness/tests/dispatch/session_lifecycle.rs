@@ -293,6 +293,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    main: false,
                     agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                         .expect("test identifier must be valid"),
 

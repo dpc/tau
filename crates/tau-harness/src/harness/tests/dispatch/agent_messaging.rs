@@ -16,7 +16,7 @@ fn local_peer_message_terminal_preserves_compact_metadata() {
         h.config
             .available_roles
             .insert("peer".to_owned(), peer_role);
-        configure_inter_session_receiver(&mut h, "peer", true);
+        configure_main_role(&mut h, "peer");
         let cid = ensure_test_user_agent(&mut h);
         let recipient = format!("&{}", h.session_runtime.current_session_id);
         let body = "héllo\n世界\n";
@@ -119,7 +119,10 @@ fn external_message_terminal_preserves_compact_metadata() {
                             tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver,
                         ))
                     } else {
-                        Ok((crate::parse_agent_id("recipient"), false))
+                        Ok(crate::event::ExternalMessageAcceptance {
+                            recipient_id: crate::parse_agent_id("recipient"),
+                            review_recipient: None,
+                        })
                     },
                     protocol_warning: None,
                     details: call.arguments,
@@ -478,6 +481,10 @@ fn external_message_hello_records_revision_for_notice_authentication() {
 fn external_receive_persists_sender_and_recipient_notice_snapshots() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.config
+        .accepted_harness_settings
+        .inter_session
+        .review_direct_messages = false;
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     h.config
@@ -721,7 +728,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
             .ensure_agent_id_for_agent(&sender_cid)
             .expect("sender id"),
     );
-    configure_inter_session_receiver(&mut target, "engineer", true);
+    configure_main_role(&mut target, "engineer");
     let ui_frames =
         connect_test_client(&mut target, "peer-auto-start-ui", tau_proto::ClientKind::Ui);
     target
@@ -1131,7 +1138,7 @@ fn external_message_no_receiver_failure_is_actionable_to_caller() {
         .expect("caller-visible tool error");
     assert_eq!(
         error,
-        "target live; no receiver; set `inter_session.receiver.role`"
+        "target live; no session main; set `main_priority` on an enabled role"
     );
     assert!(session_agent_message_sent_events(&h).is_empty());
 
@@ -1188,7 +1195,9 @@ fn external_message_major_skew_warning_headers_real_failure() {
         .expect("caller-visible tool error");
     assert_eq!(
         error,
-        format!("{warning}\n\ntarget live; no receiver; set `inter_session.receiver.role`")
+        format!(
+            "{warning}\n\ntarget live; no session main; set `main_priority` on an enabled role"
+        )
     );
     h.shutdown().expect("shutdown");
 }
@@ -1216,7 +1225,10 @@ fn external_message_major_skew_warning_headers_success() {
                 call_id: call_id.clone(),
                 tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
                 tool_type: tau_proto::ToolType::Function,
-                result: Ok((crate::parse_agent_id("recipient"), false)),
+                result: Ok(crate::event::ExternalMessageAcceptance {
+                    recipient_id: crate::parse_agent_id("recipient"),
+                    review_recipient: None,
+                }),
                 protocol_warning: Some(warning.to_owned()),
                 details: CborValue::Null,
                 auth_message_id: tau_proto::AgentMessageId::parse("skew-success-message")
@@ -1284,7 +1296,7 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
         ),
     ];
 
-    for (call_id, message_id, recipient_id, started) in completions {
+    for (call_id, message_id, recipient_id, _started) in completions {
         let call_id: tau_proto::ToolCallId = call_id.into();
         h.tool_routing
             .tool_runtime
@@ -1299,7 +1311,10 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                     call_id,
                     tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
                     tool_type: tau_proto::ToolType::Function,
-                    result: Ok((crate::parse_agent_id(recipient_id), started)),
+                    result: Ok(crate::event::ExternalMessageAcceptance {
+                        recipient_id: crate::parse_agent_id(recipient_id),
+                        review_recipient: None,
+                    }),
                     protocol_warning: None,
                     details: CborValue::Null,
                     auth_message_id: tau_proto::AgentMessageId::parse(message_id)
@@ -1374,13 +1389,13 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
     h.shutdown().expect("shutdown");
 }
 
-/// Bare routing applies established idle-first fairness across live instances
-/// of the configured receiver role.
+/// Bare routing materializes canonical main instead of adopting an idle or busy
+/// ordinary worker using its role.
 #[test]
-fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
+fn bare_peer_route_uses_main_not_idle_matching_role_worker() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", false);
+    configure_main_role(&mut h, "engineer");
     let busy = ensure_test_user_agent(&mut h);
     let busy_id = h.ensure_agent_id_for_agent(&busy).expect("busy id");
     h.agent_runtime
@@ -1409,11 +1424,9 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(request);
 
     assert_eq!(result.failure, None);
-    assert_eq!(
-        result.recipient_id.as_ref().map(ToString::to_string),
-        Some(idle_id.to_string())
-    );
-    assert!(!result.started);
+    assert_eq!(result.recipient_id.as_ref(), h.main_agent_id());
+    assert_ne!(result.recipient_id.as_ref(), Some(&idle_id));
+    assert!(result.started);
     let received = durable_agent_message_received_events(&h);
     assert_eq!(received.len(), 1);
     assert_ne!(received[0].recipient_id.as_str(), busy_id.as_str());
@@ -1426,8 +1439,8 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
 fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", false);
-    h.create_durable_user_agent(test_session_id("s1"), "engineer");
+    configure_main_role(&mut h, "engineer");
+    let main = h.ensure_main_agent().expect("main").expect("configured");
     h.provider_runtime.model_info.clear();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "model-revoked".to_owned(),
@@ -1447,8 +1460,9 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
 
     assert_eq!(
         result.failure,
-        Some(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver)
+        Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
+    assert_eq!(h.main_agent_id(), Some(&main));
     assert!(durable_agent_message_received_events(&h).is_empty());
 }
 
@@ -1459,7 +1473,7 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
 fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", true);
+    configure_main_role(&mut h, "engineer");
     let agents_before = h.agent_runtime.agent_registry.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auto-start".to_owned(),
@@ -1542,7 +1556,7 @@ fn bare_peer_auto_start_uses_configured_role() {
     h.config
         .available_roles
         .insert("preferred-receiver".to_owned(), role.clone());
-    configure_inter_session_receiver(&mut h, "preferred-receiver", true);
+    configure_main_role(&mut h, "preferred-receiver");
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
@@ -1588,7 +1602,7 @@ fn bare_peer_auto_start_rejects_unavailable_role_model() {
     h.config
         .available_roles
         .insert("unavailable-receiver".to_owned(), unavailable);
-    configure_inter_session_receiver(&mut h, "unavailable-receiver", true);
+    configure_main_role(&mut h, "unavailable-receiver");
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
@@ -1608,7 +1622,7 @@ fn bare_peer_auto_start_rejects_unavailable_role_model() {
 
     assert_eq!(
         result.failure,
-        Some(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver)
+        Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
     assert_eq!(result.recipient_id, None);
     assert!(!result.started);
@@ -1632,7 +1646,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
             })),
         )
         .expect("register metadata interceptor");
-        configure_inter_session_receiver(&mut h, "engineer", true);
+        configure_main_role(&mut h, "engineer");
         let result = h.handle_external_agent_message_request_without_auth_for_test(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "restore-peer".to_owned(),
@@ -1691,11 +1705,10 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
     h.shutdown().expect("shutdown resumed harness");
 }
 
-/// Receive commit rejects a nominal auto-start reservation whose immutable
-/// creation fact lacks the reserved peer-purpose marker, as after persistence
-/// failure of that creation fact.
+/// Main routing authority requires canonical session membership, not a role or
+/// a runtime creation candidate.
 #[test]
-fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
+fn peer_route_requires_canonical_main_membership() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
@@ -1703,13 +1716,12 @@ fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
         h.ensure_agent_id_for_agent(&cid)
             .expect("ordinary agent id"),
     );
-    h.peer_messaging
-        .uncommitted_peer_auto_starts
-        .insert(agent_id.clone());
+    configure_main_role(&mut h, "engineer");
+    h.session_runtime.current_session_state.main_candidate = Some(agent_id.clone());
 
     assert!(
-        !h.peer_auto_start_creation_committed(&agent_id),
-        "ordinary creation without reserved marker cannot establish auto-start"
+        !h.peer_entrypoint_recipient_is_eligible(&agent_id),
+        "ordinary creation cannot establish canonical main routing"
     );
 }
 
@@ -1719,7 +1731,7 @@ fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
 fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", true);
+    configure_main_role(&mut h, "engineer");
     let target_session = h.session_runtime.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("single-flight-{suffix}"),
@@ -1767,8 +1779,9 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
 fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", true);
-    let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
+    configure_main_role(&mut h, "engineer");
+    let main = h.ensure_main_agent().expect("main").expect("configured");
+    let cid = h.agent_runtime.agent_registry.agent_routes[&main].clone();
     for index in 0..32 {
         h.agent_runtime
             .agent_registry
@@ -1821,7 +1834,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
 fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", false);
+    configure_main_role(&mut h, "engineer");
     let _interceptor = connect_test_tool(&mut h, "pending-endpoint-interceptor");
     h.handle_extension_event(
         "pending-endpoint-interceptor",
@@ -1910,7 +1923,7 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
 fn peer_input_rate_limit_bounds_live_burst() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receiver(&mut h, "engineer", false);
+    configure_main_role(&mut h, "engineer");
     let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     let recipient =
         crate::parse_agent_id(h.ensure_agent_id_for_agent(&cid).expect("public agent id"));
@@ -2820,6 +2833,7 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("branch-message")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
@@ -3509,6 +3523,7 @@ fn inbound_agent_message_events_are_ignored() {
     let mut h = echo_harness(&sp).expect("start");
 
     let forged_sent = Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse("test-message")
             .expect("test identifier must satisfy its grammar"),
         sender_id: crate::parse_agent_id("attacker"),
@@ -3520,6 +3535,7 @@ fn inbound_agent_message_events_are_ignored() {
         message: "forged".to_owned(),
     });
     let forged_received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("test-message-received")
             .expect("test identifier must satisfy its grammar"),
         sender_id: crate::parse_agent_id("attacker"),
@@ -4515,6 +4531,10 @@ fn external_agent_message_request_publishes_received_projection() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.config
+        .accepted_harness_settings
+        .inter_session
+        .review_direct_messages = false;
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     h.agent_runtime
@@ -4818,6 +4838,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     h.publish_for_agent(
         &cid,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("branch-b-message")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
@@ -4927,6 +4948,7 @@ fn render_failed_message_wake_does_not_block_other_agent() {
         h.publish_for_agent(
             cid,
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse(message_id)
                     .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("manager"),
@@ -5094,6 +5116,7 @@ fn agent_message_interrupts_recipient_active_wait() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("test-message-interrupts-wait")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
@@ -5205,6 +5228,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("queued-manager-message")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
@@ -5294,6 +5318,7 @@ fn wait_start_cites_selected_branch_activation_after_off_branch_wake() {
     );
     let message = |id: &str, body: &str| {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse(id).expect("message id"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
@@ -5402,6 +5427,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse("message-cut-delivery")
                     .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("sender"),
@@ -5745,6 +5771,7 @@ fn durable_message_wake_extends_session_retention() {
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse("retention-message")
                     .expect("message id"),
                 sender_id: crate::parse_agent_id("manager"),

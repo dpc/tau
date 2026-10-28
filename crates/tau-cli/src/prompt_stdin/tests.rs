@@ -82,6 +82,7 @@ fn prompt_stdin_waits_for_successful_subscription_before_sending_work() {
             }),
             _ => HarnessOutputMessage::deliver(Event::SessionReplayComplete(
                 tau_proto::SessionReplayComplete {
+                    main_agent_id: None,
                     session_id: "s1".parse().expect("session"),
                     error: (outcome == "session-error").then(|| "busy".to_owned()),
                 },

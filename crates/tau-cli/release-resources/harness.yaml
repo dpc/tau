@@ -49,11 +49,13 @@
 #       enable: true
 #       message: "Use the `compact` tool after finishing your current task."
 
-# Optional startup role. If omitted, Tau starts on the first role in
-# `agents.role_groups` order after roles inside that group are sorted by `order` and
-# then role name. If the named role is missing, Tau warns and falls back to that
-# first role.
-#   default_role: engineer
+# Optional session main: set role-only `main_priority` below; lower numbers win.
+# For example, use priority 100 for a coordinator and 10 for a bot overlay.
+# Zero is valid. Winning ties are errors; each nonwinning tied group warns.
+# An absent or null effective value means no candidate.
+# Tau creates main on normal UI or peer demand without starting inference.
+# Ordinary workers can still use the role. Ordinary startup uses --role or
+# group/role order.
 
 # `default_profile` optionally selects one fallback after base config/drop-ins
 # and before CLI overrides. `--profile` and `TAU_PROFILE` take precedence. Omit
@@ -69,7 +71,11 @@
 #       effort: high
 #   focused:
 #     agents:
-#       default_role: engineer-senior
+#       role_groups:
+#         engineer:
+#           roles:
+#             engineer-senior:
+#               main_priority: 100
 
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles roles within the current group; Shift-Tab cycles to the

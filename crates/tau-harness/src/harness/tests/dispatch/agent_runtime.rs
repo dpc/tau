@@ -58,6 +58,7 @@ fn terminating_agent_route_rejects_direct_work() {
     );
     h.activate_received_agent_message(
         &tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-during-termination")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),

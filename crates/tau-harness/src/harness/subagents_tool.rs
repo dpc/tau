@@ -206,7 +206,7 @@ static NEXT_AGENT_MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub(crate) const EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT: Duration = Duration::from_secs(25);
 pub(crate) const EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_OUTBOUND_PEER_IO_JOBS: usize = 16;
-const MAX_INBOUND_PEER_AUTH_JOBS: usize = 16;
+pub(super) const MAX_INBOUND_PEER_AUTH_JOBS: usize = 16;
 const MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION: usize = 2;
 const MAX_EXTERNAL_AGENT_MESSAGE_BYTES: usize = 64 * 1024;
 // Admission contract: SPEC-tau-harness-peer-routing.
@@ -214,8 +214,6 @@ const MAX_QUEUED_PEER_INPUTS_PER_AGENT: usize = 32;
 const MAX_QUEUED_PEER_BYTES_PER_AGENT: usize = 256 * 1024;
 const MAX_ACCEPTED_PEER_INPUTS_PER_MINUTE: usize = 60;
 
-/// Diagnostic `PromptOriginator` query prefix for peer auto-start correlation.
-const PEER_AUTO_START_QUERY_PREFIX: &str = "peer-auto-start-";
 /// Durable non-inheritable metadata key identifying peer-created endpoints.
 pub(crate) const PEER_ENTRYPOINT_AGENT_METADATA_KEY: &str = "tau.peer_entrypoint_endpoint";
 /// Durable non-inheritable metadata key identifying a serve bootstrap
@@ -294,6 +292,7 @@ fn external_agent_message_failure_result(
     failure: tau_proto::ExternalAgentMessageFailure,
 ) -> tau_proto::ExternalAgentMessageResult {
     tau_proto::ExternalAgentMessageResult {
+        review_recipient: None,
         request_id,
         failure: Some(failure),
         recipient_id: None,
@@ -1278,6 +1277,7 @@ impl Harness {
             .resolve_peer_entrypoint_recipient(&message_id, message.len())
             .map_err(PeerEntrypointResolutionError::into_diagnostic)?;
         let received = AgentMessageReceived {
+            peer_review: None,
             message_id: message_id.clone(),
             sender_id: sender_id.clone(),
             sender_session_id: None,
@@ -1301,7 +1301,6 @@ impl Harness {
                 expected_receive: received.clone(),
                 canceled: false,
                 started,
-                reselect_attempted: false,
                 rate_admitted_at,
                 completion: path_crate_harness::PendingPeerReceiveCompletion::Local {
                     conversation_id: conversation_id.clone(),
@@ -1667,6 +1666,7 @@ impl Harness {
         );
         for (message_id, watcher_id) in deliveries {
             let event = Event::AgentMessageReceived(AgentMessageReceived {
+                peer_review: None,
                 message_id: message_id.clone(),
                 sender_id: sender_id.clone(),
                 sender_session_id: None,
@@ -1954,6 +1954,7 @@ impl Harness {
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
+                peer_review: None,
                 message_id: next_agent_message_id(&sender_id),
                 sender_id,
                 sender_session_id: None,
@@ -1994,6 +1995,7 @@ impl Harness {
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
+                peer_review: None,
                 message_id: next_agent_message_id(&sender_id),
                 sender_id,
                 sender_session_id: None,
@@ -2262,6 +2264,7 @@ impl Harness {
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
+                peer_review: None,
                 message_id: next_agent_message_id(&sender_id),
                 sender_id,
                 sender_session_id: None,
@@ -2314,6 +2317,7 @@ impl Harness {
                 agent_id,
                 Some(crate::harness::harness_connection_id()),
                 Event::AgentMessageSent(AgentMessageSent {
+                    review_recipient: None,
                     message_id: message_id.clone(),
                     sender_id: sender_id.clone(),
                     recipient: tau_proto::AgentMessageRecipient::Agent {
@@ -2328,6 +2332,7 @@ impl Harness {
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
+                peer_review: None,
                 message_id: message_id.clone(),
                 sender_id,
                 sender_session_id: None,
@@ -2604,7 +2609,23 @@ impl Harness {
             request.sender_notice.as_deref(),
             recipient_notice.as_deref(),
         );
+        let review_recipient = self.peer_review_recipient(&request);
+        if review_recipient.is_some()
+            && !self
+                .peer_messaging
+                .external_message_peer_versions
+                .get(&client_id)
+                .is_some_and(|version| version.major >= 16)
+        {
+            // Older peers cannot represent accepted-for-review and would claim
+            // worker delivery. Fail before materializing main or publishing.
+            return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
+        }
         let (recipient_id, started, rate_admitted_at) = match &request.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(_) if review_recipient.is_some() => {
+                self.resolve_peer_entrypoint_recipient(&request.message_id, admission_bytes)
+                    .map_err(|error| error.failure())?
+            }
             tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
                 let admitted_at = self
                     .admit_peer_input(agent_id, admission_bytes)
@@ -2616,6 +2637,9 @@ impl Harness {
                 .map_err(|error| error.failure())?,
         };
         let received = AgentMessageReceived {
+            peer_review: review_recipient.map(|intended_recipient| {
+                tau_proto::PeerMessageReview::Pending { intended_recipient }
+            }),
             message_id: message_id.clone(),
             sender_id: request.sender_id,
             sender_session_id: Some(request.sender_session_id),
@@ -2639,7 +2663,6 @@ impl Harness {
                 expected_receive: received.clone(),
                 canceled: false,
                 started,
-                reselect_attempted: false,
                 rate_admitted_at,
                 completion: path_crate_harness::PendingPeerReceiveCompletion::Remote {
                     client_id,
@@ -2654,6 +2677,31 @@ impl Harness {
         Ok(())
     }
 
+    /// Selects only ordinary peer exact-worker input for main review, after
+    /// callback authentication of the unchanged original request.
+    fn peer_review_recipient(
+        &self,
+        request: &tau_proto::ExternalAgentMessageRequest,
+    ) -> Option<AgentId> {
+        if request.kind != tau_proto::AgentMessageKind::Message
+            || !self
+                .config
+                .accepted_harness_settings
+                .inter_session
+                .review_direct_messages
+        {
+            return None;
+        }
+        match &request.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(worker)
+                if self.main_agent_id() != Some(worker) =>
+            {
+                Some(worker.clone())
+            }
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn handle_external_agent_message_request_without_auth_for_test(
         &mut self,
@@ -2661,11 +2709,14 @@ impl Harness {
     ) -> tau_proto::ExternalAgentMessageResult {
         let request_id = request.request_id.clone();
         let result = self.receive_external_agent_message(request);
-        let (recipient_id, started, failure) = match result {
-            Ok((recipient_id, started)) => (Some(recipient_id), started, None),
-            Err(failure) => (None, false, Some(failure)),
+        let (recipient_id, started, review_recipient, failure) = match result {
+            Ok((recipient_id, started, review_recipient)) => {
+                (Some(recipient_id), started, review_recipient, None)
+            }
+            Err(failure) => (None, false, None, Some(failure)),
         };
         tau_proto::ExternalAgentMessageResult {
+            review_recipient,
             request_id,
             failure,
             recipient_id,
@@ -2677,7 +2728,7 @@ impl Harness {
     fn receive_external_agent_message(
         &mut self,
         request: tau_proto::ExternalAgentMessageRequest,
-    ) -> Result<(AgentId, bool), tau_proto::ExternalAgentMessageFailure> {
+    ) -> Result<(AgentId, bool, Option<AgentId>), tau_proto::ExternalAgentMessageFailure> {
         self.validate_external_agent_message_target(&request)?;
         let recipient_notice = (request.kind == tau_proto::AgentMessageKind::Message)
             .then(|| {
@@ -2693,7 +2744,12 @@ impl Harness {
             request.sender_notice.as_deref(),
             recipient_notice.as_deref(),
         );
+        let review_recipient = self.peer_review_recipient(&request);
         let (recipient_id, started, _rate_admitted_at) = match &request.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(_) if review_recipient.is_some() => {
+                self.resolve_peer_entrypoint_recipient(&request.message_id, admission_bytes)
+                    .map_err(|error| error.failure())?
+            }
             tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
                 let admitted_at = self
                     .admit_peer_input(agent_id, admission_bytes)
@@ -2707,6 +2763,9 @@ impl Harness {
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
+                peer_review: review_recipient.clone().map(|intended_recipient| {
+                    tau_proto::PeerMessageReview::Pending { intended_recipient }
+                }),
                 message_id: request.message_id,
                 sender_id: request.sender_id,
                 sender_session_id: Some(request.sender_session_id),
@@ -2722,11 +2781,7 @@ impl Harness {
                 message: request.message,
             }),
         );
-        self.record_peer_route(&recipient_id);
-        self.peer_messaging
-            .uncommitted_peer_auto_starts
-            .remove(&recipient_id);
-        Ok((recipient_id, started))
+        Ok((recipient_id, started, review_recipient))
     }
 
     fn validate_external_agent_message_target(
@@ -2742,12 +2797,14 @@ impl Harness {
         let tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id) = &request.recipient
         else {
             return self
-                .config
-                .inter_session_receiver
-                .as_ref()
-                .map(|_| ())
+                .has_peer_entrypoint()
+                .then_some(())
                 .ok_or(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver);
         };
+        if self.main_agent_id() == Some(recipient_id) && !self.main_agent_is_eligible(recipient_id)
+        {
+            return Err(tau_proto::ExternalAgentMessageFailure::RecipientRestoredUnavailable);
+        }
         match self.agent_message_recipient_status(recipient_id.as_str()) {
             AgentMessageRecipientStatus::Live => {}
             AgentMessageRecipientStatus::RestoredUnavailable => {
@@ -2786,150 +2843,27 @@ impl Harness {
         Ok(())
     }
 
-    fn select_peer_entrypoint_recipient(&self) -> Result<AgentId, String> {
-        let Some(receiver) = self.config.inter_session_receiver.as_ref() else {
-            return Err(INTER_SESSION_UNAVAILABLE.to_owned());
-        };
-        let role_available = |role: &str| {
-            receiver.role == role
-                && self.config.available_roles.contains_key(role)
-                && crate::model::model_for_role(
-                    &self.provider_runtime.model_info,
-                    &self.config.available_roles,
-                    role,
-                )
-                .is_some()
-        };
-        let mut candidates = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .values()
-            .filter(|agent| !agent.dispatch.terminating)
-            .filter_map(|agent| {
-                let id = agent.identity.agent_id.as_ref()?;
-                let role = agent.identity.role.as_deref()?;
-                role_available(role).then(|| {
-                    (
-                        usize::from(
-                            agent.turn.published_runtime_state
-                                == tau_proto::AgentRuntimeState::Running,
-                        ),
-                        self.peer_messaging
-                            .peer_last_routed
-                            .get(id.as_str())
-                            .copied()
-                            .unwrap_or(0),
-                        id.clone(),
-                    )
-                })
-            })
-            .chain(
-                self.agent_runtime
-                    .agent_registry
-                    .start_coordinator
-                    .operations
-                    .values()
-                    .filter(|operation| {
-                        operation.phase != StartPhase::AwaitAcceptedCommit
-                            && role_available(&operation.pending.role)
-                    })
-                    .map(|operation| {
-                        (
-                            0,
-                            self.peer_messaging
-                                .peer_last_routed
-                                .get(operation.pending.agent_id.as_str())
-                                .copied()
-                                .unwrap_or(0),
-                            crate::parse_agent_id(&operation.pending.agent_id),
-                        )
-                    }),
-            )
-            .collect::<Vec<_>>();
-        candidates.sort();
-        candidates
-            .into_iter()
-            .next()
-            .map(|(_, _, id)| id)
-            .ok_or_else(|| INTER_SESSION_UNAVAILABLE.to_owned())
-    }
-
-    /// Resolve a bare session message to an existing endpoint or start the
-    /// first available authorized role.
-    ///
-    /// The event loop serializes this operation. A newly created endpoint is
-    /// inserted before the next request is handled, which provides live
-    /// single-flight coalescing without durable crash deduplication.
+    /// Resolve bare session demand to the canonical main, lazily creating it
+    /// without inference. Matching-role workers are never candidates.
     pub(crate) fn resolve_peer_entrypoint_recipient(
         &mut self,
-        message_id: &tau_proto::AgentMessageId,
+        _message_id: &tau_proto::AgentMessageId,
         message_bytes: usize,
     ) -> Result<(AgentId, bool, Instant), PeerEntrypointResolutionError> {
-        if let Ok(recipient_id) = self.select_peer_entrypoint_recipient() {
-            let admitted_at = self
-                .admit_peer_input(&recipient_id, message_bytes)
-                .map_err(PeerEntrypointResolutionError::Rejected)?;
-            return Ok((recipient_id, false, admitted_at));
-        }
-        let receiver = self
-            .config
-            .inter_session_receiver
-            .as_ref()
-            .filter(|receiver| receiver.auto_start)
-            .ok_or(PeerEntrypointResolutionError::NoReceiver)?;
-        let role = self
-            .config
-            .available_roles
-            .contains_key(&receiver.role)
-            .then(|| {
-                crate::model::model_for_role(
-                    &self.provider_runtime.model_info,
-                    &self.config.available_roles,
-                    &receiver.role,
-                )
-            })
-            .flatten()
-            .map(|_| receiver.role.clone())
-            .ok_or(PeerEntrypointResolutionError::NoReceiver)?;
-        // Resolve role, model, required skills, and the ordinary endpoint shape
-        // before spending. `prepare_start_agent_request` mints identity but
-        // does not create an agent or dispatch model work.
-        let query = tau_proto::StartAgentRequest {
-            trusted_internal_spans: Vec::new(),
-            query_id: format!("{PEER_AUTO_START_QUERY_PREFIX}{message_id}"),
-            instruction: String::new(),
-            role: Some(role),
-            input_stats: tau_proto::ToolUseStats::default(),
-            tool_call_id: None,
-            task_name: None,
-            parent_agent: None,
-        };
-        let pending = self
-            .prepare_start_agent_request(crate::harness::harness_connection_id(), query)
+        let started = self.main_agent_id().is_none()
+            && self
+                .session_runtime
+                .current_session_state
+                .main_candidate
+                .is_none();
+        let recipient_id = self
+            .ensure_main_agent()
             .map_err(PeerEntrypointResolutionError::Rejected)?
             .ok_or(PeerEntrypointResolutionError::NoReceiver)?;
-        let recipient_id = crate::parse_agent_id(&pending.agent_id);
         let admitted_at = self
             .admit_peer_input(&recipient_id, message_bytes)
             .map_err(PeerEntrypointResolutionError::Rejected)?;
-        if let Err(error) = self.start_peer_agent_request(pending) {
-            self.release_peer_input_rate(&recipient_id, admitted_at);
-            if let Some(cid) = self
-                .agent_runtime
-                .agent_registry
-                .agent_routes
-                .get(recipient_id.as_str())
-                .cloned()
-            {
-                self.remove_agent_expected(&cid);
-            }
-            return Err(PeerEntrypointResolutionError::Rejected(error.to_string()));
-        }
-        self.peer_messaging
-            .uncommitted_peer_auto_starts
-            .insert(recipient_id.clone());
-        Ok((recipient_id, true, admitted_at))
+        Ok((recipient_id, started, admitted_at))
     }
 
     /// Enforce endpoint queue, byte, and rolling-rate limits before acceptance.
@@ -3011,53 +2945,9 @@ impl Harness {
         }
     }
 
-    /// Revalidate one concrete endpoint against current receiver-role,
-    /// provider/model, skill, and termination authority.
+    /// Revalidate canonical main ownership and current runtime availability.
     pub(crate) fn peer_entrypoint_recipient_is_eligible(&self, recipient_id: &AgentId) -> bool {
-        let Some(receiver) = self.config.inter_session_receiver.as_ref() else {
-            return false;
-        };
-        let role_available = |role: &str| {
-            receiver.role == role
-                && self.config.available_roles.contains_key(role)
-                && crate::model::model_for_role(
-                    &self.provider_runtime.model_info,
-                    &self.config.available_roles,
-                    role,
-                )
-                .is_some()
-        };
-        self.agent_runtime
-            .agent_registry
-            .agents
-            .values()
-            .any(|agent| {
-                !agent.dispatch.terminating
-                    && agent.identity.agent_id.as_deref() == Some(recipient_id.as_str())
-                    && agent.identity.role.as_deref().is_some_and(role_available)
-            })
-            || self
-                .agent_runtime
-                .agent_registry
-                .start_coordinator
-                .operations
-                .values()
-                .any(|operation| {
-                    operation.phase != StartPhase::AwaitAcceptedCommit
-                        && operation.pending.agent_id == recipient_id.as_str()
-                        && role_available(&operation.pending.role)
-                })
-    }
-
-    /// Record a successful concrete route for deterministic
-    /// least-recently-routed selection.
-    pub(crate) fn record_peer_route(&mut self, recipient_id: &AgentId) {
-        self.peer_messaging.peer_route_clock =
-            self.peer_messaging.peer_route_clock.saturating_add(1);
-        self.peer_messaging.peer_last_routed.insert(
-            recipient_id.to_string(),
-            self.peer_messaging.peer_route_clock,
-        );
+        self.main_agent_id() == Some(recipient_id) && self.main_agent_is_eligible(recipient_id)
     }
 
     #[cfg(test)]
@@ -3887,13 +3777,16 @@ fn send_external_agent_message_request(
     cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
     policy: &tau_config::inter_session_policy::InterSessionPolicy,
 ) -> (
-    Result<(AgentId, bool), ExternalMessageDeliveryError>,
+    Result<crate::event::ExternalMessageAcceptance, ExternalMessageDeliveryError>,
     Option<String>,
 ) {
     let result = send_external_agent_message_request_inner(request, cancelled, policy);
     match result {
         Ok(success) => (
-            Ok((success.recipient_id, success.started)),
+            Ok(crate::event::ExternalMessageAcceptance {
+                recipient_id: success.recipient_id,
+                review_recipient: success.review_recipient,
+            }),
             success.protocol_warning,
         ),
         Err(failure) => (Err(failure.error), failure.protocol_warning),
@@ -3904,8 +3797,9 @@ fn send_external_agent_message_request(
 struct ExternalMessageDeliverySuccess {
     /// Canonical recipient returned by the target harness.
     recipient_id: AgentId,
-    /// Whether target routing created the recipient.
-    started: bool,
+    /// Original exact worker when the target committed a main-review
+    /// occurrence.
+    review_recipient: Option<AgentId>,
     /// Best-effort major-skew warning for the caller.
     protocol_warning: Option<String>,
 }
@@ -4095,10 +3989,42 @@ fn send_external_agent_message_request_inner(
                         protocol_warning,
                     ));
                 }
+                let route_valid = match (
+                    &request.recipient,
+                    &result.recipient_id,
+                    &result.review_recipient,
+                ) {
+                    (
+                        tau_proto::ExternalAgentMessageRecipient::Exact(expected),
+                        Some(actual),
+                        None,
+                    ) => expected == actual,
+                    (
+                        tau_proto::ExternalAgentMessageRecipient::Exact(expected),
+                        Some(actual),
+                        Some(worker),
+                    ) => {
+                        request.kind == tau_proto::AgentMessageKind::Message
+                            && expected == worker
+                            && actual != worker
+                    }
+                    (tau_proto::ExternalAgentMessageRecipient::BareEntrypoint, Some(_), None) => {
+                        true
+                    }
+                    _ => false,
+                };
+                if !route_valid {
+                    return Err(external_message_delivery_failure(
+                        ExternalMessageDeliveryError::Local(
+                            "target returned an invalid peer delivery disposition".to_owned(),
+                        ),
+                        protocol_warning,
+                    ));
+                }
                 return match result.recipient_id {
                     Some(recipient_id) => Ok(ExternalMessageDeliverySuccess {
                         recipient_id,
-                        started: result.started,
+                        review_recipient: result.review_recipient,
                         protocol_warning,
                     }),
                     None => Err(external_message_delivery_failure(

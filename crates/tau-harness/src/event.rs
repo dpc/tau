@@ -96,7 +96,7 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     /// Tool type declared by the provider.
     pub(crate) tool_type: tau_proto::ToolType,
     /// Resolved recipient and started flag on delivery success.
-    pub(crate) result: Result<(tau_proto::AgentId, bool), ExternalMessageDeliveryError>,
+    pub(crate) result: Result<ExternalMessageAcceptance, ExternalMessageDeliveryError>,
     /// Caller-visible warning retained after best-effort major-skew admission.
     pub(crate) protocol_warning: Option<String>,
     /// Original call arguments for error details.
@@ -116,6 +116,14 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     pub(crate) sender_notice: Option<tau_proto::InterSessionNotice>,
     /// Message body.
     pub(crate) message: String,
+}
+
+/// Target-confirmed disposition of one committed peer occurrence.
+pub(crate) struct ExternalMessageAcceptance {
+    /// Actual journal recipient, which is main when review is pending.
+    pub(crate) recipient_id: tau_proto::AgentId,
+    /// Original authenticated worker not yet delivered to, when reviewed.
+    pub(crate) review_recipient: Option<tau_proto::AgentId>,
 }
 
 /// Sender-side outcome of one cross-harness delivery attempt.
@@ -138,7 +146,7 @@ impl ExternalMessageDeliveryError {
                 "target session changed before message delivery; retry".to_owned()
             }
             Self::Target(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver) => {
-                "target live; no receiver; set `inter_session.receiver.role`".to_owned()
+                "target live; no session main; set `main_priority` on an enabled role".to_owned()
             }
             Self::Target(tau_proto::ExternalAgentMessageFailure::RecipientStopped) => {
                 "target recipient is stopped; start a replacement and retry".to_owned()

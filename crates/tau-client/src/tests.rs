@@ -1490,6 +1490,7 @@ fn metadata_unset() -> Event {
 
 fn session_agent_loaded() -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        main: false,
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
             .expect("test identifier must be valid"),
 

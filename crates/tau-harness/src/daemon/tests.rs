@@ -211,9 +211,10 @@ fn embedded_echo_fixture_ignores_ambient_discovery_child() {
         config_dir.join("harness.yaml"),
         r#"
 agents:
-  default_role: ambient-role
+  enable: false
   role_groups:
     fixture:
+      enable: true
       roles:
         ambient-role:
           required_skills: [ambient-shell-skill]

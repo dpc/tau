@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+mod message_release;
 mod status;
 
 #[cfg(test)]
@@ -31,6 +32,7 @@ const AGENT_START_TOOL_NAME: &str = "agent_start";
 const WAIT_TOOL_NAME: &str = "wait";
 const CANCEL_TOOL_NAME: &str = "cancel";
 const MESSAGE_TOOL_NAME: &str = "message";
+const MESSAGE_RELEASE_TOOL_NAME: &str = "message_release";
 const AGENT_WATCH_TOOL_NAME: &str = "agent_watch";
 const COMPACT_TOOL_NAME: &str = "compact";
 const AGENT_COMPACT_TOOL_NAME: &str = "agent_compact";
@@ -262,6 +264,7 @@ impl InternalToolHandler for BuiltinTools {
             wait_tool_spec(),
             cancel_tool_spec(),
             message_tool_spec(),
+            message_release::tool_spec(),
             agent_watch_tool_spec(),
             compact_tool_spec(),
             agent_compact_tool_spec(),
@@ -293,6 +296,7 @@ impl InternalToolHandler for BuiltinTools {
                 | WAIT_TOOL_NAME
                 | CANCEL_TOOL_NAME
                 | MESSAGE_TOOL_NAME
+                | MESSAGE_RELEASE_TOOL_NAME
                 | AGENT_WATCH_TOOL_NAME
                 | COMPACT_TOOL_NAME
                 | AGENT_COMPACT_TOOL_NAME
@@ -347,6 +351,12 @@ impl InternalToolHandler for BuiltinTools {
                     MESSAGE_TOOL_NAME => {
                         handle_message_tool_call(host, &conversation_id, &call, visible_tool_name)
                     }
+                    MESSAGE_RELEASE_TOOL_NAME => message_release::handle_tool_call(
+                        host,
+                        &conversation_id,
+                        &call,
+                        visible_tool_name,
+                    ),
                     AGENT_WATCH_TOOL_NAME => self.handle_agent_watch_tool_call(
                         host,
                         &conversation_id,

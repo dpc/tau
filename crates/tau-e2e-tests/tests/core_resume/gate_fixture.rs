@@ -179,7 +179,7 @@ impl GateFixture {
                 }),
             );
         }
-        let (default_role, roles) = match mode {
+        let (startup_role, mut roles) = match mode {
             FixtureMode::DummyTool | FixtureMode::ReleasableDummyTool => (
                 "deterministic-e2e",
                 serde_json::json!({
@@ -212,25 +212,22 @@ impl GateFixture {
                 }),
             ),
         };
-        let mut harness = serde_json::json!({
+        if mode == FixtureMode::PeerEntrypoint {
+            roles[startup_role]["main_priority"] = serde_json::json!(10);
+        }
+        let harness = serde_json::json!({
             "agents": {
-                "default_role": default_role,
+                "enable": false,
                 "id_template": "main",
                 "role_groups": {
                     "e2e": {
+                        "enable": true,
                         "roles": roles
                     }
                 }
             },
             "extensions": extensions,
         });
-        if mode == FixtureMode::PeerEntrypoint {
-            harness["inter_session"] = serde_json::json!({
-                "receiver": {
-                    "role": "deterministic-peer"
-                }
-            });
-        }
         let harness_json = serde_json::to_string_pretty(&harness)?;
         std::fs::write(
             tau_config.join("harness.yaml"),

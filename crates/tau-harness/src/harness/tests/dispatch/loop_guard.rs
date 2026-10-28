@@ -259,6 +259,7 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("loop-guard-agent-message")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),

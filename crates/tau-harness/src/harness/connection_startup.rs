@@ -11,7 +11,8 @@ use crate::event::StartupFrameKind;
 impl Harness {
     /// Return whether this harness accepts bare inter-session messages.
     pub(crate) fn has_peer_entrypoint(&self) -> bool {
-        self.config.inter_session_receiver.is_some()
+        self.main_agent_id().is_some()
+            || self.config.accepted_harness_settings.main_role().is_some()
     }
 
     pub(super) fn accept_initial_client(
@@ -635,12 +636,14 @@ impl Harness {
                 }
                 let mut display = crate::message_tool_display(&command.details);
                 match command.result {
-                    Ok((recipient_id, _started)) => {
+                    Ok(accepted) => {
+                        let recipient_id = accepted.recipient_id;
                         if command.publish_sent {
                             self.publish_for_agent_from(
                                 &command.conversation_id,
                                 Some(crate::harness::harness_connection_id()),
                                 Event::AgentMessageSent(tau_proto::AgentMessageSent {
+                                    review_recipient: accepted.review_recipient.clone(),
                                     message_id: command.auth_message_id.clone(),
                                     sender_id: command.sender_id,
                                     recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
@@ -658,6 +661,10 @@ impl Harness {
                             .as_deref()
                             .map(|warning| format!("{warning}\n\n"))
                             .unwrap_or_default();
+                        let disposition = accepted.review_recipient.as_ref().map_or_else(
+                            || format!("Message committed: {}; recipient was live; response not guaranteed", command.auth_message_id),
+                            |worker| format!("Accepted for main review: {}; worker `{worker}` has not received the message; release or response not guaranteed", command.auth_message_id),
+                        );
                         self.finish_harness_owned_tool_with_cbor_result(
                             &command.conversation_id,
                             command.call_id,
@@ -666,16 +673,13 @@ impl Harness {
                             tau_proto::CborValue::Map(vec![
                                 (
                                     tau_proto::CborValue::Text("status".to_owned()),
-                                     tau_proto::CborValue::Text(format!(
-                                         "{status_header}Message committed: {}; recipient was live; response not guaranteed",
-                                         command.auth_message_id
-                                     )),
+                                    tau_proto::CborValue::Text(format!(
+                                        "{status_header}{disposition}"
+                                    )),
                                 ),
                                 (
                                     tau_proto::CborValue::Text("message_id".to_owned()),
-                                    tau_proto::CborValue::Text(
-                                        command.auth_message_id.to_string(),
-                                    ),
+                                    tau_proto::CborValue::Text(command.auth_message_id.to_string()),
                                 ),
                                 (
                                     tau_proto::CborValue::Text("recipient".to_owned()),

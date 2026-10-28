@@ -572,6 +572,7 @@ fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
             session_id,
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 

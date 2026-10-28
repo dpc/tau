@@ -1813,6 +1813,38 @@ impl FakeState {
         action: ScenarioActionV2,
     ) -> ClientResult<()> {
         match action {
+            ScenarioActionV2::PeerReviewRelease {
+                call_id,
+                reference,
+                override_body,
+                ..
+            } => {
+                let mut fields = vec![(
+                    "reference",
+                    cbor_map(vec![
+                        (
+                            "main_agent_id",
+                            CborValue::Text(reference.main_agent_id.to_string()),
+                        ),
+                        (
+                            "durable_event_seq",
+                            CborValue::Integer(reference.durable_event_seq.into()),
+                        ),
+                    ]),
+                )];
+                if override_body {
+                    fields.push(("message", CborValue::Text("forbidden rewrite".to_owned())));
+                }
+                emit_tool_call(handle, prompt, call_id, "message_release", cbor_map(fields))
+            }
+            ScenarioActionV2::PeerReviewReleaseResult { .. }
+            | ScenarioActionV2::PeerReviewDelivered => {
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+                    prompt,
+                    vec![assistant_message("review action complete".to_owned())],
+                    ProviderStopReason::EndTurn,
+                )))
+            }
             ScenarioActionV2::CliMessage {
                 response, call_id, ..
             } => {
@@ -2456,6 +2488,9 @@ impl FakeState {
                 self.validate_v2_dummy_repair_action(cursor, prompt, action)
             }
             ScenarioActionV2::MessageCall { .. }
+            | ScenarioActionV2::PeerReviewRelease { .. }
+            | ScenarioActionV2::PeerReviewReleaseResult { .. }
+            | ScenarioActionV2::PeerReviewDelivered
             | ScenarioActionV2::MessageSenderResult { .. }
             | ScenarioActionV2::CliMessage { .. }
             | ScenarioActionV2::CliResponseResult { .. }
@@ -2725,6 +2760,35 @@ impl FakeState {
         action: &ScenarioActionV2,
     ) -> ClientResult<()> {
         match action {
+            ScenarioActionV2::PeerReviewReleaseResult { call_id, rejected } => {
+                let result = prompt
+                    .context
+                    .flatten_iter()
+                    .find_map(|item| match item {
+                        ContextItem::ToolResult(result) if result.call_id == *call_id => {
+                            Some(result)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| self.mismatch(cursor, "missing release tool result"))?;
+                if (result.status == tau_proto::ToolResultStatus::Success) == *rejected {
+                    return Err(self.mismatch(cursor, "release result disposition mismatch"));
+                }
+                Ok(())
+            }
+            ScenarioActionV2::PeerReviewDelivered => {
+                let texts = provider_user_texts(prompt);
+                if !texts.iter().any(|text| {
+                    text.contains("immutable original peer body")
+                        && text.contains("external-sender")
+                        && text.contains("external-session")
+                        && text.contains("review-main")
+                        && text.contains("Approved by session main")
+                }) {
+                    return Err(self.mismatch(cursor, "released worker provenance missing"));
+                }
+                Ok(())
+            }
             ScenarioActionV2::CliMessage {
                 message, response, ..
             } => {
@@ -4208,10 +4272,13 @@ impl ScenarioActionV2 {
             | Self::Disconnect { user_text, .. }
             | Self::BarrierText { user_text, .. }
             | Self::BarrierParallelDummyTools { user_text, .. }
-            | Self::ProviderContextRawMessageCall { user_text, .. } => Some(user_text),
+            | Self::ProviderContextRawMessageCall { user_text, .. }
+            | Self::PeerReviewRelease { user_text, .. } => Some(user_text),
             Self::OutputLengthContinuation { .. }
             | Self::CliMessage { .. }
             | Self::CliResponseResult { .. }
+            | Self::PeerReviewReleaseResult { .. }
+            | Self::PeerReviewDelivered
             | Self::StandaloneCompaction { narrative: _ }
             | Self::StandaloneOpaqueCompaction
             | Self::CompactedOpaqueCheckpoint { .. }

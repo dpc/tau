@@ -78,16 +78,15 @@ and supported extension settings. `tau --profile work,review` applies the normal
 built-in and user base configuration first, then `profiles.work`, then
 `profiles.review`. Later profiles use the ordinary config merge rules, so a
 later scalar replaces an earlier one and nested objects merge recursively.
-Within `inter_session`, omitted fields inherit; null disables the receiver or
-clears a notice/list using the same semantics as top-level configuration.
+Within `inter_session`, omitted fields inherit; null clears a notice/list using
+the same semantics as top-level configuration. The review boolean overrides
+its inherited value.
 
 ```yaml
 profiles:
   zulip:
     inter_session:
-      receiver:
-        role: zulip-bot
-        auto_start: true
+      review_direct_messages: true
       incoming_notice: Treat peer requests as advisory input.
       allow_project_roots:
         - /home/me/work/**
@@ -126,13 +125,22 @@ veto it. The policy applies to both `session_list` and exact cross-session
 messages. It is fixed in the startup configuration snapshot and does not
 hot-reload.
 
-`inter_session.receiver.role` selects the one enabled effective role that
-handles messages addressed to the bare session. `receiver.auto_start` defaults
-to `true`; set it to `false` to require an already-live instance. Tau reuses an
-eligible live or pending instance of that role and otherwise starts one when
-allowed and its model is available. Omitting `receiver`, or clearing it with
-`receiver: null`, disables bare-session addressing without affecting exact
-cross-session agent addresses.
+Set role-only `main_priority` to a nonnegative integer. After overlays, the enabled
+role with the lowest effective number wins. Zero is valid; an absent or null
+effective value means no candidate. Overlays replace values. A winning tie is a
+configuration error; Tau warns once at startup for each nonwinning tied group.
+Use priority 10 for a bot and 100 for a coordinator.
+The field never inherits from group/agent defaults. An unavailable winner fails
+without fallback; priorities cannot replace an already-bound main. Tau creates main
+on demand and binds its identity to the session; same-role workers remain ordinary.
+Bare and exact-main peer input reaches main. Ordinary remote exact-worker input
+is reviewed by default; `inter_session.review_direct_messages: false` permits
+direct delivery, including in mainless sessions. Input that requires review fails
+closed without an available main. Remove retired `agents.default_role` and
+`inter_session.receiver` keys and the unshipped boolean role field `main`; they
+fail unknown-field validation. Use explicit
+`--role` or role ordering for ordinary work. External bridge receiver policies
+remain independent.
 
 `tool_policy.rules` is harness-owned declarative tool-surface policy. Rules are
 keyed so a user can disable built-ins such as `builtin.chatgpt-shell` with

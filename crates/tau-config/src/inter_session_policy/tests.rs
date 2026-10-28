@@ -29,18 +29,16 @@ fn notices_preserve_optional_text_and_enforce_byte_limit() {
     }
 }
 
-/// Receiver auto-start defaults on while an omitted receiver remains disabled.
+/// Exact-worker review defaults on and requires an explicit false to disable.
 #[test]
-fn receiver_is_optional_and_defaults_auto_start_on() {
-    let omitted = serde_yaml_ng::from_str::<InterSessionPolicy>("{}").expect("omitted receiver");
-    assert_eq!(omitted.receiver, None);
+fn review_defaults_on_and_can_be_disabled() {
+    let omitted = serde_yaml_ng::from_str::<InterSessionPolicy>("{}").expect("omitted review");
+    assert!(omitted.review_direct_messages);
 
     let configured =
-        serde_yaml_ng::from_str::<InterSessionPolicy>("receiver:\n  role: coordinator\n")
-            .expect("configured receiver");
-    let receiver = configured.receiver.expect("receiver");
-    assert_eq!(receiver.role, "coordinator");
-    assert!(receiver.auto_start);
+        serde_yaml_ng::from_str::<InterSessionPolicy>("review_direct_messages: false\n")
+            .expect("configured review");
+    assert!(!configured.review_direct_messages);
 }
 
 /// Ensures an absent allowlist remains unrestricted while deny matches veto

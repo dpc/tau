@@ -216,6 +216,15 @@ reads at most the bounded first record plus an already-loaded or journal-bound c
 display projection. It does not replay the transcript, repair the checkpoint, or
 scan the global agents directory.
 
+Session membership folding preserves the optional immutable canonical main binding
+and rejects replacement or ordinary unload. Agent trees retain typed peer review
+metadata and resolve source occurrences by journal identity plus durable sequence,
+including hidden branches and deferred inputs. Linked worker receipts rebuild the
+release index during live append and cold replay; this index is derived from
+receipts, not a second durable consumption record. See
+[SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md) and
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
+
 `ToolRegistry` stores only harness-accepted runtime registration projections keyed by live
 connection. Peer declarations and harness-authored canonical lifecycle events
 remain protocol/harness concerns under

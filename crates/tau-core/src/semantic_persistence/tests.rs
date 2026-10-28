@@ -1111,6 +1111,7 @@ fn rollback_failure_retains_only_session_lock_until_release() {
 
 fn loaded_event(session_id: &str) -> tau_proto::Event {
     tau_proto::Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        main: false,
         agent_initialization_id: tau_proto::AgentInitializationId::parse("managed-init")
             .expect("test initialization id"),
         session_id: tau_proto::SessionId::parse(session_id).expect("test session id"),

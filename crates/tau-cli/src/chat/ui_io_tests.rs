@@ -1411,6 +1411,7 @@ fn ui_io_stats_report_separates_catch_up_and_steady_live() {
     ));
     record(HarnessOutputMessage::deliver(Event::SessionReplayComplete(
         tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),

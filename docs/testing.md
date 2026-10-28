@@ -364,10 +364,10 @@ coverage ceiling.
 Replay-aware side observers, exact traces, provider stats,
 bounded condition-driven waits, process-group cleanup, and runtime-artifact
 cleanup remain independent oracles.
-A third topology starts the universal PTY agentless and tool-free, then uses a
-private exact same-process sender callback to authorize one bare external
-message. That message auto-starts the configured receiver role. Typed socket stats prove
-`active/running`; the correlated hold-ready notice is broadcast later, so
+A third topology lets UI demand create a prompt-free main in the universal PTY,
+then uses a private exact same-process sender callback to authorize one bare
+external message. The harness reuses canonical main without a target UI prompt. Typed
+socket stats prove `active/running`; the correlated hold-ready notice is broadcast later, so
 its target-PTY projection proves that UI consumed the update before one real
 Ctrl-J selects the exact recipient. The test then cancels and reaps its correlated
 provider hold. These are narrow terminal projection gates, not broad rendering

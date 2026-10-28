@@ -495,6 +495,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
     let provider_status_body = "watched provider is blocked";
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("watch-provider")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("watched-agent"),
@@ -523,6 +524,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
     let long_wait_row = "▤ @watched-agent has been working for 5 minutes";
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("watch-long-wait")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("watched-agent"),
@@ -1459,6 +1461,7 @@ fn watched_agent_stats_redraws_status_row() {
     }));
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("status-engineer-1")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_1"),
@@ -1772,6 +1775,7 @@ fn watched_agent_status_row_hides_when_done_or_unreported_and_idle() {
     };
     let watch_status = |message_id: &str, phase, title: Option<&str>| {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse(message_id)
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_1"),
@@ -1865,6 +1869,7 @@ fn watched_agent_status_row_hides_when_done_or_unreported_and_idle() {
 
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("final-watch-response")
                 .expect("valid message ID"),
             sender_id: agent_id("engineer_1"),

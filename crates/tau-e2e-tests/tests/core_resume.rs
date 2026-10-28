@@ -98,6 +98,7 @@ fn prompt_stdin_accepted_prompt_prints_correlated_completion()
     let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
     let mut command = fixture.command(None);
     command
+        .args(["--role", "deterministic-e2e"])
         .arg("--prompt-stdin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -133,6 +134,7 @@ fn prompt_stdin_piped_output_preserves_terminal_control_bytes()
     let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
     let mut command = fixture.command(None);
     command
+        .args(["--role", "deterministic-e2e"])
         .arg("--prompt-stdin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -170,7 +172,7 @@ fn prompt_stdin_pty_output_sanitizes_terminal_control_bytes()
     );
     let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
     let mut command = fixture.command(None);
-    command.arg("--prompt-stdin");
+    command.args(["--role", "deterministic-e2e", "--prompt-stdin"]);
     let mut process = PtyProcess::spawn(command, false, None)?;
     process.send_text("pty terminal controls\n\u{4}")?;
     process.wait_for("ABCDE", Instant::now() + DEADLINE)?;
@@ -205,6 +207,7 @@ fn prompt_stdin_forwards_colon_prefixed_input_literally() -> Result<(), Box<dyn 
     let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
     let mut command = fixture.command(None);
     command
+        .args(["--role", "deterministic-e2e"])
         .arg("--prompt-stdin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -241,6 +244,7 @@ fn prompt_stdin_accepted_provider_failure_exits_without_stdout()
     let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
     let mut command = fixture.command(None);
     command
+        .args(["--role", "deterministic-e2e"])
         .arg("--prompt-stdin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

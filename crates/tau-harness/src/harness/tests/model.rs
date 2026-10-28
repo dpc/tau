@@ -255,24 +255,75 @@ fn role_groups_sort_roles_by_order_then_name() {
     );
 }
 
-/// The session-level inter-session receiver is retained independently of role
-/// group ordering.
+/// The main designation remains role metadata independent of navigation order.
 #[test]
-fn inter_session_receiver_uses_session_policy() {
+fn main_priority_remains_role_metadata_independent_of_navigation() {
     let mut settings = path_tau_config_settings::HarnessSettings::built_in();
-    settings.inter_session.receiver =
-        Some(tau_config::inter_session_policy::InterSessionReceiver {
-            role: "engineer".to_owned(),
-            auto_start: false,
-        });
+    settings
+        .roles
+        .get_mut("engineer")
+        .expect("role")
+        .main_priority = Some(100);
 
     let loaded = load_roles(&settings);
 
-    let receiver = loaded.inter_session_receiver.expect("receiver");
-    assert_eq!(receiver.role, "engineer");
-    assert!(!receiver.auto_start);
+    assert_eq!(loaded.roles["engineer"].main_priority, Some(100));
 }
 
+/// Nonwinning priority ties surface once as configuration warnings while a
+/// unique lower-numbered role remains authoritative.
+#[test]
+fn nonwinning_main_priority_ties_warn_once_at_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let config = td.path().join("config");
+    std::fs::create_dir_all(&config).expect("config");
+    std::fs::write(
+        config.join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    priorities:
+      roles:
+        bot: { main_priority: 10 }
+        coordinator: { main_priority: 100 }
+        backup: { main_priority: 100 }
+        disabled: { main_priority: 10, enable: false }
+"#,
+    )
+    .expect("roles");
+    let state = td.path().join("state");
+    let mut h = echo_harness_with_dirs(
+        "s1",
+        state.clone(),
+        tau_config::settings::TauDirs {
+            config_dir: Some(config),
+            state_dir: Some(state),
+        },
+    )
+    .expect("nonwinning tie remains loadable");
+    assert_eq!(h.config.accepted_harness_settings.main_role(), Some("bot"));
+    let warnings = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::HarnessNotice(notice)
+                if notice.message.contains("nonwinning `main_priority`") =>
+            {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].level, NoticeLevel::Warning);
+    assert_eq!(
+        warnings[0].kind,
+        tau_proto::notice_kind::HARNESS_CONFIG_ERROR
+    );
+    assert!(warnings[0].message.contains("100"));
+    assert!(warnings[0].message.contains("backup, coordinator"));
+    assert!(h.main_agent_id().is_none(), "warning does not create main");
+    h.shutdown().expect("shutdown");
+}
 /// Provider snapshots are runtime registry input, not just private extension
 /// chatter: the harness must retain metadata/routes and re-emit refreshed UI
 /// state for clients that are already connected.
@@ -884,7 +935,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
         h.selected_model_params().effort,
         tau_proto::ReasoningSelection {
             requested: tau_proto::ReasoningIntent::Intensity(
-                tau_proto::ReasoningIntensity::from_millionths(500_000),
+                tau_proto::ReasoningIntensity::from_millionths(250_000),
             ),
             effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::High,),
         }
@@ -1162,6 +1213,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse(message_id).expect("message id"),
                 sender_id: crate::parse_agent_id("sender"),
                 sender_session_id: None,
@@ -1996,13 +2048,13 @@ fn provider_model_metadata_drives_selection_state() {
     )
     .expect("handle provider snapshot");
 
-    assert_eq!(h.config.selected_role, "engineer");
+    assert_eq!(h.config.selected_role, "engineer-junior");
     assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
     assert_eq!(
         h.selected_model_params().effort,
         tau_proto::ReasoningSelection {
             requested: tau_proto::ReasoningIntent::Intensity(
-                tau_proto::ReasoningIntensity::from_millionths(500_000),
+                tau_proto::ReasoningIntensity::from_millionths(250_000),
             ),
             effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::High,),
         }
@@ -2067,7 +2119,7 @@ fn provider_model_metadata_drives_selection_state() {
         h.selected_model_params().effort,
         tau_proto::ReasoningSelection {
             requested: tau_proto::ReasoningIntent::Intensity(
-                tau_proto::ReasoningIntensity::from_millionths(500_000),
+                tau_proto::ReasoningIntensity::from_millionths(250_000),
             ),
             effective: tau_proto::EffectiveReasoningEffort::Native(NativeReasoningEffort::None,),
         }
@@ -2241,11 +2293,10 @@ fn load_roles_ignores_stale_harness_state() {
         config_dir.join("harness.yaml"),
         r#"{
             agents: {
-                default_role: "engineer",
                 role_groups: {
                 engineer: {
                     roles: {
-                        engineer: { model: "openai/gpt-4.1", effort: 0.75, verbosity: "medium" },
+                        engineer: { order: -100, model: "openai/gpt-4.1", effort: 0.75, verbosity: "medium" },
                     },
                 },
             },
@@ -2271,7 +2322,6 @@ fn load_roles_ignores_stale_harness_state() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        inter_session_receiver: _,
     } = load_roles(&harness_settings);
     assert!(role_overrides.is_empty());
     assert_eq!(selected_role, "engineer");
@@ -2390,11 +2440,10 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
         config_dir.join("harness.yaml"),
         r#"{
             agents: {
-                default_role: "engineer",
                 role_groups: {
                 engineer: {
                     roles: {
-                        engineer: { model: "local/engineer" },
+                        engineer: { order: -100, model: "local/engineer" },
                     },
                 },
                 manager: {
@@ -2425,7 +2474,6 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        inter_session_receiver: _,
     } = load_roles(&harness_settings);
     assert!(!role_overrides.contains_key("default"));
     assert!(!roles.contains_key("default"));
@@ -2466,12 +2514,11 @@ fn role_missing_model_uses_model_defaults_and_effort_inherits_agent_default() {
         config_dir.join("harness.yaml"),
         r#"{
             agents: {
-                default_role: "plain",
                 role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "local/engineer", effort: 0.75 },
-                        plain: {},
+                        plain: { order: -100 },
                     },
                 },
             },
@@ -2487,7 +2534,6 @@ fn role_missing_model_uses_model_defaults_and_effort_inherits_agent_default() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        inter_session_receiver: _,
     } = load_roles(&harness_settings);
     let available = ["local/aaa".into(), "local/engineer".into()];
     let available_provider_models = provider_models(
@@ -2681,6 +2727,7 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
         state_dir: Some(state_dir.clone()),
     };
     let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start harness");
+    h.config.selected_role = "engineer".to_owned();
     let role = h.config.selected_role.clone();
     std::fs::write(&config_path, "agents: [malformed\n").expect("invalidate source after startup");
 
@@ -2885,9 +2932,10 @@ fn selected_role_missing_required_skill_fails_startup() {
         config_dir.join("harness.yaml"),
         r#"
         agents:
-          default_role: reviewer
+          enable: false
           role_groups:
             custom:
+              enable: true
               roles:
                 reviewer:
                   required_skills: [missing-review-skill]
@@ -2966,13 +3014,12 @@ fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     )
     .expect("write harness config");
 
-    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    assert_eq!(h.config.selected_role, "engineer-junior");
-    let message = find_mandatory_warning_notice(&h, "default_role `ghost`")
-        .expect("expected mandatory warning HarnessNotice about missing default_role");
+    let error = echo_harness_with_dirs("s1", state_dir, dirs)
+        .err()
+        .expect("retired config must fail");
     assert!(
-        message.contains("selected `engineer-junior` instead"),
-        "message should name the fallback role, got: {message}"
+        error.to_string().contains("unknown field `default_role`"),
+        "{error}"
     );
 }
 
@@ -2993,9 +3040,10 @@ fn unavailable_explicit_role_model_emits_replayable_configuration_warning() {
         config_dir.join("harness.yaml"),
         r#"
 agents:
-  default_role: coordinator
+  enable: false
   role_groups:
     custom:
+      enable: true
       roles:
         coordinator:
           model: echo/not-published
@@ -3083,9 +3131,10 @@ fn available_explicit_role_model_does_not_emit_configuration_warning() {
         config_dir.join("harness.yaml"),
         r#"
 agents:
-  default_role: coordinator
+  enable: false
   role_groups:
     custom:
+      enable: true
       roles:
         coordinator:
           model: echo/model
@@ -3220,9 +3269,10 @@ fn loaded_explicit_prompt_override_is_quiet() {
         config_dir.join("harness.yaml"),
         r#"
 agents:
-  default_role: reviewer
+  enable: false
   role_groups:
     custom:
+      enable: true
       roles:
         reviewer:
           prompt_override: review-v2
@@ -3267,9 +3317,10 @@ fn malformed_loaded_prompt_template_is_not_eagerly_rendered() {
         config_dir.join("harness.yaml"),
         r#"
 agents:
-  default_role: reviewer
+  enable: false
   role_groups:
     custom:
+      enable: true
       roles:
         reviewer:
           prompt_override: malformed
@@ -3311,9 +3362,10 @@ fn missing_explicit_prompt_override_emits_replayable_configuration_warning() {
         config_dir.join("harness.yaml"),
         r#"
 agents:
-  default_role: reviewer
+  enable: false
   role_groups:
     custom:
+      enable: true
       roles:
         reviewer:
           prompt_override: review-v2
@@ -3428,10 +3480,10 @@ fn prompt_template_path_warning_is_bounded_and_sanitized() {
     assert!(warning.len() < 512);
 }
 
-/// Ensures a profile-selected missing default role reaches the existing startup
-/// fallback path instead of being ignored while profiles are applied.
+/// Retired default-role profile keys fail explicitly rather than silently
+/// selecting ordinary work or the session main.
 #[test]
-fn profile_missing_default_role_retains_startup_fallback() {
+fn profile_default_role_is_rejected() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
@@ -3449,36 +3501,26 @@ profiles:
     };
     let profile =
         path_tau_config_settings::ProfileSelection::parse("focused").expect("profile selection");
-    let settings =
-        path_tau_config_settings::load_harness_settings_with_profile_and_cli_overrides_in(
-            &dirs,
-            Some(&profile),
-            &[],
-            &[],
-        )
-        .expect("load selected profile");
-
-    let loaded = load_roles(&settings);
-
-    assert_eq!(loaded.selected_role, "engineer-junior");
-    assert_eq!(
-        loaded.missing_default_role,
-        Some(crate::model::MissingDefaultRole {
-            requested: "ghost".to_owned(),
-            fallback: "engineer-junior".to_owned(),
-        })
-    );
+    let error = path_tau_config_settings::load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs,
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect_err("retired profile field");
+    assert!(error.to_string().contains("unknown field `default_role`"));
 }
 
-/// Ensures a profile can enable the role that it selects as default, so
-/// disabled base roles survive role filtering before startup selection runs.
+/// A profile-enabled ordinary role participates in fallback selection after
+/// disabled-role filtering.
 #[test]
-fn profile_default_role_selects_profile_enabled_role() {
+fn profile_enabled_role_participates_in_ordinary_fallback() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
 agents:
+  enable: false
   role_groups:
     focused:
       roles:
@@ -3487,7 +3529,6 @@ agents:
 profiles:
   focused:
     agents:
-      default_role: focused-role
       role_groups:
         focused:
           roles:

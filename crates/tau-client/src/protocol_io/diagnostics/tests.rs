@@ -64,6 +64,7 @@ fn agent_id() -> tau_proto::AgentId {
 fn finish_protocol_io_cold_attach(meter: &mut TestMeter) {
     meter.record_downlink_frame(&HarnessOutputMessage::deliver(
         Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
@@ -88,6 +89,7 @@ fn protocol_io_meter_splits_catch_up_from_steady_live() {
     let live = HarnessOutputMessage::deliver_live(UnixMicros::new(2), event);
     let boundary = HarnessOutputMessage::deliver(Event::SessionReplayComplete(
         tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
@@ -441,6 +443,7 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
         UnixMicros::new(3),
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 

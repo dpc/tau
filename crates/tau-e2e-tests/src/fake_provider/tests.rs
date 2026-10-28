@@ -2095,6 +2095,7 @@ fn watch_response(
     content: &str,
 ) -> AgentMessageReceived {
     AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("watch-response")
             .expect("test identifier must satisfy its grammar"),
         sender_id: child.clone(),
@@ -2118,6 +2119,7 @@ fn watch_prompt(
     content: &str,
 ) -> AgentMessageReceived {
     AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("watch-prompt")
             .expect("test identifier must satisfy its grammar"),
         sender_id: child.clone(),

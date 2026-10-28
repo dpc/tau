@@ -3,6 +3,13 @@
 use super::{EventRenderer, render_action_output_block, selection_intent};
 
 impl EventRenderer {
+    /// Keeps explicitly role-selected work in an ordinary new-agent composer.
+    pub(crate) fn claim_explicit_startup_role(&mut self) {
+        if self.claim_initial_creation_intent() {
+            self.selection.awaiting_new_agent_selection = false;
+        }
+    }
+
     /// Adds metadata-only non-interactive members to the attachment overview.
     pub(crate) fn show_attach_roster(&mut self, entries: &[tau_proto::SessionAgentListEntry]) {
         if self.selection.displayed_agent_id.is_some() {

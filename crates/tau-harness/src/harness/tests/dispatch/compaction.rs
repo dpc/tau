@@ -7419,6 +7419,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     h.publish_event(
         None,
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -7954,6 +7955,7 @@ fn reactive_compaction_includes_coalesced_agent_message_wakes() {
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse(message_id)
                     .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("manager"),

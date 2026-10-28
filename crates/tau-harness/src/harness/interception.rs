@@ -1007,6 +1007,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::SESSION_AGENT_UNLOADED,
     // Complete current operational snapshots carry shared navigation authority.
     EventName::AGENT_STATS_UPDATED,
+    EventName::AGENT_RUNTIME_UNAVAILABLE,
     // Agent creation and message projection facts are harness-validated durable
     // transcript facts. Dropping or rewriting them after validation breaks
     // sender/recipient correlation and resume state.
@@ -1199,6 +1200,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::SessionAgentLoaded(_)
             | Event::SessionAgentUnloaded(_)
             | Event::AgentStatsUpdated(_)
+            | Event::AgentRuntimeUnavailable(_)
             | Event::AgentCompactionTriggered(_)
             | Event::AgentCompacted(_)
             | Event::AgentManualCompactionRequested(_)

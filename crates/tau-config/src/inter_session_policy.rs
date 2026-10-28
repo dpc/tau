@@ -1,4 +1,4 @@
-//! Session-level inbound receiver and outbound access policy.
+//! Session-level peer review, advisory notices, and outbound access policy.
 
 use std::path::Path;
 
@@ -7,12 +7,12 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Session-wide policy for bare-message receiving and remote-session access.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InterSessionPolicy {
-    /// Optional bare-session receiver. Omission disables bare-session
-    /// addressing.
-    pub receiver: Option<InterSessionReceiver>,
+    /// Route authenticated exact-worker peer messages through main review.
+    /// Local and CLI exact-agent delivery is unaffected.
+    pub review_direct_messages: bool,
     /// Optional advisory text attached to every outgoing cross-session message.
     pub outgoing_notice: Option<tau_proto::InterSessionNotice>,
     /// Optional recipient-local advisory text attached to every incoming
@@ -27,19 +27,16 @@ pub struct InterSessionPolicy {
     pub deny_project_roots: Option<Vec<ProjectRootGlob>>,
 }
 
-/// Single role authorized to receive bare inter-session messages.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct InterSessionReceiver {
-    /// Effective enabled role used for existing and auto-started recipients.
-    pub role: String,
-    /// Whether Tau may start the role when no eligible live instance exists.
-    #[serde(default = "default_receiver_auto_start")]
-    pub auto_start: bool,
-}
-
-const fn default_receiver_auto_start() -> bool {
-    true
+impl Default for InterSessionPolicy {
+    fn default() -> Self {
+        Self {
+            review_direct_messages: true,
+            outgoing_notice: None,
+            incoming_notice: None,
+            allow_project_roots: None,
+            deny_project_roots: None,
+        }
+    }
 }
 
 impl InterSessionPolicy {

@@ -47,7 +47,6 @@ tool_policy:
         - shell:workdir
         - shell:lock
 agents:
-  default_role: engineer
   effort: 0.5
   web_tools:
     allowed_domains: null

@@ -105,6 +105,7 @@ fn theme_refresh_preserves_session_context() {
 fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     let agent = agent_id("internal-agent");
     let provider_snapshot = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("provider-snapshot")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("watched-agent"),

@@ -155,6 +155,10 @@ membership journal, not a transcript.
   delivered live/replayed while the daemon runs but is memory-only and omitted
   from cold resume. Interceptors cannot drop or rewrite this immutable
   membership fact.
+- **`agent.runtime_unavailable`** — Harness-owned transient notification that a
+  loaded agent cannot provide live runtime context. It removes UI eligibility
+  without changing durable membership. Failed main
+  initialization preserves the canonical session binding.
 - **`session.agent_unloaded`** — Membership fact: a global agent is no longer
   loaded into this session. Like load facts, this is durable for durable agents
   and memory-only for ephemeral agents. Interceptors cannot drop or rewrite this
@@ -163,6 +167,9 @@ membership journal, not a transcript.
   harness-owned catch-up boundaries. They are delivered as non-replay frames
   after matching historical facts and before buffered live frames for that
   connection.
+  `session.replay_complete.main_agent_id` carries the optional canonical main
+  independently of runtime eligibility. `session.agent_loaded.main` binds that
+  ID; the harness rejects ordinary unload or replacement of bound main.
 
 Historical load/unload facts are not transcript history. On reconnect/resume the
 harness announces the current loaded-agent snapshot, then replays each loaded
@@ -759,7 +766,9 @@ transient runtime observations and never enter semantic replay. See
   a short message an agent sent to another agent. Carries stable `message_id`,
   `sender_id`, recipient (`agent_id` or
   `external_agent { session_id, agent_id }`), optional external
-  `sender_notice`, and `message`.
+  `sender_notice`, and `message`. Optional `review_recipient` records the
+  intended worker when the actual external recipient is main and acceptance was
+  for review, not worker delivery.
 - **`agent.message_received`** — Harness-owned immutable recipient-side
   projection for an agent-to-agent or local CLI message. Protocol 10.4 adds
   optional `cli_origin`: one-way or a single-use final-response address. Its
@@ -767,7 +776,10 @@ transient runtime observations and never enter semantic replay. See
   policy but never recreates its runtime endpoint. Carries the same stable
   `message_id`, the `sender_id`, optional `sender_session_id` for external
   senders, the receiving `recipient_id`, optional external `sender_notice` and
-  recipient-local `recipient_notice`, and `message`. UI subscribers filter,
+  recipient-local `recipient_notice`, and `message`. Optional `peer_review`
+  distinguishes a pending main review with its intended worker from a released
+  worker receive linked to the main journal's durable source sequence. Approval
+  preserves the original peer identity, body, and notices. UI subscribers filter,
   summarize, or fully display agent-to-agent message projections according to
   `:set show-messages`. The received projection is the sole model payload; local
   senders render in a stable-sender-labelled escaped outer `<tau_internal>`

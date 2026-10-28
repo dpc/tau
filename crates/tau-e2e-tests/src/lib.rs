@@ -213,10 +213,11 @@ impl VcrFixture {
             format!(
                 concat!(
                     "agents:\n",
-                    "  default_role: vcr-e2e\n",
+                    "  enable: false\n",
                     "  id_template: main\n",
                     "  role_groups:\n",
                     "    e2e:\n",
+                    "      enable: true\n",
                     "      roles:\n",
                     "        vcr-e2e:\n",
                     "          model: {model}\n",

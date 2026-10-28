@@ -240,6 +240,9 @@ pub enum AgentEntry {
         sender_notice: Option<tau_proto::InterSessionNotice>,
         /// Optional advisory text configured by the receiving session.
         recipient_notice: Option<tau_proto::InterSessionNotice>,
+        /// Original peer review or immutable approval metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_review: Option<tau_proto::PeerMessageReview>,
         /// Message body.
         message: String,
     },
@@ -315,6 +318,8 @@ struct ProviderWindowIndex {
 /// Complete non-persisted query indexes rebuilt by agent-journal replay.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct AgentTreeIndexes {
+    /// Retained worker receipts, independent of branch and provider context.
+    released_peer_reviews: HashSet<tau_proto::PeerMessageReviewReference>,
     /// Publisher-scoped passive operations, retained independently of history
     /// cache residency and rebuilt from every accepted journal occurrence.
     passive_context_operations: HashMap<(tau_proto::ExtensionName, String), blake3::Hash>,
@@ -2539,6 +2544,74 @@ impl AgentTree {
             .copied()
     }
 
+    /// Resolve one immutable inbound review occurrence, including inputs whose
+    /// provider placement is still deferred. Hidden and compacted nodes remain
+    /// retained journal facts; active-context membership grants no authority.
+    #[must_use]
+    pub fn peer_review_source(
+        &self,
+        source: &tau_proto::PeerMessageReviewReference,
+    ) -> Option<AgentMessageReceived> {
+        if source.main_agent_id != self.agent_id {
+            return None;
+        }
+        let seq = PersistedAgentEventSeq(source.durable_event_seq);
+        let entry = self
+            .node_for_durable_event_seq(seq)
+            .and_then(|node| self.node(node))
+            .map(|node| &node.entry)
+            .or_else(|| {
+                self.pending_context_inputs
+                    .iter()
+                    .find(|input| input.durable_event_seq == seq)
+                    .map(|input| input.entry.as_ref())
+            })
+            .or_else(|| {
+                self.pending_inference_inputs
+                    .iter()
+                    .find(|input| input.durable_event_seq == seq)
+                    .map(|input| input.entry.as_ref())
+            })?;
+        let AgentEntry::AgentMessage {
+            direction: AgentMessageDirection::Inbound,
+            message_id,
+            sender_id,
+            sender_session_id: Some(sender_session_id),
+            peer_review: Some(tau_proto::PeerMessageReview::Pending { intended_recipient }),
+            sender_notice,
+            recipient_notice,
+            message,
+            ..
+        } = entry
+        else {
+            return None;
+        };
+        Some(AgentMessageReceived {
+            message_id: message_id.clone(),
+            sender_id: sender_id.clone(),
+            sender_session_id: Some(sender_session_id.clone()),
+            cli_origin: None,
+            recipient_id: intended_recipient.clone(),
+            kind: AgentMessageKind::Message,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            sender_notice: sender_notice.clone(),
+            recipient_notice: recipient_notice.clone(),
+            peer_review: Some(tau_proto::PeerMessageReview::Released {
+                source: source.clone(),
+            }),
+            message: message.clone(),
+        })
+    }
+
+    /// Whether a retained linked worker receipt already records this release.
+    #[must_use]
+    pub fn has_peer_review_receipt(&self, source: &tau_proto::PeerMessageReviewReference) -> bool {
+        self.indexes.released_peer_reviews.contains(source)
+    }
+
     /// Return the single assistant-response node materialized for a durable
     /// provider-response occurrence.
     #[must_use]
@@ -3601,11 +3674,15 @@ impl AgentTree {
                 .and_then(|entry| {
                     self.record_context_entry(parent, entry, durable_event_seq, false)
                 }),
-            Event::AgentMessageReceived(message) => self
-                .agent_message_entry_from_received(message, durable_event_seq)
-                .and_then(|entry| {
-                    self.record_context_entry(parent, entry, durable_event_seq, false)
-                }),
+            Event::AgentMessageReceived(message) => {
+                let entry = self.agent_message_entry_from_received(message, durable_event_seq)?;
+                if let Some(tau_proto::PeerMessageReview::Released { source }) =
+                    &message.peer_review
+                {
+                    self.indexes.released_peer_reviews.insert(source.clone());
+                }
+                self.record_context_entry(parent, entry, durable_event_seq, false)
+            }
             Event::ProviderResponseFinished(response) => {
                 Some(self.apply_provider_response_finished(parent, durable_event_seq, response))
             }
@@ -3990,6 +4067,7 @@ impl AgentTree {
             watch_lifecycle: None,
             sender_notice: message.sender_notice.clone(),
             recipient_notice: None,
+            peer_review: None,
             message: message.message.clone(),
         })
     }
@@ -4016,6 +4094,7 @@ impl AgentTree {
             watch_lifecycle: message.watch_lifecycle.clone().map(Box::new),
             sender_notice: message.sender_notice.clone(),
             recipient_notice: message.recipient_notice.clone(),
+            peer_review: message.peer_review.clone(),
             message: message.message.clone(),
         })
     }
@@ -4247,7 +4326,12 @@ impl AgentTree {
                             AgentMessageRecipient::ExternalAgent { .. }
                         )
                 });
-                Some(if notice_valid {
+                let review_valid = message.review_recipient.as_ref().is_none_or(|worker| {
+                    message.kind == AgentMessageKind::Message
+                        && matches!(&message.recipient,
+                            AgentMessageRecipient::ExternalAgent { agent_id, .. } if agent_id != worker)
+                });
+                Some(if notice_valid && review_valid {
                     Ok(())
                 } else {
                     Err(AgentEventValidationError::new(
@@ -4286,7 +4370,25 @@ impl AgentTree {
                         message.kind == AgentMessageKind::Message
                             && message.sender_session_id.is_some()
                     });
-                Some(if !payload_matches_kind {
+                let review_valid = message.peer_review.as_ref().is_none_or(|review| {
+                    message.kind == AgentMessageKind::Message
+                        && message.sender_session_id.is_some()
+                        && message.cli_origin.is_none()
+                        && match review {
+                            tau_proto::PeerMessageReview::Pending { intended_recipient } => {
+                                intended_recipient != &message.recipient_id
+                            }
+                            tau_proto::PeerMessageReview::Released { source } => {
+                                source.main_agent_id != message.recipient_id
+                                    && !self.has_peer_review_receipt(source)
+                            }
+                        }
+                });
+                Some(if !review_valid {
+                    Err(AgentEventValidationError::new(
+                        "peer review requires a distinct main/worker ordinary peer message and a new receipt",
+                    ))
+                } else if !payload_matches_kind {
                     Err(AgentEventValidationError::new(
                         "watch payload must be present exactly for its matching watch message kind",
                     ))

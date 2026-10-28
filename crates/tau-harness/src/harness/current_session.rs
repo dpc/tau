@@ -6,6 +6,10 @@ use tau_proto::{TokenCount, TokenUsageStats};
 /// session.
 #[derive(Debug, Default)]
 pub(crate) struct CurrentSessionState {
+    /// One live lazy-creation candidate until ordinary membership binds it.
+    /// A crash may leave the candidate unused; this is not a durable
+    /// reservation.
+    pub(crate) main_candidate: Option<tau_proto::AgentId>,
     /// Input tokens consumed by the most recent agent response, if the provider
     /// reported it. `None` until the first usage report for the current model.
     pub(crate) context_input_tokens: Option<TokenCount>,

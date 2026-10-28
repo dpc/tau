@@ -62,7 +62,8 @@ fn deterministic_cli_message_one_way_and_final_response() -> Result<(), Box<dyn 
     let config_path = fixture.config_dir().join("harness.yaml");
     let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     config["agents"]["id_template"] = serde_json::json!(AGENT);
-    config["inter_session"] = serde_json::json!({"receiver": {"role": "deterministic-main"}});
+    config["agents"]["role_groups"]["e2e"]["roles"]["deterministic-main"]["main_priority"] =
+        serde_json::json!(10);
     std::fs::write(config_path, serde_json::to_vec_pretty(&config)?)?;
     let socket = fixture
         .runtime_dir()
@@ -77,21 +78,16 @@ fn deterministic_cli_message_one_way_and_final_response() -> Result<(), Box<dyn 
         64,
     );
     let mut ui = connect_ui(&socket)?;
-    ui.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
-        tau_proto::UiCreateAgent {
-            request_id: "cli-message-seed".to_owned(),
+    ui.send(&HarnessInputMessage::UiEnsureMainAgent)?;
+    ui.send(&HarnessInputMessage::emit(Event::UiPromptSubmitted(
+        tau_proto::UiPromptSubmitted {
             literal: false,
             session_id: SESSION.parse()?,
-            role: "deterministic-main".to_owned(),
-            model_override: None,
-            effort_override: None,
-            metadata: Vec::new(),
-            initial_prompt: Some("seed".to_owned()),
+            agent_id: AGENT.parse()?,
+            text: "seed".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: Some("seed".to_owned()),
-            parent_agent: None,
-            ephemeral: false,
         },
     )))?;
     wait_for_idle(&mut ui, AGENT)?;

@@ -7,6 +7,200 @@ mod cross_model_recovery;
 mod fold_allocation;
 mod partial_provider_error;
 
+/// Retained review lookup is independent of provider placement: it resolves
+/// while a tool round defers input and after a compaction replaces that
+/// context.
+#[test]
+fn peer_review_source_survives_deferred_tool_input_and_compaction() {
+    let main = agent_id();
+    let mut live = AgentTree::from_events(main.clone(), &[]);
+    let mut records = Vec::new();
+    let mut append = |tree: &mut AgentTree, event| {
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([records.len() as u8; 16]),
+            seq: tree.next_event_seq(),
+            source: None,
+            event,
+            parent: AgentEventParent::InheritHead,
+            fold_semantics: AgentJournalFoldSemantics::CommitOrder,
+            recorded_at: UnixMicros::default(),
+        };
+        tree.apply_persisted_record(&record).expect("live append");
+        records.push(record);
+        AgentTree::try_from_events(main.clone(), &records).expect("cold prefix")
+    };
+    let call: ToolCallId = "review-tool".into();
+    append(
+        &mut live,
+        Event::ProviderResponseFinished(tool_calling_response(
+            &main,
+            "ap-review-tool",
+            vec![call.clone()],
+        )),
+    );
+    let source = tau_proto::PeerMessageReviewReference {
+        main_agent_id: main.clone(),
+        durable_event_seq: live.next_event_seq().get(),
+    };
+    let cold = append(
+        &mut live,
+        Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: "deferred-review".parse().expect("message"),
+            sender_id: "external-sender".parse().expect("sender"),
+            sender_session_id: Some("external-session".parse().expect("session")),
+            cli_origin: None,
+            recipient_id: main.clone(),
+            kind: AgentMessageKind::Message,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            sender_notice: Some("unchanged notice".to_owned().try_into().expect("notice")),
+            recipient_notice: None,
+            peer_review: Some(tau_proto::PeerMessageReview::Pending {
+                intended_recipient: other_agent_id(),
+            }),
+            message: "retained through compaction".to_owned(),
+        }),
+    );
+    assert!(
+        live.node_for_durable_event_seq(PersistedAgentEventSeq::new(source.durable_event_seq))
+            .is_none()
+    );
+    let expected = live.peer_review_source(&source).expect("deferred source");
+    assert_eq!(cold.peer_review_source(&source), Some(expected.clone()));
+    append(
+        &mut live,
+        Event::ProviderToolResult(tau_proto::ToolResult {
+            presentation: Default::default(),
+            call_id: call,
+            tool_name: ToolName::new("tool"),
+            tool_type: ToolType::Function,
+            result: tau_proto::CborValue::Text("done".to_owned()),
+            provider_content: Vec::new(),
+            kind: ToolResultKind::Final,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+    );
+    let cut = AgentHead::Node(live.head().expect("drained head"));
+    let mut started = compaction_start("ct-review-source");
+    started.cut = cut;
+    started.resume_through = Some(cut);
+    append(
+        &mut live,
+        Event::AgentStandaloneCompactionStarted(started.clone()),
+    );
+    let cold = append(
+        &mut live,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compaction_output_tokens: None,
+            compact_prompt_id: started.compact_prompt_id,
+            model: started.model,
+            operation: started.operation,
+            agent_id: main.clone(),
+            transaction_id: started.transaction_id,
+            cut,
+            suffix_end: cut,
+            replacement_window: vec![ContextItem::Compaction(
+                tau_proto::OpaqueProviderItem::from_raw_json(
+                    r#"{"type":"compaction","encrypted_content":"replacement"}"#,
+                )
+                .expect("opaque"),
+            )],
+        }),
+    );
+    assert_eq!(live.peer_review_source(&source), Some(expected.clone()));
+    assert_eq!(cold.peer_review_source(&source), Some(expected));
+}
+
+/// Review authority follows journal occurrences rather than logical message IDs
+/// or the selected branch. Linked receipts rebuild on replay and reject
+/// duplicate consumption without a separate durable consumed record.
+#[test]
+fn peer_review_occurrences_and_receipts_survive_hidden_branch_replay() {
+    let main = agent_id();
+    let worker = other_agent_id();
+    let review = Event::AgentMessageReceived(AgentMessageReceived {
+        message_id: "same-logical-id".parse().expect("message id"),
+        sender_id: "peer-sender".parse().expect("sender"),
+        sender_session_id: Some("peer-session".parse().expect("session")),
+        cli_origin: None,
+        recipient_id: main.clone(),
+        kind: AgentMessageKind::Message,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        watch_lifecycle: None,
+        sender_notice: Some("sender notice".to_owned().try_into().expect("notice")),
+        recipient_notice: Some("local notice".to_owned().try_into().expect("notice")),
+        peer_review: Some(tau_proto::PeerMessageReview::Pending {
+            intended_recipient: worker.clone(),
+        }),
+        message: "immutable original".to_owned(),
+    });
+    let record = |seq, event| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: AgentEventParent::Root,
+        fold_semantics: AgentJournalFoldSemantics::CommitOrder,
+        recorded_at: UnixMicros::new(seq),
+    };
+    let records = [record(0, review.clone()), record(1, review)];
+    let mut live = AgentTree::from_events(main.clone(), &[]);
+    for record in &records {
+        live.apply_persisted_record(record)
+            .expect("accepted occurrence");
+    }
+    let replay = AgentTree::try_from_events(main.clone(), &records).expect("cold replay");
+    let first = tau_proto::PeerMessageReviewReference {
+        main_agent_id: main.clone(),
+        durable_event_seq: 0,
+    };
+    let second = tau_proto::PeerMessageReviewReference {
+        main_agent_id: main,
+        durable_event_seq: 1,
+    };
+    let receipt = live
+        .peer_review_source(&first)
+        .expect("hidden first occurrence");
+    assert_eq!(replay.peer_review_source(&first), Some(receipt.clone()));
+    assert_eq!(
+        replay.peer_review_source(&second),
+        live.peer_review_source(&second)
+    );
+    assert_ne!(
+        replay.peer_review_source(&first),
+        replay.peer_review_source(&second)
+    );
+    let mut worker_live = AgentTree::from_events(worker.clone(), &[]);
+    let receipt_record = record(0, Event::AgentMessageReceived(receipt.clone()));
+    worker_live
+        .apply_persisted_record(&receipt_record)
+        .expect("linked receipt");
+    let worker_replay =
+        AgentTree::try_from_events(worker, &[receipt_record]).expect("receipt replay");
+    for tree in [&worker_live, &worker_replay] {
+        assert!(tree.has_peer_review_receipt(&first));
+        assert!(!tree.has_peer_review_receipt(&second));
+        assert!(
+            tree.validate_event(&Event::AgentMessageReceived(receipt.clone()))
+                .is_err()
+        );
+        assert!(
+            tree.validate_event(&Event::AgentMessageReceived(
+                replay
+                    .peer_review_source(&second)
+                    .expect("distinct retry occurrence"),
+            ))
+            .is_ok()
+        );
+    }
+}
+
 /// Passive output deduplication and non-activation must survive cold replay,
 /// independently of transcript branch selection or cached history residency.
 #[test]
@@ -3748,6 +3942,7 @@ fn validate_event_enforces_watch_payload_discriminator() {
         (AgentMessageKind::Message, Some(provider_payload)),
     ] {
         let event = Event::AgentMessageReceived(AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-provider-status")
                 .expect("test message id must satisfy its grammar"),
             sender_id: other_agent_id(),
@@ -3777,6 +3972,7 @@ fn validate_event_reuses_canonical_work_status_grammar() {
     let tree = AgentTree::from_events(id.clone(), &[]);
     let event_for = |phase, title: Option<String>| {
         Event::AgentMessageReceived(AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-invalid-work-status")
                 .expect("test message id must satisfy its grammar"),
             sender_id: other_agent_id(),
@@ -3871,6 +4067,7 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
         (AgentMessageKind::Message, None, Some(wait)),
     ] {
         let event = Event::AgentMessageReceived(AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-invalid-semantic-watch")
                 .expect("valid message id"),
             sender_id: other_agent_id(),
@@ -3897,6 +4094,7 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
     };
     let lifecycle_event = |kind, watch_lifecycle, message| {
         Event::AgentMessageReceived(AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-lifecycle")
                 .expect("valid message id"),
             sender_id: other_agent_id(),
@@ -3941,6 +4139,7 @@ fn agent_message_notices_require_bounded_external_message_facts() {
     let tree = AgentTree::from_events(id.clone(), &[]);
     let received = |sender_session_id, kind, sender_notice| {
         Event::AgentMessageReceived(AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("notice-validation").expect("message id"),
             sender_id: other_agent_id(),
             sender_session_id,
@@ -4134,6 +4333,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::InheritHead,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            review_recipient: None,
             message_id: tau_proto::AgentMessageId::parse("agent-sent-during-tool")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id.clone(),
@@ -4175,6 +4375,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::InheritHead,
         Event::AgentMessageReceived(AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("agent-received-during-tool")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: other_agent_id(),
@@ -4368,6 +4569,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     assert!(error.to_string().contains("already has an open"));
 
     let sibling_message = Event::AgentMessageReceived(AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("sibling-message")
             .expect("test identifier must satisfy its grammar"),
         sender_id: other_agent_id(),
@@ -4397,6 +4599,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     );
 
     let descendant_message = Event::AgentMessageReceived(AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("descendant-message")
             .expect("test identifier must satisfy its grammar"),
         sender_id: other_agent_id(),
@@ -4457,6 +4660,7 @@ fn synthetic_agent_message_folds_advance_occurrence_sequence() {
     let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
     for (message_id, message) in [("sent-one", "one"), ("sent-two", "two")] {
         tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            review_recipient: None,
             message_id: tau_proto::AgentMessageId::parse(message_id)
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id.clone(),
@@ -4515,9 +4719,12 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
             output_length_continuation: None,
         });
     let input = Event::AgentMessageReceived(AgentMessageReceived {
+        peer_review: Some(tau_proto::PeerMessageReview::Pending {
+            intended_recipient: other_agent_id(),
+        }),
         message_id: tau_proto::AgentMessageId::parse("v1-input").expect("test message id"),
         sender_id: other_agent_id(),
-        sender_session_id: None,
+        sender_session_id: Some("peer-session".parse().expect("session")),
         cli_origin: None,
         recipient_id: agent_id.clone(),
         kind: AgentMessageKind::Message,
@@ -4530,6 +4737,7 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
         message: "Q".to_owned(),
     });
     let second_input = Event::AgentMessageReceived(AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("v1-input-two").expect("test message id"),
         sender_id: other_agent_id(),
         sender_session_id: None,
@@ -4606,11 +4814,29 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
         ),
     ];
     let mut live = AgentTree::from_events(agent_id.clone(), &[]);
+    let source = tau_proto::PeerMessageReviewReference {
+        main_agent_id: agent_id.clone(),
+        durable_event_seq: 2,
+    };
     for record in &records {
         live.apply_persisted_record(record).expect("live V1 fold");
+        if record.seq.get() == 2 {
+            assert!(live.node_for_durable_event_seq(record.seq).is_none());
+            let cold = AgentTree::try_from_events(agent_id.clone(), &records[..3])
+                .expect("deferred cold prefix");
+            assert!(live.peer_review_source(&source).is_some());
+            assert_eq!(
+                live.peer_review_source(&source),
+                cold.peer_review_source(&source)
+            );
+        }
     }
     let replay = AgentTree::try_from_events(agent_id, &records).expect("cold V1 fold");
     assert_eq!(live, replay);
+    assert_eq!(
+        live.peer_review_source(&source),
+        replay.peer_review_source(&source)
+    );
     assert!(matches!(
         live.nodes()[1].entry,
         AgentEntry::AssistantResponse { .. }

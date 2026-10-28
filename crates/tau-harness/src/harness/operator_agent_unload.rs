@@ -26,6 +26,8 @@ impl Harness {
 
         let outcome = if request.session_id != self.session_runtime.current_session_id {
             Some(Outcome::StaleSession)
+        } else if self.is_main_agent_load(&request.agent_id) {
+            Some(Outcome::MainAgent)
         } else if self.ui_runtime.shutdown_requested
             || self.session_runtime.shutdown_published
             || !self.agent_runtime.agent_registry.roster_valid

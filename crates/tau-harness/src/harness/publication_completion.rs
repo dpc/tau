@@ -9,7 +9,6 @@ use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublica
 use super::prompt_materialization_timing::PromptMaterializationTiming;
 use super::prompt_runtime_state::UncertainSupersessionPhase;
 use super::start_coordinator::StartPhase;
-use super::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY;
 use super::tool_runtime::PromptFoldDisposition;
 use super::*;
 
@@ -2127,6 +2126,14 @@ impl Harness {
             return true;
         };
         let completion_live = match &pending.completion {
+            PendingPeerReceiveCompletion::Release {
+                conversation_id,
+                call_id,
+                ..
+            } => {
+                self.tool_routing.tool_runtime.tool_agents.get(call_id) == Some(conversation_id)
+                    && self.peer_release_is_valid(conversation_id, &pending.expected_receive)
+            }
             PendingPeerReceiveCompletion::Cli { client_id } => {
                 self.peer_messaging.cli_connections.get(client_id)
                     == Some(&self.session_runtime.current_session_generation)
@@ -2145,7 +2152,28 @@ impl Harness {
         };
         let route_valid = match &pending.recipient {
             tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
-                agent_id == &pending.recipient_id
+                match &pending.expected_receive.peer_review {
+                    Some(tau_proto::PeerMessageReview::Pending { intended_recipient }) => {
+                        matches!(
+                            pending.completion,
+                            PendingPeerReceiveCompletion::Remote { .. }
+                        ) && agent_id == intended_recipient
+                            && self.agent_message_recipient_status(agent_id.as_str())
+                                == AgentMessageRecipientStatus::Live
+                            && self.peer_entrypoint_recipient_is_eligible(&pending.recipient_id)
+                    }
+                    None => {
+                        agent_id == &pending.recipient_id
+                            && (self.main_agent_id() != Some(agent_id)
+                                || self.main_agent_is_eligible(agent_id))
+                    }
+                    Some(tau_proto::PeerMessageReview::Released { .. }) => {
+                        matches!(
+                            pending.completion,
+                            PendingPeerReceiveCompletion::Release { .. }
+                        ) && agent_id == &pending.recipient_id
+                    }
+                }
             }
             tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => {
                 self.peer_entrypoint_recipient_is_eligible(&pending.recipient_id)
@@ -2155,7 +2183,6 @@ impl Harness {
             && !pending.canceled
             && completion_live
             && route_valid
-            && self.peer_auto_start_creation_committed(&pending.recipient_id)
             && matches!(
                 event,
                 Event::AgentMessageReceived(message)
@@ -2171,7 +2198,7 @@ impl Harness {
                     pending.recipient,
                     tau_proto::ExternalAgentMessageRecipient::BareEntrypoint
                 ) {
-                    if self.config.inter_session_receiver.is_none() {
+                    if !self.has_peer_entrypoint() {
                         tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver
                     } else {
                         tau_proto::ExternalAgentMessageFailure::Rejected
@@ -2192,29 +2219,6 @@ impl Harness {
                         }
                     }
                 };
-            let may_reselect = pending.session_generation
-                == self.session_runtime.current_session_generation
-                && !pending.canceled
-                && completion_live
-                && matches!(
-                    pending.recipient,
-                    tau_proto::ExternalAgentMessageRecipient::BareEntrypoint
-                )
-                && !pending.reselect_attempted;
-            if may_reselect {
-                match self.reselect_pending_external_receive(message_id, event) {
-                    Ok(true) => return false,
-                    Ok(false) => {}
-                    Err(failure) => {
-                        self.fail_pending_external_receive(
-                            event,
-                            "peer target changed before receive commit",
-                            failure,
-                        );
-                        return valid;
-                    }
-                }
-            }
             self.fail_pending_external_receive(
                 event,
                 "peer target changed before receive commit",
@@ -2222,93 +2226,6 @@ impl Harness {
             );
         }
         valid
-    }
-
-    /// Require the immutable creation role and reserved peer-purpose marker to
-    /// be durable before the first receive can establish an auto-started
-    /// endpoint.
-    pub(super) fn peer_auto_start_creation_committed(
-        &self,
-        recipient_id: &tau_proto::AgentId,
-    ) -> bool {
-        if !self
-            .peer_messaging
-            .uncommitted_peer_auto_starts
-            .contains(recipient_id)
-        {
-            return true;
-        }
-        let runtime_role = self
-            .agent_runtime
-            .agent_registry
-            .agent_routes
-            .get(recipient_id.as_str())
-            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-            .and_then(|agent| agent.identity.role.as_deref());
-        let Some(runtime_role) = runtime_role else {
-            return false;
-        };
-        self.session_runtime
-            .agent_store
-            .loaded_agent_creation(recipient_id)
-            .is_some_and(|(started, _)| {
-                started.role == runtime_role
-                    && started.metadata.iter().any(|metadata| {
-                        metadata.key.as_str() == PEER_ENTRYPOINT_AGENT_METADATA_KEY
-                            && metadata.value == CborValue::Bool(true)
-                            && !metadata.inheritable
-                    })
-            })
-    }
-
-    /// Rebind one parked bare receive after commit-time authority changed.
-    ///
-    /// The original projection is discarded and one replacement is published.
-    /// A second invalidation is terminal, preventing an unbounded retry loop.
-    pub(super) fn reselect_pending_external_receive(
-        &mut self,
-        message_id: &tau_proto::AgentMessageId,
-        event: &Event,
-    ) -> Result<bool, tau_proto::ExternalAgentMessageFailure> {
-        let Some(mut pending) = self
-            .peer_messaging
-            .pending_external_receive_acks
-            .remove(message_id)
-        else {
-            return Ok(false);
-        };
-        let old_recipient = pending.recipient_id.clone();
-        let message_bytes = super::subagents_tool::external_agent_message_admission_bytes(
-            &pending.expected_receive,
-        );
-        self.release_peer_input_rate(&old_recipient, pending.rate_admitted_at);
-        let (recipient_id, started, rate_admitted_at) =
-            match self.resolve_peer_entrypoint_recipient(message_id, message_bytes) {
-                Ok(replacement) => replacement,
-                Err(error) => {
-                    self.peer_messaging
-                        .pending_external_receive_acks
-                        .insert(message_id.clone(), pending);
-                    return Err(error.failure());
-                }
-            };
-        pending.recipient_id = recipient_id.clone();
-        pending.expected_receive.recipient_id = recipient_id;
-        pending.started = started;
-        pending.reselect_attempted = true;
-        pending.rate_admitted_at = rate_admitted_at;
-        let replacement_event = Event::AgentMessageReceived(pending.expected_receive.clone());
-        self.peer_messaging
-            .pending_external_receive_acks
-            .insert(message_id.clone(), pending);
-        self.cleanup_uncommitted_peer_auto_start(&old_recipient);
-        // ast-grep-ignore: debug-assert-expression-must-not-mutate
-        debug_assert!(matches!(event, Event::AgentMessageReceived(_)));
-        self.publish_event(
-            Some(crate::harness::harness_connection_id()),
-            replacement_event,
-        );
-        Ok(true)
     }
 
     pub(super) fn fail_pending_external_receive(
@@ -2328,13 +2245,28 @@ impl Harness {
             return;
         };
         self.release_peer_input_rate(&pending.recipient_id, pending.rate_admitted_at);
-        self.cleanup_uncommitted_peer_auto_start(&pending.recipient_id);
         if pending.canceled
             || pending.session_generation != self.session_runtime.current_session_generation
         {
             return;
         }
         match pending.completion {
+            PendingPeerReceiveCompletion::Release {
+                conversation_id,
+                call_id,
+                tool_name,
+                tool_type,
+            } => {
+                self.finish_harness_owned_tool_with_display_error(
+                    &conversation_id,
+                    call_id,
+                    tool_name,
+                    tool_type,
+                    error.to_owned(),
+                    None,
+                    None,
+                );
+            }
             PendingPeerReceiveCompletion::Cli { client_id } => {
                 self.fail_cli_message(&client_id, error.to_owned());
             }
@@ -2347,6 +2279,7 @@ impl Harness {
                     None,
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
+                            review_recipient: None,
                             request_id,
                             failure: Some(failure),
                             recipient_id: None,
@@ -2394,11 +2327,25 @@ impl Harness {
         else {
             return;
         };
-        self.peer_messaging
-            .uncommitted_peer_auto_starts
-            .remove(&pending.recipient_id);
-        self.record_peer_route(&pending.recipient_id);
         match pending.completion {
+            PendingPeerReceiveCompletion::Release {
+                conversation_id,
+                call_id,
+                tool_name,
+                tool_type,
+            } => {
+                self.finish_harness_owned_tool_with_cbor_result(
+                    &conversation_id,
+                    call_id,
+                    tool_name,
+                    tool_type,
+                    tau_proto::CborValue::Text(format!(
+                        "Original peer message committed to worker `{}`; response not guaranteed",
+                        pending.recipient_id,
+                    )),
+                    None,
+                );
+            }
             PendingPeerReceiveCompletion::Cli { client_id } => {
                 self.acknowledge_cli_message(&client_id, message_id.clone(), pending.recipient_id);
             }
@@ -2411,6 +2358,12 @@ impl Harness {
                     None,
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
+                            review_recipient: match &pending.expected_receive.peer_review {
+                                Some(tau_proto::PeerMessageReview::Pending {
+                                    intended_recipient,
+                                }) => Some(intended_recipient.clone()),
+                                _ => None,
+                            },
                             request_id,
                             failure: None,
                             recipient_id: Some(pending.recipient_id),
@@ -2432,6 +2385,7 @@ impl Harness {
                     &conversation_id,
                     Some(crate::harness::harness_connection_id()),
                     Event::AgentMessageSent(tau_proto::AgentMessageSent {
+                        review_recipient: None,
                         message_id: message_id.clone(),
                         sender_id,
                         recipient: tau_proto::AgentMessageRecipient::Agent {
@@ -2473,39 +2427,6 @@ impl Harness {
                     Some(*display),
                 );
             }
-        }
-    }
-
-    /// Remove a freshly auto-started endpoint when every precommit delivery
-    /// that could establish it has failed. Coalesced deliveries keep the
-    /// endpoint.
-    pub(super) fn cleanup_uncommitted_peer_auto_start(
-        &mut self,
-        recipient_id: &tau_proto::AgentId,
-    ) {
-        if !self
-            .peer_messaging
-            .uncommitted_peer_auto_starts
-            .contains(recipient_id)
-            || self
-                .peer_messaging
-                .pending_external_receive_acks
-                .values()
-                .any(|pending| &pending.recipient_id == recipient_id && !pending.canceled)
-        {
-            return;
-        }
-        self.peer_messaging
-            .uncommitted_peer_auto_starts
-            .remove(recipient_id);
-        if let Some(cid) = self
-            .agent_runtime
-            .agent_registry
-            .agent_routes
-            .get(recipient_id.as_str())
-            .cloned()
-        {
-            self.remove_agent_expected(&cid);
         }
     }
 
@@ -4357,9 +4278,6 @@ impl Harness {
             self.peer_messaging
                 .peer_input_rate
                 .remove(&unloaded.agent_id);
-            self.peer_messaging
-                .uncommitted_peer_auto_starts
-                .remove(&unloaded.agent_id);
             let reason = self
                 .agent_runtime
                 .agent_watch
@@ -4480,6 +4398,9 @@ impl Harness {
                 self.fail_agent_initialization(&loaded.agent_id, &error.to_string());
             }
             self.finish_history_load_reaction(loaded);
+            if loaded.main {
+                self.complete_ui_main_demands();
+            }
         }
         if let Event::AgentInitializationContextSet(context) = event {
             self.apply_finalized_agent_initialization_context(context);

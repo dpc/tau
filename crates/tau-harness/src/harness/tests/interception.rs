@@ -1914,6 +1914,12 @@ fn queue_intercepted_peer_receive(
     recipient_id: tau_proto::AgentId,
     suffix: &str,
 ) {
+    // Direct-receive interception fixture; review-on has main lifecycle
+    // coverage.
+    h.config
+        .accepted_harness_settings
+        .inter_session
+        .review_direct_messages = false;
     h.peer_messaging
         .external_message_peers
         .insert(connection_id.clone());
@@ -2082,7 +2088,7 @@ fn peer_receive_target_disappearance_before_commit_fails() {
 fn local_peer_sent_projection_waits_for_receive_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    configure_inter_session_receiver(&mut h, "engineer", false);
+    configure_main_role(&mut h, "engineer");
     let cid = ensure_test_user_agent(&mut h);
     let _interceptor = connect_test_tool(&mut h, "local-peer-interceptor");
     h.handle_extension_event(
@@ -2138,7 +2144,7 @@ fn local_peer_oversized_message_rejects_before_auto_start() {
     h.config
         .available_roles
         .insert("peer".to_owned(), peer_role);
-    configure_inter_session_receiver(&mut h, "peer", true);
+    configure_main_role(&mut h, "peer");
     let agents_before = h.agent_runtime.agent_registry.agents.len();
 
     let error = h
@@ -2168,7 +2174,7 @@ fn local_peer_auto_start_reports_started_only_after_receive_commit() {
     h.config
         .available_roles
         .insert("peer".to_owned(), peer_role);
-    configure_inter_session_receiver(&mut h, "peer", true);
+    configure_main_role(&mut h, "peer");
     let _interceptor = connect_test_tool(&mut h, "local-auto-start-interceptor");
     h.handle_extension_event(
         "local-auto-start-interceptor",
@@ -2241,7 +2247,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
     h.config
         .available_roles
         .insert("peer".to_owned(), peer_role);
-    configure_inter_session_receiver(&mut h, "peer", true);
+    configure_main_role(&mut h, "peer");
     let _interceptor = connect_test_tool(&mut h, "coalesce-interceptor");
     h.handle_extension_event(
         "coalesce-interceptor",
@@ -2325,7 +2331,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
 fn peer_auto_start_authentication_failure_precedes_spend() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    configure_inter_session_receiver(&mut h, "engineer", true);
+    configure_main_role(&mut h, "engineer");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auth-before-spend".to_owned(),
         message_id: tau_proto::AgentMessageId::parse("auth-before-spend-message")
@@ -2365,7 +2371,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
 fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    configure_inter_session_receiver(&mut h, "engineer", true);
+    configure_main_role(&mut h, "engineer");
     let target_session = h.session_runtime.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("stale-auth-{suffix}"),
@@ -2422,7 +2428,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
 fn peer_receive_bare_authority_revocation_before_commit_fails() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    configure_inter_session_receiver(&mut h, "engineer", false);
+    configure_main_role(&mut h, "engineer");
     ensure_test_user_agent(&mut h);
     let _interceptor = connect_test_tool(&mut h, "bare-revoke-interceptor");
     h.handle_extension_event(
@@ -2463,7 +2469,15 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
     );
     assert!(result.is_none());
 
-    h.config.inter_session_receiver = None;
+    let main = h.main_agent_id().expect("bound main").clone();
+    let cid = h.agent_runtime.agent_registry.agent_routes[&main].clone();
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("main")
+        .dispatch
+        .terminating = true;
     h.handle_extension_event(
         "bare-revoke-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -2482,20 +2496,20 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
                 HarnessOutputMessage::ExternalAgentMessageResult(result)
                     if result.request_id == "bare-revoke"
                         && result.failure
-                            == Some(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver)
+                            == Some(tau_proto::ExternalAgentMessageFailure::Rejected)
             )
         }),
         "peer results: {peer_results:?}"
     );
 }
 
-/// Bare routing gets only one deterministic re-selection: invalidating the
-/// replacement fails terminally without a third selection or committed receive.
+/// Losing main before receive commit fails closed without selecting either
+/// matching-role worker or replacing the retained main identity.
 #[test]
-fn peer_receive_bare_target_loss_reselects_once_before_commit() {
+fn peer_receive_bare_target_loss_never_reselects_before_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    configure_inter_session_receiver(&mut h, "engineer", false);
+    configure_main_role(&mut h, "engineer");
     ensure_test_user_agent(&mut h);
     h.create_durable_user_agent(
         "s1".parse::<tau_proto::SessionId>()
@@ -2564,40 +2578,10 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         })),
     )
     .expect("release stale receive");
-    assert_eq!(h.peer_messaging.pending_external_receive_acks.len(), 1);
-    assert!(committed_peer_receives(&h).is_empty());
-    let replacement = h
-        .peer_messaging
-        .pending_external_receive_acks
-        .values()
-        .next()
-        .expect("replacement receive")
-        .recipient_id
-        .clone();
-    assert_ne!(replacement, original);
-    let replacement_cid = h
-        .agent_runtime
-        .agent_registry
-        .agent_routes
-        .get(replacement.as_str())
-        .cloned()
-        .expect("replacement route");
-    h.remove_agent(&replacement_cid);
-
-    h.handle_extension_event(
-        "bare-reselect-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("release invalid replacement receive");
-
     assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
-    assert!(
-        h.agent_runtime.agent_registry.agent_routes.is_empty(),
-        "second invalidation must not reselect"
-    );
+    assert_eq!(h.main_agent_id(), Some(&original));
+    assert_eq!(h.agent_runtime.agent_registry.agent_routes.len(), 2);
     let peer_results = peer_results.lock().expect("peer results");
     assert!(
         peer_results.iter().any(|frame| {
@@ -6237,6 +6221,7 @@ fn parked_ui_prompt_has_committed_interaction_fact() {
 
 fn session_agent_loaded_event(h: &Harness, agent_id: AgentId) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        main: false,
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
             .expect("test identifier must be valid"),
 
@@ -6372,6 +6357,7 @@ fn session_shutdown_event(session_id: &str) -> Event {
 
 fn agent_message_sent_event(message: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse("msg-intercept")
             .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
@@ -6386,6 +6372,7 @@ fn agent_message_sent_event(message: &str) -> Event {
 
 fn agent_message_received_event(sender_id: AgentId, recipient_id: AgentId) -> Event {
     Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("msg-intercept")
             .expect("test identifier must satisfy its grammar"),
         sender_id,

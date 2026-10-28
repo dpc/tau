@@ -82,6 +82,7 @@ fn cleanup_detaches_tree_before_removal_and_writer_reload() {
             "old",
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -124,6 +125,7 @@ fn cleanup_detaches_tree_before_removal_and_writer_reload() {
                     "old",
                     None,
                     Event::SessionAgentLoaded(SessionAgentLoaded {
+                        main: false,
                         agent_initialization_id: tau_proto::AgentInitializationId::parse(
                             "test-init",
                         )

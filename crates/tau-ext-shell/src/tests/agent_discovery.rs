@@ -212,6 +212,7 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -282,6 +283,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
 
     dispatch_session_agent_loaded(
         tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 

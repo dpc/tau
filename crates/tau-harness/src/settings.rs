@@ -780,7 +780,7 @@ fn apply_startup_role_override(mut settings: HarnessSettings) -> HarnessSettings
     if let Ok(role) = std::env::var(STARTUP_ROLE_ENV)
         && !role.is_empty()
     {
-        settings.default_role = Some(role);
+        settings.startup_role = Some(role);
     }
     settings
 }
@@ -1107,7 +1107,7 @@ fn resolve_config_with_cli_overrides_in(
         harness_config_overrides,
     )?;
     if let Some(role) = startup_role.filter(|role| !role.is_empty()) {
-        settings.default_role = Some(role.to_owned());
+        settings.startup_role = Some(role.to_owned());
     }
     let resolved_extensions = resolve_extensions_with_environment_and_cli_overrides(
         &settings,

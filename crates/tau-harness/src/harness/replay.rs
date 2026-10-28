@@ -160,6 +160,9 @@ impl Harness {
             historical_selectors.clone(),
             live_selectors,
         )?;
+        if self.ui_runtime.main_demand_clients.contains(connection_id) {
+            return Ok(None);
+        }
         if self.session_initialized(&self.session_runtime.current_session_id) {
             if !historical_selectors.is_empty() {
                 self.runtime_io.bus.begin_catch_up(connection_id)?;
@@ -358,6 +361,7 @@ impl Harness {
                 continue;
             };
             let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: self.main_agent_id() == Some(agent_id),
                 session_id: self.session_runtime.current_session_id.clone(),
                 agent_id: agent_id.clone(),
                 agent_initialization_id,
@@ -427,6 +431,7 @@ impl Harness {
     /// replaying those current-state notices again would duplicate the visible
     /// `harness.session_dir` and `extension.ready` status block.
     pub(crate) fn catch_up_subscribers_after_session_init(&mut self) {
+        self.fulfill_ui_main_demands();
         let subscribers: Vec<(
             tau_proto::ConnectionId,
             tau_proto::ClientKind,
@@ -445,6 +450,9 @@ impl Harness {
             })
             .collect();
         for (client_id, kind, selectors) in subscribers {
+            if self.ui_runtime.main_demand_clients.contains(&client_id) {
+                continue;
+            }
             let _ = self.runtime_io.bus.begin_catch_up(&client_id);
             let replay = self.replay_session_history(&client_id, &selectors);
             if kind != tau_proto::ClientKind::Ui {
@@ -479,11 +487,26 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         error: Option<String>,
     ) {
+        if let Some(main) = self.main_agent_id().cloned()
+            && !self.main_agent_is_eligible(&main)
+        {
+            let _ = self.runtime_io.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(Event::AgentRuntimeUnavailable(
+                    tau_proto::AgentRuntimeUnavailable {
+                        session_id: self.session_runtime.current_session_id.clone(),
+                        agent_id: main,
+                    },
+                )),
+            );
+        }
         let _ = self.runtime_io.bus.send_to(
             client_id,
             None,
             HarnessOutputMessage::deliver(Event::SessionReplayComplete(
                 tau_proto::SessionReplayComplete {
+                    main_agent_id: self.main_agent_id().cloned(),
                     session_id: self.session_runtime.current_session_id.clone(),
                     error,
                 },

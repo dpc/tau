@@ -6,8 +6,9 @@ use std::os::unix::net::UnixStream;
 use super::*;
 use crate::harness::AgentMessageRecipientStatus;
 
-/// Exact and session-entrypoint CLI routes must both retain ephemeral content
-/// suppression, including the raw frame logged before recipient selection.
+/// Exact CLI delivery retains ephemeral content suppression, including the raw
+/// frame logged before recipient selection; it never routes through main
+/// review.
 #[test]
 fn cli_message_ephemeral_routes_do_not_leak_to_debug_log() {
     let temp = TempDir::new().expect("temp");
@@ -42,11 +43,8 @@ fn cli_message_ephemeral_routes_do_not_leak_to_debug_log() {
             _ => None,
         })
         .expect("ephemeral identity");
-    configure_inter_session_receiver(&mut h, &role, false);
-    for recipient in [
-        tau_proto::ExternalAgentMessageRecipient::Exact(agent.clone()),
-        tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
-    ] {
+    {
+        let recipient = tau_proto::ExternalAgentMessageRecipient::Exact(agent.clone());
         let (connection, mut reader) = caller(&mut h);
         let message = HarnessInputMessage::CliMessage(tau_proto::CliMessageRequest {
             session_id: h.session_runtime.current_session_id.clone(),

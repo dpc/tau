@@ -253,10 +253,18 @@ array replacement:
   identity edges terminate, while any other cycle (including an unused cycle)
   fails startup. The resulting `HarnessSettings` contains only canonical model
   IDs and does not retain alias maps.
-- `inter_session.receiver` is a session-level optional object. Its required
-  `role` names one enabled effective role; `auto_start` defaults to true.
-  Ordinary layered object merging permits a later auto-start override to retain
-  the inherited role, while `receiver: null` disables bare-session addressing.
+- `main_priority` is a role-only optional nonnegative integer; roles cannot
+  inherit it from agent/group defaults. After effective enabled-role merging,
+  the lowest number wins, including zero. An absent or null effective value
+  means no candidate.
+  Overlays replace values. A tied winning minimum is a configuration error;
+  the harness emits one startup warning for each tied nonwinning group.
+  Session identity and lazy demand follow
+  [SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md).
+- `inter_session.review_direct_messages` is a startup session policy, defaulting
+  to true. False permits ordinary remote exact-worker delivery without main
+  review. The removed `inter_session.receiver` and `agents.default_role` fields
+  fail ordinary unknown-field validation.
 - `visible` is ordinary inherited role metadata. Effective `false` suppresses
   only the built-in available-sub-task-role prompt catalog; it neither removes a
   role nor changes its authorization, diagnostics, UI lists, or other role
@@ -267,11 +275,11 @@ array replacement:
 `profiles` is a raw configuration-only map, not part of effective
 `HarnessSettings`. A selected profile supports the session-level `inter_session`
 policy, startup-only provider/model aliases, the global `tau_state_access`
-default, `agents.default_role`, agent provider defaults, agent/global role
+default, agent provider defaults, agent/global role
 metadata, role groups and roles, plus `extensions.<name>.enable` and arbitrary
 `extensions.<name>.config` for a built-in or base-configured extension.
 Inter-session fields keep their ordinary layered semantics: omission inherits,
-`receiver: null` disables bare-session addressing, notice nulls clear advisory
+the review boolean overrides its inherited value, notice nulls clear advisory
 text, and project-root list nulls restore their unrestricted/no-veto defaults.
 Extension config objects merge recursively; arrays, scalars, nested nulls, and
 type mismatches replace lower precedence values, and no deletion sentinel

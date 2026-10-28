@@ -1,4 +1,4 @@
-//! Fresh-session peer auto-start and real-terminal navigation coverage.
+//! Lazy UI main creation, peer reuse, and real-terminal navigation coverage.
 
 use std::path::Path;
 use std::time::Instant;
@@ -39,8 +39,8 @@ const REQUEST_ID: &str = "peer-navigation-request";
 const AUTH_REQUEST_ID: &str = "auth-peer-navigation-request";
 const CALLBACK_CLIENT_NAME: &str = "tau-external-agent-message";
 
-/// Proves an authenticated external message can auto-start the first agent in
-/// an otherwise empty session and Ctrl-L can select it while its turn is live.
+/// UI demand creates main without inference; authenticated peer input reuses it
+/// and real terminal navigation keeps that canonical agent selected.
 #[test]
 fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -82,17 +82,14 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
         deadline,
     )?;
     observer.wait_for_extension("e2e-fake-provider", deadline)?;
+    target.wait_ready_for("main", deadline)?;
     assert!(
         !observer
             .events
             .iter()
-            .any(|observed| matches!(observed.event, Event::AgentStarted(_))),
-        "target session must be agentless before the peer message"
+            .any(|observed| matches!(observed.event, Event::AgentPromptCreated(_))),
+        "main creation alone must not start inference"
     );
-    target.wait_for(
-        "Write a message to start a new deterministic-peer agent...",
-        deadline,
-    )?;
 
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),
@@ -133,8 +130,8 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     if let Some(failure) = result.failure {
         return Err(format!("external message failed: {failure:?}").into());
     }
-    if !result.started {
-        return Err("external message did not auto-start its bare recipient".into());
+    if result.started {
+        return Err("external message replaced the UI-created main".into());
     }
     let agent_id = result.recipient_id.ok_or("missing started recipient")?;
 
@@ -215,10 +212,7 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
     )?;
     observer.wait_for_extension("e2e-fake-provider", deadline)?;
     observer.wait_for_extension("test-dummy", deadline)?;
-    target.wait_for(
-        "Write a message to start a new deterministic-peer agent...",
-        deadline,
-    )?;
+    target.wait_ready_for("main", deadline)?;
 
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),
@@ -247,8 +241,8 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
     peer.send(&HarnessInputMessage::ExternalAgentMessage(request))?;
     sender.authorize(deadline)?;
     let result = recv_external_message_result(&mut peer, deadline)?;
-    if result.failure.is_some() || !result.started {
-        return Err(format!("peer handover did not auto-start: {result:?}").into());
+    if result.failure.is_some() || result.started {
+        return Err(format!("peer handover did not reuse main: {result:?}").into());
     }
     let agent_id = result.recipient_id.ok_or("missing peer tool recipient")?;
 

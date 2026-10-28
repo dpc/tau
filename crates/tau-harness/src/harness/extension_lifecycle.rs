@@ -93,6 +93,7 @@ impl Harness {
         now: Instant,
     ) {
         self.cancel_connection_history(connection_id);
+        self.ui_runtime.main_demand_clients.remove(connection_id);
         self.retire_compaction_image_admissions(Some(connection_id));
         self.tool_routing
             .tool_runtime
@@ -376,7 +377,6 @@ impl Harness {
                 pending.canceled = true;
             }
             self.release_peer_input_rate(&recipient_id, admitted_at);
-            self.cleanup_uncommitted_peer_auto_start(&recipient_id);
         }
         self.discard_canceled_peer_receive_publishes(&canceled_message_ids);
         self.peer_messaging
@@ -1411,6 +1411,7 @@ impl Harness {
                 | Event::SessionAgentLoaded(_)
                 | Event::SessionAgentUnloaded(_)
                 | Event::AgentStatsUpdated(_)
+                | Event::AgentRuntimeUnavailable(_)
                 | Event::AgentStarted(_)
                 | Event::AgentPromptStarted(_)
                 | Event::AgentPromptFailed(_)
@@ -1564,8 +1565,33 @@ impl Harness {
         }) = missing
         {
             self.emit_info_important(&format!(
-                "default_role `{requested}` is not configured; selected `{fallback}` instead"
+                "requested startup role `{requested}` is not configured; selected `{fallback}` instead"
             ));
+        }
+    }
+
+    /// Surface nonwinning priority ties once at startup. Selection uses the
+    /// accepted configuration, not runtime availability or mutable role knobs.
+    pub(super) fn emit_main_priority_warnings(&mut self) {
+        let mut groups = std::collections::BTreeMap::<u64, Vec<String>>::new();
+        for (name, role) in &self.config.accepted_harness_settings.roles {
+            if let Some(priority) = role.main_priority {
+                groups.entry(priority).or_default().push(name.clone());
+            }
+        }
+        // Effective config validation already rejects ties in the winning
+        // group.
+        for (priority, mut roles) in groups.into_iter().skip(1) {
+            if roles.len() < 2 {
+                continue;
+            }
+            roles.sort();
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_CONFIG_ERROR,
+                tau_proto::NoticeLevel::Warning,
+                tau_proto::NoticePurpose::Alert,
+                &format!("nonwinning `main_priority` {priority} is shared by roles: {}; lower numbers win, so the selected main role is unchanged", roles.join(", ")),
+            );
         }
     }
 
@@ -1992,6 +2018,7 @@ impl Harness {
         agent_initialization_id: tau_proto::AgentInitializationId,
     ) -> HashSet<tau_proto::ConnectionId> {
         let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: self.is_main_agent_load(&agent_id),
             session_id: self.session_runtime.current_session_id.clone(),
             ephemeral: self.agent_is_ephemeral(&agent_id),
             agent_id,

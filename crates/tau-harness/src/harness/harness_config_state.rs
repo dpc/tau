@@ -14,9 +14,6 @@ pub(crate) struct HarnessConfigState {
     pub(crate) disabled_role_reasons: HashMap<String, DisabledRoleReason>,
     /// Ordered role groups visible to clients.
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Optional single role used by bare inter-session routing.
-    pub(crate) inter_session_receiver:
-        Option<tau_config::inter_session_policy::InterSessionReceiver>,
     /// Reusable prompts from startup settings.
     pub(crate) custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
     /// Runtime role overrides.

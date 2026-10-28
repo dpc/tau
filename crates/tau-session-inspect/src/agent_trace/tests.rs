@@ -363,6 +363,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         sent,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            review_recipient: None,
             message_id: tau_proto::AgentMessageId::parse("message-semantic")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id.clone(),
@@ -380,6 +381,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         received,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("message-semantic")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: AgentId::parse("agent-remote").expect("agent"),

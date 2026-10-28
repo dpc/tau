@@ -5546,14 +5546,11 @@ impl EventRenderer {
                 true
             }
             Event::SessionAgentUnloaded(unloaded) => {
-                if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
-                    navigation.unload(&unloaded.agent_id);
-                }
-                if let Ok(mut statuses) = self.discovery.agent_completion_statuses.lock() {
-                    statuses.remove(&unloaded.agent_id);
-                }
-                self.remove_agent_watch_endpoint(&unloaded.agent_id);
-                self.watches.agent_models.remove(&unloaded.agent_id);
+                self.forget_agent_runtime(&unloaded.agent_id);
+                true
+            }
+            Event::AgentRuntimeUnavailable(unavailable) => {
+                self.forget_agent_runtime(&unavailable.agent_id);
                 true
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
@@ -5562,6 +5559,19 @@ impl EventRenderer {
             }
             _ => false,
         }
+    }
+
+    /// Removes live navigation/status without discarding retained transcript
+    /// identity or taking over this attachment's explicit selection.
+    fn forget_agent_runtime(&mut self, agent_id: &tau_proto::AgentId) {
+        if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
+            navigation.unload(agent_id);
+        }
+        if let Ok(mut statuses) = self.discovery.agent_completion_statuses.lock() {
+            statuses.remove(agent_id);
+        }
+        self.remove_agent_watch_endpoint(agent_id);
+        self.watches.agent_models.remove(agent_id);
     }
 
     fn learn_agent_prompt_metadata(&mut self, event: &Event) -> bool {
@@ -6347,6 +6357,9 @@ impl EventRenderer {
         if let Some(second) = second {
             parts.push((separator.to_owned(), false));
             Self::push_agent_message_endpoint(&mut parts, second);
+        }
+        if let Some(note) = Self::agent_message_review_note(event) {
+            parts.push((note, false));
         }
         parts
     }

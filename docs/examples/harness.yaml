@@ -15,10 +15,9 @@ session_retention: 60d
 session_idle_shutdown: 48h
 agent_retention: 60d
 
-# Route messages addressed to this session to a coordinator agent.
+# Send ordinary remote worker messages to canonical main for review.
 inter_session:
-  receiver:
-    role: coordinator
+  review_direct_messages: true
 
 extensions:
   # External web search for models without a native search tool.
@@ -151,7 +150,6 @@ extensions:
 
 # Agent configurations
 agents:
-  default_role: coordinator
   id_template: "{{role}}-{{random_alphanumeric 4}}"
   compactions:
     # Compact before a new outer turn when the context is large and the agent's last
@@ -493,9 +491,10 @@ agents:
 
             When editing a commit body, pull request description, or standalone explanation of a code change, read and follow the `change-description` skill.
 
-    # The main agent (role) I interact with.
+    # The role for the session main I interact with.
     #
-    # It keeps track of tasks, communicates with other agents and sessions, makes most of the high level decisions.
+    # It tracks tasks, communicates with other agents and sessions, and makes
+    # most high-level decisions.
     #
     # A strong model makes coordination decisions; tight compaction limits keep
     # its context small while engineers handle most implementation work.
@@ -514,6 +513,7 @@ agents:
         - swarm
       roles:
         coordinator:
+          main_priority: 100
           description: Coordinates work across agents and delivers the integrated result.
           order: 0
           compactions:

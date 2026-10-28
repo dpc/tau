@@ -8,6 +8,27 @@ use super::EventRenderer;
 use crate::markdown_render::markdown_block_with_osc8;
 
 impl EventRenderer {
+    /// Labels review acceptance separately from approved worker delivery.
+    pub(super) fn agent_message_review_note(event: &Event) -> Option<String> {
+        match event {
+            Event::AgentMessageSent(message) => message
+                .review_recipient
+                .as_ref()
+                .map(|worker| format!(" — accepted for main review; @{worker} not delivered")),
+            Event::AgentMessageReceived(message) => match &message.peer_review {
+                Some(tau_proto::PeerMessageReview::Pending { intended_recipient }) => Some(
+                    format!(" — main review for @{intended_recipient}; worker not delivered"),
+                ),
+                Some(tau_proto::PeerMessageReview::Released { source }) => Some(format!(
+                    " — approved by @{} (review {})",
+                    source.main_agent_id, source.durable_event_seq
+                )),
+                None => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Renders literal headers with bright routing identities and Markdown-lite
     /// prose bodies. Structured watch records retain their literal rendering.
     pub(super) fn submitted_agent_message_block(

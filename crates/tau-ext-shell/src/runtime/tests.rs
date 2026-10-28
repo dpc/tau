@@ -598,6 +598,7 @@ fn replayed_cwd_metadata_folds_without_emitting_until_live_agent_load() {
     runtime
         .handle_event(
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -675,6 +676,7 @@ fn malformed_replayed_workdir_is_retained_without_default_seeding() {
     runtime
         .handle_event(
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -1053,6 +1055,7 @@ fn rapid_agent_initialization_publishes_complete_ordered_transactions() {
         runtime
             .handle_event(
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    main: false,
                     agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
                         "init-{index}"
                     ))

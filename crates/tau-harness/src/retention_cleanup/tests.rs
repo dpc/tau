@@ -144,6 +144,7 @@ fn seed_agent_and_session(temp: &TempDir) -> AgentId {
             session_id.as_str(),
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("init")
                     .expect("initialization id"),
                 session_id: session_id.clone(),

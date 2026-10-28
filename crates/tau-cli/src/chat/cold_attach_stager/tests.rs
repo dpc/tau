@@ -176,6 +176,7 @@ fn replay_tool_normalization_preserves_event_allocation() {
 /// Builds the catch-up boundary used to publish the folded pending baseline.
 fn replay_complete() -> Event {
     Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        main_agent_id: None,
         session_id: "session-1".parse().expect("valid session id"),
         error: None,
     })
@@ -285,6 +286,51 @@ fn selects_unique_successful_runtime_agent_at_replay_boundary() {
             target: InitialAttachTarget::Agent(agent_id),
         }) if agent_id.as_str() == "restored-agent"
     ));
+}
+
+/// Canonical main beats worker ambiguity, but missing/unavailable main never
+/// selects an unrelated worker. Both owning and attaching UIs use this rule.
+#[test]
+fn main_default_selection_requires_its_successful_runtime_join() {
+    for attach in [false, true] {
+        for available in [false, true] {
+            let mut stager = if attach {
+                ColdAttachStager::staging()
+            } else {
+                ColdAttachStager::pass_through()
+            };
+            stager.admit(live(agent_replay_complete("worker", None), 1));
+            stager.admit(live(agent_stats("worker"), 2));
+            if available {
+                stager.admit(live(agent_replay_complete("main", None), 3));
+                stager.admit(live(agent_stats("main"), 4));
+            } else {
+                stager.admit(live(agent_replay_complete("main", None), 3));
+                stager.admit(live(agent_stats("main"), 4));
+                stager.admit(live(
+                    Event::AgentRuntimeUnavailable(tau_proto::AgentRuntimeUnavailable {
+                        session_id: "session-1".parse().expect("session"),
+                        agent_id: "main".parse().expect("agent"),
+                    }),
+                    5,
+                ));
+            }
+            let Event::SessionReplayComplete(mut boundary) = replay_complete() else {
+                unreachable!()
+            };
+            boundary.main_agent_id = Some("main".parse().expect("id"));
+            let ready = stager.admit(live(Event::SessionReplayComplete(boundary), 6));
+            let expected = if available {
+                InitialAttachTarget::Agent(Box::new("main".parse().expect("id")))
+            } else {
+                InitialAttachTarget::Overview
+            };
+            assert!(
+                matches!(ready.last().map(|delivery| &delivery.presentation),
+                Some(RendererPresentation::FinishAttach {target}) if target == &expected)
+            );
+        }
+    }
 }
 
 /// Attach-selection metadata shares the cold-attach item/byte budget, fails
@@ -397,6 +443,7 @@ fn failed_agent_replay_cannot_enable_implicit_creation() {
 fn failed_session_replay_cannot_enable_implicit_creation() {
     let mut stager = ColdAttachStager::staging();
     let failed_boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        main_agent_id: None,
         session_id: "session-1".parse().expect("valid session id"),
         error: Some("replay failed".to_owned()),
     });
@@ -588,6 +635,7 @@ fn replay_boundary_abandons_unconfirmed_shell_start() {
     let mut stager = ColdAttachStager::pass_through();
     assert_eq!(stager.admit(live(shell_start(), 1)).len(), 1);
     let boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        main_agent_id: None,
         session_id: "session-1".parse().expect("valid session id"),
         error: None,
     });
@@ -665,6 +713,7 @@ fn places_state_before_history_and_live_after_boundary() {
         pid: Some(123),
     });
     let boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        main_agent_id: None,
         session_id,
         error: None,
     });

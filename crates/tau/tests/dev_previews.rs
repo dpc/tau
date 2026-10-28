@@ -91,7 +91,7 @@ fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
 }
 
 /// Ensures a render subprocess forwards comma-separated profiles to its daemon
-/// and lets the later profile override the earlier startup role.
+/// and lets later role ordering choose the ordinary fallback.
 #[test]
 fn print_prompt_applies_ordered_profile_stack_in_spawned_harness() {
     let home = TempDir::new().expect("temporary home");
@@ -103,13 +103,21 @@ fn print_prompt_applies_ordered_profile_stack_in_spawned_harness() {
 profiles:
   first:
     agents:
-      default_role: first-role
+      role_groups:
+        preview:
+          roles:
+            first-role: { order: -100 }
   second:
     agents:
-      default_role: second-role
+      role_groups:
+        preview:
+          roles:
+            second-role: { order: -200 }
 agents:
+  enable: false
   role_groups:
     preview:
+      enable: true
       roles:
         first-role:
           prompt_fragments:
@@ -616,16 +624,17 @@ fn print_prompt_supplies_workdir_context_to_strict_role_template() {
 /// Ensures role-less developer previews use normal startup-role selection while
 /// `--role` continues to select an explicit prompt and tool policy.
 #[test]
-fn previews_use_configured_default_role_unless_overridden() {
+fn previews_use_ordinary_fallback_unless_explicitly_overridden() {
     let home = TempDir::new().expect("temporary home");
     let config_dir = home.path().join(".config/tau");
     std::fs::create_dir_all(&config_dir).expect("create config directory");
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"agents:
-  default_role: preview-default
+  enable: false
   role_groups:
     preview:
+      enable: true
       roles:
         preview-default:
           prompt_fragments:
@@ -699,9 +708,10 @@ fn print_skills_lists_only_effective_role_skills_in_markdown_and_json() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"agents:
-  default_role: preview-default
+  enable: false
   role_groups:
     preview:
+      enable: true
       roles:
         preview-default: {}
         preview-explicit: {}

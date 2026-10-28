@@ -1992,6 +1992,11 @@ impl Harness {
         agent_id: &tau_proto::AgentId,
         message: &str,
     ) {
+        if self.main_agent_id() == Some(agent_id) {
+            self.emit_info_important(&format!(
+                "session main agent `{agent_id}` is unavailable: {message}"
+            ));
+        }
         let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) else {
             return;
         };
@@ -2111,6 +2116,16 @@ impl Harness {
             .iter()
             .filter_map(|record| {
                 let source = match &record.event {
+                    // Retained main reviews remain explicit approval sources;
+                    // restart must not rerun a review decision automatically.
+                    Event::AgentMessageReceived(message)
+                        if matches!(
+                            message.peer_review,
+                            Some(tau_proto::PeerMessageReview::Pending { .. })
+                        ) =>
+                    {
+                        None
+                    }
                     Event::AgentMessageReceived(message) => {
                         Some(PendingMessageWakeSource::AgentMessageReceived {
                             durable_event_seq: record.seq,

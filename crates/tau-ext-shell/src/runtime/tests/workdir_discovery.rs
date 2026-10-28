@@ -147,6 +147,7 @@ fn workdir_discovery_scans_explicit_initial_and_committed_paths() {
         runtime
             .handle_event(
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    main: false,
                     session_id: session_id.clone(),
                     agent_id: agent_id.clone(),
                     agent_initialization_id: initialization_id.clone(),

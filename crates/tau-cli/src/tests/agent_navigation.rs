@@ -5,6 +5,66 @@ use crate::agent_navigation::AgentNavigation;
 use crate::chat::InputRoutingState;
 use crate::event_renderer::selection_intent::{EmptyUiTarget, SelectionIntent, UiTarget};
 
+/// Losing main's runtime must invalidate live navigation/status just as a cold
+/// attach's missing-runtime join does, without inventing a membership unload.
+#[test]
+fn unavailable_main_is_not_a_live_navigation_target() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+        parent_agent: None,
+        agent_id: agent_id("main"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent_id("main"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+        inner_turns_total: None,
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+        work_status: Default::default(),
+    }));
+    let navigation = renderer.agent_navigation();
+    assert!(
+        navigation
+            .lock()
+            .expect("navigation")
+            .is_live(&agent_id("main"))
+    );
+    renderer.handle(&Event::AgentRuntimeUnavailable(
+        tau_proto::AgentRuntimeUnavailable {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("main"),
+        },
+    ));
+    assert!(
+        !navigation
+            .lock()
+            .expect("navigation")
+            .is_live(&agent_id("main"))
+    );
+    assert!(
+        !renderer
+            .agent_completion_statuses()
+            .lock()
+            .expect("statuses")
+            .contains_key(&agent_id("main"))
+    );
+}
+
 /// Agent-trace help must advertise the compact-overview semantics and both
 /// default values so generated help cannot drift from parser behavior.
 #[test]
@@ -135,6 +195,7 @@ fn attach_boundary_selects_only_from_unclaimed_empty_state() {
     let mut renderer = marker_test_renderer(handle);
     let selected = renderer.current_agent_state();
     let boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        main_agent_id: None,
         session_id: test_session_id("s1"),
         error: Some("legacy agent journal is incompatible".to_owned()),
     });
@@ -177,6 +238,7 @@ fn attach_boundary_cas_preserves_newer_local_intent() {
         Arc::new(Mutex::new(HashSet::new())),
     );
     let boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        main_agent_id: None,
         session_id: test_session_id("s1"),
         error: None,
     });
@@ -811,6 +873,7 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
 
     renderer.handle_attach_agent_selection_socket_delivery(
         &Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: test_session_id("session-1"),
             error: None,
         }),
@@ -1880,6 +1943,7 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
     ));
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-sender-agent-recipient-agent")
                 .expect("test message id must satisfy its grammar"),
             sender_id: agent_id("sender-agent"),

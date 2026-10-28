@@ -589,6 +589,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "external_agent_message_auth",
         HarnessInputMessage::PeerSessionProbe(_) => "peer_session_probe",
+        HarnessInputMessage::UiEnsureMainAgent => "ui_ensure_main_agent",
     }
 }
 

@@ -7,21 +7,19 @@ Peer delivery spans runtime discovery, typed socket RPC and callback authenticat
 The harness-owned `message` tool accepts bare `&<session-id>` and the exact-agent
 form `[&]<session-id>/[@]<agent-id>`, where `&` and `@` are independently optional.
 A plain agent id remains local; a session-only address requires `&`. A bare address
-sends to the session, whose harness selects exactly one eligible loaded or
-pending receiving agent. Bare and exact authority are distinct protocol values.
-Session selection considers only live or pending instances of the single
-configured `inter_session.receiver.role`, prefers idle over running and
-least-recently-routed then agent id, and reuses busy eligible agents. If none
-exists and `receiver.auto_start` is enabled, Tau starts that role when its model
-is available. An omitted receiver, disabled auto-start, or unavailable model
-fails without spawn. The result reports the resolved recipient. Successful model
-tool results report only delivery status and that resolved recipient; they do
-not expose recipient selection or auto-start mechanics.
+sends to the session's optional canonical main. Bare and exact authority are
+distinct protocol values. Main is bound by session membership, not inferred from
+an agent's role, name, or lifecycle marker. On demand, the harness may create main
+without a prompt from the enabled role with the lowest effective `main_priority`;
+no matching-role worker substitutes for it. Missing or unavailable main fails
+closed without replacement.
+The identity and attachment contract is specified by
+[SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md).
 Target rejections report only a fixed `ExternalAgentMessageFailure`
 classification. In particular, a reached bare target with no available
 inter-session receiver reports that condition separately from a target that
 cannot be reached. The sender renders a compact fixed diagnostic that directs
-the caller to set `inter_session.receiver.role`, and never exposes arbitrary
+the caller to configure a main role, and never exposes arbitrary
 target-local errors.
 
 Remote routing uses cooperative same-UID Tau IPC. Callback correlation proves
@@ -60,20 +58,42 @@ Auto-start uses ordinary role/model/required-skill/tool-policy construction and
 inherits no remote ancestry, watch, cwd, or transcript. The created live endpoint
 is immediately eligible, so concurrent sends coalesce; no second endpoint is
 created merely because the first is busy.
-After durable creation and current-session membership setup, only that newly
-created bare peer-entrypoint endpoint receives the daemon-lifetime `active`
-navigation classification and its complete `agent.stats_updated` projection.
-Existing bare recipients, exact recipients, and every non-peer start retain
-their existing navigation behavior. Cold restore recomputes the normal default.
+After creating main on demand and establishing current-session membership, the
+harness assigns it the daemon-lifetime `active` navigation classification and
+publishes its complete `agent.stats_updated` projection. This receiving lifecycle
+applies whether UI or peer demand triggered creation. Existing recipients and
+starts outside that lifecycle retain their navigation behavior. Cold restore
+recomputes the normal default.
 Peer-created lifecycle purpose is embedded as reserved, non-inheritable metadata
 in the immutable harness-owned `AgentStarted` creation fact. The ordinary ordered
 creation path commits it before the receive can succeed, and interception cannot
 drop or rewrite that protected fact. Clients, extensions, and caller-supplied
 initial metadata cannot use the reserved key. Restore loads it before one-shot
 extension-query lifecycle classification.
-The first receive rechecks that the durable `AgentStarted` contains both the
-selected creation role and marker; missing creation persistence fails and cleans
-up the live reservation instead of acknowledging.
+The durable session binding, rather than the lifecycle marker, establishes main
+authority. An orphan creation before binding does not become main.
+
+Ordinary remote exact-worker input is reviewed by default. Callback authentication
+first binds the original exact worker request, including its body and sender
+notice. Only then may target-local `inter_session.review_direct_messages`
+redirect the receive to main, retaining the intended worker in typed metadata.
+Bare and exact-main messages, local exact messages, CLI input, watches, and control
+traffic do not take this path. Disabling review restores exact-worker delivery.
+Mainless sessions remain valid, but worker input with review enabled fails closed there.
+Reviewed delivery requires a sender protocol capable of representing the review
+disposition (major 16 or later); older peers fail before main creation/publication.
+The committed main receive and ACK report accepted-for-review, never worker
+delivery, and do not await model execution. The sender projection retains both
+the actual main and intended worker.
+
+Only the currently available bound main may release an immutable retained review
+by its owning journal and accepted event sequence. Release revalidates the original
+worker, admission, current main authority, tool ownership, and exact retained facts
+at commit. It cannot change sender, body, notices, or target. The worker receives
+original peer provenance plus separate approval metadata. A retained linked worker
+receipt is the only successful-release idempotency fact; there is no source-side
+consumed write. See
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
 After validation and endpoint selection, the target enqueues the exact
 `AgentMessageReceived` projection but does not acknowledge it. A bounded
@@ -109,10 +129,10 @@ resets the connection as specified by
 Delivery is best-effort at-least-once, not distributed exactly-once. A crash or
 transport loss after receive commit but before acknowledgement is indeterminate;
 retry may duplicate the receive occurrence and live model work. There is no cross-session WAL, restart resumption,
-or deduplication index. Crash ambiguity may duplicate prompts, agents, model work,
+or global deduplication index. Crash ambiguity may duplicate prompts, agents, model work,
 and spend. An ACK or provider effect can also escape after live acceptance and
 before worker persistence, then survive a crash that loses the journal fact.
-Immediately before receive commit, bare authority, creation-role
-membership, provider/model/skill availability, endpoint liveness, and runtime generation
-are revalidated. Authority loss reselects once; a second loss fails. Exact routes
-never redirect.
+Immediately before receive commit, the harness revalidates main authority when
+applicable, provider/model/skill availability, original intended-worker liveness,
+endpoint liveness, and runtime generation. Authority loss fails the request;
+the harness never selects a replacement main or worker.

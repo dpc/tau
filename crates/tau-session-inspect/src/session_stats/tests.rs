@@ -613,6 +613,7 @@ fn persisted_traversal_reports_missing_member_journal() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 

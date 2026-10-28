@@ -527,6 +527,7 @@ fn agent_watch_reports_structured_work_status() {
 #[test]
 fn agent_message_status_activation_class_covers_watch_prompt() {
     let make = |kind| tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: "message-1".parse().expect("message id"),
         sender_id: "sender".parse().expect("sender id"),
         sender_session_id: None,

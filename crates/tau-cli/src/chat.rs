@@ -1326,6 +1326,7 @@ pub(crate) fn run_chat(
     )?;
     let socket_reader_input = admission.reader;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "verified UI session admission");
+    send_frame(&writer, &HarnessInputMessage::UiEnsureMainAgent)?;
     send_frame(&writer, &crate::ui_client::chat_subscribe_message())?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
 
@@ -1341,6 +1342,7 @@ pub(crate) fn run_chat(
         shutdown,
         socket_reader_input,
         admission.harness_protocol_version,
+        startup_role.is_some(),
     )
 }
 
@@ -1358,6 +1360,7 @@ fn run_chat_session(
     shutdown: UiTransportShutdown,
     socket_reader_input: crate::ui_client::UiInputReader,
     harness_protocol_version: Option<tau_proto::ProtocolVersion>,
+    explicit_startup_role: bool,
 ) -> Result<(), CliError> {
     use tau_cli_term::{CommandCompletion, HighTerm};
 
@@ -1536,6 +1539,9 @@ fn run_chat_session(
     );
     renderer.set_cold_attach_redraw(cold_attach_redraw);
     renderer.set_started_session(!attach);
+    if explicit_startup_role {
+        renderer.claim_explicit_startup_role();
+    }
     renderer.set_harness_protocol_version(harness_protocol_version);
     renderer.set_startup_profile_selection(startup_profile);
     renderer.set_osc8_links(settings.osc8_links);

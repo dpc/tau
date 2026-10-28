@@ -106,6 +106,7 @@ fn prompt_terminated(id: &str) -> Event {
 
 fn message_sent(id: usize, payload: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse(format!("message-{id}"))
             .expect("test message id must satisfy its identifier grammar"),
         sender_id: AgentId::parse("agent-test").expect("agent id"),

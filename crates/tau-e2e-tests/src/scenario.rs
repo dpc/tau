@@ -55,6 +55,27 @@ pub struct ScenarioLaneV2 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScenarioActionV2 {
+    /// Invoke the production immutable-review release tool with a fixed source.
+    PeerReviewRelease {
+        /// Exact user prompt selecting this action.
+        user_text: String,
+        /// Exact call identity.
+        call_id: ToolCallId,
+        /// Retained source occurrence, seeded by the test driver.
+        reference: tau_proto::PeerMessageReviewReference,
+        /// Deliberately add a forbidden message override for schema coverage.
+        override_body: bool,
+    },
+    /// Validate the correlated production release result.
+    PeerReviewReleaseResult {
+        /// Exact call identity.
+        call_id: ToolCallId,
+        /// Whether schema or runtime authority must reject the call.
+        rejected: bool,
+    },
+    /// Verify original external provenance and separate approval in worker
+    /// input.
+    PeerReviewDelivered,
     /// Consume one exact live CLI receipt, optionally submitting its final
     /// reply.
     CliMessage {

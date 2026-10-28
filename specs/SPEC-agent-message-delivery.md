@@ -28,6 +28,42 @@ remote session, remote agent, and local CLI final-response recipient forms. The 
 `user` is unsupported and fails before routing or creating either durable
 projection.
 
+## Reviewed peer input and immutable release
+
+An authenticated exact-worker message may commit as a pending review in the
+session main's journal. `peer_review` identifies the intended worker; the actual
+recipient remains main. The sender projection and RPC result identify both and
+must describe acceptance for review, not worker delivery or promised approval.
+Only ordinary remote messages use this policy; local messages, exact-main input,
+watches, CLI input, and tool/control traffic retain their own contracts.
+
+A release reference is the main journal identity plus `durable_event_seq`.
+`message_id` is not a release identity: transport retries may create distinct
+review occurrences with identical logical IDs. Source lookup includes retained
+hidden branches and deferred entries, not just current provider context.
+Compaction or head selection does not consume or retarget a retained source.
+
+Only the session's currently available canonical main may release its source.
+Release derives all message facts from retained history and exposes no replacement
+sender, target, body, or notice arguments. Worker delivery preserves the original
+authenticated peer identities and notice snapshots, adding separate typed main
+approval metadata. Rendering keeps peer content inside the existing registered
+internal envelope; payload text cannot supply review or approval authority.
+
+The retained worker receive linked to this exact source is the sole completed
+release fact. Live append and cold replay reconstruct the same receipt index,
+independent of active branch selection. A retry with a receipt reports already
+delivered without another append. There is no source-consumed event, persisted
+second payload queue, automatic restart release, or model rerun for review.
+If the original worker's history is not loaded after restart, release fails
+until you load that worker; it does not open a foreign leased journal, revive a
+worker, claim non-delivery, or consume the source.
+
+Review and release inherit ordinary receive admission, interception validation,
+post-commit completion, and writeback durability. An append lost before durable
+writeback can lose a receipt even if a result escaped. Receipt idempotency depends
+on retained history; it does not guarantee global exactly-once delivery or inference.
+
 ## Local CLI messages
 
 An exact-session admitted local CLI connection can publish one recipient-side
@@ -261,10 +297,12 @@ exact suffix content.
 ## Replay, recovery, and cleanup
 
 Replay folds each canonical fact with the same sequence-aware placement and
-rendering. It rebuilds one immediately trigger-ready payload-free wake for each uncovered activating typed
-receive or canonical `message.*` occurrence; it does not recreate admission
-ownership, wait completion, watch fanout/edge, private reply authority, or peer
-retry. A marked uncertain ordinary dispatch with deferred activating input is
+rendering. Except for pending peer reviews, it rebuilds one immediately
+trigger-ready payload-free wake for each uncovered activating typed receive or
+canonical `message.*` occurrence. Pending peer reviews remain retained sources
+for explicit approval; replay does not rerun main for them. Replay does not
+recreate admission ownership, wait completion, watch fanout/edge, private reply
+authority, or peer retry. A marked uncertain ordinary dispatch with deferred activating input is
 superseded by durable `AgentPromptTerminated(Stale)` before that wake can run;
 Tau never resends the uncertain prompt. Without deferred activating input, the
 existing uncertain block remains.

@@ -171,6 +171,7 @@ fn cold_attach_compaction_queue_reconstructs_at_replay_boundary() {
         }
         renderer.handle_attach_agent_selection_socket_delivery(
             &Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+                main_agent_id: None,
                 session_id: test_session_id("s1"),
                 error: None,
             }),

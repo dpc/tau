@@ -28,7 +28,7 @@ Offer these topics:
 - initial setup with `tau init`, `tau provider add`, and the XDG config/state/runtime
   layout;
 - roles and role groups: model, effort, verbosity, tool policy, delegate catalog,
-  and `default_role`;
+  and an optional session main selected by role-only `main_priority` (lower wins);
 - reusable `agents.prompt_fragments` versus full `prompt_override` templates;
 - ordered, composable `profiles`, `default_profile`, `--profile`, and stable
   provider/model aliases for different projects;

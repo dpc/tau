@@ -1198,6 +1198,21 @@ impl<'a> InternalToolHost<'a> {
         )
     }
 
+    /// Release one immutable review as canonical main. Returns true only when a
+    /// retained worker receipt already records delivery; queued commits finish
+    /// the tool asynchronously.
+    pub fn release_peer_review(
+        &mut self,
+        conversation_id: &AgentId,
+        source: tau_proto::PeerMessageReviewReference,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: tau_proto::ToolType,
+    ) -> Result<bool, String> {
+        self.harness
+            .release_peer_review(conversation_id, source, call_id, tool_name, tool_type)
+    }
+
     /// Publish an agent-to-agent message from a conversation.
     pub fn publish_agent_message(
         &mut self,

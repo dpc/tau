@@ -307,6 +307,7 @@ fn protocol_io_detailed_meter_integrates_delivery_and_cumulative_accounting() {
     );
     let boundary = HarnessOutputMessage::deliver(Event::SessionReplayComplete(
         tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),

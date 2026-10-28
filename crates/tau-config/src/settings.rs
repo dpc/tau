@@ -1142,11 +1142,9 @@ pub struct HarnessSettings {
     /// ```
     pub extensions: HashMap<String, ExtensionEntry>,
 
-    /// Role selected on startup when no explicit runtime selection has been
-    /// made. If the configured role is missing, Tau warns and falls back to
-    /// the first role from the first non-empty `agents.role_groups` entry after
-    /// roles inside that group are sorted by role `order` and then role name.
-    pub default_role: Option<String>,
+    /// Explicit process startup selection transported by CLI `--role`, never a
+    /// configuration default or session-main designation.
+    pub startup_role: Option<String>,
 
     /// Harness-owned role defaults. Each role is a partial set of model
     /// settings; missing fields use provider/model fallbacks for the selected
@@ -1258,8 +1256,6 @@ struct AgentsSettings {
     /// and leaves the role's default presentation behavior in effect.
     #[serde(default = "agent_visible_default", deserialize_with = "present_option")]
     visible: Option<Option<bool>>,
-    #[serde(default)]
-    default_role: Option<String>,
 
     id_template: String,
     #[serde(default)]
@@ -1336,7 +1332,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             provider_cache_refresh: wire.provider_cache_refresh,
             tau_state_access: wire.tau_state_access,
             extensions: wire.extensions,
-            default_role: wire.agents.default_role,
+            startup_role: None,
             roles: HashMap::new(),
             role_groups: Vec::new(),
             prompt_fragments: wire.agents.prompt_fragments,
@@ -1358,8 +1354,8 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         settings.remove_disabled_roles();
         // The layered loader replays role sources with domain-specific merge
         // semantics after this generic deserialization step. Validate the
-        // receiver only after that replay has produced the final effective
-        // roles.
+        // main-role uniqueness only after that replay has produced the final
+        // effective roles.
         settings
             .validate_context_size_alerts()
             .map_err(D::Error::custom)?;
@@ -1606,12 +1602,9 @@ struct HarnessProfile {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfileInterSessionPolicy {
-    /// Bare-session receiver patch, or an explicit receiver disable.
-    #[serde(
-        deserialize_with = "present_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    receiver: Option<Option<HarnessProfileInterSessionReceiver>>,
+    /// Exact-worker peer review policy patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_direct_messages: Option<bool>,
     /// Outgoing advisory text patch, or an explicit clear.
     #[serde(
         deserialize_with = "present_option",
@@ -1638,25 +1631,10 @@ struct HarnessProfileInterSessionPolicy {
     deny_project_roots: Option<Option<Vec<crate::inter_session_policy::ProjectRootGlob>>>,
 }
 
-/// Field-wise receiver patch supported inside one selected profile.
-#[derive(Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-struct HarnessProfileInterSessionReceiver {
-    /// Effective enabled receiver role patch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    /// Receiver auto-start behavior patch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auto_start: Option<bool>,
-}
-
 /// The supported agent portion of one configuration profile.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfileAgentOverrides {
-    /// Startup role patch applied after base files and before CLI overrides.
-    #[serde(default, deserialize_with = "present_option")]
-    default_role: Option<Option<String>>,
     /// Default enablement patch applied to every role.
     #[serde(deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
@@ -2151,6 +2129,9 @@ fn agent_visible_default() -> Option<Option<bool>> {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct AgentRolePatch {
+    /// Role-only designation; never inherited from agent or group defaults.
+    #[serde(deserialize_with = "present_option")]
+    main_priority: Option<Option<u64>>,
     #[serde(deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
@@ -2203,6 +2184,7 @@ struct AgentRolePatch {
 impl RawRoleGroup {
     fn defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
+            main_priority: None,
             enable: self.enable,
             visible: self.visible,
             order: self.order,
@@ -2434,17 +2416,43 @@ impl HarnessSettings {
         Ok(())
     }
 
-    fn validate_inter_session_receiver(&self) -> Result<(), SettingsError> {
-        let Some(receiver) = &self.inter_session.receiver else {
+    /// Returns the lowest-numbered effective main role, without selecting an
+    /// instance. Effective settings validation rejects a tied minimum.
+    #[must_use]
+    pub fn main_role(&self) -> Option<&str> {
+        self.roles
+            .iter()
+            .filter_map(|(name, role)| role.main_priority.map(|priority| (name, priority)))
+            .min_by_key(|(_, priority)| *priority)
+            .map(|(name, _)| name.as_str())
+    }
+
+    fn validate_main_role(&self) -> Result<(), SettingsError> {
+        let Some(lowest) = self
+            .roles
+            .values()
+            .filter_map(|role| role.main_priority)
+            .min()
+        else {
             return Ok(());
         };
-        if self.roles.contains_key(&receiver.role) {
-            Ok(())
-        } else {
-            Err(SettingsError::UnknownInterSessionReceiverRole {
-                role: receiver.role.clone(),
+        let mut main_roles = self
+            .roles
+            .iter()
+            .filter_map(|(name, role)| {
+                (role.main_priority == Some(lowest)).then_some(name.as_str())
             })
+            .collect::<Vec<_>>();
+        if main_roles.len() > 1 {
+            main_roles.sort_unstable();
+            return Err(SettingsError::Config(config::ConfigError::Message(
+                format!(
+                    "lowest `main_priority` {lowest} is tied between effective roles: {}",
+                    main_roles.join(", ")
+                ),
+            )));
         }
+        Ok(())
     }
 
     fn validate_context_size_alerts(&self) -> Result<(), SettingsError> {
@@ -2900,6 +2908,15 @@ impl FromStr for HarnessConfigCliOverride {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentRole {
+    /// Role priority for lazy creation of the optional session-owned main
+    /// agent.
+    ///
+    /// Ordinary agents may use the same role without becoming main. This
+    /// field is role-only: lowest enabled effective number wins, a tied
+    /// minimum is an error, and zero is a valid candidate. None is not a
+    /// candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_priority: Option<u64>,
     /// Whether this role is part of the effective runtime role set. Defaults to
     /// enabled; set to `false` in a higher-precedence config layer to hide a
     /// built-in or lower-layer role without deleting the rest of its settings.
@@ -3664,6 +3681,9 @@ fn apply_context_size_alert_patches(
 
 impl AgentRole {
     fn apply_patch(&mut self, patch: &AgentRolePatch) {
+        if let Some(main_priority) = patch.main_priority {
+            self.main_priority = main_priority;
+        }
         if let Some(enable) = patch.enable {
             self.enable = enable;
         }
@@ -3795,11 +3815,6 @@ pub enum SettingsError {
         /// Later group that attempted to contain the same role.
         second_group: String,
     },
-    /// The configured inter-session receiver role is not enabled.
-    UnknownInterSessionReceiverRole {
-        /// Missing effective role name.
-        role: String,
-    },
     /// A command-line role override named a role absent from effective config.
     UnknownRoleCliOverride(String),
     /// The requested configuration profile is not present in effective files.
@@ -3848,9 +3863,6 @@ impl fmt::Display for SettingsError {
                 f,
                 "configuration profile `{profile}` changes unknown extension `{extension}`"
             ),
-            Self::UnknownInterSessionReceiverRole { role } => {
-                write!(f, "inter-session receiver role `{role}` is not enabled")
-            }
             Self::InvalidHarnessConfigCliOverride(message) => {
                 write!(f, "invalid harness config CLI override: {message}")
             }
@@ -3879,7 +3891,6 @@ impl std::error::Error for SettingsError {
         match self {
             Self::Config(source) => Some(source),
             Self::DuplicateGroupedRole { .. }
-            | Self::UnknownInterSessionReceiverRole { .. }
             | Self::UnknownRoleCliOverride(_)
             | Self::UnknownProfile(_)
             | Self::UnknownProfileExtension { .. }
@@ -4453,7 +4464,7 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     settings.context_size_alerts = role_settings.context_size_alerts;
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
-    settings.validate_inter_session_receiver()?;
+    settings.validate_main_role()?;
     resolve_model_references(&mut settings, &aliases.aliases)?;
     Ok(settings)
 }
@@ -4814,12 +4825,6 @@ fn profile_config_source(
         "extensions".to_owned(),
         serde_json::Value::Object(extensions),
     );
-    if let Some(default_role) = &profile.agents.default_role {
-        values.insert(
-            "agents".to_owned(),
-            serde_json::json!({ "default_role": default_role }),
-        );
-    }
     let value = serde_json::Value::Object(values);
     let yaml = serde_yaml_ng::to_string(&value).map_err(|error| {
         SettingsError::Config(config::ConfigError::Message(format!(

@@ -2687,6 +2687,7 @@ fn done_watched_agent_visibility_converges_with_runtime_catch_up() {
             cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
         });
         let done = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("done-status").expect("valid message ID"),
             sender_id: worker.clone(),
             sender_session_id: None,
@@ -3208,6 +3209,7 @@ fn cold_attach_suppresses_routine_snapshots_and_announces_session_once() {
     );
     renderer.handle_attach_replay_complete_socket_delivery(
         &tau_proto::Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: "s1".parse().expect("valid session id"),
             error: None,
         }),
@@ -3275,6 +3277,7 @@ fn fresh_first_agent_keeps_startup_scrollback_but_later_new_clears_it() {
     ));
     renderer.handle_attach_replay_complete_socket_delivery(
         &tau_proto::Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: "fresh-session".parse().expect("valid session id"),
             error: None,
         }),
@@ -3340,6 +3343,7 @@ fn attach_roster_survives_return_to_overview_without_agent_contamination() {
 
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::Event {
     tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
             .expect("test message id must satisfy the identifier grammar"),
         sender_id: agent_id(sender_id),
@@ -3359,6 +3363,7 @@ fn received_agent_message(
     message: &str,
 ) -> tau_proto::Event {
     tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse(format!(
             "received-{sender_id}-{recipient_id}"
         ))
@@ -4023,6 +4028,7 @@ fn peer_message_names_require_endpoint_authority() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.remember_agent_display_name(&agent_id("agent-b"), "local worker");
     let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse("peer-message")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("agent-a"),
@@ -4091,6 +4097,7 @@ fn watch_content_summaries_preserve_wording_with_names() {
     ];
     for (kind, expected) in cases {
         let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            review_recipient: None,
             message_id: tau_proto::AgentMessageId::parse(format!("watch-{kind:?}"))
                 .expect("test message id must satisfy the identifier grammar"),
             sender_id: agent_id("worker"),
@@ -4297,6 +4304,7 @@ fn watch_work_status_renders_all_reportable_states() {
         (tau_proto::AgentWorkStatusPhase::Waiting, "waiting", "⏳"),
     ] {
         let event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse(format!("status-{label}"))
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("worker"),
@@ -4353,6 +4361,7 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     ));
     let status_event = |message_id: &str, phase, title, initial| {
         tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse(message_id).expect("valid message ID"),
             sender_id: agent_id("worker"),
             sender_session_id: None,
@@ -4442,6 +4451,7 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
 fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
     let renderer = renderer_for_agent_id_tests();
     let provider = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("provider-live")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("worker"),
@@ -4480,6 +4490,7 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
         .expect("provider event has typed status")
         .initial = true;
     let long_wait = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("long-wait")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("worker"),
@@ -4604,6 +4615,7 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
 fn watch_work_status_visibly_escapes_structural_unicode() {
     let renderer = renderer_for_agent_id_tests();
     let event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("status-bidi")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("worker"),

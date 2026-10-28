@@ -3002,6 +3002,7 @@ fn standalone_accounting_restore_is_session_scoped_and_idempotent() {
         h.publish_event(
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
                     "init-{session}"
                 ))

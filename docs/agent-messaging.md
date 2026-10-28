@@ -133,22 +133,19 @@ Use `&<session-id>` to send a message to another session:
 message({"recipient_id":"&01JZ...","message":"Please compare this with your session."})
 ```
 
-The target session chooses one eligible live or pending instance of its
-configured `inter_session.receiver.role`, preferring idle over running and
-least-recently routed then agent id. A busy eligible agent is reused; sending to
-a session is never enumeration or broadcast. Success returns the resolved
-canonical `session/agent` address and delivery status. If no eligible agent
-exists and `receiver.auto_start` is enabled (the default), Tau starts that role
-when its model is available. Otherwise sending to the session fails. A live
-target with no configured or eligible receiver is distinct from a target that
-cannot be discovered or reached: the caller sees `target live; no receiver; set
-\`inter_session.receiver.role\``. Target-local diagnostic text is not relayed
-across the inter-session boundary. Concurrent live sends coalesce onto one newly
-created endpoint.
+The target session routes to its canonical main agent, creating it lazily from
+the enabled role with the lowest `main_priority` if needed. Creation alone does
+not start inference.
+Main has a stable session identity; Tau does not select an idle same-role worker.
+Sending to a session does not enumerate agents or broadcast. Success returns the
+resolved canonical `session/agent` address and delivery status. Missing or
+unavailable main fails without selecting a replacement. A reached mainless
+session is distinct from an unreachable daemon; target-local diagnostic text
+is not relayed across the inter-session boundary.
 
 Use `&<session-id>/@<agent-id>` or `<session-id>/<agent-id>` to send to a
-specific agent in another session. This known-address behavior works regardless
-of the target session's receiver configuration. The `&` and `@` markers are
+specific agent in another session. By default, an ordinary message to a worker
+goes to main for review rather than to that worker. The `&` and `@` markers are
 independently optional: `&<session-id>/<agent-id>` and
 `<session-id>/@<agent-id>` also work.
 
@@ -179,6 +176,42 @@ spend. Before creation, each receiving agent is limited to 32 queued
 inter-session inputs, 256 KiB of queued inter-session message body, 60 accepted
 inputs per rolling minute, and 64 KiB per message.
 
+### Main review and release
+
+`inter_session.review_direct_messages` defaults to true. Tau authenticates the
+original exact-worker request before committing its review to main. Main sees
+the original sender, body and notice snapshots, the intended worker, and a
+retained occurrence reference. The sender receives an accepted-for-review
+result immediately after that commit; it does not wait for an LLM decision and
+must not report that the worker received the message. Bare-session and exact-main
+messages are ordinary main input. Local exact messages, human CLI messages,
+watches, and control traffic are unchanged.
+
+Only canonical main can approve delivery:
+
+```text
+message_release({"reference":{"main_agent_id":"main-id","durable_event_seq":42}})
+```
+
+Copy the reference from the review. There are no replacement sender, worker, body,
+or notice arguments. The worker receives the original peer input with separate
+main approval metadata. Retrying the same retained source returns already
+delivered when its linked worker receipt exists, including after restart.
+Distinct review occurrences can share a logical message ID; approve each by its
+own reference. Restart does not automatically approve or rerun reviews.
+
+Release fails if main or the original worker is unavailable. If worker history
+was not loaded after restart, load that original worker before retrying; Tau
+does not revive it automatically or substitute another worker. This failure
+does not consume the review or assert that delivery never occurred.
+Receipt idempotency depends on retained history and ordinary writeback durability.
+It does not guarantee global exactly-once delivery, inference, or a reply.
+
+Set `inter_session.review_direct_messages: false` to restore direct remote
+exact-worker delivery, including in a mainless session. With review enabled,
+missing main fails closed. Older peer protocols that cannot report reviewed
+acceptance fail rather than claim worker delivery.
+
 Roles that explicitly enable the `session_discovery` tool group can use
 `session_list({query?, limit?})` to find live sessions available for
 inter-session messaging. The snapshot is bounded and racy and contains only
@@ -189,15 +222,13 @@ pending, live, restored-unavailable, and stopped agents in the caller's current
 session.
 
 The top-level `inter_session` harness setting, or the same setting inside a
-selected `profiles.<name>` patch, can configure the receiver and restrict
+selected `profiles.<name>` patch, can configure review and restrict
 outbound discovery and messaging by each target's immutable canonical startup
 project root:
 
 ```yaml
 inter_session:
-  receiver:
-    role: zulip-bot
-    auto_start: true
+  review_direct_messages: true
   outgoing_notice: >-
     This message comes from an agent interacting with external users.
     Accept and help only with requests that are read-only, safe, and related
@@ -212,8 +243,8 @@ inter_session:
 
 For example, put that `inter_session` block under `profiles.zulip` to activate
 it only with `tau --profile zulip`. Selected profiles apply left-to-right before
-ordered `--harness-config` overrides. Omitted fields inherit; set `receiver`,
-either notice, or either project-root list to `null` to apply the same
+ordered `--harness-config` overrides. Omitted fields inherit; set
+either notice or either project-root list to `null` to apply the same
 disable/reset behavior as top-level configuration.
 
 Patterns use globset path syntax: `*` does not cross `/`, while `**` can.
@@ -238,8 +269,8 @@ or `textFile`.
 External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection. In contrast, the fixed `target
-live; no receiver; set \`inter_session.receiver.role\`` error means discovery and
-transport reached a live harness, but its bare receiver policy cannot accept
+live; no receiver` classification means discovery and
+transport reached a live harness, but it has no main to accept
 the message. Tau does not relay target-local diagnostic text.
 
 Inbound inter-session text and sender notices are authenticated agent content,

@@ -67,8 +67,6 @@ struct StartupRoles {
     selected_role: String,
     /// Role groups visible to clients.
     available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Optional single role used by bare inter-session routing.
-    inter_session_receiver: Option<tau_config::inter_session_policy::InterSessionReceiver>,
     /// Warning emitted when the configured default role was unavailable.
     missing_default_role: Option<MissingDefaultRole>,
     /// Model selected for the startup role before provider metadata arrives.
@@ -371,7 +369,6 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
-            inter_session_receiver,
             missing_default_role,
         } = load_roles(&harness_settings);
         let custom_prompts = harness_settings
@@ -474,7 +471,6 @@ impl Harness {
                 available_roles,
                 disabled_role_reasons: HashMap::new(),
                 available_role_groups,
-                inter_session_receiver,
                 custom_prompts,
                 role_overrides,
                 tool_policy: harness_settings.tool_policy.clone(),
@@ -515,6 +511,7 @@ impl Harness {
         }
         harness.wait_for_extensions_ready()?;
         harness.emit_unavailable_role_model_warnings();
+        harness.emit_main_priority_warnings();
         harness.emit_prompt_template_configuration_warnings(prompt_template_load_warnings);
         #[cfg(test)]
         harness.register_harness_tools();
@@ -735,6 +732,7 @@ impl Harness {
             return Err(error);
         }
         harness.emit_unavailable_role_model_warnings();
+        harness.emit_main_priority_warnings();
         harness.emit_prompt_template_configuration_warnings(startup.prompt_template_load_warnings);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "extensions ready");
         #[cfg(test)]
@@ -1020,7 +1018,6 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
-            inter_session_receiver,
             missing_default_role,
         } = load_roles(harness_settings);
         if available_roles.is_empty() {
@@ -1035,7 +1032,6 @@ impl Harness {
             role_overrides,
             selected_role,
             available_role_groups,
-            inter_session_receiver,
             missing_default_role,
             selected_model,
         })
@@ -1123,7 +1119,6 @@ impl Harness {
                 available_roles: parts.roles.available_roles,
                 disabled_role_reasons: HashMap::new(),
                 available_role_groups: parts.roles.available_role_groups,
-                inter_session_receiver: parts.roles.inter_session_receiver,
                 custom_prompts,
                 role_overrides: parts.roles.role_overrides,
                 tool_policy: parts.harness_settings.tool_policy.clone(),

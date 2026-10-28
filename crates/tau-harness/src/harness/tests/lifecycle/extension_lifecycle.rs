@@ -2849,6 +2849,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("query-pending-message")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("manager").expect("sender id"),

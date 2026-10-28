@@ -288,6 +288,9 @@ pub struct PersistedSessionEvent {
 /// Folded membership view for one session.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionMembership {
+    /// Optional immutable identity, retained independently of runtime
+    /// readiness.
+    main_agent_id: Option<AgentId>,
     session_id: SessionId,
     loaded_agents: HashSet<AgentId>,
     next_event_seq: PersistedSessionEventSeq,
@@ -311,12 +314,14 @@ impl SessionMembership {
         events: &[PersistedSessionEvent],
     ) -> Result<Self, SessionStoreError> {
         let mut tree = Self {
+            main_agent_id: None,
             session_id: session_id.clone(),
             loaded_agents: HashSet::new(),
             next_event_seq: PersistedSessionEventSeq::new(0),
         };
         for record in events {
             validate_session_event(session_id.as_str(), &record.event)?;
+            tree.validate_transition(&record.event)?;
             tree.apply_event(&record.event);
             tree.next_event_seq = record.seq.next();
         }
@@ -327,6 +332,12 @@ impl SessionMembership {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Returns the retained session main identity, including while unavailable.
+    #[must_use]
+    pub fn main_agent_id(&self) -> Option<&AgentId> {
+        self.main_agent_id.as_ref()
     }
 
     /// Returns true when `agent_id` is currently loaded in this session.
@@ -360,6 +371,7 @@ impl SessionMembership {
     ) -> Result<(), SessionStoreError> {
         validate_ephemeral_membership_overlay(self.session_id.as_str(), events)?;
         for record in events {
+            self.validate_transition(&record.event)?;
             self.apply_event(&record.event);
         }
         Ok(())
@@ -373,9 +385,31 @@ impl SessionMembership {
         self.next_event_seq = self.next_event_seq.next();
     }
 
+    fn validate_transition(&self, event: &Event) -> Result<(), SessionStoreError> {
+        let invalid = match event {
+            Event::SessionAgentLoaded(loaded) if loaded.main => self
+                .main_agent_id
+                .as_ref()
+                .is_some_and(|main| main != &loaded.agent_id),
+            Event::SessionAgentUnloaded(unloaded) => {
+                self.main_agent_id.as_ref() == Some(&unloaded.agent_id)
+            }
+            _ => false,
+        };
+        if invalid {
+            return Err(SessionStoreError::InvalidEvent {
+                message: "the session main agent cannot be replaced or unloaded".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     fn apply_event(&mut self, event: &Event) {
         match event {
             Event::SessionAgentLoaded(loaded) if loaded.session_id == self.session_id => {
+                if loaded.main {
+                    self.main_agent_id = Some(loaded.agent_id.clone());
+                }
                 self.loaded_agents.insert(loaded.agent_id.clone());
             }
             Event::SessionAgentUnloaded(unloaded) if unloaded.session_id == self.session_id => {
@@ -665,6 +699,7 @@ impl SessionStore {
         let status = prepared.status;
         let membership = if fresh_runtime {
             SessionMembership {
+                main_agent_id: None,
                 session_id: session_id.clone(),
                 loaded_agents: HashSet::new(),
                 next_event_seq: PersistedSessionEventSeq::new(prepared.events.len() as u64),
@@ -874,6 +909,7 @@ impl SessionStore {
             .sessions
             .entry(sid.clone())
             .or_insert_with(|| SessionMembership::from_events(sid.clone(), &[]));
+        tree.validate_transition(&event)?;
         let seq = if retain_membership_overlay {
             PersistedSessionEventSeq::new(
                 self.ephemeral_membership_overlay
@@ -940,6 +976,7 @@ impl SessionStore {
                 PersistenceAdmissionError::NotPrepared,
             ))?;
         let seq = projection.membership.next_event_seq();
+        projection.membership.validate_transition(&event)?;
         let record = PersistedSessionEvent {
             seq,
             source,
@@ -1444,7 +1481,7 @@ fn validate_ephemeral_membership_overlay_event(
 ) -> Result<(), SessionStoreError> {
     validate_session_event(session_id, event)?;
     match event {
-        Event::SessionAgentLoaded(loaded) if loaded.ephemeral => Ok(()),
+        Event::SessionAgentLoaded(loaded) if loaded.ephemeral && !loaded.main => Ok(()),
         Event::SessionAgentLoaded(_) => Err(SessionStoreError::InvalidEvent {
             message: "process-local membership overlay requires ephemeral loaded agents".to_owned(),
         }),

@@ -1048,6 +1048,7 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    main: false,
                     agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                         .expect("test identifier must be valid"),
 
@@ -1164,6 +1165,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse("replay-agent-message")
                     .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("manager"),
@@ -1270,6 +1272,7 @@ fn member_agent_message_fact_uses_agent_journal() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -1480,6 +1483,7 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -1518,6 +1522,7 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             seq: tau_core::PersistedSessionEventSeq::new(2),
             source: None,
             event: Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -1565,6 +1570,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -1791,6 +1797,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -1890,6 +1897,7 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    main: false,
                     agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                         .expect("test identifier must be valid"),
 
@@ -1994,6 +2002,7 @@ fn seed_restored_tool_round_for_agent(
             session_id,
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -2104,6 +2113,7 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
             "main",
             None,
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse("during-open-tool-round")
                     .expect("message id"),
                 sender_id: tau_proto::AgentId::parse("sender").expect("sender"),
@@ -2360,6 +2370,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
                 crate::test_connection_id(HARNESS_CONNECTION_ID),
             )),
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -2380,6 +2391,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
                 crate::test_connection_id(HARNESS_CONNECTION_ID),
             )),
             Event::AgentMessageSent(tau_proto::AgentMessageSent {
+                review_recipient: None,
                 message_id: tau_proto::AgentMessageId::parse("test-message")
                     .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("agent-1"),
@@ -2899,6 +2911,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     h.publish_event(
         None,
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -3066,6 +3079,7 @@ fn replay_complete_boundaries_report_agent_log_errors() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -3799,6 +3813,10 @@ fn resumed_peer_messages_use_persisted_notice_snapshots() {
         |text: &str| tau_proto::InterSessionNotice::new(text.to_owned()).expect("valid notice");
     let recipient_id = {
         let mut h = echo_harness_for("s1", &sp).expect("start");
+        h.config
+            .accepted_harness_settings
+            .inter_session
+            .review_direct_messages = false;
         let cid = ensure_test_user_agent(&mut h);
         let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
         h.config
@@ -4247,6 +4265,7 @@ fn replay_emits_current_metadata_snapshot_and_selected_mutation_history() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    main: false,
                     agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                         .expect("test identifier must be valid"),
 

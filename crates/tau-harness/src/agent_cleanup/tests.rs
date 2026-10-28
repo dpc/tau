@@ -205,6 +205,7 @@ fn ever_loaded_session_reference_protects_unloaded_agent() {
             session_id.as_str(),
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("init")
                     .expect("initialization id"),
                 session_id: session_id.clone(),
@@ -432,6 +433,7 @@ fn candidate_rescan_catches_reference_added_after_coarse_scan() {
                         session_id.as_str(),
                         None,
                         Event::SessionAgentLoaded(SessionAgentLoaded {
+                            main: false,
                             agent_initialization_id: tau_proto::AgentInitializationId::parse(
                                 "late-init",
                             )
@@ -886,6 +888,7 @@ fn unreadable_session_manifest_aborts_agent_deletion() {
             session_id.as_str(),
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("init")
                     .expect("initialization id"),
                 session_id: session_id.clone(),

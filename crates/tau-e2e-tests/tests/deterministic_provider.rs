@@ -17,6 +17,8 @@ use tau_socket::SocketPeer;
 mod cli_message;
 #[path = "deterministic_provider/daemon_support.rs"]
 mod daemon_support;
+#[path = "deterministic_provider/peer_review.rs"]
+mod peer_review;
 #[path = "deterministic_provider/persistence_barrier.rs"]
 mod persistence_barrier;
 #[path = "deterministic_provider/session_restore.rs"]

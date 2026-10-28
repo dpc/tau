@@ -10,6 +10,7 @@ use super::*;
 #[test]
 fn external_message_admission_bytes_include_both_notice_snapshots() {
     let message = tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("notice-weight").expect("message id"),
         sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
         sender_session_id: Some(tau_proto::SessionId::parse("sender-session").expect("session id")),
@@ -101,9 +102,9 @@ fn external_message_rechecks_live_project_root_after_lookup() {
         );
     });
     let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        review_direct_messages: true,
         outgoing_notice: None,
         incoming_notice: None,
-        receiver: None,
         allow_project_roots: Some(vec![
             tau_config::inter_session_policy::ProjectRootGlob::new("/srv/allowed".to_owned())
                 .expect("allowed project-root glob"),

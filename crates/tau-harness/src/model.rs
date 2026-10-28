@@ -28,8 +28,6 @@ pub(crate) struct LoadedRoles {
     pub selected_role: String,
     /// Effective role groups used for UI navigation.
     pub role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Optional single role used by bare inter-session routing.
-    pub inter_session_receiver: Option<tau_config::inter_session_policy::InterSessionReceiver>,
     /// Missing configured default role warning to surface after startup.
     pub missing_default_role: Option<MissingDefaultRole>,
 }
@@ -41,7 +39,6 @@ pub(crate) fn load_roles(harness_settings: &HarnessSettings) -> LoadedRoles {
     let roles = harness_settings.roles.clone();
     let role_overrides = HashMap::new();
     let role_groups = role_groups_for_roles(&roles, &harness_settings.role_groups);
-    let inter_session_receiver = harness_settings.inter_session.receiver.clone();
     let (selected_role, missing_default_role) =
         select_startup_role(harness_settings, &roles, &role_groups);
     LoadedRoles {
@@ -49,7 +46,6 @@ pub(crate) fn load_roles(harness_settings: &HarnessSettings) -> LoadedRoles {
         role_overrides,
         selected_role,
         role_groups,
-        inter_session_receiver,
         missing_default_role,
     }
 }
@@ -60,7 +56,7 @@ fn select_startup_role(
     role_groups: &[tau_proto::HarnessRoleGroup],
 ) -> (String, Option<MissingDefaultRole>) {
     let fallback = first_grouped_role(role_groups).unwrap_or_else(|| fallback_role(roles));
-    let Some(default_role) = harness_settings.default_role.as_ref() else {
+    let Some(default_role) = harness_settings.startup_role.as_ref() else {
         return (fallback, None);
     };
     if roles.contains_key(default_role) {

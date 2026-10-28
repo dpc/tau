@@ -333,8 +333,12 @@ impl ColdAttachStager {
             };
         }
         if replay_complete {
+            let main_agent_id = match delivery.event.as_ref() {
+                Event::SessionReplayComplete(complete) => complete.main_agent_id.as_ref(),
+                _ => None,
+            };
             delivery.presentation = RendererPresentation::FinishAttach {
-                target: self.take_initial_attach_target(),
+                target: self.take_initial_attach_target(main_agent_id),
             };
             self.cold_attach_presentation = false;
             delivery.abandoned_shell_starts = self.finish_shell_reconciliation();
@@ -425,6 +429,12 @@ impl ColdAttachStager {
     /// Records existing replay/runtime facts used only to select an unambiguous
     /// attach target at the session replay boundary.
     fn observe_attach_agent_candidate(&mut self, event: &Event, charge: usize) {
+        if let Event::AgentRuntimeUnavailable(unavailable) = event
+            && let AttachSelection::Collecting { runtime_agents, .. } = &mut self.attach_selection
+        {
+            runtime_agents.remove(&unavailable.agent_id);
+            return;
+        }
         if matches!(
             event,
             Event::AgentReplayComplete(complete) if complete.error.is_some()
@@ -481,7 +491,10 @@ impl ColdAttachStager {
 
     /// Resolves fresh creation, one safe existing target, or explicit overview,
     /// then releases all attach-only candidate metadata.
-    fn take_initial_attach_target(&mut self) -> InitialAttachTarget {
+    fn take_initial_attach_target(
+        &mut self,
+        main_agent_id: Option<&tau_proto::AgentId>,
+    ) -> InitialAttachTarget {
         let state = std::mem::replace(&mut self.attach_selection, AttachSelection::Disabled);
         let AttachSelection::Collecting {
             successful_replays,
@@ -490,6 +503,14 @@ impl ColdAttachStager {
         else {
             return InitialAttachTarget::Overview;
         };
+        if let Some(main) = main_agent_id {
+            return if successful_replays.contains_key(main) && runtime_agents.contains_key(main) {
+                InitialAttachTarget::Agent(Box::new(main.clone()))
+            } else {
+                // An unavailable bound main must not silently select a worker.
+                InitialAttachTarget::Overview
+            };
+        }
         if successful_replays.is_empty() && runtime_agents.is_empty() {
             return InitialAttachTarget::FreshSession;
         }

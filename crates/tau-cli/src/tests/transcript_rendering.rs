@@ -1315,6 +1315,7 @@ fn agent_messages_render_all_recipients_as_history() {
 #[test]
 fn compact_mode_reprojects_agent_activity_without_content_leaks() {
     let status = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("compact-status").expect("test message id"),
         sender_id: agent_id("researcher-iDAo"),
         sender_session_id: None,
@@ -1337,6 +1338,7 @@ fn compact_mode_reprojects_agent_activity_without_content_leaks() {
         message: "COMPATIBILITY_STATUS_BODY_LEAK".to_owned(),
     });
     let message = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("compact-message").expect("test message id"),
         sender_id: agent_id("researcher-iDAo"),
         sender_session_id: None,
@@ -1481,6 +1483,7 @@ fn external_agent_messages_render_session_agent_labels() {
     ));
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-inbound-external")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("reviewer_33333333"),

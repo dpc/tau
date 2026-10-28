@@ -98,6 +98,7 @@ fn prepared_roster_agent(h: &mut Harness, name: &str) -> tau_proto::AgentId {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 session_id: "s1".parse().expect("session id"),
                 agent_id: agent.clone(),
                 agent_initialization_id: "history-init".parse().expect("init id"),
@@ -1334,6 +1335,7 @@ fn cold_history_lifecycle_pins_release_only_their_exact_owner() {
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let agent = prepared_roster_agent(&mut h, "pinned-history");
     let load = tau_proto::SessionAgentLoaded {
+        main: false,
         session_id: "s1".parse().expect("session"),
         agent_id: agent.clone(),
         agent_initialization_id: "current-init".parse().expect("initialization"),

@@ -51,6 +51,7 @@ fn lock_existing_session_rejects_deleted_target_without_recreation() {
 /// Builds one fold-changing durable membership fact.
 fn loaded_event(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentLoaded(SessionAgentLoaded {
+        main: false,
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
             .expect("test identifier must be valid"),
 
@@ -58,6 +59,70 @@ fn loaded_event(session_id: &str, agent_id: &str) -> Event {
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         ephemeral: false,
     })
+}
+
+/// Binding is optional, immutable and reconstructed from a retained membership
+/// prefix. An ordinary creation/load orphan does not become main implicitly.
+#[test]
+fn main_binding_survives_restart_and_rejects_replacement_or_unload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let main = AgentId::parse("main").expect("id");
+    let main_load = |id: &str| {
+        let Event::SessionAgentLoaded(mut loaded) = loaded_event("session-1", id) else {
+            unreachable!()
+        };
+        loaded.main = true;
+        Event::SessionAgentLoaded(loaded)
+    };
+    {
+        let mut store = SessionStore::open_fixture(temp.path()).expect("store");
+        store
+            .append_session_event("session-1", None, loaded_event("session-1", "orphan"))
+            .expect("orphan");
+        assert_eq!(
+            store.session("session-1").expect("session").main_agent_id(),
+            None
+        );
+        store
+            .append_session_event("session-1", None, main_load("main"))
+            .expect("bind");
+        assert_eq!(
+            store.session("session-1").expect("session").main_agent_id(),
+            Some(&main)
+        );
+        assert!(
+            store
+                .append_session_event("session-1", None, main_load("replacement"))
+                .is_err()
+        );
+        assert!(
+            store
+                .append_session_event(
+                    "session-1",
+                    None,
+                    Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+                        session_id: "session-1".parse().expect("id"),
+                        agent_id: main.clone()
+                    },)
+                )
+                .is_err()
+        );
+    }
+    let mut store = SessionStore::open_fixture(temp.path()).expect("reopen");
+    let membership = store
+        .lock_and_load_existing_session("session-1")
+        .expect("reload")
+        .expect("session");
+    assert_eq!(membership.main_agent_id(), Some(&main));
+    assert!(membership.contains_agent(&main));
+    assert!(
+        store
+            .append_session_event("session-1", None, main_load("replacement"))
+            .is_err()
+    );
+    store
+        .append_session_event("session-1", None, loaded_event("session-1", "worker"))
+        .expect("ordinary role reuse is independent");
 }
 
 /// Stable configured publisher provenance survives a real framed journal

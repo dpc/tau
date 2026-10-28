@@ -153,6 +153,13 @@ impl AgentTree {
                 charge = charge
                     .saturating_add(owned_value(message))
                     .saturating_add(self.context_allocation_charge(parent, false, &mut additions));
+                if let Some(tau_proto::PeerMessageReview::Released { source }) =
+                    &message.peer_review
+                {
+                    charge = charge
+                        .saturating_add(owned_value(source))
+                        .saturating_add(set_growth(&self.indexes.released_peer_reviews, 1));
+                }
             }
             Event::AgentCompactionTriggered(_) => additions.nodes = 1,
             Event::AgentCompacted(compacted) => {

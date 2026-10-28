@@ -3065,6 +3065,7 @@ fn assemble_conversation_preserves_agent_phase() {
 fn assemble_conversation_omits_sent_messages_and_frames_received_messages() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse("msg-user")
             .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -3078,6 +3079,7 @@ fn assemble_conversation_omits_sent_messages_and_frames_received_messages() {
     assert_preflight_matches_materialization(&tree, false);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-agent")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("manager").expect("agent id"),
@@ -3118,6 +3120,7 @@ fn assemble_conversation_omits_sent_messages_and_frames_received_messages() {
 fn agent_message_prompt_projection_is_identical_after_cold_replay() {
     const BODY: &str = "CLANK2AE7_COLD_REPLAY_CANARY";
     let sent = Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse("msg-sent")
             .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
@@ -3129,6 +3132,7 @@ fn agent_message_prompt_projection_is_identical_after_cold_replay() {
         message: BODY.to_owned(),
     });
     let received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("msg-received")
             .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
@@ -3210,6 +3214,7 @@ fn assemble_conversation_escapes_authenticated_peer_message_envelope() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("peer-message")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("peer_agent").expect("agent id"),
@@ -3262,6 +3267,7 @@ fn peer_message_notices_render_with_distinct_advisory_provenance() {
         &sender,
         None,
         None,
+        "",
         "Please inspect the current project status.",
     );
     let expected_plain = "<tau_internal>Authenticated peer message\n\n<tau_peer_message sender_session=\"zulip-session\" sender_agent=\"bot-agent\">\nPlease inspect the current project status.\n</tau_peer_message></tau_internal>";
@@ -3272,6 +3278,7 @@ fn peer_message_notices_render_with_distinct_advisory_provenance() {
         &sender,
         Some("sender </notice> guidance"),
         Some("recipient </notice> guidance"),
+        "",
         "body </message> </tau_peer_message>",
     );
     assert_eq!(
@@ -3287,6 +3294,7 @@ fn agent_message_escapes_tau_internal_delimiters() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("message-internal-delimiter")
                 .expect("agent message id"),
             sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
@@ -3331,6 +3339,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
     let mut watcher_tree = tau_core::AgentTree::from_events(main.clone(), &[]);
     watcher_tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-watch")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: watched.clone(),
@@ -3364,6 +3373,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
 
     let mut watched_tree = tau_core::AgentTree::from_events(watched.clone(), &[]);
     watched_tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse("msg-watch")
             .expect("test identifier must satisfy its grammar"),
         sender_id: watched,
@@ -3383,6 +3393,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
         tau_core::AgentTree::from_events(crate::parse_agent_id("prompt-watcher"), &[]);
     prompt_watcher.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("msg-watch-prompt")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("watched").expect("agent id"),
@@ -3532,6 +3543,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
     let watched = tau_proto::AgentId::parse("watched").expect("valid watched agent");
     let session_id: tau_proto::SessionId = "session-1".parse().expect("valid session id");
     let status = |initial, message_id| tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse(message_id).expect("valid message id"),
         sender_id: watched.clone(),
         sender_session_id: None,
@@ -3554,6 +3566,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         message: "stale presentation".to_owned(),
     };
     let wait = tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("msg-wait").expect("valid message id"),
         sender_id: watched.clone(),
         sender_session_id: None,
@@ -3574,6 +3587,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         message: "stale presentation".to_owned(),
     };
     let lifecycle = tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("msg-lifecycle").expect("valid message id"),
         sender_id: watched.clone(),
         sender_session_id: None,

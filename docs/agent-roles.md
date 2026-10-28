@@ -266,14 +266,11 @@ profiles:
               verbosity: high
 ```
 
-Profiles support the global `tau_state_access` default, `agents.default_role`,
+Profiles support the global `tau_state_access` default,
 agent defaults including `agents.enable`, global role metadata, role groups,
 role patches, and extension `enable` and arbitrary `config` patches. A profile
-can select a role it creates or enables.
-Its selected default supersedes the base setting, while a later
-`--harness-config agents.default_role=...` override supersedes the profile. Set
-`agents.default_role: null` in a profile to clear a base default and fall back
-to configured role order. Extension
+can designate a main role it creates or enables. Main validation runs after all
+selected profiles and final CLI layers establish the enabled role set. Extension
 config maps merge recursively; arrays, scalars, nested nulls, and type
 mismatches replace, while top-level `config: null` remains absent/no-op.
 Profiles do not expose per-instance outer extension fields or unrelated harness
@@ -285,7 +282,7 @@ set `TAU_PROFILE` before launching it to override that fallback. Normal
 `tau --profile NAME[,NAME...]` startup and render commands forward the resolved selection
 to their spawned harness daemon.
 
-Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `agents.default_role` selects the startup role; if omitted, Tau starts on the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
+Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. Ordinary work uses explicit `--role` or the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
 
 Named context-size alerts can be set globally, on a role group, or on one role.
 Their fields merge from broad to specific scope, so a role can customize or
@@ -420,35 +417,63 @@ a restart; only a delivery that already committed remains in history. Alerts
 only advise the model; they do not grant `compact` if role policy disables the
 tool.
 
-Bare inter-session messages use one session-level receiver role:
+### Optional session main
+
+Give candidate roles a nonnegative main priority; lower numbers win:
 
 ```yaml
-inter_session:
-  receiver:
-    role: coordinator
-    # auto_start: true
+agents:
+  role_groups:
+    coordination:
+      roles:
+        coordinator:
+          main_priority: 100
+    bots:
+      roles:
+        project-bot:
+          main_priority: 10
 ```
 
-`role` must name an enabled effective role. `auto_start` defaults to true; set
-it to false to accept bare messages only while an instance of that role is
-already live. Omitting `receiver`, or setting it to `null` in a later layer,
-disables bare-session addressing. Exact agent addresses remain available.
-The same block may be nested under `profiles.<name>.inter_session`; receiver
-validation runs only after all selected profiles and final CLI layers establish
-the effective enabled role set.
+`main_priority` belongs only on a role, not agent/group defaults. After all
+overlays, the enabled role with the lowest effective number wins. Zero is valid.
+An absent or null effective value means no candidate. In an overlay, omission
+keeps the earlier value, while explicit null clears it. Later layers replace a
+role's value rather than adding to it or taking a minimum.
+Ties at the winning minimum are configuration errors; every tied nonwinning
+priority group gets a startup warning but does not prevent startup.
+The example selects the bot when enabled and the coordinator otherwise.
+An unavailable winning role fails rather than falling back.
+Ordinary workers may reuse either role without becoming main. No designation
+is required; old mainless sessions remain valid and resumable.
 
-Live routing keeps idle/least-recently-routed fairness across eligible instances
-of the configured role. If none is live and auto-start is enabled, Tau starts
-one when that role's model is available. The new endpoint uses the role's normal
-model, skill, prompt, and tool policy and does not inherit the remote sender's
-parent, cwd, transcript, or watches. Busy eligible receivers are reused instead
-of creating more agents. The removed per-role receiver keys and superseded flat
-receiver schema are not accepted.
+Normal UI create/attach and bare peer input request one prompt-free main on demand.
+The harness binds its ID in session membership, preserving it across restart and
+configuration changes. Creation alone does not start inference. Ordinary unload
+cannot remove main, and the harness cannot replace it when unavailable. UI selection
+stays local to each attachment: explicit selection or creation wins over delayed
+main discovery.
+Explicit `--role` starts ordinary work separately; bootstrap and explicit-role
+stdin keep their usual behavior.
+
+Bare peer input goes to main. Ordinary remote exact-worker input goes to main
+for review by default; set `inter_session.review_direct_messages: false` for
+direct worker delivery. See [agent messaging](agent-messaging.md).
+
+#### Configuration migration
+
+Remove `agents.default_role` and `inter_session.receiver` (including `role` and
+`auto_start`); these retired keys now fail unknown-field validation. Put
+`main_priority` on candidate roles instead. There is no role-pool or auto-start
+switch: main is optional and created on demand. For ordinary-role selection use
+`--role` or role/group ordering, not main designation. Profiles can replace or
+clear role priorities; an existing bound main is never replaced by a new winner.
+The unshipped boolean `main` role field is not accepted.
+See [the migration handoff](main-agent-migration.md) for Nix-generated config
+and shared SDK updates.
 
 ```json5
 {
   agents: {
-    default_role: "engineer",
     effort: 0.5,
     role_groups: {
       engineer: {
@@ -509,7 +534,7 @@ still fails closed.
 Global harness policy is configured under `tool_policy`. Set `default_shell_tool_style` to `codex`, `edit`, or `replace` to choose the apply-patch, line-coordinate, or exact-text implementation. Missing, null, or whitespace-only values select exact-text `replace` except for ChatGPT/Codex models, which select `apply_patch`. Both non-Codex implementations are provider-visible as `edit`; public named enables and allow-lists retain the selected style rather than exposing their distinct backing identities. Rules under `tool_policy.rules` are keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:workdir`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:exec:shell_command`, `shell:workdir`, and `shell:lock`; it separately enables the provider-independent `artifact:read:image` consumer. Image-producing tools remain independently gated by the exact provider route modalities. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 
 Tau ships built-in `engineer-junior`, `engineer`, and `engineer-senior` roles,
-with `agents.default_role: engineer`. `engineer-junior` uses lower reasoning
+without a main designation. `engineer-junior` uses lower reasoning
 for straightforward engineering work, `engineer` uses balanced
 individual-contributor defaults, and `engineer-senior` is the
 higher-reasoning engineering variant. Their built-in shared effort is 0.5,
@@ -590,7 +615,7 @@ The `<role>` argument completes existing roles, but any new name can be used to 
 
 `:role <role> delete` removes the runtime role override. It does not edit `agents.role_groups` from configuration; built-in or configured roles come back on the next harness start.
 
-Runtime role changes are not persisted. Startup is controlled by `agents.default_role` and `agents.role_groups` order, and durable role changes should be made in `harness.yaml`.
+Runtime role changes are not persisted. Ordinary startup selection uses explicit `--role` and `agents.role_groups` order; normal UI demand uses optional main identity. Make durable role changes in `harness.yaml`.
 
 Prompt fragment priorities sort ascending. Use priorities below `100` for role/persona instructions that should appear before generated context sections such as skills and AGENTS.md. Use high priorities for epilogue context; Tau's built-in current-working-directory fragment uses `900` so it stays at the end of the prompt.
 ## Compaction tool policy

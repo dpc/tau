@@ -346,6 +346,7 @@ fn expected_rendered_color(color: vt100::Color) -> vt100::Color {
 
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
             .expect("test message id must satisfy the identifier grammar"),
         sender_id: agent_id(sender_id),
@@ -365,6 +366,7 @@ fn external_agent_message(
     message: &str,
 ) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        review_recipient: None,
         message_id: tau_proto::AgentMessageId::parse(format!(
             "msg-{sender_id}-{session_id}-{recipient}"
         ))

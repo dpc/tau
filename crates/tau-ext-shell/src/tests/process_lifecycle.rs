@@ -471,6 +471,7 @@ fn user_shell_context_modes_enforce_the_same_allowlist() {
     let target = discover_shell_endpoint(&mut reader, &mut writer);
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             session_id: "session-1".parse().expect("session"),
             agent_id: agent_id.clone(),
             ephemeral: false,

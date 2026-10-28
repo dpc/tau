@@ -33,11 +33,11 @@ fn register_bot_tool(h: &mut Harness) {
 /// Write a role requirement through the public configuration schema.
 fn write_bot_config(state: &Path, selected: bool) {
     std::fs::create_dir_all(state.join("config")).expect("config directory");
-    let selection = if selected { "default_role: bot" } else { "" };
+    let selection = if selected { "enable: false" } else { "" };
     std::fs::write(
         state.join("config/harness.yaml"),
         format!(
-            "agents:\n  {selection}\n  role_groups:\n    bots:\n      roles:\n        bot:\n          required_tools: [zulip_register]\n"
+            "agents:\n  {selection}\n  role_groups:\n    bots:\n      enable: true\n      roles:\n        bot:\n          required_tools: [zulip_register]\n"
         ),
     )
     .expect("bot config");

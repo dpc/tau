@@ -777,20 +777,22 @@ impl DeterministicFixture {
                 }
             }
             serde_json::json!({
-                "default_role": "deterministic-main",
+                "enable": false,
                 "id_template": "main",
                 "role_groups": {
                     "e2e": {
+                        "enable": true,
                         "roles": roles
                     }
                 }
             })
         } else {
             serde_json::json!({
-                "default_role": "deterministic-e2e",
+                "enable": false,
                 "id_template": "main",
                 "role_groups": {
                     "e2e": {
+                        "enable": true,
                         "roles": {
                             "deterministic-e2e": {
                                 "model": "fake/test",
@@ -1005,7 +1007,7 @@ impl DeterministicFixture {
         )?)?;
         let agents = &config["agents"];
         let roles = &agents["role_groups"]["e2e"]["roles"];
-        if agents["default_role"] != "deterministic-main"
+        if agents["enable"] != false
             || agents["id_template"] != "main"
             || roles.as_object().is_none_or(|roles| roles.len() != 3)
             || roles["deterministic-main"]["model"] != "fake/test"
@@ -1038,7 +1040,7 @@ impl DeterministicFixture {
         let agents = &config["agents"];
         let roles = &agents["role_groups"]["e2e"]["roles"];
         let extensions = &config["extensions"];
-        if agents["default_role"] != "deterministic-main"
+        if agents["enable"] != false
             || agents["id_template"] != "main"
             || roles.as_object().is_none_or(|roles| roles.len() != 2)
             || roles["deterministic-main"]["model"] != "fake/test"
@@ -1068,7 +1070,7 @@ impl DeterministicFixture {
         let agents = &config["agents"];
         let roles = &agents["role_groups"]["e2e"]["roles"];
         let extensions = &config["extensions"];
-        if agents["default_role"] != "deterministic-main"
+        if agents["enable"] != false
             || agents["id_template"] != "main"
             || roles.as_object().is_none_or(|roles| roles.len() != 4)
             || roles["deterministic-main"]["model"] != "fake/test"
@@ -1113,7 +1115,7 @@ impl DeterministicFixture {
         )?)?;
         let agents = &config["agents"];
         let roles = &agents["role_groups"]["e2e"]["roles"];
-        if agents["default_role"] != "deterministic-main"
+        if agents["enable"] != false
             || agents["id_template"] != "main"
             || roles.as_object().is_none_or(|roles| roles.len() != 2)
             || roles["deterministic-main"]["model"] != "fake/test"

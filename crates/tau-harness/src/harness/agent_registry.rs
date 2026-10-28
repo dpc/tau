@@ -1824,9 +1824,6 @@ impl Harness {
             self.peer_messaging
                 .peer_input_rate
                 .remove(&unloading_agent_id_proto);
-            self.peer_messaging
-                .uncommitted_peer_auto_starts
-                .remove(&unloading_agent_id_proto);
             let staged_request_keys = self
                 .prompt_coordination
                 .compaction_runtime
@@ -1919,6 +1916,7 @@ impl Harness {
             return;
         };
         self.cancel_agent_synchronized_publications(cid);
+        let retiring_main = self.main_agent_id() == Some(&agent_id);
         if !self.unload_agent_from_session_if_loaded(&session_id, &agent_id) {
             let reason = self
                 .agent_runtime
@@ -1941,12 +1939,31 @@ impl Harness {
             self.agent_runtime
                 .agent_registry
                 .stopped_ids
-                .insert(agent_id);
+                .insert(agent_id.clone());
             self.runtime_io
                 .publication
                 .capacity_rejected_activations
                 .remove(cid);
             self.agent_runtime.agent_registry.agents.remove(cid);
+            if retiring_main {
+                self.agent_runtime
+                    .agent_registry
+                    .session_loaded
+                    .remove(&agent_id);
+                self.prompt_coordination
+                    .prompt_runtime
+                    .shown_tool_failure_examples
+                    .retain(|(owner, _, _)| owner != cid);
+                self.discard_input_wait_for(cid);
+                self.evict_eligible_history();
+                self.publish_event(
+                    None,
+                    Event::AgentRuntimeUnavailable(tau_proto::AgentRuntimeUnavailable {
+                        session_id,
+                        agent_id,
+                    }),
+                );
+            }
         }
     }
 
@@ -1960,6 +1977,14 @@ impl Harness {
             return false;
         }
         let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
+        if self.main_agent_id() == Some(&agent_id_proto) {
+            // Main membership outlives an unavailable runtime. The caller has
+            // already settled prompt/accounting ownership; let its runtime-only
+            // retirement branch finish instead of attempting a forbidden
+            // unload.
+            self.retire_unavailable_main_context(&agent_id_proto);
+            return false;
+        }
         let already_loaded = self
             .agent_runtime
             .agent_registry
@@ -2686,6 +2711,7 @@ impl Harness {
                 },
             );
         let loaded = tau_proto::SessionAgentLoaded {
+            main: self.is_main_agent_load(agent_id),
             session_id: self.session_runtime.current_session_id.clone(),
             agent_id: agent_id.clone(),
             agent_initialization_id,

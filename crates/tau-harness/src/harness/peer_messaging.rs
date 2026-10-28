@@ -39,17 +39,11 @@ pub(super) struct PeerMessagingState {
         HashMap<tau_proto::AgentMessageId, PendingExternalReceiveAck>,
     /// Rolling accepted-input timestamps for each concrete peer endpoint.
     pub(super) peer_input_rate: HashMap<tau_proto::AgentId, VecDeque<std::time::Instant>>,
-    /// Auto-started endpoints awaiting their first committed peer input.
-    pub(super) uncommitted_peer_auto_starts: HashSet<tau_proto::AgentId>,
     /// Weak cancellation handles for outbound peer I/O in the active session.
     pub(super) peer_io_cancellations: Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>,
     /// Inbound callback cancellation handles grouped by owning socket.
     pub(super) inbound_peer_io_cancellations:
         HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>>,
-    /// Monotonic event-loop clock used for fair peer selection.
-    pub(super) peer_route_clock: u64,
-    /// Most recent selection clock for each concrete peer agent.
-    pub(super) peer_last_routed: HashMap<String, u64>,
 }
 
 pub(crate) const EXTERNAL_AGENT_MESSAGE_CLIENT_NAME: &str = "tau-external-agent-message";
@@ -88,9 +82,6 @@ pub(crate) struct PendingExternalReceiveAck {
     pub(crate) canceled: bool,
     /// Whether resolving this delivery created its recipient.
     pub(crate) started: bool,
-    /// Whether commit-time bare-route invalidation already consumed its one
-    /// permitted reselection.
-    pub(crate) reselect_attempted: bool,
     /// Rolling-rate admission to release if this receive never commits.
     pub(crate) rate_admitted_at: std::time::Instant,
     /// Completion released by the receive projection's commit hook.
@@ -99,6 +90,17 @@ pub(crate) struct PendingExternalReceiveAck {
 
 /// Live-only completion waiting for one exact peer receive commit.
 pub(crate) enum PendingPeerReceiveCompletion {
+    /// Main's immutable approval, completed only by the worker receipt commit.
+    Release {
+        /// Conversation whose live tool invocation authorized the release.
+        conversation_id: AgentId,
+        /// Tool call awaiting the linked receipt.
+        call_id: ToolCallId,
+        /// Visible tool name.
+        tool_name: ToolName,
+        /// Declared tool type.
+        tool_type: tau_proto::ToolType,
+    },
     /// Exact-session local CLI delivery acknowledgement, without a sender fact.
     Cli {
         /// Caller connection owning this delivery and optional reply endpoint.

@@ -15,6 +15,7 @@ fn append_load(store: &mut SessionStore, session: &SessionId, agent: &str) {
             session.as_str(),
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
                     "init-{agent}"
                 ))

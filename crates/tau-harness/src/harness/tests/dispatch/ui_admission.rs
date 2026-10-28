@@ -388,7 +388,7 @@ fn bootstrap_prompt_exact_content_and_role_survive_cold_replay() {
         tau_proto::UiCreateAgent {
             request_id: request_id.to_owned(),
             session_id: h.session_runtime.current_session_id.clone(),
-            role: h.config.selected_role.clone(),
+            role: "engineer".to_owned(),
             model_override: None,
             effort_override: None,
             metadata: Vec::new(),

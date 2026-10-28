@@ -3,6 +3,7 @@ use super::*;
 fn boundary(session: &str, error: Option<&str>, replay: bool) -> HarnessOutputMessage {
     let mut delivery = tau_proto::EventDelivery::direct(Event::SessionReplayComplete(
         tau_proto::SessionReplayComplete {
+            main_agent_id: None,
             session_id: session.parse().expect("session"),
             error: error.map(str::to_owned),
         },

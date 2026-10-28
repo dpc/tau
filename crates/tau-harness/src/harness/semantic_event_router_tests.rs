@@ -681,6 +681,7 @@ fn inverted_wire_metadata_preserves_persistence_exceptions() {
 #[test]
 fn session_membership_events_route_to_session_log() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
+        main: false,
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
             .expect("test identifier must be valid"),
 

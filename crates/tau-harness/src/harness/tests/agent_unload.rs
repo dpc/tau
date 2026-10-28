@@ -14,6 +14,7 @@ fn request(agent_id: tau_proto::AgentId) -> tau_proto::UnloadSessionAgent {
 
 fn received_event(recipient_id: tau_proto::AgentId) -> Event {
     Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("unload-race-message").expect("message id"),
         sender_id: crate::parse_agent_id("sender"),
         sender_session_id: None,

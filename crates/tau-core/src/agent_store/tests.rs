@@ -2041,6 +2041,7 @@ fn strict_replay_rejects_framed_record_with_malformed_watch_work_status() {
         seq: PersistedAgentEventSeq::new(1),
         source: None,
         event: Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("message-1").expect("message id"),
             sender_id: AgentId::parse("watched-agent").expect("sender id"),
             sender_session_id: None,
@@ -2099,6 +2100,7 @@ fn strict_replay_rejects_framed_record_with_malformed_watch_work_status() {
 /// Builds a canonical uncertainty report without a retained task title.
 fn unknown_work_status_event(agent_id: &AgentId) -> Event {
     Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        peer_review: None,
         message_id: tau_proto::AgentMessageId::parse("unknown-work-status").expect("message id"),
         sender_id: AgentId::parse("watched-agent").expect("sender id"),
         sender_session_id: None,

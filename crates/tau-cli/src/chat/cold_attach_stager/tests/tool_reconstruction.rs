@@ -51,6 +51,7 @@ fn session_started() -> Event {
 /// Builds current membership for the transcript-owning fixture agent.
 fn agent_loaded() -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        main: false,
         session_id: "session-1".parse().expect("valid session id"),
         agent_id: "agent-1".parse().expect("valid agent id"),
         agent_initialization_id: "fixture-init".parse().expect("valid initialization id"),

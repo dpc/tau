@@ -1619,6 +1619,7 @@ fn render_peer_agent_message(
     sender_id: &tau_proto::AgentId,
     sender_notice: Option<&str>,
     recipient_notice: Option<&str>,
+    review_annotation: &str,
     message: &str,
 ) -> String {
     if sender_notice.is_none() && recipient_notice.is_none() {
@@ -1628,7 +1629,7 @@ fn render_peer_agent_message(
             PEER_MESSAGE_CLOSE_VISIBLE,
         );
         return crate::internal_envelope::frame(&format!(
-            "Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
+            "Authenticated peer message\n{review_annotation}\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
             xml_escape(sender_session_id.as_str()),
             xml_escape(sender_id.as_str()),
             body
@@ -1660,7 +1661,7 @@ fn render_peer_agent_message(
         PEER_MESSAGE_CLOSE_VISIBLE,
     );
     crate::internal_envelope::frame(&format!(
-        "Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
+        "Authenticated peer message\n{review_annotation}\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
         xml_escape(sender_session_id.as_str()),
         xml_escape(sender_id.as_str()),
         body
@@ -1824,7 +1825,7 @@ fn assemble_prompt_context_window(
                 ));
             }
             AgentEntry::AgentMessage {
-                durable_event_seq: _,
+                durable_event_seq,
                 message_id: _,
                 direction,
                 sender_id,
@@ -1838,6 +1839,7 @@ fn assemble_prompt_context_window(
                 watch_lifecycle,
                 sender_notice,
                 recipient_notice,
+                peer_review,
                 message,
             } => match kind {
                 tau_proto::AgentMessageKind::Message => {
@@ -1851,6 +1853,22 @@ fn assemble_prompt_context_window(
                         continue;
                     }
                     contains_payload_envelope_provenance_projection = true;
+                    let review_annotation = match peer_review {
+                        Some(tau_proto::PeerMessageReview::Pending { intended_recipient }) => {
+                            let reference = serde_json::json!({
+                                "main_agent_id": tree.agent_id(),
+                                "durable_event_seq": durable_event_seq.get(),
+                            });
+                            format!(
+                                "Accepted for main review only; intended worker `{intended_recipient}` has not received this message. To approve immutable delivery, call message_release with reference {reference}. Approval cannot edit the original sender, target, body, or notices.\n"
+                            )
+                        }
+                        Some(tau_proto::PeerMessageReview::Released { source }) => format!(
+                            "Approved by session main `{}` from retained review occurrence {}. The sender and content below remain the original peer's, not main's.\n",
+                            source.main_agent_id, source.durable_event_seq,
+                        ),
+                        None => String::new(),
+                    };
                     let message_text = if let Some(origin) = cli_origin {
                         let policy = match origin {
                             tau_proto::CliMessageOrigin::OneWay =>
@@ -1870,6 +1888,7 @@ fn assemble_prompt_context_window(
                                 sender_id,
                                 sender_notice.as_deref(),
                                 recipient_notice.as_deref(),
+                                &review_annotation,
                                 message,
                             ),
                             None => {

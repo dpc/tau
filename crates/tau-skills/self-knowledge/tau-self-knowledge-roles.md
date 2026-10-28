@@ -7,8 +7,19 @@ advertise: false
 # Roles and effective permissions
 
 Configure persistent roles in `~/.config/tau/harness.yaml` under
-`agents.role_groups.<group>.roles.<role>`; set `agents.default_role` to choose
-the startup role. Global `agents` settings apply first, then group defaults,
+`agents.role_groups.<group>.roles.<role>`. Optional `main_priority` selects the
+enabled role with the lowest effective nonnegative number (bot 10, coordinator
+100). Zero is valid; an absent or null effective value means no candidate.
+Overlays replace values. Winning ties are configuration errors; each nonwinning
+tied group produces a startup warning.
+An unavailable winner fails without fallback. This role-only field does not
+inherit from defaults or prevent ordinary workers from using the role. Main's
+session-bound ID survives restart and changed priorities. Normal UI demand
+defaults to main, while explicit `--role` starts separate ordinary work and
+explicit attachment selection wins. Without
+main, ordinary startup uses role/group order. The retired `agents.default_role`
+and `inter_session.receiver` keys are rejected.
+Global `agents` settings apply first, then group defaults,
 then role settings. Role names are globally unique; a role can set its model,
 effort, prompts, required skills, and tool policy. The effective tool surface
 also depends on extension defaults and harness `tool_policy.rules` before role

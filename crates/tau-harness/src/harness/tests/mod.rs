@@ -96,14 +96,18 @@ enum TestMessage {
     UiQuitResult(tau_proto::UiQuitResult),
 }
 
-/// Configure deterministic receiver authority directly for focused harness
-/// tests that do not load user role configuration.
-fn configure_inter_session_receiver(harness: &mut Harness, role: &str, auto_start: bool) {
-    harness.config.inter_session_receiver =
-        Some(tau_config::inter_session_policy::InterSessionReceiver {
-            role: role.to_owned(),
-            auto_start,
-        });
+/// Designate main in the accepted role snapshot for focused routing fixtures.
+fn configure_main_role(harness: &mut Harness, role: &str) {
+    if let Some(configured) = harness.config.available_roles.get(role) {
+        harness
+            .config
+            .accepted_harness_settings
+            .roles
+            .insert(role.to_owned(), configured.clone());
+    }
+    for (name, configured) in &mut harness.config.accepted_harness_settings.roles {
+        configured.main_priority = (name == role).then_some(10);
+    }
 }
 
 impl TestProtocolItem {
@@ -1714,9 +1718,10 @@ fn provider_harness_ignores_ambient_startup_environment_child() {
         config_dir.join("harness.yaml"),
         r#"
 agents:
-  default_role: fixture
+  enable: false
   role_groups:
     fixture:
+      enable: true
       roles:
         fixture: {}
 "#,
@@ -2807,6 +2812,7 @@ mod idle_session;
 mod image_admission;
 mod interception;
 mod lifecycle;
+mod main_agent;
 mod mode;
 mod model;
 mod protocol_items;

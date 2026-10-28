@@ -221,6 +221,9 @@ impl Harness {
     /// Read admission failures use the existing initialization/start failure
     /// lifecycle rather than allowing ungated dispatch or inventing a retry.
     pub(super) fn fail_history_load(&mut self, load: &HistoryLoad, message: &str) {
+        if load.loaded.main {
+            self.fail_ui_main_demands(message);
+        }
         if self
             .prompt_coordination
             .context_discovery

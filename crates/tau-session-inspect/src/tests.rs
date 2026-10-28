@@ -2129,6 +2129,7 @@ fn session_list_isolates_invalid_session_journals() {
                 session_id,
                 None,
                 Event::SessionAgentLoaded(SessionAgentLoaded {
+                    main: false,
                     agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                         .expect("test identifier must be valid"),
 
@@ -2149,6 +2150,7 @@ fn session_list_isolates_invalid_session_journals() {
             seq: tau_core::PersistedSessionEventSeq::new(5),
             source: None,
             event: Event::SessionAgentLoaded(SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
                 session_id: SessionId::parse("invalid")
@@ -2194,6 +2196,7 @@ fn session_show_ignores_incompatible_unrelated_session_journal() {
             "target",
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
                 session_id: SessionId::parse("target").expect("known-safe SessionId must be valid"),
@@ -2382,6 +2385,7 @@ fn cache_session_membership_corruption_is_partial_and_read_only() {
                     seq: tau_core::PersistedSessionEventSeq::new(9),
                     source: None,
                     event: Event::SessionAgentLoaded(SessionAgentLoaded {
+                        main: false,
                         session_id: "cache-session".parse().expect("session"),
                         agent_id: "cache-agent".parse().expect("agent"),
                         agent_initialization_id: "init".parse().expect("init"),

@@ -3766,6 +3766,7 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("context-race-message")
                 .expect("message id"),
             sender_id: crate::parse_agent_id("manager"),
@@ -3785,6 +3786,7 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("context-race-message-two")
                 .expect("message id"),
             sender_id: crate::parse_agent_id("manager"),
@@ -4214,6 +4216,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     "s1",
                     None,
                     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                        main: false,
                         agent_initialization_id: tau_proto::AgentInitializationId::parse(
                             "test-init",
                         )

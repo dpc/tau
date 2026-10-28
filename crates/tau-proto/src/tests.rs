@@ -1645,6 +1645,7 @@ fn representative_events() -> Vec<Event> {
             ctx_id: None,
         }),
         Event::AgentMessageSent(AgentMessageSent {
+            review_recipient: None,
             message_id: AgentMessageId::parse("msg-1")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_abcd1234"),
@@ -1656,6 +1657,7 @@ fn representative_events() -> Vec<Event> {
             message: "hello".to_owned(),
         }),
         Event::AgentMessageReceived(AgentMessageReceived {
+            peer_review: None,
             message_id: AgentMessageId::parse("msg-2")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_abcd1234"),
@@ -1678,6 +1680,10 @@ fn representative_events() -> Vec<Event> {
             changed_agent_id: Some(agent_id("engineer_child")),
             cause: AgentWatchUpdateCause::AgentWatchEnable,
         }),
+        Event::AgentRuntimeUnavailable(AgentRuntimeUnavailable {
+            session_id: test_session_id("session_123"),
+            agent_id: agent_id("engineer_child"),
+        }),
         Event::AgentStatsUpdated(AgentStatsUpdated {
             session_id: test_session_id("session_123"),
             agent_id: agent_id("engineer_child"),
@@ -1699,6 +1705,7 @@ fn representative_events() -> Vec<Event> {
             reason: SessionStartReason::Initial,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
+            main: false,
             agent_initialization_id: AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -1714,6 +1721,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
         }),
         Event::SessionReplayComplete(SessionReplayComplete {
+            main_agent_id: None,
             session_id: test_session_id("s1"),
             error: None,
         }),
@@ -2633,6 +2641,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             agent_id: agent_id("agent-1"),
         }),
         HarnessInputMessage::UiShutdownRequest(UiShutdownRequest {}),
+        HarnessInputMessage::UiEnsureMainAgent,
         HarnessInputMessage::UiQuitRequest(UiQuitRequest {
             request_id: "quit-1".to_owned(),
             detach: true,
@@ -2821,12 +2830,14 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
             },
         })),
         HarnessOutputMessage::ExternalAgentMessageResult(ExternalAgentMessageResult {
+            review_recipient: None,
             request_id: "external-1".to_owned(),
             failure: None,
             recipient_id: Some(agent_id("recipient_agent")),
             started: false,
         }),
         HarnessOutputMessage::ExternalAgentMessageResult(ExternalAgentMessageResult {
+            review_recipient: None,
             request_id: "external-no-receiver".to_owned(),
             failure: Some(ExternalAgentMessageFailure::NoInterSessionReceiver),
             recipient_id: None,
@@ -3173,6 +3184,7 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::HarnessProviderQuotaChanged(_)
                 | Event::AgentWatchesUpdated(_)
                 | Event::AgentStatsUpdated(_)
+                | Event::AgentRuntimeUnavailable(_)
                 | Event::HarnessAgentContextInitialized(_)
                 | Event::HarnessAgentDiscoveryRefreshRequested(_)
                 | Event::HarnessSessionSkillsAvailable(_)
@@ -3254,6 +3266,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.prompt_submitted",
         "agent.prompt_terminated",
         "agent.replay_complete",
+        "agent.runtime_unavailable",
         "agent.start_accepted",
         "agent.start_failed",
         "agent.start_request",
@@ -3389,6 +3402,7 @@ fn event_name_rejects_empty_segments() {
 #[test]
 fn agent_message_events_have_names_and_persistence_defaults() {
     let sent = Event::AgentMessageSent(AgentMessageSent {
+        review_recipient: None,
         message_id: AgentMessageId::parse("msg-1")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("engineer_abcd1234"),
@@ -3404,6 +3418,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     assert!(sent.defaults_to_persist());
 
     let received = Event::AgentMessageReceived(AgentMessageReceived {
+        peer_review: None,
         message_id: AgentMessageId::parse("msg-2")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("engineer_abcd1234"),
@@ -3455,6 +3470,7 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     assert_eq!(legacy.cli_origin, None);
 
     let explicit_message = AgentMessageReceived {
+        peer_review: None,
         message_id: AgentMessageId::parse("msg-message")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("engineer_abcd1234"),
@@ -4502,7 +4518,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 15, "minor": 0})
+        serde_json::json!({"major": 16, "minor": 0})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4612,7 +4628,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 15, "minor": 0})
+        serde_json::json!({"major": 16, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4704,7 +4720,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 15, "minor": 0})
+        serde_json::json!({"major": 16, "minor": 0})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -6050,6 +6066,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             ctx_id: None,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
+            main: false,
             agent_initialization_id: AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -6307,6 +6324,7 @@ fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     assert!(json.get("ephemeral").is_none());
 
     let loaded = SessionAgentLoaded {
+        main: false,
         agent_initialization_id: AgentInitializationId::parse("test-init")
             .expect("test identifier must be valid"),
 

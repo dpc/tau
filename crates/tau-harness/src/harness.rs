@@ -1609,6 +1609,7 @@ mod history_runtime;
 mod idle_session;
 mod image_admission;
 mod local_summary_continuation;
+mod main_agent;
 mod notification_delivery;
 mod operator_agent_unload;
 mod output_length_continuation_reducer;
@@ -3225,6 +3226,15 @@ impl Harness {
                             ),
                         )),
                     )?;
+                }
+                Ok(ClientMessageDisposition::Continue)
+            }
+            HarnessInputMessage::UiEnsureMainAgent => {
+                if self.is_ui_client(client_id) {
+                    self.ui_runtime
+                        .main_demand_clients
+                        .insert(client_id.clone());
+                    self.fulfill_ui_main_demands();
                 }
                 Ok(ClientMessageDisposition::Continue)
             }

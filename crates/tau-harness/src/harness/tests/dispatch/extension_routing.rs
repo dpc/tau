@@ -119,6 +119,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: tau_proto::AgentMessageId::parse("test-message")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
@@ -308,7 +309,7 @@ fn side_agent_pending_message_wake_defers_automatic_decision_until_final_respons
                 parent_agent: None,
                 query_id: "q-policy-message".to_owned(),
                 instruction: "side task".to_owned(),
-                role: None,
+                role: Some(h.config.selected_role.clone()),
                 input_stats: tau_proto::ToolUseStats::default(),
                 tool_call_id: Some("delegate-call".into()),
                 task_name: None,
@@ -333,6 +334,7 @@ fn side_agent_pending_message_wake_defers_automatic_decision_until_final_respons
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse("test-policy-message")
                     .expect("message id"),
                 sender_id: crate::parse_agent_id("manager"),
@@ -1133,6 +1135,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             session_id: test_session_id("forged-session"),
         }),
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -1141,6 +1144,10 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             ephemeral: false,
         }),
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+            session_id: test_session_id("forged-session"),
+            agent_id: crate::parse_agent_id("forged-agent"),
+        }),
+        Event::AgentRuntimeUnavailable(tau_proto::AgentRuntimeUnavailable {
             session_id: test_session_id("forged-session"),
             agent_id: crate::parse_agent_id("forged-agent"),
         }),
@@ -1395,6 +1402,7 @@ fn cold_restore_classifies_legacy_extension_worker_without_creator_as_unavailabl
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("legacy-init")
                     .expect("initialization id"),
                 session_id: test_session_id("s1"),

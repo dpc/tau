@@ -1,6 +1,13 @@
 # ARCH-tau-proto: tau-proto architecture
 
-Protocol 15.0 adds `MessagePhase::PartialAnswer` and
+Protocol 16.0 adds optional canonical main membership/replay identity,
+UI-only main demand and unavailable-runtime notification, and typed peer review
+source, approval, and accepted-for-review disposition. The matching
+`dpc-tau-proto` and `dpc-tau-client` SDK release is 0.16.0; consumers must update
+both pins and rebuild against this protocol. The review path rejects incompatible
+senders rather than returning a false worker-delivery ACK.
+
+Protocol 15.0 added `MessagePhase::PartialAnswer` and
 `ProviderStopReason::Continue`. `PartialAnswer` preserves the answer phase; only
 `Continue` requests sampling in the same outer turn. Rebuild configured extensions
 and UI peers together. New readers accept older journals, but old readers cannot

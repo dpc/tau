@@ -28,6 +28,10 @@ pub(super) struct UiSessionAdmission {
 /// side effect. This state does not own the generic event bus.
 #[derive(Default)]
 pub(crate) struct UiRuntimeState {
+    /// UI main demands waiting for session readiness or canonical main binding.
+    pub(super) main_demand_clients: HashSet<tau_proto::ConnectionId>,
+    /// Suppresses nested load callbacks while synchronous demand owns replay.
+    pub(super) main_demand_processing: bool,
     /// Existing UI Hello's exact session/generation for directed local RPCs.
     pub(super) exact_session_admissions: HashMap<tau_proto::ConnectionId, UiSessionAdmission>,
     /// Monotonic explicit navigation writes; delayed implicit writes cannot

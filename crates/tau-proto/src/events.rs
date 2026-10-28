@@ -2145,6 +2145,36 @@ impl AgentMessageKind {
     }
 }
 
+/// One accepted review occurrence in the canonical main's retained journal.
+///
+/// Logical message IDs can be reused by retries; only the owning journal and
+/// accepted sequence identify the immutable release authority.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerMessageReviewReference {
+    /// Main agent whose journal owns the original peer review.
+    pub main_agent_id: AgentId,
+    /// Sequence of the original accepted receive, not its provider-context
+    /// node.
+    pub durable_event_seq: u64,
+}
+
+/// Harness-owned disposition of an ordinary authenticated peer input.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PeerMessageReview {
+    /// Accepted by main for review; the intended worker has received nothing.
+    Pending {
+        /// Exact worker authenticated in the original peer request.
+        intended_recipient: AgentId,
+    },
+    /// Main approved the original immutable review occurrence.
+    Released {
+        /// Retained occurrence whose facts were copied without editing.
+        source: PeerMessageReviewReference,
+    },
+}
+
 /// A harness-authored durable sender-side projection of a message sent by one
 /// agent to another agent.
 ///
@@ -2166,6 +2196,10 @@ pub struct AgentMessageSent {
     /// Optional advisory text configured by the sending session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_notice: Option<InterSessionNotice>,
+    /// Original exact worker when the peer accepted this message for main
+    /// review instead of delivering it to that worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_recipient: Option<AgentId>,
     /// Message body.
     pub message: String,
 }
@@ -2216,6 +2250,10 @@ pub struct AgentMessageReceived {
     /// Optional advisory text configured by the receiving session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_notice: Option<InterSessionNotice>,
+    /// Immutable review or approval metadata, separate from original peer
+    /// provenance. Absent for local and nonordinary inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_review: Option<PeerMessageReview>,
     /// Message body. Must be empty for [`AgentMessageKind::WatchLifecycle`].
     pub message: String,
 }
@@ -2860,6 +2898,12 @@ pub struct AgentDisplayNameSet {
 /// Session membership fact: an agent is now loaded in a session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionAgentLoaded {
+    /// Bind this agent as the session's immutable optional main identity.
+    ///
+    /// This is session ownership, not a role restriction. Once retained, a
+    /// binding cannot be replaced or unloaded by ordinary membership changes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub main: bool,
     /// Session membership container.
     pub session_id: SessionId,
     /// Agent now available in the session.
@@ -2881,6 +2925,17 @@ pub struct SessionAgentUnloaded {
     /// Session membership container.
     pub session_id: SessionId,
     /// Agent removed from the session.
+    pub agent_id: AgentId,
+}
+
+/// Transient loss of an agent runtime while its durable membership remains.
+///
+/// This does not unload, delete, or replace the session's main identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentRuntimeUnavailable {
+    /// Session that retains the unavailable agent's membership.
+    pub session_id: SessionId,
+    /// Agent whose current runtime is no longer usable.
     pub agent_id: AgentId,
 }
 
@@ -3793,6 +3848,9 @@ pub struct AgentReplayComplete {
 /// are released only after this boundary is sent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionReplayComplete {
+    /// Canonical optional session main, even when its runtime is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_agent_id: Option<AgentId>,
     /// Session whose catch-up phase has reached its boundary.
     pub session_id: SessionId,
     /// Replay error for this session, if catch-up could not complete normally.
@@ -7516,6 +7574,8 @@ pub enum Event {
     SessionAgentLoaded(SessionAgentLoaded),
     #[serde(rename = "session.agent_unloaded")]
     SessionAgentUnloaded(SessionAgentUnloaded),
+    #[serde(rename = "agent.runtime_unavailable")]
+    AgentRuntimeUnavailable(AgentRuntimeUnavailable),
     #[serde(rename = "session.replay_complete")]
     SessionReplayComplete(SessionReplayComplete),
 
@@ -7952,6 +8012,7 @@ impl Event {
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
             Self::SessionAgentLoaded(_) => EventName::SESSION_AGENT_LOADED,
             Self::SessionAgentUnloaded(_) => EventName::SESSION_AGENT_UNLOADED,
+            Self::AgentRuntimeUnavailable(_) => EventName::AGENT_RUNTIME_UNAVAILABLE,
             Self::SessionReplayComplete(_) => EventName::SESSION_REPLAY_COMPLETE,
             _ => return None,
         }
@@ -8084,6 +8145,7 @@ impl Event {
                 | Self::AgentState(_)
                 | Self::AgentWatchesUpdated(_)
                 | Self::AgentStatsUpdated(_)
+                | Self::AgentRuntimeUnavailable(_)
                 | Self::HarnessAgentContextInitialized(_)
                 | Self::HarnessSessionSkillsAvailable(_)
                 | Self::AgentReplayComplete(_)

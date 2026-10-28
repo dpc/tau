@@ -696,6 +696,7 @@ fn replayed_session_agent_loaded_restores_workdir_context_and_ready() {
         .write_frame(&HarnessOutputMessage::deliver_replay(
             tau_proto::UnixMicros::new(2),
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -759,6 +760,7 @@ fn live_loaded_existing_agent_uses_replayed_workdir_before_ready() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -836,6 +838,7 @@ fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -891,6 +894,7 @@ fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
     runtime
         .handle_event(
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                main: false,
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
 
@@ -998,6 +1002,7 @@ fn malformed_workdir_metadata_does_not_wedge_context_ready() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
 
@@ -1137,6 +1142,7 @@ fn targeted_user_shell_runs_from_agent_workdir() {
     let target = discover_shell_endpoint(&mut reader, &mut writer);
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            main: false,
             session_id: "session-1".parse().expect("session"),
             agent_id: agent_id.clone(),
             ephemeral: false,

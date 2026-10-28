@@ -3303,7 +3303,7 @@ fn harness_settings_role_cli_disable_all_leaves_no_effective_roles() {
 
     assert!(s.roles.is_empty());
     assert!(s.role_groups.is_empty());
-    assert_eq!(s.default_role.as_deref(), Some("engineer"));
+    assert_eq!(s.startup_role, None);
 }
 
 /// Ensures CLI overrides for unknown role paths fail with explicit config
@@ -3800,11 +3800,10 @@ default_profile: default
 profiles:
   default:
     agents:
-      default_role: default-role
       role_groups:
         default:
           roles:
-            default-role: {}
+            default-role: { main_priority: 10 }
 "#,
     )
     .expect("write default profile");
@@ -3828,9 +3827,9 @@ profiles:
         load_harness_settings_with_profile_and_cli_overrides_in(&dirs, Some(&default), &[], &[])
             .expect("load explicit default profile");
 
-    assert_eq!(implicit.default_role.as_deref(), Some("default-role"));
+    assert_eq!(implicit.main_role(), Some("default-role"));
     assert_eq!(implicit.extensions["local-tool"].enable, Some(false));
-    assert_eq!(explicit.default_role, implicit.default_role);
+    assert_eq!(explicit.main_role(), implicit.main_role());
     assert_eq!(
         explicit.extensions["local-tool"].enable,
         implicit.extensions["local-tool"].enable
@@ -3849,7 +3848,10 @@ default_profile: focused
 profiles:
   focused:
     agents:
-      default_role: engineer-senior
+      role_groups:
+        engineer:
+          roles:
+            engineer-senior: { main_priority: 10 }
 "#,
     )
     .expect("write fallback profile");
@@ -3866,7 +3868,7 @@ profiles:
         None
     );
     let settings = load_harness_settings_in(&dirs).expect("load base settings");
-    assert_eq!(settings.default_role.as_deref(), Some("engineer"));
+    assert_eq!(settings.main_role(), None);
 }
 
 /// Ensures a configured default normalizes surrounding ASCII spaces/tabs while
@@ -3939,7 +3941,10 @@ profiles:
         enable: false
   focused:
     agents:
-      default_role: engineer-senior
+      role_groups:
+        engineer:
+          roles:
+            engineer-senior: { main_priority: 10 }
 "#,
     )
     .expect("write independent profiles");
@@ -3953,7 +3958,7 @@ profiles:
 
     assert_eq!(implicit.extensions["local-tool"].enable, Some(false));
     assert_eq!(explicit.extensions["local-tool"].enable, Some(true));
-    assert_eq!(explicit.default_role.as_deref(), Some("engineer-senior"));
+    assert_eq!(explicit.main_role(), Some("engineer-senior"));
 }
 
 /// Ensures a role introduced by a selected profile inherits the group defaults
@@ -4257,17 +4262,14 @@ profiles:
     assert_eq!(settings.extensions["core-shell"].enable, Some(true));
 }
 
-/// Ensures a selected profile can choose a role that it adds after base
-/// settings have loaded, so role construction completes before startup
-/// selection observes the profile default.
+/// A selected profile can designate the main role it introduces.
 #[test]
-fn selected_profile_default_role_selects_profile_created_role() {
+fn selected_profile_main_designates_profile_created_role() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
 agents:
-  default_role: base-role
   role_groups:
     base:
       roles:
@@ -4275,11 +4277,10 @@ agents:
 profiles:
   focused:
     agents:
-      default_role: profile-role
       role_groups:
         profile:
           roles:
-            profile-role: {}
+            profile-role: { main_priority: 10 }
 "#,
     )
     .expect("write profile");
@@ -4293,14 +4294,13 @@ profiles:
     )
     .expect("load selected profile");
 
-    assert_eq!(settings.default_role.as_deref(), Some("profile-role"));
+    assert_eq!(settings.main_role(), Some("profile-role"));
     assert!(settings.roles.contains_key("profile-role"));
 }
 
-/// Ensures profile defaults replay in source order, accept the established
-/// alias, and remain lower precedence than a later harness-config override.
+/// Main designation follows role patch source order and final CLI precedence.
 #[test]
-fn selected_profile_default_role_preserves_source_and_cli_precedence() {
+fn selected_profile_main_preserves_source_and_cli_precedence() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
@@ -4316,7 +4316,10 @@ agents:
 profiles:
   focused:
     agents:
-      default_role: first-profile-role
+      role_groups:
+        roles:
+          roles:
+            first-profile-role: { main_priority: 10 }
 "#,
     )
     .expect("write base profile");
@@ -4327,7 +4330,11 @@ profiles:
 profiles:
   focused:
     agents:
-      default_role: final-profile-role
+      role_groups:
+        roles:
+          roles:
+            first-profile-role: { main_priority: null }
+            final-profile-role: { main_priority: 10 }
 "#,
     )
     .expect("write profile drop-in");
@@ -4340,10 +4347,17 @@ profiles:
         &[],
     )
     .expect("load profile sources");
-    assert_eq!(base.default_role.as_deref(), Some("final-profile-role"));
+    assert_eq!(base.main_role(), Some("final-profile-role"));
 
     let overrides = [
-        HarnessConfigCliOverride::from_str("agents.default_role=cli-role").expect("CLI override"),
+        HarnessConfigCliOverride::from_str(
+            "agents.role_groups.roles.roles.final-profile-role.main_priority=null",
+        )
+        .expect("clear prior main"),
+        HarnessConfigCliOverride::from_str(
+            "agents.role_groups.roles.roles.cli-role.main_priority=10",
+        )
+        .expect("CLI main override"),
     ];
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
@@ -4352,23 +4366,29 @@ profiles:
         &overrides,
     )
     .expect("load profile with CLI override");
-    assert_eq!(settings.default_role.as_deref(), Some("cli-role"));
+    assert_eq!(settings.main_role(), Some("cli-role"));
 }
 
-/// Ensures an explicit null in a selected profile clears the base startup role,
-/// matching the top-level nullable default-role configuration semantics.
+/// An explicit null in a selected profile removes the optional main
+/// designation.
 #[test]
-fn selected_profile_default_role_null_clears_base_default() {
+fn selected_profile_main_false_clears_base_designation() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
 agents:
-  default_role: base-role
+  role_groups:
+    custom:
+      roles:
+        base-role: { main_priority: 10 }
 profiles:
   focused:
     agents:
-      default_role: null
+      role_groups:
+        custom:
+          roles:
+            base-role: { main_priority: null }
 "#,
     )
     .expect("write profile");
@@ -4382,7 +4402,7 @@ profiles:
     )
     .expect("load selected profile");
 
-    assert_eq!(settings.default_role, None);
+    assert_eq!(settings.main_role(), None);
 }
 
 /// Ensures profiles reject harness and extension process settings outside their
@@ -5133,7 +5153,7 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
     // The available-role list is shared across roles, but its Handlebars guard
     // leaves prompts unchanged when `agent_start` is absent.
     let s = HarnessSettings::built_in();
-    assert_eq!(s.default_role.as_deref(), Some("engineer"));
+    assert_eq!(s.startup_role, None);
     assert_eq!(
         s.role_groups
             .iter()
@@ -5435,76 +5455,198 @@ fn harness_role_groups_reject_duplicate_role_names() {
     assert!(err.to_string().contains("appears in multiple role_groups"));
 }
 
-/// The nested receiver merges field-by-field across layers and defaults
-/// auto-start on.
+/// Main designation stays optional, role-only, and unique after all layers and
+/// disabled-role filtering rather than preventing reuse of the designated role.
 #[test]
-fn inter_session_receiver_merges_and_defaults_auto_start() {
+fn main_role_is_optional_and_validated_after_layering() {
+    let td = TempDir::new().expect("tempdir");
+    let dirs = dirs_with_config(td.path());
+    let settings = load_harness_settings_in(&dirs).expect("optional main");
+    assert_eq!(settings.main_role(), None);
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents: { role_groups: { main_test: { roles: { leader: {main_priority: 10}, other: {main_priority: 10, enable: false} } } } }",
+    ).expect("write roles");
+    let settings = load_harness_settings_in(&dirs).expect("disabled main excluded");
+    assert_eq!(settings.main_role(), Some("leader"));
+    std::fs::create_dir(td.path().join("harness.d")).expect("dropins");
+    std::fs::write(
+        td.path().join("harness.d/override.yaml"),
+        "agents: { role_groups: { main_test: { roles: { other: {enable: true} } } } }",
+    )
+    .expect("enable duplicate");
+    let error = load_harness_settings_in(&dirs).expect_err("two effective mains");
+    assert!(
+        error
+            .to_string()
+            .contains("is tied between effective roles")
+    );
+    std::fs::write(
+        td.path().join("harness.d/override.yaml"),
+        "agents: { role_groups: { main_test: { roles: { leader: {main_priority: null}, other: {enable: true} } } } }",
+    ).expect("clear old main");
+    let settings = load_harness_settings_in(&dirs).expect("replacement designation");
+    assert_eq!(settings.main_role(), Some("other"));
+}
+
+/// Group/global defaults must not accidentally designate every inherited role.
+#[test]
+fn main_role_cannot_be_inherited_from_defaults() {
+    for yaml in [
+        "agents: {main_priority: 10}",
+        "agents: {role_groups: {test: {main_priority: 10, roles: {leader: {}}}}}",
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(td.path().join("harness.yaml"), yaml).expect("write config");
+        assert!(load_harness_settings_in(&dirs_with_config(td.path())).is_err());
+    }
+}
+
+/// Normal overlays replace a role's priority rather than combining values.
+/// Zero is a candidate; omission/null/disable retain their ordinary meanings.
+#[test]
+fn main_priority_selects_lowest_effective_value_after_overlay_replacement() {
+    let td = TempDir::new().expect("tempdir");
+    let dirs = dirs_with_config(td.path());
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    priorities:
+      roles:
+        coordinator: { main_priority: 100 }
+        backup: { main_priority: 200 }
+        bot: { main_priority: 10 }
+"#,
+    )
+    .expect("base");
+    assert_eq!(
+        load_harness_settings_in(&dirs).expect("base").main_role(),
+        Some("bot")
+    );
+    std::fs::create_dir(td.path().join("harness.d")).expect("dropins");
+    for (patch, expected) in [
+        ("{main_priority: 300}", "coordinator"),
+        ("{main_priority: 0}", "bot"),
+        ("{main_priority: null}", "coordinator"),
+        ("{enable: false}", "coordinator"),
+        ("{description: unchanged}", "bot"),
+    ] {
+        std::fs::write(
+            td.path().join("harness.d/override.yaml"),
+            format!("agents: {{role_groups: {{priorities: {{roles: {{bot: {patch}}}}}}}}}"),
+        )
+        .expect("overlay");
+        assert_eq!(
+            load_harness_settings_in(&dirs)
+                .expect("effective config")
+                .main_role(),
+            Some(expected),
+            "{patch}"
+        );
+    }
+}
+
+/// Only a tied winning minimum rejects effective config; other ties remain
+/// loadable for the harness's one-time warning projection.
+#[test]
+fn main_priority_rejects_winning_ties_and_invalid_values() {
+    let td = TempDir::new().expect("tempdir");
+    let dirs = dirs_with_config(td.path());
+    for (winner, succeeds) in [(0, true), (10, false), (20, false)] {
+        std::fs::write(td.path().join("harness.yaml"), format!(
+            "agents:\n  role_groups:\n    priorities:\n      roles:\n        bot:\n          main_priority: {winner}\n        a:\n          main_priority: 10\n        b:\n          main_priority: 10\n"
+        )).expect("config");
+        let result = load_harness_settings_in(&dirs);
+        if succeeds {
+            assert_eq!(
+                result.expect("nonwinning tie allowed").main_role(),
+                Some("bot")
+            );
+        } else {
+            let message = result.expect_err("winning tie").to_string();
+            assert!(message.contains("lowest `main_priority` 10"), "{message}");
+            assert!(message.contains("a, b"), "{message}");
+        }
+    }
+    for value in ["-1", "0.5", "true"] {
+        std::fs::write(td.path().join("harness.yaml"), format!(
+            "agents:\n  role_groups:\n    priorities:\n      roles:\n        bot:\n          main_priority: {value}\n"
+        )).expect("config");
+        assert!(load_harness_settings_in(&dirs).is_err(), "{value}");
+    }
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents: {role_groups: {priorities: {roles: {bot: {main: true}}}}}",
+    )
+    .expect("old boolean");
+    assert!(
+        load_harness_settings_in(&dirs)
+            .expect_err("retired boolean")
+            .to_string()
+            .contains("unknown field `main`")
+    );
+}
+
+/// Review defaults on, and a later explicit session policy can disable it.
+#[test]
+fn inter_session_review_policy_layers_and_defaults_on() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
-inter_session:
-  receiver:
-    role: engineer
+inter_session: {}
 "#,
     )
     .expect("write base");
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("load receiver policy");
-    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
-    assert_eq!(receiver.role, "engineer");
-    assert!(receiver.auto_start);
+    assert!(settings.inter_session.review_direct_messages);
 
     std::fs::create_dir(td.path().join("harness.d")).expect("drop-in dir");
     std::fs::write(
         td.path().join("harness.d/10-auto-start.yaml"),
-        "inter_session: { receiver: { auto_start: false } }",
+        "inter_session: { review_direct_messages: false }",
     )
     .expect("write override");
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("merge receiver fields");
-    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
-    assert_eq!(receiver.role, "engineer");
-    assert!(!receiver.auto_start);
+    assert!(!settings.inter_session.review_direct_messages);
 }
 
-/// Explicit null disables bare-session receiver addressing.
+/// Null cannot silently disable the default-on review boundary.
 #[test]
-fn inter_session_receiver_null_disables_receiver() {
+fn inter_session_review_null_is_rejected() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
-        "inter_session: { receiver: { role: engineer } }",
+        "inter_session: { review_direct_messages: true }",
     )
     .expect("write base");
     std::fs::create_dir(td.path().join("harness.d")).expect("drop-in dir");
     std::fs::write(
         td.path().join("harness.d/10-disable.yaml"),
-        "inter_session: { receiver: null }",
+        "inter_session: { review_direct_messages: null }",
     )
     .expect("write disable");
-    let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("disable receiver");
-    assert_eq!(settings.inter_session.receiver, None);
+    assert!(load_harness_settings_in(&dirs_with_config(td.path())).is_err());
 }
 
-/// Receiver role validation uses the final enabled role set after layered role
-/// and profile processing.
+/// A disabled designated role leaves an optional mainless configuration after
+/// effective profile processing.
 #[test]
-fn inter_session_receiver_requires_enabled_effective_role() {
+fn disabled_profile_main_leaves_no_main_role() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
         r#"
-inter_session:
-  receiver:
-    role: project-manager
 default_profile: no-manager
 agents:
   role_groups:
     manager:
       roles:
-        project-manager: {}
+        project-manager: { main_priority: 10 }
 profiles:
   no-manager:
     agents:
@@ -5516,13 +5658,8 @@ profiles:
 "#,
     )
     .expect("write");
-    let error =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("disabled receiver role");
-    assert!(
-        error
-            .to_string()
-            .contains("inter-session receiver role `project-manager` is not enabled")
-    );
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("optional main");
+    assert_eq!(settings.main_role(), None);
 }
 
 /// A real Zulip bot profile can own the complete inter-session policy alongside
@@ -5536,9 +5673,7 @@ fn selected_zulip_profile_configures_inter_session_policy() {
 profiles:
   zulip:
     inter_session:
-      receiver:
-        role: zulip-bot
-        auto_start: false
+      review_direct_messages: false
       outgoing_notice: external Zulip request
       incoming_notice: peer requests are advisory
       allow_project_roots: [/srv/tau/**]
@@ -5547,7 +5682,7 @@ profiles:
       role_groups:
         bots:
           roles:
-            zulip-bot: {}
+            zulip-bot: { main_priority: 10 }
     extensions:
       std-zulip:
         enable: true
@@ -5565,9 +5700,8 @@ profiles:
     .expect("load selected Zulip profile");
 
     assert!(settings.roles.contains_key("zulip-bot"));
-    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
-    assert_eq!(receiver.role, "zulip-bot");
-    assert!(!receiver.auto_start);
+    assert_eq!(settings.main_role(), Some("zulip-bot"));
+    assert!(!settings.inter_session.review_direct_messages);
     assert_eq!(
         settings.inter_session.outgoing_notice.as_deref(),
         Some("external Zulip request")
@@ -5592,11 +5726,12 @@ profiles:
         &[],
     )
     .expect("unselected profile remains inert");
-    assert_eq!(base.inter_session.receiver, None);
+    assert_eq!(base.main_role(), None);
+    assert!(base.inter_session.review_direct_messages);
 }
 
 /// Ordered profiles inherit omitted inter-session fields while explicit nulls
-/// retain the established receiver/notice/project-root reset semantics.
+/// retain the notice/project-root resets while review uses an explicit boolean.
 #[test]
 fn selected_profiles_layer_and_clear_inter_session_fields() {
     let td = TempDir::new().expect("tempdir");
@@ -5606,16 +5741,14 @@ fn selected_profiles_layer_and_clear_inter_session_fields() {
 profiles:
   receiver:
     inter_session:
-      receiver:
-        role: engineer
-        auto_start: false
+      review_direct_messages: false
       outgoing_notice: first outgoing
       incoming_notice: first incoming
       allow_project_roots: [/srv/allowed/**]
       deny_project_roots: [/srv/allowed/private/**]
   reset:
     inter_session:
-      receiver: null
+      review_direct_messages: true
       outgoing_notice: null
       allow_project_roots: null
       deny_project_roots: null
@@ -5632,7 +5765,7 @@ profiles:
     )
     .expect("load ordered profiles");
 
-    assert_eq!(settings.inter_session.receiver, None);
+    assert!(settings.inter_session.review_direct_messages);
     assert_eq!(settings.inter_session.outgoing_notice, None);
     assert_eq!(
         settings.inter_session.incoming_notice.as_deref(),
@@ -5647,7 +5780,7 @@ profiles:
 }
 
 /// Generic CLI layers remain final after every selected profile inter-session
-/// patch, including field-wise receiver merging.
+/// patch, including the review policy.
 #[test]
 fn inter_session_cli_overrides_win_over_selected_profiles() {
     let td = TempDir::new().expect("tempdir");
@@ -5657,9 +5790,7 @@ fn inter_session_cli_overrides_win_over_selected_profiles() {
 profiles:
   zulip:
     inter_session:
-      receiver:
-        role: engineer
-        auto_start: false
+      review_direct_messages: false
       incoming_notice: profile notice
       allow_project_roots: [/srv/profile/**]
 "#,
@@ -5667,10 +5798,8 @@ profiles:
     .expect("write profile");
     let profile = profile_selection("zulip");
     let overrides = [
-        HarnessConfigCliOverride::from_str("inter_session.receiver.role=engineer-senior")
-            .expect("receiver role override"),
-        HarnessConfigCliOverride::from_str("inter_session.receiver.auto_start=true")
-            .expect("receiver auto-start override"),
+        HarnessConfigCliOverride::from_str("inter_session.review_direct_messages=true")
+            .expect("review override"),
         HarnessConfigCliOverride::from_str("inter_session.incoming_notice=CLI notice")
             .expect("incoming notice override"),
         HarnessConfigCliOverride::from_str("inter_session.allow_project_roots=[/srv/cli/**]")
@@ -5685,9 +5814,7 @@ profiles:
     )
     .expect("load profile with final CLI overrides");
 
-    let receiver = settings.inter_session.receiver.as_ref().expect("receiver");
-    assert_eq!(receiver.role, "engineer-senior");
-    assert!(receiver.auto_start);
+    assert!(settings.inter_session.review_direct_messages);
     assert_eq!(
         settings.inter_session.incoming_notice.as_deref(),
         Some("CLI notice")
@@ -5710,6 +5837,10 @@ fn inter_session_configuration_rejects_removed_receiver_schemas() {
         "agents: { role_groups: { manager: { roles: { project-manager: { inter_session_auto_start: true } } } } }",
         "inter_session: { receiver_role: coordinator }",
         "inter_session: { auto_start: true }",
+        "inter_session: { receiver: { role: engineer, auto_start: true } }",
+        "inter_session: { receiver: null }",
+        "agents: { default_role: engineer }",
+        "profiles: { legacy: { agents: { default_role: engineer } } }",
     ] {
         let td = TempDir::new().expect("tempdir");
         std::fs::write(td.path().join("harness.yaml"), yaml).expect("write removed schema");
@@ -5729,12 +5860,8 @@ fn missing_user_files_load_the_built_in_baseline() {
     let td = TempDir::new().expect("tempdir");
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
-    assert!(
-        harness
-            .default_role
-            .as_ref()
-            .is_some_and(|role| harness.roles.contains_key(role))
-    );
+    assert!(harness.roles.contains_key("engineer"));
+    assert_eq!(harness.main_role(), None);
 }
 
 /// Ensures `enable: false` removes lower-layer roles only after all role layers
@@ -5750,7 +5877,6 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
         dir.join("harness.yaml"),
         r#"{
             agents: {
-                default_role: "engineer",
                 role_groups: {
                 engineer: {
                     roles: {
@@ -5770,7 +5896,7 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     assert!(!s.roles.contains_key("engineer"));
     assert!(!s.roles.contains_key("engineer-senior"));
     assert!(!s.roles.contains_key("assistant"));
-    assert_eq!(s.default_role.as_deref(), Some("engineer"));
+    assert_eq!(s.startup_role, None);
     assert!(s.role_groups.is_empty());
 }
 

@@ -240,6 +240,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                 ))
             } else {
                 Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                    peer_review: None,
                     message_id: tau_proto::AgentMessageId::parse("loss-typed-input")
                         .expect("message id"),
                     sender_id: crate::parse_agent_id("sender"),
@@ -2600,6 +2601,7 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
         append_seed_agent_event(
             &mut store,
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                peer_review: None,
                 message_id: tau_proto::AgentMessageId::parse("wake-after-closure")
                     .expect("message id"),
                 sender_id: tau_proto::AgentId::parse("sender").expect("sender"),
@@ -3205,7 +3207,12 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     let cid = ensure_test_user_agent(&mut h);
-    let role = h.config.selected_role.clone();
+    let role = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .role
+        .clone()
+        .expect("restored role");
+    h.config.selected_role = role.clone();
     let alternate: tau_proto::ModelId = "test/alternate".into();
     let route = h
         .provider_runtime

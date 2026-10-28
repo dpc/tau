@@ -115,6 +115,7 @@ impl Harness {
             self.session_runtime.current_session_generation,
         );
         let received = tau_proto::AgentMessageReceived {
+            peer_review: None,
             message_id: message_id.clone(),
             sender_id,
             sender_session_id: None,
@@ -138,7 +139,6 @@ impl Harness {
                 expected_receive: received.clone(),
                 canceled: false,
                 started,
-                reselect_attempted: false,
                 rate_admitted_at,
                 completion: PendingPeerReceiveCompletion::Cli {
                     client_id: client_id.clone(),

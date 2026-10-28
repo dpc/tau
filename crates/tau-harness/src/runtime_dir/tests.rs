@@ -1228,9 +1228,9 @@ fn peer_discovery_filters_denied_project_roots_before_probe() {
         .expect("denied listener nonblocking");
     denied_claim.publish(true).expect("publish denied peer");
     let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        review_direct_messages: true,
         outgoing_notice: None,
         incoming_notice: None,
-        receiver: None,
         allow_project_roots: Some(Vec::new()),
         deny_project_roots: None,
     };
@@ -1381,9 +1381,9 @@ fn exact_message_lookup_cannot_bypass_project_root_policy() {
         .expect("denied target nonblocking");
     denied_claim.publish(true).expect("publish denied target");
     let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        review_direct_messages: true,
         outgoing_notice: None,
         incoming_notice: None,
-        receiver: None,
         allow_project_roots: None,
         deny_project_roots: Some(vec![
             tau_config::inter_session_policy::ProjectRootGlob::new("/srv/denied".to_owned())
@@ -1456,9 +1456,9 @@ fn peer_discovery_rechecks_live_project_root_after_restart() {
         );
     });
     let policy = tau_config::inter_session_policy::InterSessionPolicy {
+        review_direct_messages: true,
         outgoing_notice: None,
         incoming_notice: None,
-        receiver: None,
         allow_project_roots: Some(vec![
             tau_config::inter_session_policy::ProjectRootGlob::new("/srv/allowed".to_owned())
                 .expect("allowed project-root glob"),
