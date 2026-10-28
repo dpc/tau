@@ -38,7 +38,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-ext-slack` — Slack Socket Mode setup, scopes, event subscriptions, routing, security modes, and troubleshooting.
 - `tau-self-knowledge-ext-telegram` — Telegram bot setup, route registration, send authority, gateway-client mode, and troubleshooting.
 - `tau-self-knowledge-ext-discord` — Discord bridge receiver designation, tool grants, routing, and migration behavior.
-- `tau-self-knowledge-ext-github` — GitHub bridge receiver designation, admission configuration, and migration behavior.
+- `tau-self-knowledge-ext-github-standalone` — GitHub bridge for a dedicated agent/bot-owned account: receiver designation, admission configuration, and migration; `tau-ext-github-watch` reuses the user's account and setup.
 - `tau-self-knowledge-ext-zulip` — Zulip extension configuration, message routing, and troubleshooting.
 - `tau-self-knowledge-ext-swarm` — separately installed Tau Swarm endpoint pinning, credentials, blockers, updates, reconnects, and process-memory lifetime.
 - `tau-self-knowledge-ext-provider-builtin` — built-in providers and models: ChatGPT/Codex Responses, Grok, Chat Completions, OpenRouter, and image generation.

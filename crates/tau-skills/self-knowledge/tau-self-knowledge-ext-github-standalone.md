@@ -1,17 +1,31 @@
 ---
-name: tau-self-knowledge-ext-github
-description: Use when configuring or troubleshooting the separately maintained Tau GitHub bridge, including receiver designation, repository admission, or migration.
+name: tau-self-knowledge-ext-github-standalone
+description: Use when configuring or troubleshooting the separately maintained standalone GitHub bridge for a dedicated agent/bot-owned account, including receiver designation, repository admission, or migration; distinguish it from tau-ext-github-watch, which reuses the user's account and setup.
 advertise: false
 ---
 
-# Tau GitHub bridge self-knowledge
+# Tau standalone GitHub bridge self-knowledge
 
-`tau-ext-github` is a separately maintained inbound MessageBridge executable. Its
-project owns the exact secret, repository, actor-admission, and polling schema.
-For Tau protocol 13.1, rebuild with exact registry SDK
-`dpc-tau-client`/`dpc-tau-proto` 0.13.0 and update the extension together with the
-harness. Protocol-9 and protocol-10 binaries are rejected before configuration;
-the historical automatic-receiver fix does not establish current compatibility.
+`tau-ext-github-standalone` (formerly `tau-ext-github`) is a separately maintained
+inbound MessageBridge executable for a dedicated agent/bot-owned GitHub account.
+`tau-ext-github-watch` reuses the user's GitHub account and setup,
+with each calling agent watching selected issues and pull requests. The receiver
+and repository-admission configuration below belongs to the standalone bridge,
+not the watch extension.
+
+Consult the standalone project's `README.md` and `docs/upstream-contracts.md` for
+its exact secret, repository, actor-admission, and polling schema, build
+instructions, compatibility evidence, and limits. Use the watch project's
+`README.md` for its separate configuration. Rebuild each extension against the
+SDK required by the target harness and check the owning project's compatibility
+guidance. Do not assume historical compatibility evidence applies to a newer
+harness.
+
+When migrating from `tau-ext-github`, change the executable path and named Nix
+package to `tau-ext-github-standalone`. Keep the configured Tau extension instance
+name, tool prefix, secrets, and session data unchanged: the executable rename does
+not require a receiver-state migration. See the standalone project's README for
+the complete rename instructions.
 
 Its logical receive tool is `github_register {}`, meaning “make the authenticated
 calling agent the receiving agent.” The old `{"enabled":true}` spelling remains
