@@ -62,19 +62,22 @@ messages, and local exact messages are separate and unchanged.
 
 ## SDK consumers
 
-The shared protocol is **16.0**. Both registry packages move together:
+The shared protocol is **16.0**. Both registry packages are published and have
+passed registry-only consumer acceptance on Rust 1.91:
 
 ```toml
 tau-proto = { package = "dpc-tau-proto", version = "=0.16.0" }
 tau-client = { package = "dpc-tau-client", version = "=0.16.0" }
 ```
 
-After publication, update external consumers' manifest and
-lockfile pins, rebuild their binaries, and update any Nix package source and
-dependency hashes. Rebuild every deployed extension/client using the shared
-SDK, including separately maintained bridge repositories. This document is a
-handoff; the implementing change does not publish crates, modify external
-repositories or personal configuration, deploy, or restart live sessions.
+Update external consumers' manifest and lockfile pins and any Nix package source
+and dependency hashes. Rebuild every deployed extension/client using the shared
+SDK, including those in separately maintained bridge repositories. This document
+is a handoff; SDK publication does not modify external repositories or personal
+configuration, deploy, or restart live sessions. See the
+[SDK release acceptance record](sdk-releases.md#protocol-160-release-acceptance)
+for checksums and source-identifying tags. New readers accept older mainless
+history; old readers cannot decode the new variants. Journal framing is unchanged.
 
 Consumers must accept the new main membership/replay fields and transient
 unavailable-runtime notification. Peer senders must preserve the reviewed

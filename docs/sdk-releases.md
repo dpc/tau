@@ -20,12 +20,12 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Unpublished SDK 0.16.0
+### Published SDK 0.16.0
 
 Protocol **16.0** and proto/client SDK **0.16.0** add an optional canonical session
 main identity and peer-message review. The client pins proto `=0.16.0`; the two
-leaf packages remain 0.1.0. SDK 0.16.0 is ready in source but remains unpublished
-and has not passed registry acceptance.
+leaf packages remain 0.1.0. Both packages are published and have passed
+registry-only consumer acceptance; see the acceptance record below.
 
 Consumers must update struct literals for `AgentMessageSent.review_recipient`,
 `AgentMessageReceived.peer_review`, `SessionAgentLoaded.main`,
@@ -39,12 +39,12 @@ event sequence. An acknowledgement naming main with `review_recipient` confirms
 acceptance for review; it does not confirm delivery to the intended worker.
 Client function signatures are unchanged.
 
-Run `./.config/selfci/check-sdk-packages.sh` for archive-source acceptance on Rust
-1.91 before publication. Run locked verified Cargo publish dry-runs in dependency
-order and publish proto before client. After publication, run the same check with
-`--registry` from an isolated Cargo home without local SDK patches. Verify registry
-checksums and clean archive provenance before creating source-identifying package
-tags. Compatible external rebuilds and activation remain separate gates.
+Rebuild configured extensions and UI clients against this SDK before activation.
+Compatible external rebuilds, downstream configuration and lock updates, and
+activation remain separate gates. New readers accept older mainless history;
+old readers cannot decode the new variants. Journal framing is unchanged.
+See the [main-agent migration guide](main-agent-migration.md) for configuration
+and consumer updates.
 See [SPEC-session-main-agent](../specs/SPEC-session-main-agent.md).
 
 ### Published SDK 0.15.0
@@ -118,6 +118,33 @@ a new wire version. The 0.13.0 archive consumer check verified protocol 13.1 and
 typed failure variants under Rust 1.91; registry-only acceptance must follow
 publication before source-identifying package tags are created; this acceptance
 has passed for 0.13.0.
+
+## Protocol 16.0 release acceptance
+
+Both packages were published on October 28, 2026 from clean source revision
+`37f7518558d230f3d0e8edf791c2b850d3d49a8f`, after locked Cargo publish
+dry-runs passed verification in dependency order. Both official sparse-index
+entries are unyanked. Downloaded registry archives match the index checksums.
+Their Cargo VCS metadata identifies that clean revision and the respective
+`crates/tau-proto` and `crates/tau-client` subdirectories.
+
+| Package | Registry archive SHA-256 |
+| --- | --- |
+| `dpc-tau-proto 0.16.0` | `09ecbaf380ca7e53330753e61c95b1b061fad6f94ec7843141ce9ec1b37309fa` |
+| `dpc-tau-client 0.16.0` | `109243178a6a4b462e0ecfc7b017bc9acb9d0dc4edf0ffbb2ee82d59fcbc5406` |
+
+The unchanged 0.1.0 leaf packages were not republished.
+`./.config/selfci/check-sdk-packages.sh --registry` passed all nine consumer
+tests on Rust 1.91 with an isolated Cargo home and no local SDK patches.
+
+After acceptance, `dpc-tau-proto-v0.16.0` and `dpc-tau-client-v0.16.0` were
+published at the exact source revision on Radicle and the GitHub mirror; both
+public remotes were verified. This documentation follow-up does not move those
+package tags or change archive provenance.
+
+This acceptance does not publish an application release, update external
+repositories or personal configuration, activate a system, restart services, or
+authorize old readers to open new journal variants.
 
 ## Protocol 15.0 release acceptance
 
