@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 16.1 adds an optional notification presentation hint to delivered
+messages. It changes model-facing metadata only. Readers retain full presentation
+when the hint is absent; older readers ignore it. Proto/client SDK 0.17.0 exposes
+the typed hint while existing 16.x peers remain compatible. Publication and
+activation are separate.
+See [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
 Protocol 16.0 adds optional canonical main membership/replay identity,
 UI-only main demand and unavailable-runtime notification, and typed peer review
 source, approval, and accepted-for-review disposition. The matching

@@ -2999,7 +2999,7 @@ impl FakeState {
                         ..
                     } => {
                         let raw = format!(
-                            "<message event=\"created\" publisher=\"e2e-test-dummy\" \
+                            "<message publisher=\"e2e-test-dummy\" \
               message_ref=\"provider-context-raw-message\" \
               sender_ref=\"provider-context-raw-sender\" \
               content_trust=\"external\">{raw_text}</message>"

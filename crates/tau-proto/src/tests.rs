@@ -1545,6 +1545,7 @@ fn representative_events() -> Vec<Event> {
             details: None,
         }),
         Event::MessageDelivered(MessageDelivered {
+            presentation: None,
             publisher_extension_id: crate::MessagePublisherId::parse("bridge-main")
                 .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent"),
@@ -4518,7 +4519,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 0})
+        serde_json::json!({"major": 16, "minor": 1})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4628,7 +4629,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 16, "minor": 0})
+        serde_json::json!({"major": 16, "minor": 1})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4720,7 +4721,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 0})
+        serde_json::json!({"major": 16, "minor": 1})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

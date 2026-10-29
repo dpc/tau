@@ -231,6 +231,13 @@ pub struct MessageDelivered<Publisher = MessagePublisherId> {
     pub message_id: MessageFactId,
     /// External sender described by the publisher.
     pub sender: MessageParty,
+    /// Optional model-facing presentation hint; absence retains full message
+    /// metadata.
+    ///
+    /// This affects rendering only, not identity, validation, delivery, or
+    /// authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<MessagePresentation>,
     /// Optional descriptive conversation provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<MessageConversation>,
@@ -255,6 +262,7 @@ impl<Publisher> MessageDelivered<Publisher> {
             agent_id,
             message_id,
             sender,
+            presentation: None,
             conversation,
             text: text.into(),
             extension_data: MessageExtensionData::default(),
@@ -271,11 +279,23 @@ impl<Publisher> MessageDelivered<Publisher> {
             agent_id: self.agent_id,
             message_id: self.message_id,
             sender: self.sender,
+            presentation: self.presentation,
             conversation: self.conversation,
             text: self.text,
             extension_data: self.extension_data,
         }
     }
+}
+
+/// Optional publisher-selected presentation for a delivered message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePresentation {
+    /// Hide message and sender reference/display attributes for a notification.
+    ///
+    /// Publisher, content trust, sender authentication/trust, and conversation
+    /// metadata remain visible. The complete typed fact remains available.
+    Notification,
 }
 
 /// Shared report/canonical payload describing replacement text for a referenced
@@ -665,15 +685,15 @@ impl<'a> MessageFactView<'a> {
         }
     }
 
-    /// Return the stable model-facing occurrence discriminator.
-    fn event_name(&self) -> &'static str {
+    /// Return the occurrence discriminator, omitting ordinary delivery.
+    fn event_name(&self) -> Option<&'static str> {
         match self {
-            Self::Delivered(_) => "created",
-            Self::Edited(_) => "edited",
-            Self::Deleted(_) => "deleted",
-            Self::ReactionAdded(_) => "reaction_added",
-            Self::ReactionRemoved(_) => "reaction_removed",
-            Self::Sent(_) => "sent",
+            Self::Delivered(_) => None,
+            Self::Edited(_) => Some("edited"),
+            Self::Deleted(_) => Some("deleted"),
+            Self::ReactionAdded(_) => Some("reaction_added"),
+            Self::ReactionRemoved(_) => Some("reaction_removed"),
+            Self::Sent(_) => Some("sent"),
         }
     }
 
@@ -783,6 +803,17 @@ impl<'a> MessageFactView<'a> {
     fn activates_model(&self) -> bool {
         !matches!(self, Self::Sent(_))
     }
+
+    /// Whether this delivery requests concise notification metadata.
+    fn is_notification(&self) -> bool {
+        matches!(
+            self,
+            Self::Delivered(MessageDelivered {
+                presentation: Some(MessagePresentation::Notification),
+                ..
+            })
+        )
+    }
 }
 
 /// Validate a universal opaque stable identifier.
@@ -817,12 +848,14 @@ fn valid_display(value: &str) -> bool {
 fn render_message_fact(view: &MessageFactView<'_>) -> String {
     // Keep this common transport-neutral projection aligned with
     // SPEC-external-message-reports-and-facts.
-    let mut output = format!(
-        "<message event=\"{}\" publisher=\"{}\"",
-        view.event_name(),
-        xml_escape(view.publisher().as_str())
-    );
-    if let Some(message_id) = view.message_id() {
+    let mut output = String::from("<message");
+    if let Some(event_name) = view.event_name() {
+        push_attribute(&mut output, "event", event_name);
+    }
+    push_attribute(&mut output, "publisher", view.publisher().as_str());
+    if let Some(message_id) = view.message_id()
+        && !view.is_notification()
+    {
         push_attribute(&mut output, "message_ref", message_id.as_str());
     }
     if let Some(reference) = view.reference() {
@@ -839,9 +872,11 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
         } else {
             "sender"
         };
-        push_attribute(&mut output, &format!("{party_label}_ref"), &party.stable_id);
-        if let Some(display) = &party.display_name {
-            push_attribute(&mut output, &format!("{party_label}_display"), display);
+        if !view.is_notification() {
+            push_attribute(&mut output, &format!("{party_label}_ref"), &party.stable_id);
+            if let Some(display) = &party.display_name {
+                push_attribute(&mut output, &format!("{party_label}_display"), display);
+            }
         }
         if !matches!(view, MessageFactView::Sent(_))
             && let Some(sender_auth) = party.sender_auth
@@ -869,13 +904,26 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
                 push_attribute(&mut output, "content_trust", "external");
             }
             output.push('>');
-            let visible_body = visible_escape_metadata(text);
+            let visible_body = visible_escape_message_body(text);
             output.push_str(&MESSAGE_PAYLOAD_ENVELOPE.escape_body(&visible_body));
             output.push_str(MESSAGE_PAYLOAD_ENVELOPE.exact_close);
         }
         None => output.push_str("/>"),
     }
     output
+}
+
+/// Preserve body line feeds while exposing other structural Unicode as metadata
+/// does.
+fn visible_escape_message_body(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for (index, line) in value.split('\n').enumerate() {
+        if index != 0 {
+            escaped.push('\n');
+        }
+        escaped.push_str(&visible_escape_metadata(line));
+    }
+    escaped
 }
 
 impl MessageSenderAuth {

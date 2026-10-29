@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.16.0",
+        "dpc-tau-proto": "=0.17.0",
     },
 }
 
@@ -162,8 +162,33 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 1));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// Notification hints survive the packaged wire API without losing delivery identity.
+#[test]
+fn packaged_sdk_preserves_notification_presentation() {
+    use tau_proto::*;
+    let mut report = MessageDelivered::new(
+        RawMessagePublisherId::new("notices"),
+        MessageAgentTarget::new("agent"),
+        MessageFactId::new("delivery-id"),
+        MessageParty {
+            stable_id: "sender".into(),
+            display_name: None,
+            sender_auth: None,
+            sender_trust: None,
+        },
+        None,
+        "New activity.\nhttps://example.com/issue/1",
+    );
+    assert_eq!(report.presentation, None);
+    report.presentation = Some(MessagePresentation::Notification);
+    let event = Event::MessageDeliveredReported(report);
+    let bytes = encode_message_to_vec(&event).expect("encode notification");
+    let decoded: Event = decode_message_from_slice(&bytes).expect("decode notification");
+    assert_eq!(decoded, event);
 }
 
 /// Consumers must distinguish review acceptance from worker delivery and retain

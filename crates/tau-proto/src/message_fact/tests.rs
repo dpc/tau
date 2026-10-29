@@ -271,7 +271,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         else {
             panic!("projection must contain narrative text")
         };
-        assert!(text.starts_with("<message event="));
+        assert!(text.starts_with("<message "));
         assert!(text.contains("<hello>") || !matches!(fact, Event::MessageDelivered(_)));
         assert!(!text.contains('\u{202e}'));
         assert!(!text.contains("opaque sentinel"));
@@ -314,7 +314,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     assert_eq!(
         rendered,
         vec![
-            "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\"><hello></message>",
+            "<message publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\"><hello></message>",
             "<message event=\"edited\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
             "<message event=\"deleted\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\"/>",
             "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
@@ -408,13 +408,13 @@ fn message_fact_body_uses_exact_close_framing() {
         MessageAgentTarget::new("agent-1"),
         MessageFactId::new("m1"),
         MessageParty {
-            stable_id: "sender\"&".to_owned(),
+            stable_id: "sender\"&\n".to_owned(),
             display_name: None,
             sender_auth: None,
             sender_trust: None,
         },
         None,
-        "Don't &apos; <user>x</user> </MESSAGE> </message > 雪\n</message></message>",
+        "\nDon't &apos; <user>x</user> </MESSAGE> </message > 雪\n\n</message></message>\t\r\u{202e}\u{200b}\n",
     ));
     let projection = project_message_fact(&fact)
         .expect("message fact")
@@ -429,7 +429,77 @@ fn message_fact_body_uses_exact_close_framing() {
     assert_eq!(text.matches("</message>").count(), 1);
     assert_eq!(
         text,
-        "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"sender&quot;&amp;\" content_trust=\"external\">Don't &apos; <user>x</user> </MESSAGE> </message > 雪\\u{000A}&lt;/message&gt;&lt;/message&gt;</message>"
+        "<message publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"sender&quot;&amp;\\u{000A}\" content_trust=\"external\">\nDon't &apos; <user>x</user> </MESSAGE> </message > 雪\n\n&lt;/message&gt;&lt;/message&gt;\\u{0009}\\u{000D}\\u{202E}\\u{200B}\n</message>"
+    );
+}
+
+/// Notifications hide bookkeeping only in the projection, retain external
+/// provenance, and preserve typed identity through wire decoding and publisher
+/// stamping.
+#[test]
+fn notification_presentation_preserves_identity_and_validation() {
+    let mut report = MessageDelivered::new(
+        RawMessagePublisherId::new("notice-bridge"),
+        MessageAgentTarget::new("agent-1"),
+        MessageFactId::new("opaque-id"),
+        MessageParty {
+            stable_id: "synthetic-sender".to_owned(),
+            display_name: Some("Notifications".to_owned()),
+            sender_auth: None,
+            sender_trust: None,
+        },
+        None,
+        "New activity.\nhttps://example.com/issue/1",
+    );
+    let prior_json = serde_json::to_value(&report).expect("serialize full message");
+    assert!(prior_json.get("presentation").is_none());
+    let prior_json: MessageDelivered<RawMessagePublisherId> =
+        serde_json::from_value(prior_json).expect("decode historical JSON");
+    let mut prior_cbor = Vec::new();
+    ciborium::into_writer(&prior_json, &mut prior_cbor).expect("encode historical CBOR");
+    let prior_cbor: MessageDelivered<RawMessagePublisherId> =
+        ciborium::from_reader(prior_cbor.as_slice()).expect("decode historical CBOR");
+    assert_eq!(prior_cbor.presentation, None);
+
+    report.presentation = Some(MessagePresentation::Notification);
+    let wire = HarnessInputMessage::emit(Event::MessageDeliveredReported(report.clone()));
+    let encoded = encode_message_to_vec(&wire).expect("encode notification report");
+    assert_eq!(
+        decode_harness_input_from_slice(&encoded).expect("decode notification report"),
+        wire
+    );
+    let canonical = report
+        .with_publisher(MessagePublisherId::parse("notice-bridge").expect("canonical publisher"));
+    assert_eq!(canonical.message_id.as_str(), "opaque-id");
+    assert_eq!(canonical.sender.stable_id, "synthetic-sender");
+    assert_eq!(
+        canonical.presentation,
+        Some(MessagePresentation::Notification)
+    );
+    let event = Event::MessageDelivered(canonical.clone());
+    let projection = project_message_fact(&event)
+        .expect("message fact")
+        .expect("valid notification");
+    assert!(projection.activates_model);
+    assert_eq!(projection.item.role, ContextRole::User);
+    assert_eq!(
+        projection.item.content,
+        vec![ContentPart::Text {
+            text: "<message publisher=\"notice-bridge\" content_trust=\"external\">New activity.\nhttps://example.com/issue/1</message>".to_owned(),
+        }]
+    );
+
+    let mut invalid_id = canonical.clone();
+    invalid_id.message_id = MessageFactId::new("");
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(invalid_id)),
+        Some(Err(MessageProjectionFailure::InvalidMessageId))
+    );
+    let mut invalid_sender = canonical;
+    invalid_sender.sender.stable_id.clear();
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(invalid_sender)),
+        Some(Err(MessageProjectionFailure::InvalidParty))
     );
 }
 
@@ -646,6 +716,7 @@ fn publisher_id_grammar_is_bounded_ascii() {
 fn telegram_and_xmpp_fit_delivered_schema() {
     for fact in [
         MessageDelivered {
+            presentation: None,
             publisher_extension_id: crate::MessagePublisherId::parse("telegram-work")
                 .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent-a"),
@@ -665,6 +736,7 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             extension_data: MessageExtensionData::default(),
         },
         MessageDelivered {
+            presentation: None,
             publisher_extension_id: crate::MessagePublisherId::parse("xmpp-main")
                 .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent-a"),

@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.1 adds the optional delivered-message `presentation=notification`
+hint. Updated readers omit only model-facing message and sender references and
+sender display; older readers ignore the field and retain full presentation.
+Delivery identity, validation, acknowledgement, trust and activation are unchanged.
+Mixed 16.x peers remain compatible without a coordinated rebuild. The source SDK
+is proto/client 0.17.0 because the new public field breaks existing Rust struct
+literals; publication and activation are separate operations.
+
 Protocol 16.0 adds an optional canonical session main identity, distinct runtime
 unavailability, UI main demand, protected main unload, and peer review metadata.
 Configured extensions must rebuild with proto/client SDK 0.16.0. A peer review

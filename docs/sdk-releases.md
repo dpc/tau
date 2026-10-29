@@ -20,6 +20,23 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Prepared SDK 0.17.0
+
+Protocol **16.1** adds optional `MessageDelivered.presentation`, with
+`Some(MessagePresentation::Notification)` hiding model-facing message and sender
+references and sender display. Constructors default to `None`; consumers using
+struct literals must add `presentation: None` unless they opt in. Internal
+identifiers, sender validation, acknowledgement, activation, and trust metadata
+are unchanged. Older 16.x peers ignore the hint and keep full presentation, so
+existing extensions do not need to rebuild.
+
+The new public field breaks existing Rust struct literals, so this change prepares
+`dpc-tau-proto` and `dpc-tau-client` **0.17.0** while keeping wire protocol
+**16.1**. The client pins proto `=0.17.0`; both leaf packages remain 0.1.0.
+This is not a publication or registry-acceptance record. Publish proto before
+client, run the registry-only consumer acceptance, and verify source tags before
+treating the release as complete. Activation remains separate.
+
 ### Published SDK 0.16.0
 
 Protocol **16.0** and proto/client SDK **0.16.0** add an optional canonical session

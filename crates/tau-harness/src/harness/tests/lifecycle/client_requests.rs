@@ -902,6 +902,7 @@ fn socket_client_cannot_emit_message_reports_or_canonical_facts() {
     let client_id = "ui";
     connect_test_client(&mut h, client_id, tau_proto::ClientKind::Ui);
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered {
+        presentation: None,
         publisher_extension_id: tau_proto::MessagePublisherId::parse("forged")
             .expect("canonical publisher"),
         agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),

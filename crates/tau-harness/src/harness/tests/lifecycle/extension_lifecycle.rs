@@ -3875,6 +3875,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
     )
     .expect("subscribe");
     let report = tau_proto::MessageDelivered {
+        presentation: Some(tau_proto::MessagePresentation::Notification),
         publisher_extension_id: tau_proto::RawMessagePublisherId::new(configured_name),
         agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
         message_id: tau_proto::MessageFactId::new("m1"),
@@ -3902,6 +3903,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
                 && prepared.sender.sender_auth.is_none()
                 && prepared.sender.sender_trust
                     == Some(tau_proto::MessageSenderTrust::Untrusted)
+                && prepared.presentation == Some(tau_proto::MessagePresentation::Notification)
     ));
 
     h.handle_extension_event_inner_with_persist(
@@ -3926,6 +3928,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
             && fact.publisher_extension_id.as_str() == configured_name
             && fact.sender.sender_auth.is_none()
             && fact.sender.sender_trust == Some(tau_proto::MessageSenderTrust::Untrusted)
+            && fact.presentation == Some(tau_proto::MessagePresentation::Notification)
     ));
     assert!(event_log_contains_source_event(
         &h,
@@ -4005,6 +4008,7 @@ fn extension_message_report_requires_exact_authenticated_publisher_claim() {
         "unicode-☃",
     ] {
         let report = tau_proto::MessageDelivered {
+            presentation: None,
             publisher_extension_id: tau_proto::RawMessagePublisherId::new(claim),
             agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
             message_id: tau_proto::MessageFactId::new("m1"),

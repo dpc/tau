@@ -731,7 +731,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
                             && matches!(
                                 message.content.first(),
                                 Some(tau_proto::ContentPart::Text { text })
-                                    if text.contains("<message event=\"created\"")
+                                    if text.contains("<message publisher=")
                             )
                 ))
         )
@@ -964,7 +964,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
                     if matches!(
                         message.content.first(),
                         Some(ContentPart::Text { text })
-                            if text.contains("<message event=\"created\"")
+                            if text.contains("<message publisher=")
                     )
             )
         })
@@ -1036,6 +1036,16 @@ fn metadata_only_offline_agent_message_fact_uses_session_journal() {
 /// Cold replay reconstructs an offline fact and one uncovered activation.
 #[test]
 fn agent_message_fact_replay_rebuilds_uncovered_wake() {
+    for presentation in [None, Some(tau_proto::MessagePresentation::Notification)] {
+        assert_message_fact_replay_rebuilds_uncovered_wake(presentation);
+    }
+}
+
+/// Exercise full and notification projections through durable live/replay
+/// paths.
+fn assert_message_fact_replay_rebuilds_uncovered_wake(
+    presentation: Option<tau_proto::MessagePresentation>,
+) {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let agent_id = tau_proto::AgentId::parse("offline-agent").expect("agent id");
@@ -1060,27 +1070,26 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
                 }),
             )
             .expect("seed membership");
-        h.commit_message_fact(
-            None,
-            Event::MessageDelivered(tau_proto::MessageDelivered::new(
-                tau_proto::MessagePublisherId::parse("bridge")
-                    .expect("canonical publisher id must satisfy the identifier grammar"),
-                tau_proto::MessageAgentTarget::new(agent_id.as_str()),
-                tau_proto::MessageFactId::new("m1"),
-                tau_proto::MessageParty {
-                    stable_id: "u1".to_owned(),
-                    display_name: Some("Alice".to_owned()),
-                    sender_auth: Some(tau_proto::MessageSenderAuth::VerifiedAllowlisted),
-                    sender_trust: Some(tau_proto::MessageSenderTrust::Untrusted),
-                },
-                Some(tau_proto::MessageConversation {
-                    stable_id: "c1".to_owned(),
-                    display_name: None,
-                    alias: Some("general".to_owned()),
-                }),
-                "persisted message",
-            )),
+        let mut fact = tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("m1"),
+            tau_proto::MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: Some("Alice".to_owned()),
+                sender_auth: Some(tau_proto::MessageSenderAuth::VerifiedAllowlisted),
+                sender_trust: Some(tau_proto::MessageSenderTrust::Untrusted),
+            },
+            Some(tau_proto::MessageConversation {
+                stable_id: "c1".to_owned(),
+                display_name: None,
+                alias: Some("general".to_owned()),
+            }),
+            "persisted message\nhttps://example.com/issue/1",
         );
+        fact.presentation = presentation;
+        h.commit_message_fact(None, Event::MessageDelivered(fact));
         let projection = h
             .session_runtime
             .agent_store
@@ -1123,9 +1132,16 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
     else {
         panic!("expected narrative text")
     };
+    let references = if presentation.is_none() {
+        " message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\""
+    } else {
+        ""
+    };
     assert_eq!(
         text,
-        "<message event=\"created\" publisher=\"bridge\" message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"general\" content_trust=\"external\">persisted message</message>"
+        &format!(
+            "<message publisher=\"bridge\"{references} sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"general\" content_trust=\"external\">persisted message\nhttps://example.com/issue/1</message>"
+        )
     );
     assert!(
         event_log_events(&resumed).iter().any(|event| matches!(
