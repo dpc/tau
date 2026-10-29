@@ -20,22 +20,21 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.17.0
+### Published SDK 0.17.0
 
 Protocol **16.1** adds optional `MessageDelivered.presentation`, with
-`Some(MessagePresentation::Notification)` hiding model-facing message and sender
-references and sender display. Constructors default to `None`; consumers using
-struct literals must add `presentation: None` unless they opt in. Internal
+`Some(MessagePresentation::Notification)` hiding model-facing message references,
+sender references, and sender display. Constructors default to `None`; consumers
+using struct literals must add `presentation: None` unless they opt in. Internal
 identifiers, sender validation, acknowledgement, activation, and trust metadata
 are unchanged. Older 16.x peers ignore the hint and keep full presentation, so
 existing extensions do not need to rebuild.
 
-The new public field breaks existing Rust struct literals, so this change prepares
+The new public field breaks existing Rust struct literals, so this change uses
 `dpc-tau-proto` and `dpc-tau-client` **0.17.0** while keeping wire protocol
 **16.1**. The client pins proto `=0.17.0`; both leaf packages remain 0.1.0.
-This is not a publication or registry-acceptance record. Publish proto before
-client, run the registry-only consumer acceptance, and verify source tags before
-treating the release as complete. Activation remains separate.
+Both packages are published and have passed registry-only consumer acceptance;
+see the acceptance record below. Activation remains separate.
 
 ### Published SDK 0.16.0
 
@@ -135,6 +134,33 @@ a new wire version. The 0.13.0 archive consumer check verified protocol 13.1 and
 typed failure variants under Rust 1.91; registry-only acceptance must follow
 publication before source-identifying package tags are created; this acceptance
 has passed for 0.13.0.
+
+## Protocol 16.1 release acceptance
+
+Both packages were published on October 29, 2026 from clean source revision
+`fec75e54754187cea087afb19684b2d9b6f48f61`, after locked Cargo publish
+dry-runs passed verification in dependency order. Both official sparse-index
+entries are unyanked. Downloaded registry archives match the index checksums.
+Their Cargo VCS metadata identifies that clean revision and the respective
+`crates/tau-proto` and `crates/tau-client` subdirectories.
+
+| Package | Registry archive SHA-256 |
+| --- | --- |
+| `dpc-tau-proto 0.17.0` | `1018c7ed01b361cab8adb3198da39eae751caabced258779ec99e6fb066fe5e1` |
+| `dpc-tau-client 0.17.0` | `d79d99b50033c279c13f6bb42fa35a42eedbc1423c035c586abe454dd5c21061` |
+
+The unchanged 0.1.0 leaf packages were not republished.
+`./.config/selfci/check-sdk-packages.sh --registry` passed all ten consumer
+tests on Rust 1.91 with an isolated Cargo home and no local SDK patches.
+
+After acceptance, `dpc-tau-proto-v0.17.0` and `dpc-tau-client-v0.17.0` were
+published at the exact source revision on Radicle and the GitHub mirror.
+Both public remotes were verified. This documentation follow-up does not move
+those package tags or change archive provenance.
+
+This acceptance does not publish an application release, update external
+repositories or personal configuration, activate a system, or restart services.
+Wire protocol remains 16.1, and older 16.x peers remain compatible.
 
 ## Protocol 16.0 release acceptance
 
