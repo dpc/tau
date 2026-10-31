@@ -23,7 +23,13 @@ struct PtyPeer {
 impl PtyPeer {
     /// Starts the child in a separate controlling-terminal session.
     fn new(case: &str) -> Self {
-        let pty = nix::pty::openpty(None, None).expect("private PTY");
+        let size = nix::pty::Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = nix::pty::openpty(Some(&size), None).expect("private PTY");
         let slave = File::from(pty.slave);
         let master = File::from(pty.master);
         nix::fcntl::fcntl(master.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
@@ -87,7 +93,9 @@ impl PtyPeer {
             }
             assert!(
                 path_std_time::Instant::now() < deadline,
-                "PTY output marker timed out"
+                "PTY output marker {:?} timed out: {:?}",
+                String::from_utf8_lossy(marker),
+                String::from_utf8_lossy(&self.output)
             );
             thread::sleep(Duration::from_millis(2));
         }
@@ -262,6 +270,67 @@ fn clipboard_handoff_real_pty_rejects_error_and_malformed_fence() {
     }
 }
 
+/// Multiline pastes split across terminal reads must redraw without a
+/// subsequent key, even when the closing delimiter arrives after the reader
+/// slice expires.
+#[test]
+fn multiline_paste_redraws_without_followup_key() {
+    for delay in [0, 2, 30, 100] {
+        let mut peer = PtyPeer::new("paste-redraw");
+        peer.wait_for(b"CHILD_READY");
+        peer.send(b"\x1b[200~first paste line\r\nsecond paste line\n");
+        thread::sleep(Duration::from_millis(delay));
+        peer.send(b"final paste line\x1b[201~");
+        peer.wait_for(b"final paste line");
+        peer.send(b"\r");
+        peer.finish();
+    }
+}
+
+/// Native clipboard DONE must publish a multiline draft and repaint even when
+/// transport gaps exceed an input-reader slice and split the final ST
+/// delimiter.
+#[test]
+fn multiline_native_paste_redraws_without_followup_key() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    for delay in [0, 2, 30, 100] {
+        let mut peer = PtyPeer::new("paste-redraw");
+        peer.wait_for(b"CHILD_READY");
+        peer.send(
+            b"\x1b[?5522;1$y\
+              \x1b]5522;type=read:status=OK\x1b\\\
+              \x1b]5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbg==\x1b\\\
+              \x1b]5522;type=read:status=DONE\x1b\\",
+        );
+        peer.wait_for(b";dGV4dC9wbGFpbg==\x1b\\");
+        let output = String::from_utf8_lossy(&peer.output);
+        let id = output
+            .split("type=read:id=")
+            .nth(1)
+            .expect("clipboard request")
+            .split(';')
+            .next()
+            .expect("request ID")
+            .to_owned();
+        let encoded = STANDARD.encode(b"first paste line\r\nsecond paste line\nfinal paste line");
+        peer.send(
+            format!(
+                "\x1b]5522;type=read:id={id}:status=OK\x1b\\\
+                 \x1b]5522;type=read:id={id}:status=DATA:mime=dGV4dC9wbGFpbg==;{encoded}\x1b\\"
+            )
+            .as_bytes(),
+        );
+        thread::sleep(Duration::from_millis(delay));
+        peer.send(format!("\x1b]5522;type=read:id={id}:status=DONE\x1b").as_bytes());
+        thread::sleep(Duration::from_millis(delay));
+        peer.send(b"\\");
+        peer.wait_for(b"final paste line");
+        peer.send(b"\r");
+        peer.finish();
+    }
+}
+
 /// Runs only in the isolated PTY subprocess; the ordinary suite never shares
 /// its crossterm global input reader with this terminal.
 #[test]
@@ -270,6 +339,20 @@ fn clipboard_handoff_pty_child() {
         return;
     };
     let (term, handle) = Term::new("> ", TerminalOptions::default()).expect("real PTY terminal");
+    if case == "paste-redraw" {
+        println!("CHILD_READY");
+        io::stdout().flush().expect("publish ready marker");
+        assert!(matches!(
+            term.get_next_event().expect("paste event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(
+            handle.get_buffer(),
+            "first paste line\nsecond paste line\nfinal paste line"
+        );
+        term.get_next_event().expect("finish key");
+        return;
+    }
     handle.set_buffer("draft".into(), 5);
     if case != "unsupported" {
         let output = handle

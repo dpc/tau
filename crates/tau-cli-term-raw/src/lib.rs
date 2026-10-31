@@ -3264,6 +3264,11 @@ impl Term {
     /// Inserts one normalized text paste atomically or freezes it for upload.
     /// Both legacy2004 and completed5522 text use this same threshold path.
     fn apply_text_paste(&self, text: String) -> Option<Event> {
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            paste_bytes = text.len(),
+            "complete text paste received"
+        );
         if text.is_empty() {
             self.handle.redraw();
             return None;
@@ -3300,9 +3305,19 @@ impl Term {
             st.editor.buffer.insert_str(cursor, &text);
             st.write_cursor(cursor + text.len());
             st.sync_buffer_to_history_nav();
+            tracing::trace!(
+                target: "tau_cli_term_raw::frontend_progress",
+                editor_revision = st.editor.revision,
+                redraw_suppression = st.terminal.redraw_suppression,
+                "text paste inserted; completion refresh started"
+            );
         }
         self.refresh_completion();
         self.handle.redraw();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            "text paste completion refreshed and redraw requested"
+        );
         Some(Event::BufferChanged)
     }
 
@@ -5355,6 +5370,9 @@ struct RedrawPass {
     size_changed: bool,
     force_full: bool,
     sync_gen: RedrawSyncGeneration,
+    /// Process-local editor revision captured with layout for opt-in paste
+    /// diagnostics; a flushed frame does not prove terminal receipt or paint.
+    editor_revision: u64,
     pending_raw: Vec<String>,
     /// Clipboard controls emitted outside the frame and never logged.
     clipboard_control: Vec<u8>,
@@ -5466,6 +5484,7 @@ fn redraw_loop(
             target: "tau_cli_term_raw::frontend_progress",
             write_us = write_elapsed.as_micros(),
             flush_us = flush_elapsed.as_micros(),
+            editor_revision = pass.editor_revision,
             "terminal write and flush finished"
         );
         trace_flushed_presentation_observations(&state, &pass);
@@ -5704,6 +5723,7 @@ fn prepare_redraw_pass(
         size_changed,
         force_full,
         sync_gen,
+        editor_revision: st.editor.revision,
         pending_raw,
         clipboard_control,
         redraw_history_size,
