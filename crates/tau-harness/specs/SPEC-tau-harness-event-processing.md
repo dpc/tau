@@ -1,17 +1,16 @@
 # SPEC-tau-harness-event-processing: Event Processing
 
+## Record justification
+
+Publication spans harness intake, admission and activation staging, interception,
+debug logging, semantic stores, broadcast, replay, and downstream consumers, so no
+single module owns the complete commit and persistence contract.
+
 Durable semantic facts cross persistence admission before EventLog, debug JSONL,
 subscriptions, reactions, and continuation mutation. `Full`, unavailable, stale,
 or staging failures leave those consumers unchanged. Worker I/O follows
 acceptance; retryable failures retain the FIFO head, and rejected
 `ShellCommandFinished` facts receive no substitute canonical broadcast.
-
-## Record justification
-
-Publication spans harness intake, admission and activation staging, interceptor
-selection, debug logging, semantic stores, broadcast, replay, and downstream
-domain consumers. No one owning module can state the complete commit and
-persistence contract coherently.
 
 For changes to event persistence, sequencing authority, replay, or logging
 behavior, follow the approval requirements in
@@ -88,37 +87,18 @@ Session-bound semantic consumers reject any frame whose captured session or
 connection no longer matches. Process-global tool, prompt-fragment,
 provider-model, and provider-quota consumers still require the captured
 connection and configured extension instance to remain exact.
-Declarations are excluded from semantic persistence and replay for either
-caller-supplied `persist` value; see
-[SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
-Session registration, complete discovery snapshots, canonical projection, and
-readiness release likewise run only after ordinary commit; their raw events are
-excluded from semantic persistence for either caller `persist` value. See
-[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
-Per-agent context registration, correlated discovery/value projection, and
-readiness release also run only after ordinary commit. The raw events are excluded from semantic
-persistence for either caller `persist` value. See
-[SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
-Internal-prompt requests likewise cross ordinary commit before target
-validation and prompt submission. Raw requests remain outside semantic history
-for either caller `persist` value. See
-[SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
-Start-agent requests also commit before validation, duplicate rebinding,
-acceptance/result routing, and child creation. Raw requests remain outside
-semantic history for either caller `persist` value. See
-[SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
-Terminal-output events likewise use ordinary interception and commit before a
-subscribed UI acts. They remain outside semantic history for either caller
-`persist` value, and terminal consumers reject replay delivery. See
-[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
-Custom extension-owned events also use ordinary interception and commit before
-direct subscriber delivery. Opaque custom events remain outside semantic history
-for either caller `persist` value. See
-[SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
-Attached-UI prompt-draft and focus observations likewise use ordinary
-interception and commit before live subscriber reaction. Both remain outside
-semantic history for either caller `persist` value. See
-[SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
+The following contracts specify post-commit consumers and exclude their raw
+events from semantic persistence for either caller-supplied `persist` value:
+
+- [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md)
+- [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md)
+- [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md)
+- [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md)
+- [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md)
+- [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md)
+- [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md)
+- [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md)
+
 User-shell execution and completion use opaque custom events with generic
 publisher and privacy metadata. No shell-specific consumer runs after commit.
 The separately requested generic passive-context append uses ordinary
@@ -192,13 +172,6 @@ is the stable configured publisher name rather than the run-local connection.
 The live committed peer envelope alone invokes correlation and routing;
 historical delivery never does. The complete peer request flow is
 [SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
-
-Catch-up snapshots reconstructed from current harness state (for example
-`session.agent_loaded`, folded metadata, and `harness.session_dir`) are also
-selected by `historical_selectors` and delivered with `EventDelivery.replay =
-true`. Only `agent.replay_complete` and `session.replay_complete` boundaries
-remain non-replay during catch-up; live delivery is buffered until the session
-boundary has been sent.
 
 Agent-journal catch-up delivers subscriber-selected durable events without a
 shared transcript eligibility allowlist, on both initial subscription and later
@@ -381,11 +354,11 @@ Historical selectors are a separate exposure decision from live selectors:
 replayed `tool.request` and `tool.started` facts can include tool arguments and
 must only be requested by restore code that needs them. Live execution handlers
 must remain live-only and must not run from replayed delivery envelopes.
-Historical catch-up also includes replay-marked current-state snapshots (for
-example loaded-agent, metadata, and session-dir facts), with live events buffered
-until the non-replay replay-complete boundary. Ephemeral session stores keep
-restore facts only in same-daemon memory. A journal-backed writer recovers
-restore facts under the session lock by truncating only an incomplete EOF frame;
+Catch-up snapshot selection, replay markers, and live-delivery barriers follow
+[SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md#subscription-replay-protocol).
+Ephemeral session stores keep restore facts only in same-daemon memory.
+A journal-backed writer recovers restore facts under the session lock by
+truncating only an incomplete EOF frame;
 a complete invalid frame fails closed unchanged before append. Read-only
 historical replay remains strict.
 

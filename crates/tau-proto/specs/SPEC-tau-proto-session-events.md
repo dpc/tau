@@ -67,6 +67,7 @@ that produced the terminal response, independent of the continuation ordinal.
 If selection moves to a sibling after a plan commits but before the reserved
 successor prompt starts, the original branch closes with its exact steer,
 reserved owner, pre-start harness `failed` terminal, and stamped owed finish.
+These append under explicit parents without changing the selected sibling.
 No successor prompt-start or provider request is created. Once the successor
 prompt has started, its real provider response remains the sole terminal owner
 on the original branch.
@@ -114,14 +115,10 @@ Required and optional fields express only the current protocol semantics.
 
 ## Agent metadata protocol
 
-`agent.metadata_set_request` and `agent.metadata_unset_request` are
-`persist=false`-by-default peer mutation requests. They reuse the canonical payload
-shapes but never enter semantic replay for either Emit metadata value.
-`agent.metadata_set` and `agent.metadata_unset` are separate harness-authored,
-durable, extension-visible agent facts. Metadata keys are strings; values are
-arbitrary CBOR values capped by `MAX_AGENT_METADATA_VALUE_BYTES`; and
-`metadata_set.inheritable` controls child-agent copies. Replay uses the latest
-folded canonical snapshot before `session.agent_loaded`. See
+Metadata keys are strings; values are arbitrary CBOR values capped by
+`MAX_AGENT_METADATA_VALUE_BYTES`; and
+`metadata_set.inheritable` controls child-agent copies. Request/canonical-fact
+separation, durability, and replay ordering follow
 [SPEC-agent-metadata-requests-and-canonical-facts](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 
 ## Subscription replay protocol
@@ -167,13 +164,6 @@ matching outer-turn finish must reference the decision before a standalone start
 with `automatic_policy` can claim the same identity. Replay repairs an owed finish
 and start exactly once.
 
-An output-length plan whose branch becomes dormant may append its exact reserved
-steer, successor owner, pre-start failure, and owed finish under explicit parents
-without changing the selected sibling. This repair is valid only before the
-reserved successor's `agent.prompt_started`. After prompt-start, the dispatched
-owner remains the sole terminal authority and branch movement cannot synthesize
-a competing failure.
-
 `agent.prompt_created` is the full transient provider work request and may carry
 large system prompts, context, images, and tool definitions. It is emitted only
 from the matching prompt-start fact's live post-commit continuation and never
@@ -192,11 +182,7 @@ maintain state from supplied draft text must key that state by both `session_id`
 and `target_agent_id`. A missing `target_agent_id` means an
 unscoped/session-level draft, normally the start-new-agent prompt; consumers
 must not infer the current agent from absence.
-Only an attached socket UI may author draft observations. The event default is
-transient, although the interactive CLI's established Emit wrapper currently
-sends a true `persist` bit. The harness preserves that metadata but excludes
-the event from semantic stores and replay for either value. `ui.focus_changed`
-uses the same authority and persistence contract. See
+Draft and focus authority, producer metadata, and persistence follow
 [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 
 ## Shared agent navigation mode
