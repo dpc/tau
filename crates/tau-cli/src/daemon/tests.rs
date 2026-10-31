@@ -129,6 +129,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -151,6 +152,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -176,6 +178,34 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
     }
 }
 
+/// Directory-scoped preview startup affects only the child process.
+#[test]
+fn discovery_preview_workdir_does_not_change_parent_directory() {
+    let tmp = tempfile::TempDir::new().expect("preview directory");
+    let original = std::env::current_dir().expect("parent directory");
+    let command = build_daemon_command(DaemonCommandSpec {
+        tau_binary: Path::new("tau"),
+        session_id: "discovery-preview",
+        session_status: SessionLaunchStatus::New,
+        stdout: Stdio::piped(),
+        stderr: Stdio::null(),
+        stdin: Stdio::null(),
+        startup_role: None,
+        cli_overrides: DaemonCliOverrides {
+            workdir: Some(tmp.path()),
+            profile: None,
+            role: &[],
+            extension: &[],
+            extension_environment: None,
+            harness_config: &[],
+            memory_only_agent_store: false,
+        },
+        storage_mode: HarnessStorageMode::SessionEphemeral,
+    });
+    assert_eq!(command.get_current_dir(), Some(tmp.path()));
+    assert_eq!(std::env::current_dir().expect("parent directory"), original);
+}
+
 /// Ensures the launcher does not manufacture a parent-wide logging allowlist;
 /// the harness and each extension must own their absent-environment fallback.
 #[test]
@@ -189,6 +219,7 @@ fn daemon_command_leaves_tau_log_inherited() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -220,6 +251,7 @@ fn daemon_command_sets_and_clears_profile_env() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile,
             role: &[],
             extension: &[],
@@ -256,6 +288,7 @@ fn daemon_command_clears_empty_extension_transport() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -294,6 +327,7 @@ fn daemon_command_forwards_public_extension_environment_separately() {
         stdin: Stdio::null(),
         startup_role: Some("engineer"),
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &cli,
@@ -330,6 +364,7 @@ fn daemon_command_clears_socket_activation_env() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -368,6 +403,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -396,6 +432,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -426,6 +463,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],
@@ -462,6 +500,7 @@ fn daemon_command_scopes_memory_only_agent_store_to_previews() {
             stdin: Stdio::null(),
             startup_role: None,
             cli_overrides: DaemonCliOverrides {
+                workdir: None,
                 profile: None,
                 role: &[],
                 extension: &[],
@@ -497,6 +536,7 @@ fn daemon_command_uses_initial_ui_stdio() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            workdir: None,
             profile: None,
             role: &[],
             extension: &[],

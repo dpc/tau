@@ -4594,6 +4594,9 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
             ),
             _ => None,
         })
+        // Closed fixtures match task text separately from the harness's lazy
+        // discovery messages. This is not runtime provenance or authority.
+        .filter(|text| !tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
         .collect()
 }
 

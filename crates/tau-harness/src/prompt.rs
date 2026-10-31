@@ -90,7 +90,6 @@ pub(crate) fn prompt_template_render_count() -> usize {
     PROMPT_TEMPLATE_RENDER_COUNT.get()
 }
 
-use crate::discovery as path_crate_discovery;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 pub(crate) const BUILT_IN_SYSTEM_TEMPLATE_NAME: &str = "built-in";
 const BUILT_IN_SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../prompts/system.hbs");
@@ -621,7 +620,7 @@ pub(crate) fn try_build_system_prompt_and_additional_templates_with_engine(
 
 fn prompt_template_data(
     context: RolePromptTemplateContext<'_>,
-    skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
+    _skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     mut agent_context: serde_json::Value,
     capabilities: PromptCapabilities,
 ) -> serde_json::Value {
@@ -642,7 +641,7 @@ fn prompt_template_data(
             "cwd": context.session_cwd.map(|path| path.display().to_string()),
         },
         "agent_id": context.agent_id.map(ToString::to_string),
-        "skills": prompt_template_skills(skills),
+        "skills": [],
         "agent_context": agent_context,
         "capabilities": capabilities,
     })
@@ -858,33 +857,6 @@ impl handlebars::HelperDef for CapabilityMembershipHelper {
             values.iter().any(|value| value.as_str() == Some(name)),
         )))
     }
-}
-
-fn prompt_template_skills(
-    skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
-) -> Vec<serde_json::Value> {
-    let mut skills: Vec<_> = skills
-        .iter()
-        .filter(|(_, skill)| skill.add_to_prompt && !skill.disable_model_invocation)
-        .map(|(name, skill)| {
-            let base_dir = match &skill.source {
-                path_crate_discovery::DiscoveredSkillSource::File(path) => path
-                    .parent()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| path.display().to_string()),
-                path_crate_discovery::DiscoveredSkillSource::BuiltIn { .. } => {
-                    "<builtin>".to_owned()
-                }
-            };
-            serde_json::json!({
-                "name": name.as_str(),
-                "description": tau_skills::truncate_description(&skill.description),
-                "baseDir": base_dir,
-            })
-        })
-        .collect();
-    skills.sort_by(|a, b| compare_template_values(a, b, Some("name")));
-    skills
 }
 
 struct EqHelper;
@@ -1214,42 +1186,44 @@ fn value_type_rank(value: &serde_json::Value) -> u8 {
     }
 }
 
-pub(crate) fn render_agents_context_message<'a>(
-    files: impl IntoIterator<Item = &'a DiscoveredAgentsFile>,
-) -> String {
-    use std::fmt::Write as _;
-
-    let mut files = files.into_iter().peekable();
-    let mut text = String::from(
-        "# AGENTS.md instructions\n\n\
-The following instructions were loaded from AGENTS.md files.\n\
-More specific files usually override broader ones.\n\n",
-    );
-
-    if files.peek().is_some() {
-        text.push_str("# agents.md files\n\n");
-    }
-
-    for file in files {
-        let _ = writeln!(
-            &mut text,
-            "<AGENTS_FILE path=\"{}\">",
-            file.file_path.display()
-        );
-        let parsed = tau_skills::parse_context_frontmatter(&file.content);
-        text.push_str(parsed.body);
-        if !parsed.body.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str("</AGENTS_FILE>\n\n");
-    }
-
-    text
+/// Sample exactly the advertisements and instruction bodies delivered to a
+/// model.
+pub(crate) fn discovery_context_items(
+    skills: &[tau_proto::DiscoveryEffectiveSkill],
+    files: &[DiscoveredAgentsFile],
+) -> Vec<tau_proto::DiscoveryContextItem> {
+    let mut items = skills
+        .iter()
+        .filter(|skill| skill.add_to_prompt && !skill.disable_model_invocation)
+        .map(|skill| {
+            (
+                format!("skill:{}", skill.name),
+                tau_skills::truncate_description(&skill.description).to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items.extend(files.iter().map(|file| {
+        (
+            format!("agents:{}", file.file_path.display()),
+            tau_skills::parse_context_frontmatter(&file.content)
+                .body
+                .to_owned(),
+        )
+    }));
+    items
+        .into_iter()
+        .map(|(identity, content)| tau_proto::DiscoveryContextItem {
+            identity,
+            version: blake3::hash(content.as_bytes()).to_hex().to_string(),
+            content,
+        })
+        .collect()
 }
 
 pub(crate) fn render_effective_prompt_message(
     system_prompt: &str,
-    agents_context: Option<&str>,
+    discovery_context: Option<&str>,
 ) -> String {
     let mut text = String::new();
     text.push_str("<message role=\"system\">\n");
@@ -1259,10 +1233,10 @@ pub(crate) fn render_effective_prompt_message(
     }
     text.push_str("</message>\n");
 
-    if let Some(agents_context) = agents_context {
-        text.push_str("\n<message role=\"user\" synthetic=\"true\" source=\"AGENTS.md\">\n");
-        text.push_str(agents_context);
-        if !agents_context.ends_with('\n') {
+    if let Some(discovery_context) = discovery_context {
+        text.push_str("\n<message role=\"user\" source=\"discovery\">\n");
+        text.push_str(discovery_context);
+        if !discovery_context.ends_with('\n') {
             text.push('\n');
         }
         text.push_str("</message>\n");
@@ -1386,6 +1360,7 @@ fn context_items_contain_payload_envelope_provenance_projection(items: &[Context
     })
 }
 
+#[cfg(test)]
 pub(crate) fn context_block_contains_payload_envelope_provenance_projection(
     block: &tau_proto::ContextBlock,
 ) -> bool {
@@ -1436,9 +1411,12 @@ pub(crate) fn active_prompt_context_contains_payload_envelope_provenance_project
                 submission_source,
                 ..
             } => {
-                contains_projection |= tree
-                    .node_has_background_completion_prompt_provenance(node_id)
-                    && is_canonical_background_completion_prompt(items, submission_source.as_ref())
+                contains_projection |= tree.node_has_discovery_context(node_id)
+                    || tree.node_has_background_completion_prompt_provenance(node_id)
+                        && is_canonical_background_completion_prompt(
+                            items,
+                            submission_source.as_ref(),
+                        )
                     || submission_source.as_ref()
                         == Some(&tau_proto::PromptSubmissionSource::HumanUi)
                     || items.iter().any(|item| {
@@ -1590,28 +1568,6 @@ pub(crate) fn active_prompt_prefix_json_measurements(
     let mut measurements = Vec::new();
     let _ = assemble_prompt_context_window(tree, active_head, None, Some(&mut measurements), None);
     Some(measurements)
-}
-
-/// Builds the synthetic user block that prompt materialization prepends from
-/// the agent's frozen initialization context.
-pub(crate) fn initialization_agents_context_block(
-    tree: &tau_core::AgentTree,
-) -> Option<tau_proto::ContextBlock> {
-    let agents_message = tree.initialization_context()?.agents_message.as_ref()?;
-    Some(tau_proto::ContextBlock::UserInput(
-        tau_proto::UserInputBlock {
-            items: vec![ContextItem::Message(tau_proto::MessageItem {
-                role: tau_proto::ContextRole::User,
-                content: vec![tau_proto::ContentPart::Text {
-                    text: tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE
-                        .escape_body(agents_message)
-                        .into_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-        },
-    ))
 }
 
 fn render_peer_agent_message(
@@ -1778,7 +1734,9 @@ fn assemble_prompt_context_window(
                 let background_completion_prompt = tree
                     .node_has_background_completion_prompt_provenance(node_id)
                     && is_canonical_background_completion_prompt(items, submission_source.as_ref());
-                contains_payload_envelope_provenance_projection |= background_completion_prompt
+                contains_payload_envelope_provenance_projection |= tree
+                    .node_has_discovery_context(node_id)
+                    || background_completion_prompt
                     || submission_source.as_ref()
                         == Some(&tau_proto::PromptSubmissionSource::HumanUi)
                     || items.iter().any(|item| {
@@ -2113,24 +2071,15 @@ impl<'a> PromptContextMeasurementState<'a> {
     /// Initialize accounting from the replacement window and initialization
     /// block.
     fn new(
-        tree: &tau_core::AgentTree,
+        _tree: &tau_core::AgentTree,
         blocks: &[tau_proto::ContextBlock],
         measurements: &'a mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>,
     ) -> Self {
-        // Prefix admission measures the exact historical context that prompt
-        // materialization will send. Keep the initialization block out of the
-        // assembled transcript itself so materialization remains its sole
-        // owner.
-        let measurement_prefix = initialization_agents_context_block(tree);
-        let measured_blocks = measurement_prefix
-            .iter()
-            .map(clone_measured_block)
-            .chain(blocks.iter().map(clone_measured_block))
-            .collect();
+        let measured_blocks = blocks.iter().map(clone_measured_block).collect();
         let serialized_bytes = measurement_json_bytes(&tau_proto::PromptContext {
             blocks: measured_blocks,
         });
-        let serialized_block_count = blocks.len() + usize::from(measurement_prefix.is_some());
+        let serialized_block_count = blocks.len();
         Self {
             measurements,
             serialized_bytes,

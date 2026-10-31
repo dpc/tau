@@ -171,7 +171,6 @@ fn unique_prompt_handoff_moves_constituent_allocations() {
                 capabilities: Vec::new(),
                 providers: Vec::new(),
                 effective_names: Default::default(),
-                has_bootstrap: false,
                 history_provenance: false,
             },
             started: tau_proto::AgentPromptStarted::from(&prompt),

@@ -733,6 +733,11 @@ pub struct GetRenderedPrompt {
 /// Response to [`GetRenderedPrompt`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RenderedPromptResult {
+    /// Full initial discovery snapshot rendered by this preview, not a receipt
+    /// for any running agent. Available after successful initialization even if
+    /// rendering the unrelated system template failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_context: Option<crate::DiscoveryContextDelivery>,
     /// Request correlation id copied from the request.
     pub request_id: String,
     /// Rendered prompt context when the role exists and template rendering

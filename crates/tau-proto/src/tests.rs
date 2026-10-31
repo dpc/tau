@@ -1873,6 +1873,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::AgentUserMessageInjected(AgentUserMessageInjected {
+            discovery_context: None,
             inference_activation: false,
             agent_id: agent_id("engineer_abcd1234"),
             text: "injected".to_owned(),
@@ -2118,6 +2119,7 @@ fn representative_events() -> Vec<Event> {
             error: None,
         }),
         Event::AgentInitializationContextSet(AgentInitializationContextSet {
+            discovery_items: Vec::new(),
             discovery_revision: 0,
             discovery_refreshes: Vec::new(),
             discovery_diagnostics: Vec::new(),
@@ -2755,6 +2757,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
             error: None,
         })),
         HarnessOutputMessage::RenderedPromptResult(Box::new(RenderedPromptResult {
+            discovery_context: None,
             request_id: "render-prompt-1".to_owned(),
             prompt: Some("<message role=\"system\">\nYou are helpful.\n</message>\n".to_owned()),
             error: None,
@@ -3115,6 +3118,7 @@ fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
     );
 
     let empty = Event::AgentInitializationContextSet(AgentInitializationContextSet {
+        discovery_items: Vec::new(),
         discovery_revision: 0,
         discovery_refreshes: Vec::new(),
         discovery_diagnostics: Vec::new(),
@@ -3850,6 +3854,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
     );
 
     let active_injected = AgentUserMessageInjected {
+        discovery_context: None,
         inference_activation: true,
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         text: "injected".to_owned(),
@@ -4519,7 +4524,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 1})
+        serde_json::json!({"major": 16, "minor": 2})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4629,7 +4634,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 16, "minor": 1})
+        serde_json::json!({"major": 16, "minor": 2})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4721,7 +4726,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 1})
+        serde_json::json!({"major": 16, "minor": 2})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

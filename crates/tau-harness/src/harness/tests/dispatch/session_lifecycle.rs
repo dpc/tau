@@ -28,6 +28,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
         (
             "injected activation",
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: "injected activation".to_owned(),
@@ -134,7 +135,10 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
         })
         .collect::<Vec<_>>();
     assert_eq!(checkpoints.len(), 1);
-    assert_eq!(checkpoints[0].through, tau_proto::AgentHead::Node(branch_b));
+    assert_eq!(
+        before_discovery_head(&h, &checkpoints[0].agent_id, checkpoints[0].through),
+        tau_proto::AgentHead::Node(branch_b)
+    );
     assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 

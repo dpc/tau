@@ -21,8 +21,11 @@ EOF cursors. Candidate refreshes validate appended suffixes instead of
 materializing or replaying complete session histories repeatedly.
 
 `AgentTree` folds `agent.initialization_context_set` as replaceable side state,
-not a transcript node. The latest bootstrap/skill replacement survives replay
-and remains outside branch-head movement and compaction.
+not a transcript node. The latest discovery snapshot survives replay and remains
+outside branch-head movement and compaction. Passive typed discovery deliveries
+are ordinary canonical user nodes. The core derives their receipt index from event
+identity and intersects it with the selected original context window. Compaction
+replacement text cannot preserve consumed delivery authority.
 
 Agent journals and both ordinary and restore session journals share one bounded,
 ordered persistence worker. Live admission validates and advances process-local

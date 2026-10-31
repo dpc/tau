@@ -23,6 +23,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
             MESSAGE_PAYLOAD_ENVELOPE,
             TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
             TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
+            super::TAU_DISCOVERY_PAYLOAD_ENVELOPE,
         ]
     );
     assert_eq!(

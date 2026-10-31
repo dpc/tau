@@ -40,7 +40,7 @@ The frontmatter fields Tau reads are:
 - `description`: Required. Used in prompt advertisements, search results, and loaded skill results.
 - `advertise`: Optional. `true`, `True`, `TRUE`, and `1` force prompt advertisement. `false`, `False`, `FALSE`, and `0` force no prompt advertisement. Invalid values warn and use the default.
 - `user-invocable`: Optional, default `true`. If false, `:skill` rejects the skill and the terminal completion hides it unless `disable-model-invocation: true` overrides it. This does not block model-side invocation.
-- `disable-model-invocation`: Optional, default `false`. If true, Tau excludes the skill from `<available_skills>` and from the model-visible `skill` tool, and treats the skill as user-invocable.
+- `disable-model-invocation`: Optional, default `false`. If true, Tau excludes the skill from discovery advertisements and from the model-visible `skill` tool, and treats the skill as user-invocable.
 - `argument-hint`: Optional short UI hint shown with `:skill` completion.
 
 Tau ignores `allowed-tools` and other provider-specific permission fields; skill frontmatter does not grant or restrict Tau tool permissions.
@@ -49,32 +49,48 @@ Project-scoped skills default to advertised. User-scoped skills default to hidde
 ## Inspecting effective skills
 
 `tau dev print-skills` initializes a fresh ephemeral agent through the ordinary
-discovery lifecycle and prints the collision-resolved, readable skills available
-to its role. It uses the configured startup role unless `--role ROLE` is set.
-The default Markdown document includes each skill's name, source path (or
-`built-in`), and description:
+discovery lifecycle and prints the advertised-skill portion of the initial
+`tau_discovery` user envelope. `tau dev print-agents-md` prints its AGENTS.md
+portion. Both use the configured startup role unless `--role ROLE` is set, and
+the same discovery and rendering code used for model delivery:
 
 ```sh
 tau --role engineer dev print-skills
+tau --role engineer dev print-agents-md --workdir /path/to/project
 ```
 
-Use JSON for scripts. Built-in skills have a `null` path:
+Use `--format markdown` or `--format json` with `print-skills` to inspect the full
+effective inventory, including unadvertised skills. Built-in skills have a `null`
+JSON path:
 
 ```sh
 tau --role engineer dev print-skills --format json
 ```
 
-Like `print-prompt` and `print-tools`, this developer command starts configured
+Like `print-prompt` and `print-tools`, these developer commands start configured
 extensions and may therefore have their ordinary persistent-state side effects.
-It does not call a model provider.
+Neither command calls a model provider. Use `--workdir DIR` to start the preview
+harness and agent in that directory for project discovery without changing the
+caller's directory. Tau still loads profile configuration from the ordinary
+user/XDG locations. These commands show a fresh full initial snapshot, not the
+remaining delta of a running agent.
 
 
 ## Prompt advertisement
 
-Advertised skills from the target agent's frozen snapshot appear in
-`<available_skills>` with only name and description. Tau does not include the
-skill body until the agent calls `skill`. Later session discovery changes do not
-mutate an already initialized agent.
+Advertised skills appear with their names and descriptions in a user-role
+`tau_discovery` envelope alongside applicable AGENTS.md instructions, never in
+system/developer templates. Delivery waits for the first real inference; loading
+or inspecting an agent does not start a model call. Tau does not include a skill
+body until the agent calls `skill`.
+
+A persistent workdir change refreshes only that source. New discovery follows the
+completed tool-results block as a separate user message in the same continuation,
+not inside the tool result or in an extra turn. The scope list identifies current
+instructions; previous scopes remain history. Tau references exact versions with
+surviving canonical delivery receipts in the current context rather than repeating
+their bodies, even after A→B→A or a file-content reversion. Compaction can remove
+original receipts, so Tau redelivers needed content on the next writable inference.
 
 This keeps normal agent context small while still surfacing project-local instructions that are likely relevant immediately.
 

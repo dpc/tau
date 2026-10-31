@@ -425,6 +425,8 @@ fn daemon_output_for_session_in(
 }
 
 pub(crate) struct DaemonCliOverrides<'a> {
+    /// Explicit startup directory for an ephemeral developer preview.
+    pub(crate) workdir: Option<&'a Path>,
     /// Explicit ordered profile selection resolved before the daemon is
     /// spawned.
     pub(crate) profile: Option<&'a tau_config::settings::ProfileSelection>,
@@ -627,6 +629,9 @@ struct DaemonCommandSpec<'a> {
 /// UI protocol.
 fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
     let mut cmd = Command::new(spec.tau_binary);
+    if let Some(workdir) = spec.cli_overrides.workdir {
+        cmd.current_dir(workdir);
+    }
     cmd.arg("component")
         .arg("harness")
         .env("TAU_SESSION_ID", spec.session_id)

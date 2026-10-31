@@ -2280,7 +2280,7 @@ fn preview_only_provider_request_carries_registry_provenance_rule() {
         request.system_prompt
     );
     let flattened = request.context.flatten();
-    assert_eq!(flattened.len(), 1);
+    assert_eq!(flattened.len(), 2, "preview plus lazy discovery");
     let ContextItem::Message(message) = &flattened[0] else {
         panic!("preview must remain a generic user-role message");
     };

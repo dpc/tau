@@ -712,6 +712,7 @@ fn consumes_harness_settings(command: &DispatchCommand) -> bool {
                 | cli::DevCommand::PrintPrompt { .. }
                 | cli::DevCommand::PrintSystemPrompt
                 | cli::DevCommand::PrintSkills { .. }
+                | cli::DevCommand::PrintAgentsMd { .. }
                 | cli::DevCommand::PrintTools
                 | cli::DevCommand::PreviewDeclarations,
         }) => true,
@@ -895,6 +896,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
                     | cli::DevCommand::PrintSkills { .. }
+                    | cli::DevCommand::PrintAgentsMd { .. }
                     | cli::DevCommand::PrintTools
                     | cli::DevCommand::PreviewDeclarations
                     | cli::DevCommand::Tmux { .. },
@@ -924,6 +926,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
                     | cli::DevCommand::PrintSkills { .. }
+                    | cli::DevCommand::PrintAgentsMd { .. }
                     | cli::DevCommand::PrintTools
                     | cli::DevCommand::PreviewDeclarations,
             }) => {}
@@ -1079,6 +1082,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         session_status,
                         harness.role.as_deref(),
                         crate::daemon::DaemonCliOverrides {
+                            workdir: None,
                             profile: selected_profile.as_ref(),
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
@@ -1095,6 +1099,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         session_status,
                         harness.role.as_deref(),
                         crate::daemon::DaemonCliOverrides {
+                            workdir: None,
                             profile: selected_profile.as_ref(),
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
@@ -1291,9 +1296,28 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         &harness_config_overrides,
                     )
                 }
-                cli::DevCommand::PrintSkills { format } => print_skills::run_print_skills(
-                    harness.role.as_deref(),
-                    format,
+                cli::DevCommand::PrintSkills { format, workdir } => {
+                    print_skills::run_print_discovery(
+                        print_skills::DiscoveryPrintOptions {
+                            role: harness.role.as_deref(),
+                            workdir: workdir.as_deref(),
+                            format,
+                            agents_md: false,
+                        },
+                        selected_profile.as_ref(),
+                        &role_cli_overrides,
+                        &extension_cli_overrides,
+                        &environment_extension_names,
+                        &harness_config_overrides,
+                    )
+                }
+                cli::DevCommand::PrintAgentsMd { workdir } => print_skills::run_print_discovery(
+                    print_skills::DiscoveryPrintOptions {
+                        role: harness.role.as_deref(),
+                        workdir: workdir.as_deref(),
+                        format: cli::SkillOutputFormat::Envelope,
+                        agents_md: true,
+                    },
                     selected_profile.as_ref(),
                     &role_cli_overrides,
                     &extension_cli_overrides,

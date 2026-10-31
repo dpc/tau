@@ -2077,6 +2077,7 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let replacement =
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_items: Vec::new(),
             discovery_revision: 0,
             discovery_refreshes: Vec::new(),
             discovery_diagnostics: Vec::new(),

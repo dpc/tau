@@ -57,6 +57,12 @@ inference. V1's first text and tool-call actions additionally require the exact
 HumanUi envelope, so the always-on deterministic lane fails if interactive
 prompt projection disappears or changes structure.
 
+The closed task-text matcher skips whole registered `tau_discovery` user
+envelopes so lazy harness guidance does not replace the scenario's task text.
+This rule applies only to fixture matching, not runtime provenance recognition.
+Exact context-order oracles still inspect the original provider context,
+including discovery nodes.
+
 The V2 grammar includes one closed two-lane production-message exchange. Its
 message-only main binds one test-driver-created tool-free idle worker through
 typed creation identity, then checks a correlated compact sender result. The

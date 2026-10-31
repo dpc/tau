@@ -611,19 +611,20 @@ The harness atomically replaces each extension connection's complete discovery
 source, validates bounded skill/AGENTS.md items, and resolves stable collision
 slots. Session winners drive role preflight and agentless UI completion. Every
 agent initialization starts from that baseline and freezes its own finalized
-skill/bootstrap state.
+skill and discovery snapshot.
 
 Role/group visibility filters run after role-neutral collision and loadability
-selection, never exposing hidden duplicates. Each AGENTS file filters
-independently and its header is removed before bootstrap rendering. Required
-skills are checked per role at startup and against each final eligible set.
+selection, never exposing hidden duplicates. The harness filters each AGENTS file
+independently and removes its header before discovery versioning. It checks
+required skills per role at startup and against each final eligible set.
 Malformed metadata fails open and reports file-specific retained Warning+Alert
 notices from admitted snapshots or encountered live reads. Skill bodies stay
-live while eligibility remains frozen; previews use the same frozen bootstrap.
+live while eligibility remains frozen; previews use the same initial snapshot
+and envelope renderer without inferring or creating delivery receipts.
 
 User `:skill <name> [args]` and `:skill:<name> [args]` expansion uses the selected
 agent's frozen snapshot. New-agent initial commands defer expansion until
-finalization. The model skill tool and `<available_skills>` use the same frozen
+finalization. The model skill tool and lazy advertisements use the same frozen
 state. Unknown, invalid, unreadable, or non-user-invocable commands emit a notice
 and are not submitted.
 
@@ -648,8 +649,14 @@ without selecting another candidate. Explicit `--role` and headless startup
 retain their preflight failures.
 Session registration, complete source snapshots, and readiness cross ordinary
 interception and commit before they atomically update projections or release the
-barrier. Finalization stores one durable replaceable bootstrap side-state fact;
-it does not append ordinary AGENTS.md transcript messages.
+barrier. Finalization stores one durable replaceable discovery side-state fact;
+it does not itself append transcript messages. Before already-authorized
+inference, the harness appends a passive canonical user message with a
+`tau_discovery` envelope listing the current scope and bodies only for exact
+content versions absent from surviving context receipts. Original context
+occurrences supply receipt authority; compaction replacement content does not.
+The harness delivers a workdir refresh in the existing continuation after the
+complete tool-results block, never in a tool body or system/developer template.
 See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 

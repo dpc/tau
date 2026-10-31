@@ -1680,6 +1680,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
             if started.agent_id == retained_agent_id
     )));
     let ready_checkpoint = assert_inference_dispatch_lifecycle(
+        &h,
         &events,
         &ready_agent_id,
         ready_obligation
@@ -1739,6 +1740,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
     .expect("record ready-agent provider submission");
     let events = event_log_events(&h);
     let submitted_ready_checkpoint = assert_inference_dispatch_lifecycle(
+        &h,
         &events,
         &ready_agent_id,
         ready_checkpoint.through,
@@ -1765,6 +1767,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
 
     let events = event_log_events(&h);
     let retained_checkpoint = assert_inference_dispatch_lifecycle(
+        &h,
         &events,
         &retained_agent_id,
         retained_obligation
@@ -1796,6 +1799,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         (&ready_agent_id, &ready_checkpoint),
     ] {
         let submitted_checkpoint = assert_inference_dispatch_lifecycle(
+            &h,
             &events,
             agent_id,
             checkpoint.through,
@@ -1895,7 +1899,11 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
     assert_eq!(runnable_checkpoints.len(), 1);
     let runnable_checkpoint = runnable_checkpoints[0];
     assert_eq!(
-        runnable_checkpoint.through,
+        before_discovery_head(
+            &h,
+            &runnable_checkpoint.agent_id,
+            runnable_checkpoint.through
+        ),
         runnable_obligation
             .activation_through
             .expect("runnable activation watermark")
@@ -1961,7 +1969,11 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
         .collect::<Vec<_>>();
     assert_eq!(blocked_checkpoints.len(), 1);
     assert_eq!(
-        blocked_checkpoints[0].through,
+        before_discovery_head(
+            &h,
+            &blocked_checkpoints[0].agent_id,
+            blocked_checkpoints[0].through
+        ),
         blocked_obligation
             .activation_through
             .expect("blocked activation watermark")
@@ -2179,7 +2191,10 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
         })
         .collect::<Vec<_>>();
     assert_eq!(checkpoints.len(), 1);
-    assert_eq!(checkpoints[0].through, tau_proto::AgentHead::Node(branch_b));
+    assert_eq!(
+        before_discovery_head(&h, &checkpoints[0].agent_id, checkpoints[0].through),
+        tau_proto::AgentHead::Node(branch_b)
+    );
     assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
 
     h.handle_provider_response_finished(provider_text_response(
@@ -2204,7 +2219,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
         .collect::<Vec<_>>();
     assert_eq!(checkpoints.len(), 2);
     assert_eq!(
-        checkpoints[1].through,
+        before_discovery_head(&h, &checkpoints[1].agent_id, checkpoints[1].through),
         tau_proto::AgentHead::Node(branch_a),
         "branch_a={branch_a:?}, branch_b={branch_b:?}, checkpoints={checkpoints:?}"
     );
@@ -3813,6 +3828,7 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
         (
             "injected deferred Q",
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: "injected deferred Q".to_owned(),
@@ -4005,6 +4021,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
             ctx_id: None,
         }),
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "passive injected".to_owned(),

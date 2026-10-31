@@ -48,7 +48,8 @@ pub struct DiscoverySkillCandidate {
     pub description: String,
     /// Absolute path to the skill file.
     pub file_path: PathBuf,
-    /// Whether the skill should appear in the model's system prompt.
+    /// Whether the skill should appear in model-facing discovery
+    /// advertisements.
     pub add_to_prompt: bool,
     /// Whether users may explicitly invoke the skill with `:skill`.
     pub user_invocable: bool,
@@ -176,6 +177,10 @@ pub struct ExtensionAgentDiscoverySnapshotDeclared {
 /// Durable replacement state for one completed agent initialization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentInitializationContextSet {
+    /// Complete current discovery content, delivered lazily rather than
+    /// prepended to every provider request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovery_items: Vec<crate::DiscoveryContextItem>,
     /// Runtime revision of this load's replaceable discovery state.
     #[serde(default)]
     pub discovery_revision: u64,
@@ -187,16 +192,17 @@ pub struct AgentInitializationContextSet {
     pub discovery_diagnostics: Vec<String>,
     /// Session containing the initialized agent.
     pub session_id: SessionId,
-    /// Agent whose bootstrap context and skill state are replaced.
+    /// Agent whose discovery snapshot and skill state are replaced.
     pub agent_id: AgentId,
     /// Exact initialization attempt that produced this state.
     pub agent_initialization_id: AgentInitializationId,
-    /// Rendered user-role bootstrap instructions, or `None` to clear them.
+    /// Legacy bootstrap text retained for decoding older records only.
+    /// New snapshots use `discovery_items`; this field is not materialized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents_message: Option<String>,
     /// Complete effective skill state frozen for this agent.
     pub effective_skills: Vec<DiscoveryEffectiveSkill>,
-    /// Ordered AGENTS.md summaries represented by `agents_message`.
+    /// Ordered AGENTS.md summaries represented by the discovery snapshot.
     pub agents_files: Vec<DiscoveryAgentsFileSummary>,
 }
 
@@ -226,7 +232,8 @@ pub struct HarnessAgentContextInitialized {
     /// inventory for an initialized agent.
     #[serde(default)]
     pub effective_skills: Vec<DiscoveryEffectiveSkill>,
-    /// Exact ordered AGENTS.md files used for this agent's bootstrap block.
+    /// Exact ordered AGENTS.md files represented by this agent's discovery
+    /// snapshot.
     pub agents_files: Vec<DiscoveryAgentsFileSummary>,
 }
 

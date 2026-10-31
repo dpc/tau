@@ -836,10 +836,17 @@ fn production_message_tool_delivers_one_canonical_inbound_wrapper()
             _ => None,
         })
         .ok_or("received occurrence lacks a following dispatch checkpoint")?;
+    let tau_proto::AgentHead::Node(through) = dispatch.through else {
+        return Err("worker dispatch omitted discovery context".into());
+    };
+    let discovery_node = worker_tree
+        .node(through)
+        .ok_or("worker through node missing")?;
     if dispatch.agent_id != worker
         || dispatch.operation != tau_proto::PromptOperation::Inference
         || dispatch.activation_cut != pre_receive_head
-        || dispatch.through != received_head
+        || !worker_tree.node_has_discovery_context(through)
+        || discovery_node.parent_id.map(tau_proto::AgentHead::Node) != Some(received_head)
     {
         return Err("worker checkpoint does not own the received-message activation".into());
     }
@@ -1113,6 +1120,7 @@ fn suffix_after_initialization_events<'a>(
         })
         .ok_or_else(|| format!("{agent_id} lacks its prior initialization fact"))?;
     let tau_proto::AgentInitializationContextSet {
+        discovery_items: _,
         discovery_revision: current_revision,
         discovery_refreshes: current_refreshes,
         discovery_diagnostics: current_diagnostics,
@@ -1124,6 +1132,7 @@ fn suffix_after_initialization_events<'a>(
         agents_files: current_agents_files,
     } = current;
     let tau_proto::AgentInitializationContextSet {
+        discovery_items: _,
         discovery_revision: previous_revision,
         discovery_refreshes: previous_refreshes,
         discovery_diagnostics: previous_diagnostics,

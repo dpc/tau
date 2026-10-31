@@ -9,6 +9,26 @@ use crate::daemon::{DaemonCliOverrides, daemon_output_for_session, resolve_daemo
 use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
 
+/// Component and directory selected for a fresh, non-inferencing preview.
+pub(crate) struct DiscoveryPrintOptions<'a> {
+    /// Explicit role, or the configured startup role.
+    pub(crate) role: Option<&'a str>,
+    /// Optional startup directory for the preview harness and its agent.
+    pub(crate) workdir: Option<&'a std::path::Path>,
+    /// Envelope or retained inventory encoding.
+    pub(crate) format: SkillOutputFormat,
+    /// Select AGENTS.md rather than skill advertisements.
+    pub(crate) agents_md: bool,
+}
+
+/// Both inspection projections come from the same initialized preview agent.
+struct DiscoveryPreview {
+    /// Eligible inventory, including unadvertised skills for legacy formats.
+    effective_skills: Vec<tau_proto::DiscoveryEffectiveSkill>,
+    /// Full initial content rendered by the harness's normal discovery path.
+    delivery: tau_proto::DiscoveryContextDelivery,
+}
+
 /// Stable developer-facing projection of one effective role skill.
 #[derive(Debug, Eq, PartialEq, serde::Serialize)]
 struct SkillPreview {
@@ -35,9 +55,8 @@ impl From<tau_proto::DiscoveryEffectiveSkill> for SkillPreview {
 }
 
 /// Prints the collision-resolved, readable effective skill set for one role.
-pub(crate) fn run_print_skills(
-    role: Option<&str>,
-    format: SkillOutputFormat,
+pub(crate) fn run_print_discovery(
+    options: DiscoveryPrintOptions<'_>,
     profile: Option<&tau_config::settings::ProfileSelection>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
@@ -56,8 +75,9 @@ pub(crate) fn run_print_skills(
         &session_id,
         SessionLaunchStatus::New,
         Some(output),
-        role,
+        options.role,
         DaemonCliOverrides {
+            workdir: options.workdir,
             profile,
             role: role_cli_overrides,
             extension: extension_cli_overrides,
@@ -68,21 +88,30 @@ pub(crate) fn run_print_skills(
         storage_mode,
     )?;
 
-    let result = get_effective_skills(&mut daemon, role);
+    let result = get_discovery_preview(&mut daemon, options.role);
     daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
-    let skills = result?
+    let preview = result?;
+    if options.format == SkillOutputFormat::Envelope {
+        return write_discovery(
+            std::io::stdout().lock(),
+            preview.delivery,
+            options.agents_md,
+        );
+    }
+    let skills = preview
+        .effective_skills
         .into_iter()
         .map(SkillPreview::from)
         .collect::<Vec<_>>();
-    write_skills(std::io::stdout().lock(), format, &skills)
+    write_skills(std::io::stdout().lock(), options.format, &skills)
 }
 
 /// Initializes one ephemeral role agent and returns its frozen effective
 /// skills.
-fn get_effective_skills(
+fn get_discovery_preview(
     daemon: &mut crate::daemon::DaemonHandle,
     role: Option<&str>,
-) -> Result<Vec<tau_proto::DiscoveryEffectiveSkill>, CliError> {
+) -> Result<DiscoveryPreview, CliError> {
     let mut effective_skills = None;
     crate::render_request::request_rendered_value_with_selectors(
         daemon,
@@ -95,7 +124,7 @@ fn get_effective_skills(
             HarnessInputMessage::GetRenderedPrompt(tau_proto::GetRenderedPrompt {
                 request_id,
                 role: role.map(str::to_owned),
-                enable_agents_md: false,
+                enable_agents_md: true,
             })
         },
         |message, request_id| match message {
@@ -108,21 +137,53 @@ fn get_effective_skills(
             HarnessOutputMessage::RenderedPromptResult(result)
                 if result.request_id == request_id =>
             {
-                let result = effective_skills.take().ok_or_else(|| {
-                    result.error.map_or_else(
-                        || {
+                let tau_proto::RenderedPromptResult {
+                    discovery_context,
+                    error,
+                    ..
+                } = *result;
+                let result = (|| {
+                    // Discovery is independently valid even when an unrelated
+                    // system template fails to render. print-prompt still
+                    // reports that error through its ordinary consumer.
+                    let delivery =
+                        discovery_context.ok_or_else(|| {
+                            CliError::Participant(error.unwrap_or_else(|| {
+                                "daemon returned no discovery preview".to_owned()
+                            }))
+                        })?;
+                    Ok(DiscoveryPreview {
+                        effective_skills: effective_skills.take().ok_or_else(|| {
                             CliError::Participant(
                                 "daemon returned no effective skill snapshot".to_owned(),
                             )
-                        },
-                        CliError::Participant,
-                    )
-                });
+                        })?,
+                        delivery,
+                    })
+                })();
                 RenderResponse::Matched(result)
             }
             _ => RenderResponse::Ignore,
         },
     )
+}
+
+/// Print one component using the same exact-close renderer as model delivery.
+fn write_discovery(
+    mut output: impl Write,
+    mut delivery: tau_proto::DiscoveryContextDelivery,
+    agents_md: bool,
+) -> Result<(), CliError> {
+    let prefix = if agents_md { "agents:" } else { "skill:" };
+    delivery
+        .items
+        .retain(|item| item.identity.starts_with(prefix));
+    delivery
+        .scope
+        .retain(|item| item.identity.starts_with(prefix));
+    writeln!(output, "{}", delivery.render())?;
+    output.flush()?;
+    Ok(())
 }
 
 /// Writes the selected skill projection and terminates it with a newline.
@@ -132,6 +193,7 @@ fn write_skills(
     skills: &[SkillPreview],
 ) -> Result<(), CliError> {
     match format {
+        SkillOutputFormat::Envelope => unreachable!("envelopes use the discovery renderer"),
         SkillOutputFormat::Markdown => write_markdown(&mut output, skills)?,
         SkillOutputFormat::Json => {
             serde_json::to_writer_pretty(&mut output, skills).map_err(|error| {

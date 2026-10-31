@@ -282,9 +282,12 @@ fn unusable_summary_retreat_preserves_closed_tool_round_suffix() {
     assert_eq!(original_round.len(), 2);
     h.handle_provider_response_finished(unusable_summary(&compact))
         .expect("retreat");
-    // The empty rejected inference may supply one closed boundary after the
-    // complete round. Cross it first, then cross the indivisible round itself.
-    if starts(&h).last().expect("retreat").cut != prefix {
+    // The discovery message and empty rejected inference each supply a closed
+    // boundary. Cross those before the indivisible round; no cut may split it.
+    for _ in 0..3 {
+        if starts(&h).last().expect("retreat").cut == prefix {
+            break;
+        }
         let compact = latest_prompt(&h);
         let input = serde_json::to_string(&compact.context).expect("input");
         assert!(input.contains("kept input") && input.contains("kept result"));

@@ -95,21 +95,16 @@ Before finalizing after an interrupt or context compaction, verify your answer a
 {{payload_envelope_provenance_notice}}
 
 {{/if}}
-{{#if skills~}}
 ## Skills
-In your workspace you have skills the user created. A **skill** is a guide for proven techniques, patterns, or tools. If a skill exists for a task, you must do it. The following skills provide specialized instructions for specific tasks.
-### Available skills
-{{#each (sort skills by="name")~}}
-- {{name}}: {{description}} (file: {{baseDir}}/SKILL.md)
-{{/each~}}
+In your workspace you have skills the user created. A **skill** is a guide for proven techniques, patterns, or tools. If a skill exists for a task, you must do it.
 
 ### How to use skills
-- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths. Use skill tool to load them.
-- Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
+- Discovery: Advertised skills and AGENTS.md guidance arrive in discovery-context user messages, including after workdir changes. Use the skill tool to search for and load skills.
+- Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a currently applicable skill's description, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
+- Missing/blocked: If a named skill cannot be found or loaded, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
   1) After deciding to use a skill, call the skill tool to load it. Read only enough to follow the workflow.
-  2) When `SKILL.md` references relative paths (e.g., `scripts/foo.py`), resolve them relative to the skill directory listed above first.
+  2) When `SKILL.md` references relative paths (e.g., `scripts/foo.py`), resolve them relative to the loaded skill's directory first.
   3) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
   4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   5) If `assets/` or templates exist, reuse them instead of recreating from scratch.
@@ -117,8 +112,6 @@ In your workspace you have skills the user created. A **skill** is a guide for p
   - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.
   - Avoid deep reference-chasing: prefer opening only files directly linked from `SKILL.md` unless you're blocked.
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue.
-
-{{/if~}}
 
 {{#if prompt_fragments}}
 {{#each prompt_fragments}}

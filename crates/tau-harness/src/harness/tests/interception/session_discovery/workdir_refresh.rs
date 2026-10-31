@@ -69,6 +69,9 @@ fn workdir_refresh_discards_canceled_ordinary_fold() {
         }
         refresh_reply(&mut h, &agent, "one", revision, vec![user]);
         assert_eq!(prompt_created_count(&h), 1);
+        assert_eq!(event_log_events(&h).iter().filter(|event| matches!(event,
+            Event::AgentUserMessageInjected(injected) if injected.discovery_context.is_some()
+        )).count(), 1, "canceled refresh must not append discovery without authorized inference");
         assert!(
             !h.prompt_coordination
                 .context_discovery
@@ -628,7 +631,7 @@ fn workdir_refresh_preserves_hidden_other_source_eligibility() {
 
 /// Install one source with distinct retained user and replaceable project
 /// input.
-fn initialize_source(
+pub(super) fn initialize_source(
     h: &mut Harness,
     agent: &tau_proto::AgentId,
     source: &str,
@@ -685,7 +688,12 @@ fn initialize_source(
 }
 
 /// Commit the authoritative metadata fact, not the setter's requested path.
-fn commit_cwd(h: &mut Harness, agent: &tau_proto::AgentId, source: &str, mutation: &str) -> u64 {
+pub(super) fn commit_cwd(
+    h: &mut Harness,
+    agent: &tau_proto::AgentId,
+    source: &str,
+    mutation: &str,
+) -> u64 {
     h.publish_event(
         Some(crate::harness::harness_connection_id()),
         Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
@@ -703,7 +711,7 @@ fn commit_cwd(h: &mut Harness, agent: &tau_proto::AgentId, source: &str, mutatio
 
 /// Reply to one exact source scan without restarting the agent's load
 /// lifecycle.
-fn refresh_reply(
+pub(super) fn refresh_reply(
     h: &mut Harness,
     agent: &tau_proto::AgentId,
     source: &str,
@@ -791,17 +799,15 @@ fn workdir_refresh_is_source_local_revisioned_and_agent_local() {
     assert!(context.discovery_refreshes[1].error.is_none());
     assert!(
         !context
-            .agents_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("old project instructions one")
+            .discovery_items
+            .iter()
+            .any(|item| item.content.contains("old project instructions one"))
     );
     assert!(
         context
-            .agents_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("old project instructions two")
+            .discovery_items
+            .iter()
+            .any(|item| item.content.contains("old project instructions two"))
     );
 }
 
@@ -857,17 +863,15 @@ fn workdir_refresh_degrades_required_skills_and_repairs_without_reinitialization
         assert!(context.discovery_refreshes[0].error.is_some());
         assert!(
             !context
-                .agents_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("old project")
+                .discovery_items
+                .iter()
+                .any(|item| item.content.contains("old project"))
         );
         assert!(
             context
-                .agents_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("user instructions")
+                .discovery_items
+                .iter()
+                .any(|item| item.content.contains("user instructions"))
         );
         if !disconnect {
             let repair = commit_cwd(&mut h, &agent, "one", "repair");
@@ -987,11 +991,10 @@ fn workdir_refresh_resumes_exact_undelivered_prompt_in_both_phases() {
             original.local_summary_continuation
         );
         assert_eq!(
-            delivered.context.blocks,
-            original.context.blocks[1..],
-            "only the owned old bootstrap is removed"
+            delivered.context.blocks, original.context.blocks,
+            "canonical discovery occurrences are not rewritten in retained requests"
         );
-        assert!(delivered.system_prompt.contains("<name>new</name>"));
+        assert!(!delivered.system_prompt.contains("<name>new</name>"));
         assert!(!delivered.system_prompt.contains("<name>old</name>"));
         assert_eq!(event_log_events(&h).iter().filter(|event| matches!(
             event, Event::AgentPromptStarted(started) if started.agent_prompt_id == original.agent_prompt_id
@@ -1274,10 +1277,9 @@ fn workdir_refresh_retries_only_current_capacity_rejected_install() {
             !cold
                 .initialization_context()
                 .expect("cold context")
-                .agents_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("old project")
+                .discovery_items
+                .iter()
+                .any(|item| item.content.contains("old project"))
         );
     }
 }

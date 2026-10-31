@@ -172,6 +172,7 @@ impl Harness {
                             agent_id,
                             &specs,
                             model.as_ref(),
+                            false,
                         )
                         .map_err(|error| format!("failed to render system prompt: {error}"));
                     self.send_rendered_system_prompt(&connection_id, request_id, result);
@@ -190,18 +191,32 @@ impl Harness {
                             agent_id,
                             &specs,
                             model.as_ref(),
+                            true,
                         )
                         .map_err(|error| format!("failed to render system prompt: {error}"));
-                    let agents_message = enable_agents_md
-                        .then(|| {
-                            self.session_runtime
-                                .agent_store
-                                .agent(agent_id.as_str())
-                                .and_then(|tree| tree.initialization_context())
-                                .and_then(|context| context.agents_message.clone())
-                        })
-                        .flatten();
-                    self.send_rendered_prompt(&connection_id, request_id, agents_message, result);
+                    let discovery = self
+                        .session_runtime
+                        .agent_store
+                        .agent(agent_id.as_str())
+                        .and_then(|tree| tree.initialization_context())
+                        .map(|context| {
+                            let items = context
+                                .discovery_items
+                                .iter()
+                                .filter(|item| {
+                                    enable_agents_md || !item.identity.starts_with("agents:")
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            tau_proto::DiscoveryContextDelivery {
+                                scope: items
+                                    .iter()
+                                    .map(tau_proto::DiscoveryContextItem::reference)
+                                    .collect(),
+                                items,
+                            }
+                        });
+                    self.send_rendered_prompt(&connection_id, request_id, discovery, result);
                 }
                 PendingRenderedPrompt::Tools {
                     connection_id,
@@ -303,11 +318,17 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
         request_id: String,
-        agents_message: Option<String>,
+        discovery_context: Option<tau_proto::DiscoveryContextDelivery>,
         result: Result<String, String>,
     ) {
         let result = result.map(|system_prompt| {
-            render_effective_prompt_message(&system_prompt, agents_message.as_deref())
+            render_effective_prompt_message(
+                &system_prompt,
+                discovery_context
+                    .as_ref()
+                    .map(tau_proto::DiscoveryContextDelivery::render)
+                    .as_deref(),
+            )
         });
         let (prompt, error) =
             result.map_or_else(|error| (None, Some(error)), |prompt| (Some(prompt), None));
@@ -315,6 +336,7 @@ impl Harness {
             connection_id,
             None,
             HarnessOutputMessage::RenderedPromptResult(Box::new(tau_proto::RenderedPromptResult {
+                discovery_context,
                 request_id,
                 prompt,
                 error,

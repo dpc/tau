@@ -198,8 +198,8 @@ use crate::model::{
 use crate::pending_agent_discovery::PendingAgentDiscovery;
 use crate::prompt::{
     BUILT_IN_SYSTEM_TEMPLATE_NAME, PromptTemplateEngine, RolePromptTemplateContext,
-    ToolPromptFragment, built_in_system_prompt_templates, render_agents_context_message,
-    render_effective_prompt_message, try_build_system_prompt_and_additional_templates_with_engine,
+    ToolPromptFragment, built_in_system_prompt_templates, render_effective_prompt_message,
+    try_build_system_prompt_and_additional_templates_with_engine,
 };
 use crate::provider_cache_residency::{
     ProviderCacheResidency, RuntimeCacheClock, RuntimeCacheJitter,
@@ -1600,6 +1600,7 @@ mod compaction_supplement;
 mod connection_startup;
 mod construction;
 mod context_discovery_state;
+mod discovery_delivery;
 mod discovery_refresh;
 mod extension_activation;
 mod extension_lifecycle;
@@ -2130,6 +2131,13 @@ where
                     .rev()
                     .find_map(|item| match item {
                         ContextItem::Message(message) if message.role == ContextRole::User => {
+                            // The fixture echoes the task, not lazy harness
+                            // guidance.
+                            if matches!(message.content.first(), Some(ContentPart::Text { text })
+                                if tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
+                            {
+                                return None;
+                            }
                             message.content.first().map(|part| match part {
                                 ContentPart::Text { text }
                                 | ContentPart::SyntheticCompactionSummary { text }

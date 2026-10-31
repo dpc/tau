@@ -53,19 +53,32 @@ fn agents_context_is_injected_when_agent_is_created() {
         .find_map(|event| match event {
             Event::AgentInitializationContextSet(context)
                 if context
-                    .agents_message
-                    .as_deref()
-                    .is_some_and(|message| message.contains("/repo/pkg")) =>
+                    .discovery_items
+                    .iter()
+                    .any(|item| item.identity.contains("/repo/pkg")) =>
             {
-                context.agents_message.as_deref()
+                assert!(
+                    context.agents_message.is_none(),
+                    "do not duplicate instruction bodies"
+                );
+                Some(
+                    tau_proto::DiscoveryContextDelivery {
+                        scope: context
+                            .discovery_items
+                            .iter()
+                            .map(tau_proto::DiscoveryContextItem::reference)
+                            .collect(),
+                        items: context.discovery_items.clone(),
+                    }
+                    .render(),
+                )
             }
             _ => None,
         })
         .expect("expected AGENTS.md initialization context");
-    assert!(bootstrap.contains("# AGENTS.md instructions"));
-    assert!(bootstrap.contains("<AGENTS_FILE path=\"/repo/pkg/AGENTS.md\">"));
-    assert!(bootstrap.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">"));
-    assert!(bootstrap.contains("</AGENTS_FILE>"));
+    assert!(bootstrap.contains("<tau_discovery>"));
+    assert!(bootstrap.contains("agents:/repo/pkg/AGENTS.md"));
+    assert!(bootstrap.contains("agents:/repo/AGENTS.md"));
     let root_pos = bootstrap.find("root rule").expect("root rule");
     let pkg_pos = bootstrap.find("package rule").expect("package rule");
     assert!(
@@ -389,6 +402,7 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
             source.agent_id.as_str(),
             tau_core::AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: source.agent_id.clone(),
                 text: "selected sibling".to_owned(),
                 inference_activation: false,
@@ -783,6 +797,7 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
                     source.agent_id.as_str(),
                     tau_core::AgentEventParent::Root,
                     Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                        discovery_context: None,
                         agent_id: source.agent_id.clone(),
                         text: "cold sibling".to_owned(),
                         inference_activation: false,
@@ -1017,6 +1032,7 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
             source.agent_id.as_str(),
             tau_core::AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: source.agent_id.clone(),
                 text: "post-start sibling".to_owned(),
                 inference_activation: false,
@@ -1328,6 +1344,7 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
             source.agent_id.as_str(),
             tau_core::AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: source.agent_id.clone(),
                 text: "selected recovery sibling".to_owned(),
                 inference_activation: false,
@@ -1598,6 +1615,7 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
             source.agent_id.as_str(),
             tau_core::AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: source.agent_id.clone(),
                 text: "cancel sibling".to_owned(),
                 inference_activation: false,
@@ -2248,6 +2266,7 @@ fn semantic_capacity_retry_retires_divergent_owner_without_overtaking() {
             durable_id.as_str(),
             tau_core::AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: durable_id.clone(),
                 text: "divergent head".to_owned(),
                 inference_activation: false,

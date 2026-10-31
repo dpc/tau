@@ -237,6 +237,11 @@ startup cwd unless metadata is absent. Persistent `workdir(path)` commits,
 including same-path setters, replace only that shell instance's project discovery;
 getters and call-local overrides do not. Dependent inference and `:skill`
 expansion wait for installation even if the setter backgrounds or is cancelled.
+New advertised skills and AGENTS instructions arrive in a separate user-role
+`tau_discovery` message after the complete tool-results block in that same
+continuation. The workdir result itself is unchanged. Tau includes bodies only for
+exact content versions absent from surviving context receipts; the current
+scope list handles removals and reactivation. No separate discovery turn runs.
 True scan failure removes stale project input, retains user/other-source input,
 and reports the committed-cwd/degraded-discovery outcome. Established agents stay
 usable for absolute or same-path repair when required skills disappear.

@@ -30,8 +30,8 @@ pub(super) fn assert_snapshot_a(
         != expected
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
-        || snapshot.agent_events[&identities.main].len() != 24
-        || snapshot.agent_events[&identities.worker].len() != 9
+        || snapshot.agent_events[&identities.main].len() != 25
+        || snapshot.agent_events[&identities.worker].len() != 10
     {
         return Err(format!(
             "S8 Boot A durable record counts changed: session={}, restore={}, main={}, worker={}",
@@ -60,13 +60,34 @@ pub(super) fn assert_snapshot_a(
         {
             return Err(format!("S8 durable sequence is not contiguous for {agent_id}").into());
         }
+        let discovery = events
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::AgentUserMessageInjected(value) => Some(value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [delivery] = discovery.as_slice() else {
+            return Err(format!("S8 expected one initial discovery receipt for {agent_id}").into());
+        };
+        if delivery.inference_activation
+            || !delivery.text.is_empty()
+            || delivery
+                .discovery_context
+                .as_ref()
+                .is_none_or(|context| context.items.is_empty())
+        {
+            return Err(
+                format!("S8 discovery must be passive and carry bodies for {agent_id}").into(),
+            );
+        }
     }
     assert_exact_event_names(snapshot, identities)?;
     let main_runtime = assert_lifecycle_pairs(
         &snapshot.agent_events[&identities.main],
         &identities.main,
         &snapshot.session_id,
-        &[(&["ap-main-0", "ap-main-1"], 0), (&["ap-main-2"], 5)],
+        &[(&["ap-main-0", "ap-main-1"], 0), (&["ap-main-2"], 6)],
     )?;
     let worker_prompt = format!("ap-{}-0", identities.worker.as_str());
     let worker_runtime = assert_lifecycle_pairs(
@@ -130,6 +151,7 @@ fn assert_exact_event_names(
         E::AGENT_USER_INTERACTION_RECORDED,
         E::AGENT_ACTIVATION_QUEUED,
         E::AGENT_PROMPT_SUBMITTED,
+        E::AGENT_USER_MESSAGE_INJECTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
@@ -155,6 +177,7 @@ fn assert_exact_event_names(
         E::AGENT_ACTIVATION_QUEUED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INITIALIZATION_CONTEXT_SET,
+        E::AGENT_USER_MESSAGE_INJECTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
@@ -269,7 +292,7 @@ fn assert_boot_a_agent_payloads(
                     && prompt.ctx_id.is_none()
         )
         || !exact_text_response(
-            &worker[7].event,
+            &worker[8].event,
             &identities.worker,
             "worker boot-a complete",
             false,
@@ -347,17 +370,17 @@ fn assert_boot_a_agent_payloads(
     assert_inference_rounds(
         main,
         &identities.main,
-        &[0, 3, 5],
+        &[1, 4, 6],
         &[
             tau_proto::AgentHead::Root,
-            tau_proto::AgentHead::Node(tau_proto::NodeId::new(2)),
-            tau_proto::AgentHead::Node(tau_proto::NodeId::new(4)),
+            tau_proto::AgentHead::Node(tau_proto::NodeId::new(3)),
+            tau_proto::AgentHead::Node(tau_proto::NodeId::new(5)),
         ],
     )?;
     assert_inference_rounds(
         worker,
         &identities.worker,
-        &[0],
+        &[1],
         &[tau_proto::AgentHead::Root],
     )?;
     Ok(())
@@ -580,7 +603,7 @@ pub(super) fn assert_snapshot_suffix(
         suffix,
         &identities.worker,
         &after.session_id,
-        &[(&[fresh_prompt.as_str()], 3)],
+        &[(&[fresh_prompt.as_str()], 4)],
     )?;
     if resumed_runtime == previous_runtime {
         return Err("S8 cold resume reused its Boot A accounting runtime identity".into());
@@ -670,10 +693,10 @@ pub(super) fn assert_snapshot_suffix(
         || dispatch.agent_prompt_id != started.agent_prompt_id
         || dispatch.agent_prompt_id.as_str() != format!("ap-{}-1", identities.worker.as_str())
         || dispatch.transaction_id.is_some()
-        || dispatch.through != tau_proto::AgentHead::Node(tau_proto::NodeId::new(3))
+        || dispatch.through != tau_proto::AgentHead::Node(tau_proto::NodeId::new(4))
         || Some(dispatch.model.to_string()).as_deref() != Some("fake/test")
         || dispatch.operation != tau_proto::PromptOperation::Inference
-        || dispatch.activation_cut != tau_proto::AgentHead::Node(tau_proto::NodeId::new(2))
+        || dispatch.activation_cut != tau_proto::AgentHead::Node(tau_proto::NodeId::new(3))
         || started.model.to_string() != "fake/test"
         || started.operation != tau_proto::PromptOperation::Inference
         || outer_start.agent_prompt_id != dispatch.agent_prompt_id

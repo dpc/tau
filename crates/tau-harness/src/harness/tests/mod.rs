@@ -675,7 +675,10 @@ fn assert_literal_provider_projection(h: &Harness, agent_id: &AgentId, text: &st
         })
         .expect("provider prompt");
     assert_eq!(
-        provider_prompt.context.flatten(),
+        provider_prompt.context.flatten().into_iter().filter(|item| !matches!(item,
+            ContextItem::Message(message) if matches!(message.content.first(),
+                Some(ContentPart::Text { text }) if tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
+        )).collect::<Vec<_>>(),
         vec![ContextItem::Message(MessageItem {
             role: ContextRole::User,
             content: vec![ContentPart::Text {
@@ -685,6 +688,31 @@ fn assert_literal_provider_projection(h: &Harness, agent_id: &AgentId, text: &st
             responses_raw_json: None,
         })]
     );
+}
+
+/// Find the task head before only typed passive discovery descendants. This
+/// preserves exact branch assertions without assuming discovery has no node.
+fn before_discovery_head(
+    h: &Harness,
+    agent_id: &tau_proto::AgentId,
+    mut head: tau_proto::AgentHead,
+) -> tau_proto::AgentHead {
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(agent_id.as_str())
+        .expect("agent tree");
+    while let tau_proto::AgentHead::Node(node) = head {
+        if !tree.node_has_discovery_context(node) {
+            break;
+        }
+        head = tree
+            .node(node)
+            .expect("discovery node")
+            .parent_id
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    }
+    head
 }
 
 #[test]

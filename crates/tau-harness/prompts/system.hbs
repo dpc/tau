@@ -50,24 +50,12 @@ This provider route permits at most one tool call per model response. Do not emi
 {{payload_envelope_provenance_notice}}
 
 {{/if}}
-{{#if skills}}
 
 ## Skills and skill system
 
 Skills provide specialized instructions for specific tasks.
 
-Skills you should always be aware of are listed below, but more skills are likely available for you. Use the `skill` tool to search for more skills by keywords or load a skill by name. A single early `skill` search that includes, for example, the project's main programming language, a one-word description of the task, and relevant tools is usually a good idea.
-
-<available_skills>
-{{#each (sort skills by="name")}}
-  <skill>
-    <name>{{xml_escape_lax name}}</name>
-    <description>{{xml_escape_lax description}}</description>
-  </skill>
-{{/each~}}
-</available_skills>
-
-{{/if~}}
+Advertised skills and AGENTS.md instructions arrive in discovery-context user messages, including after workdir changes. More skills may be available. Use the `skill` tool to search by keywords or load a skill by name. A single early search including the project's language, task, and relevant tools is usually useful.
 
 
 {{#if prompt_fragments}}

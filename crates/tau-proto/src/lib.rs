@@ -24,6 +24,7 @@ mod byte_count;
 mod context;
 mod context_visibility;
 mod diff;
+mod discovery_context;
 mod discovery_snapshot;
 mod duration_format;
 mod estimated_cost;
@@ -74,6 +75,7 @@ pub use ciborium::value::Value as CborValue;
 pub use context::*;
 pub use context_visibility::*;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
+pub use discovery_context::*;
 pub use discovery_snapshot::*;
 pub use duration_format::format_approximate_duration_secs;
 pub use estimated_cost::*;
@@ -115,7 +117,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(16, 1);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(16, 2);
 
 /// Reporter-owned filename used by the locked papercut history RPC.
 pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";

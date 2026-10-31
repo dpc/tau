@@ -2774,6 +2774,7 @@ fn invalid_cwd_context_event(
 
 fn cwd_notice_event(agent_id: tau_proto::AgentId, cwd: &Path) -> Event {
     Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        discovery_context: None,
         inference_activation: false,
         agent_id,
         text: format!("Your working directory changed to {}.", cwd.display()),

@@ -45,10 +45,12 @@ at most one prompt-start fact and one live continuation. Delivery consumes the
 continuation once; replay never recreates it.
 
 A canonical source-local workdir refresh may park an exact retained undelivered
-phase outside the global publication queue until discovery installs. Only its
-current synthetic bootstrap and system discovery text are rebuilt, using the
-original capability/provider surface. Prompt identity, selected model, tools,
-accounting, compaction trigger/owner, opaque history, and historical skill loads
+phase outside the global publication queue until discovery installs. The retained
+request keeps its canonical user context and original capability/provider surface;
+refresh never rewrites earlier discovery messages. The harness appends discovery
+to the next writable authorized inference as a separate passive canonical user
+message, never as a synthetic prefix or system/developer catalog. Prompt identity,
+selected model, tools, accounting, compaction trigger/owner, opaque history, and historical skill loads
 are unchanged. Pre-materialization waits retain only their exact live callback;
 neither form reconstructs replayed work or reissues an already delivered request.
 See [SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).

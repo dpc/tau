@@ -1952,8 +1952,6 @@ impl Harness {
                 .then(a.refresh_id.cmp(&b.refresh_id))
         });
         let initialization_id = pending.initialization_id.clone();
-        let agents_message = (!filtered_agents_files.is_empty())
-            .then(|| render_agents_context_message(filtered_agents_files.iter()));
         let agents_files = filtered_agents_files
             .iter()
             .map(|file| tau_proto::DiscoveryAgentsFileSummary {
@@ -1964,13 +1962,17 @@ impl Harness {
             })
             .collect();
         let context = tau_proto::AgentInitializationContextSet {
+            discovery_items: crate::prompt::discovery_context_items(
+                &effective_skills(&pending.skills),
+                &filtered_agents_files,
+            ),
             discovery_revision: pending.revision,
             discovery_refreshes,
             discovery_diagnostics,
             session_id: self.session_runtime.current_session_id.clone(),
             agent_id: agent_id.clone(),
             agent_initialization_id: initialization_id,
-            agents_message,
+            agents_message: None,
             effective_skills: effective_skills(&pending.skills),
             agents_files,
         };

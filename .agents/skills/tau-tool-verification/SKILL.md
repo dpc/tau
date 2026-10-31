@@ -66,6 +66,12 @@ project directories, verify that a successful persistent setter makes the new
 project AGENTS/skill catalog available before a dependent turn; a getter and
 call-local override must not change discovery. A same-path setter must rescan
 edited or deleted project files. Do not run dependent calls as sibling tools.
+Inspect the provider continuation: changed discovery belongs in a separate
+`tau_discovery` user message after the complete tool-results block, in the same
+request. The typed workdir result stays unchanged, with no extra turn or provider
+call. Verify that A→B→A and content reversion reference exact versions with surviving
+context receipts rather than repeat their bodies. Compaction may remove those
+receipts and require redelivery.
 
 Verify unavailable-project failure reports the actual committed cwd and degraded
 discovery rather than claiming rollback or retaining stale project instructions.

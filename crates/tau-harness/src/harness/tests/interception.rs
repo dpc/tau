@@ -4303,6 +4303,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
                 }
                 event if *event == tau_proto::EventName::AGENT_USER_MESSAGE_INJECTED => {
                     Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                        discovery_context: None,
                         inference_activation,
                         agent_id,
                         text: "injected".to_owned(),
@@ -5870,6 +5871,7 @@ fn discovery_canonical_events_are_protected() {
         tau_proto::AgentInitializationId::parse("init-1").expect("test identifier must be valid");
     let events = [
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_items: Vec::new(),
             discovery_revision: 0,
             discovery_refreshes: Vec::new(),
             discovery_diagnostics: Vec::new(),
@@ -6840,6 +6842,12 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
         .get(&cid)
         .and_then(|c| c.identity.head)
         .expect("c.head advanced");
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let tau_proto::AgentHead::Node(head_after) =
+        before_discovery_head(&h, &agent_id, tau_proto::AgentHead::Node(head_after))
+    else {
+        panic!("task head");
+    };
     let entry = default_agent_node(&h, head_after);
     assert!(
         matches!(
@@ -7056,15 +7064,19 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
     assert_ne!(branch_a, branch_b);
     let branch_b_prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].identity.head,
-        Some(branch_b)
+        before_discovery_head(
+            &h,
+            &agent_id,
+            h.selected_head_for_agent(&cid).expect("head")
+        ),
+        tau_proto::AgentHead::Node(branch_b)
     );
     assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentInferenceDispatchStarted(started)
             if started.agent_prompt_id == branch_b_prompt.agent_prompt_id
-                && started.through == tau_proto::AgentHead::Node(branch_b)
+                && before_discovery_head(&h, &agent_id, started.through) == tau_proto::AgentHead::Node(branch_b)
     )));
 
     h.handle_provider_response_finished(provider_text_response(
@@ -7086,7 +7098,7 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
         event,
         Event::AgentInferenceDispatchStarted(started)
             if started.agent_prompt_id == branch_a_prompt.agent_prompt_id
-                && started.through == tau_proto::AgentHead::Node(branch_a)
+                && before_discovery_head(&h, &started.agent_id, started.through) == tau_proto::AgentHead::Node(branch_a)
     )));
     assert!(h.runtime_io.publication.pending_intercept.is_none());
     assert!(h.runtime_io.publication.idle_dispatches.is_empty());
@@ -7219,6 +7231,12 @@ fn interception_mutating_prompt_reaches_agent() {
         .get(&cid)
         .and_then(|c| c.identity.head)
         .expect("c.head advanced");
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let tau_proto::AgentHead::Node(head) =
+        before_discovery_head(&h, &agent_id, tau_proto::AgentHead::Node(head))
+    else {
+        panic!("task head");
+    };
     let entry = default_agent_node(&h, head);
     assert!(
         matches!(

@@ -8,6 +8,15 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.2 adds optional typed discovery snapshots, passive user-message
+receipts, and full initial preview content. Configured providers still receive the
+ordinary materialized user context, and workdir tools retain their existing
+results. Older observers may ignore the metadata and omit discovery-only display;
+ordinary work remains usable. New CLI previews require an updated harness for
+the optional preview field. No coordinated extension rebuild, SDK publication,
+or runtime activation is implied. The new metadata defaults to absent in older journals;
+older harnesses do not reconstruct these new delivery receipts.
+
 Protocol 16.1 adds the optional delivered-message `presentation=notification`
 hint. Updated readers omit only model-facing message and sender references and
 sender display; older readers ignore the field and retain full presentation.

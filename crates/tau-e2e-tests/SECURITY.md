@@ -74,6 +74,11 @@ value from that form. This is test matching, not prompt-control authority, and a
 fixture needing literal canonical wrapper syntax requires a typed scenario
 distinction.
 
+The closed task-text matcher also skips whole registered `tau_discovery`
+envelopes when selecting task text. It does not infer runtime receipt authority or
+remove those envelopes from the provider request. Canonical delivery and
+context-order tests cover that content.
+
 The S1 session-restore fixture enables the production harness-owned `agent_start`
 built-in only for its closed main role; S2 adds only `agent_watch`. The worker
 role has no tools. The isolated production-message fixture instead exposes only

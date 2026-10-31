@@ -1342,6 +1342,7 @@ fn cold_history_lifecycle_pins_release_only_their_exact_owner() {
         ephemeral: false,
     };
     let mut context = tau_proto::AgentInitializationContextSet {
+        discovery_items: Vec::new(),
         discovery_revision: 0,
         discovery_refreshes: Vec::new(),
         discovery_diagnostics: Vec::new(),
@@ -1495,6 +1496,7 @@ fn cold_history_live_notice_dedup_survives_eviction() {
                 agent.as_str(),
                 None,
                 Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    discovery_context: None,
                     agent_id: agent.clone(),
                     text: text.to_owned(),
                     inference_activation: false,

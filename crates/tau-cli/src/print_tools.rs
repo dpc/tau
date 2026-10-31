@@ -111,6 +111,7 @@ pub(crate) fn run_print_tools(
         Some(output),
         role,
         DaemonCliOverrides {
+            workdir: None,
             profile,
             role: role_cli_overrides,
             extension: extension_cli_overrides,

@@ -82,28 +82,51 @@ set, and renders included instructions without frontmatter. It publishes one dur
 `agent.initialization_context_set` replacement fact for that exact initialization,
 including an unchanged cold-restored initialization with a fresh ID. The reducer
 stores the latest durable fact as agent side state without creating a transcript
-node or advancing the branch
-head. Missing AGENTS.md files clear the bootstrap slot on the next initialization
-or applicable project refresh.
+node or advancing the branch head. Missing AGENTS.md files clear their entries on
+the next initialization or applicable project refresh.
 
-The committed fact freezes the agent's effective skills and bootstrap block for
-the load attempt. Provider `<available_skills>`, the model `skill` tool,
+The committed fact freezes the agent's effective skills and model-facing discovery
+items for the load attempt. Lazy advertisement delivery, the model `skill` tool,
 selected-agent `:skill` expansion, and the protected transient
 `harness.agent_context_initialized` projection all consume that frozen state.
 Non-literal `:skill` commands wait for pending discovery before expansion.
 Unsolicited session/source updates do not mutate an already-frozen agent;
 canonical workdir mutations explicitly replace only their bound source.
 
-The bootstrap block is materialized once as a provider user-context block outside
-ordinary transcript history. Branching and compaction retain the latest folded
-slot exactly once; attaching a UI cannot append or duplicate it.
+Skill advertisements and AGENTS.md instructions never enter system/developer
+templates or a replaceable provider prefix. Before the first already-authorized
+inference, the harness appends a passive canonical `agent.user_message_injected`
+with typed discovery content, rendered as a separate user-role `tau_discovery`
+envelope.
+The empty `text` field avoids storing the rendered body twice. Discovery alone
+does not activate inference or start an outer turn.
+
+Each item has a kind-qualified identity (skill name or canonical AGENTS.md path)
+and a digest of its exact model-facing content. Each delivery lists the complete
+current scope and includes bodies only for exact versions absent from surviving
+canonical delivery receipts in the selected context. A→B→A and content
+reversion reactivate retained versions by reference without repeating their
+bodies. Removal changes current scope; earlier instructions remain history.
+Role filtering, frontmatter stripping, collision selection, and advertisement
+truncation happen before versioning. Advertisements never include loaded skill
+bodies.
+
+Receipts derive from typed canonical occurrences, not text matching, process
+flags, or a lifetime delivered set. Branch selection and cold replay reconstruct
+the same receipts. Compaction drops authority for consumed originals; replacement
+narrative or opaque content cannot claim a receipt. Retained original suffix
+occurrences keep authority. The next writable authorized inference redelivers
+needed versions after compaction. Protected continuation cuts are unchanged;
+discovery waits for the next writable continuation. Attaching a UI does not append
+discovery.
 
 ## Replay and current state
 
 Cold resume refreshes session discovery and starts a new correlated initialization
 for every restored live agent before replay activations or prompts dispatch. Each
-refresh replaces the durable initialization side state rather than appending an
-ordinary AGENTS.md user message.
+refresh replaces the durable initialization side state. Loading or inspecting an
+agent alone does not append a discovery message; delivery waits for authorized
+inference and consults the surviving context receipts.
 
 Raw declarations and readiness have no historical replay. Late subscribers receive
 one current `harness.session_skills_available` snapshot and one

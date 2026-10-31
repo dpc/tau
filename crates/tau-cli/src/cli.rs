@@ -689,16 +689,32 @@ pub enum DevCommand {
     /// `--role` uses the configured startup role.
     PrintTools,
 
-    /// Print the effective skills available to a role.
+    /// Print the advertised-skill portion of an initial discovery envelope.
     ///
     /// Uses the same fresh ephemeral-agent lifecycle and effective context
     /// snapshot as `print-prompt`, without calling a provider. Extensions
     /// retain ordinary persistent state access and side effects. Omitting
-    /// `--role` uses the configured startup role.
+    /// `--role` uses the configured startup role. This previews a full initial
+    /// snapshot, not the remaining delta in a running agent's context.
     PrintSkills {
-        /// Output encoding for the effective skill list.
+        /// Start the preview harness and agent in DIR for project discovery.
+        #[arg(long, value_name = "DIR", value_parser = parse_canonical_directory)]
+        workdir: Option<PathBuf>,
+        /// Envelope by default; markdown/json list all effective skills.
         #[arg(long, value_enum, default_value_t)]
         format: SkillOutputFormat,
+    },
+
+    /// Print the AGENTS.md portion of a full initial discovery envelope.
+    ///
+    /// Starts the ordinary ephemeral preview lifecycle without calling a model.
+    /// Configured extensions retain their normal startup side effects.
+    /// Uses the selected role and a full initial snapshot, not a running
+    /// agent's delta.
+    PrintAgentsMd {
+        /// Start the preview harness and agent in DIR for project discovery.
+        #[arg(long, value_name = "DIR", value_parser = parse_canonical_directory)]
+        workdir: Option<PathBuf>,
     },
 
     /// Preview config-derived declarations from explicitly opted-in extensions.
@@ -726,8 +742,10 @@ pub enum DevCommand {
 /// Encodings supported by `tau dev print-skills`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum SkillOutputFormat {
-    /// Human-readable Markdown document.
+    /// The advertised catalog portion of a full initial discovery envelope.
     #[default]
+    Envelope,
+    /// Human-readable inventory of all effective skills.
     Markdown,
     /// Machine-readable JSON array.
     Json,

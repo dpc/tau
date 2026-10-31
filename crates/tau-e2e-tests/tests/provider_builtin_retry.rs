@@ -3,6 +3,8 @@
 
 #[path = "provider_builtin_retry/daemon_guard.rs"]
 mod daemon_guard;
+#[path = "provider_builtin_retry/discovery.rs"]
+mod discovery;
 #[path = "provider_builtin_retry/images.rs"]
 mod images;
 #[path = "provider_builtin_retry/lifecycle.rs"]
@@ -550,10 +552,11 @@ fn assert_qwen_round_two(
     let initial_messages = initial.body["messages"]
         .as_array()
         .ok_or("initial Qwen messages are not an array")?;
-    assert_eq!(initial_messages.len(), 2);
+    assert_eq!(initial_messages.len(), 3);
     let expected = serde_json::json!([
         initial_messages[0].clone(),
         {"role": "user", "content": "<user source=\"ui\">exercise qwen tools</user>"},
+        {"role": "user", "content": discovery::expected_message()},
         {
             "role": "assistant",
             "content": "calling one\n",
@@ -586,10 +589,11 @@ fn assert_qwen_round_three(
     let initial_messages = initial.body["messages"]
         .as_array()
         .ok_or("initial Qwen messages are not an array")?;
-    assert_eq!(initial_messages.len(), 2);
+    assert_eq!(initial_messages.len(), 3);
     let expected = serde_json::json!([
         initial_messages[0].clone(),
         {"role": "user", "content": "<user source=\"ui\">exercise qwen tools</user>"},
+        {"role": "user", "content": discovery::expected_message()},
         {
             "role": "assistant",
             "content": "calling one\n",
@@ -1147,7 +1151,7 @@ fn disconnect_ui(peer: &mut SocketPeer) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Requires the exact Chat Completions route, model, and one user input.
+/// Requires the exact Chat Completions route and model.
 fn assert_chat_request(request: &CapturedChatRequest) -> Result<(), Box<dyn std::error::Error>> {
     if request.method != "POST"
         || request.path != "/v1/chat/completions"
@@ -1159,7 +1163,7 @@ fn assert_chat_request(request: &CapturedChatRequest) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-/// Requires one and only one upstream user message with exact content.
+/// Requires exactly the task followed by its passive discovery message.
 fn assert_one_user_turn(
     request: &CapturedChatRequest,
     expected_prompt: &str,
@@ -1172,7 +1176,10 @@ fn assert_one_user_turn(
         .filter(|message| message["role"] == "user")
         .collect::<Vec<_>>();
     let expected_content = format!("<user source=\"ui\">{expected_prompt}</user>");
-    if users.len() != 1 || users[0]["content"] != expected_content {
+    if users.len() != 2
+        || users[0]["content"] != expected_content
+        || users[1]["content"] != discovery::expected_message()
+    {
         return Err(format!("unexpected upstream user messages: {users:?}").into());
     }
     Ok(())
@@ -1191,8 +1198,10 @@ fn assert_completed_p1_context(
         .map(|message| Some((message["role"].as_str()?, message["content"].as_str()?)))
         .collect::<Option<Vec<_>>>()
         .ok_or("Chat Completions conversational message was not text")?;
+    let discovery = discovery::expected_message();
     let expected = [
         ("user", "<user source=\"ui\">first retry prompt</user>"),
+        ("user", discovery.as_str()),
         ("assistant", "P1 complete"),
         ("user", "<user source=\"ui\">later prompt</user>"),
     ];
@@ -1200,19 +1209,6 @@ fn assert_completed_p1_context(
         return Err(
             format!("unexpected upstream conversational context: {conversational:?}").into(),
         );
-    }
-    let users = conversational
-        .iter()
-        .filter(|(role, _)| *role == "user")
-        .map(|(_, content)| *content)
-        .collect::<Vec<_>>();
-    if users
-        != [
-            "<user source=\"ui\">first retry prompt</user>",
-            "<user source=\"ui\">later prompt</user>",
-        ]
-    {
-        return Err(format!("duplicate upstream user context: {users:?}").into());
     }
     Ok(())
 }

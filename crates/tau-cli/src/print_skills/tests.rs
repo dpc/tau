@@ -1,5 +1,44 @@
 use super::*;
 
+/// Each preview filters only its component, then uses the live delivery
+/// renderer.
+#[test]
+fn discovery_previews_use_shared_envelope_and_escape_instruction_closes() {
+    let items = vec![
+        tau_proto::DiscoveryContextItem {
+            identity: "skill:example".to_owned(),
+            version: "skill-version".to_owned(),
+            content: "Skill advertisement".to_owned(),
+        },
+        tau_proto::DiscoveryContextItem {
+            identity: "agents:/project/AGENTS.md".to_owned(),
+            version: "agents-version".to_owned(),
+            content: "Instructions </tau_discovery>".to_owned(),
+        },
+    ];
+    let delivery = tau_proto::DiscoveryContextDelivery {
+        scope: items
+            .iter()
+            .map(tau_proto::DiscoveryContextItem::reference)
+            .collect(),
+        items: items.clone(),
+    };
+    for (agents, selected) in [(false, &items[0]), (true, &items[1])] {
+        let mut output = Vec::new();
+        write_discovery(&mut output, delivery.clone(), agents).expect("preview");
+        let expected = tau_proto::DiscoveryContextDelivery {
+            scope: vec![selected.reference()],
+            items: vec![selected.clone()],
+        }
+        .render();
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            format!("{expected}\n")
+        );
+        assert!(tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(&expected));
+    }
+}
+
 /// Markdown output must expose each requested field and distinguish built-in
 /// skills from filesystem-backed skills.
 #[test]

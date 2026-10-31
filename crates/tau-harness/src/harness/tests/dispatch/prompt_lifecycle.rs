@@ -1136,7 +1136,7 @@ fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
         concat!(
             "    0   before first prompt (root)\n",
             "    1   before prompt  user: first prompt\n",
-            "    2 * before prompt  user: second prompt",
+            "    2   before prompt  user: second prompt",
         )
     );
 }

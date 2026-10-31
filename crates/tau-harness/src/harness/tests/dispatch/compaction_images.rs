@@ -153,6 +153,7 @@ fn prepared_reference_prefix_fitting_counts_canonical_replacement_and_initializa
     f.h.publish_for_agent(
         &f.cid,
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_items: Vec::new(),
             discovery_revision: 0,
             discovery_refreshes: Vec::new(),
             discovery_diagnostics: Vec::new(),
@@ -179,17 +180,13 @@ fn prepared_reference_prefix_fitting_counts_canonical_replacement_and_initializa
             .agent_store
             .agent(agent_id.as_str())
             .expect("tree");
-    let mut canonical = crate::prompt::assemble_prompt_context_prefix_from(
+    let canonical = crate::prompt::assemble_prompt_context_prefix_from(
         tree,
         Some(incident),
         tau_proto::AgentHead::Node(safe),
     )
     .expect("prefix")
     .context;
-    canonical.blocks.insert(
-        0,
-        crate::prompt::initialization_agents_context_block(tree).expect("initialization"),
-    );
     let canonical_json = serde_json::to_vec(&canonical).expect("canonical JSON");
     assert!(String::from_utf8_lossy(&canonical_json).contains(f.blob.key.as_str()));
     let mut expanded = canonical.clone();

@@ -4,6 +4,7 @@ use super::*;
 
 mod compaction_guards;
 mod cross_model_recovery;
+mod discovery_context;
 mod fold_allocation;
 mod partial_provider_error;
 
@@ -478,6 +479,7 @@ fn randomized_prevalidated_live_fold_matches_cold_replay() {
             seq: live.next_event_seq(),
             source: None,
             event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: format!("randomized-{random}"),
                 inference_activation: false,
@@ -511,6 +513,7 @@ fn randomized_prevalidated_live_fold_matches_cold_replay() {
                 seq: live.next_event_seq(),
                 source: None,
                 event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    discovery_context: None,
                     agent_id: agent_id.clone(),
                     text: format!("candidate-{random}-{offset}"),
                     inference_activation: false,
@@ -610,6 +613,7 @@ fn randomized_prevalidated_live_fold_matches_cold_replay() {
                 InvalidClass::SemanticOwner => {
                     record.event =
                         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                            discovery_context: None,
                             agent_id: other_agent_id.clone(),
                             text: "wrong owner".to_owned(),
                             inference_activation: false,
@@ -1727,6 +1731,7 @@ fn compaction_chain_view_is_live_cold_and_restart_equivalent() {
         &mut live,
         &mut records,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: agent_id(),
             text: "branch away".to_owned(),
             inference_activation: false,
@@ -2059,6 +2064,7 @@ fn randomized_live_and_cold_ancestry_matches_allocating_reference_at_every_head(
             seq: live.next_event_seq(),
             source: None,
             event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: format!("ancestry-{step}-{random}"),
                 inference_activation: false,
@@ -3403,6 +3409,7 @@ fn compaction_start_uses_explicit_parent_with_divergent_write_cursor() {
             seq: tree.next_event_seq,
             source: None,
             event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id(),
                 text: text.to_owned(),
                 inference_activation: false,
@@ -3842,6 +3849,7 @@ fn provider_window_indexes_stop_before_dangling_synthetic_parent() {
         .apply_event_at(
             AgentEventParent::Under(unknown),
             &Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id(),
                 text: "dangling parent".to_owned(),
                 inference_activation: false,
@@ -4234,6 +4242,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::Root,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: agent_id.clone(),
             text: "H".to_owned(),
             inference_activation: true,
@@ -4263,6 +4272,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::Under(NodeId::new(0)),
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: agent_id.clone(),
             text: "accepted before tool-bearing response".to_owned(),
             inference_activation: false,
@@ -4702,6 +4712,7 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
         recorded_at: tau_proto::UnixMicros::new(seq),
     };
     let initial = Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        discovery_context: None,
         agent_id: agent_id.clone(),
         text: "H".to_owned(),
         inference_activation: true,
@@ -4881,6 +4892,7 @@ fn deferred_background_preview_provenance_matches_live_and_cold_replay() {
                         tool_outcome=\"result\" delivery=\"full\" rendered_bytes=\"4\" \
                         retrieval=\"wait\">done</tau_background_result>";
     let initial = Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        discovery_context: None,
         agent_id: agent_id.clone(),
         text: "H".to_owned(),
         inference_activation: true,
@@ -4976,6 +4988,7 @@ fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
             seq: PersistedAgentEventSeq::new(0),
             source: None,
             event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "H".to_owned(),
                 inference_activation: true,
@@ -5094,6 +5107,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
             &mut tree,
             AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "H".to_owned(),
                 inference_activation: false,
@@ -5150,6 +5164,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
             &mut tree,
             AgentEventParent::Under(owner_through),
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "Q".to_owned(),
                 inference_activation: true,
@@ -5323,6 +5338,7 @@ fn inference_deferred_input_v1_head_move_resets_branch_eligibility() {
     };
     let input = |text: &str| {
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: agent_id.clone(),
             text: text.to_owned(),
             inference_activation: true,
@@ -5420,6 +5436,7 @@ fn inference_deferred_input_v1_defers_only_exact_owner_branch() {
     };
     let input = |text: &str| {
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: agent_id.clone(),
             text: text.to_owned(),
             inference_activation: false,
@@ -5552,6 +5569,7 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
                 0,
                 AgentEventParent::Root,
                 Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    discovery_context: None,
                     agent_id: agent_id.clone(),
                     text: "H".to_owned(),
                     inference_activation: true,
@@ -5569,6 +5587,7 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
                 2,
                 AgentEventParent::Under(NodeId::new(0)),
                 Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    discovery_context: None,
                     agent_id: agent_id.clone(),
                     text: "Q".to_owned(),
                     inference_activation: true,
@@ -5650,6 +5669,7 @@ fn mixed_commit_order_v1_replay_preserves_old_node_targets() {
     };
     let input = |text: &str| {
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: agent_id.clone(),
             text: text.to_owned(),
             inference_activation: true,
@@ -5761,6 +5781,7 @@ fn v1_terminal_fallback_restores_selected_queue_not_global_last_node() {
             &mut tree,
             parent,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: text.to_owned(),
                 inference_activation: false,
@@ -5801,6 +5822,7 @@ fn v1_terminal_fallback_restores_selected_queue_not_global_last_node() {
             &mut tree,
             AgentEventParent::Under(parent),
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: text.to_owned(),
                 inference_activation: false,
@@ -7754,6 +7776,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
         4,
         AgentEventParent::Root,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: fixture.agent_id().clone(),
             text: "branch elsewhere".to_owned(),
             inference_activation: false,
@@ -7924,6 +7947,7 @@ fn output_length_post_start_branch_move_has_no_synthetic_repair() {
         u64::try_from(records.len()).expect("bounded fixture"),
         AgentEventParent::Root,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: fixture.agent_id().clone(),
             text: "post-start sibling".to_owned(),
             inference_activation: false,

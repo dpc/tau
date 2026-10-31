@@ -233,13 +233,19 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   the harness (for example shell output) and folded
   like user input. It uses the same immutable harness-owned, default-false
   activation marker: false is passive/legacy context and cannot independently
-  wake replay.
+  wake replay. Optional typed `discovery_context` carries a passive current-scope
+  listing and content versions absent from surviving context receipts; `text` is
+  empty in that case. Core renders the user envelope and derives delivery receipts
+  from the canonical occurrence.
 - **`agent.initialization_context_set`** — Durable harness-authored replacement
-  DTO carrying an optional bootstrap block, frozen effective skills, ordered
+  DTO carrying model-facing discovery items, frozen effective skills, ordered
   AGENTS.md summaries, and the initialization ID that produced the replacement.
   Every finalization appends one exact-ID replacement, including unchanged
   effective content refreshed during cold restore. The reducer folds the fact
-  into replaceable side state without adding a transcript node.
+  into replaceable side state without adding a transcript node. The snapshot is
+  not a provider prefix. Lazy passive delivery records only the versions needed
+  in the selected current context. Tau still decodes legacy `agents_message` but
+  no longer produces or materializes it.
 - **`agent.prompt_recalled`** — A queued prompt was recalled for editing.
 - **`agent.prompt_rejected`** — Harness-authored transient terminal for one
   ordinary queued prompt that cannot dispatch because provider initialization

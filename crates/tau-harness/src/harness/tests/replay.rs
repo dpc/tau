@@ -703,7 +703,9 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
             .agent(agent_id.as_str())
             .expect("projected tree")
             .nodes()
-            .last()
+            .iter()
+            .rev()
+            .find(|node| matches!(node.entry, tau_core::AgentEntry::MessageFact { .. }))
             .map(|node| &node.entry),
         Some(tau_core::AgentEntry::MessageFact { .. })
     ));
@@ -845,7 +847,9 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
             .agent(agent_id.as_str())
             .expect("terminating target tree")
             .nodes()
-            .last()
+            .iter()
+            .rev()
+            .find(|node| matches!(node.entry, tau_core::AgentEntry::MessageFact { .. }))
             .map(|node| &node.entry),
         Some(tau_core::AgentEntry::MessageFact { .. })
     ));
@@ -1118,7 +1122,9 @@ fn assert_message_fact_replay_rebuilds_uncovered_wake(
         .agent(agent_id.as_str())
         .expect("replayed transcript")
         .nodes()
-        .last()
+        .iter()
+        .rev()
+        .find(|node| matches!(node.entry, tau_core::AgentEntry::MessageFact { .. }))
         .expect("replayed fact node")
         .entry
         .clone();
@@ -1234,7 +1240,12 @@ fn received_agent_message_replay_restores_context_and_activation() {
         .agent(agent_id.as_str())
         .expect("replayed tree");
     assert_eq!(
-        tree.nodes().last().expect("replayed received node").entry,
+        tree.nodes()
+            .iter()
+            .rev()
+            .find(|node| matches!(node.entry, tau_core::AgentEntry::AgentMessage { .. }))
+            .expect("replayed received node")
+            .entry,
         live_projection
     );
     let cid = resumed

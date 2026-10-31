@@ -1196,6 +1196,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             ctx_id: None,
         }),
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             inference_activation: false,
             agent_id: crate::parse_agent_id("forged-agent"),
             text: "forged injected".to_owned(),

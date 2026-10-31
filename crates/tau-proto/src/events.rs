@@ -5332,6 +5332,11 @@ pub struct SelfCompactionTerminal {
 /// output and eager AGENTS.md context preambles.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentUserMessageInjected {
+    /// Canonical passive discovery body and receipt, rendered without
+    /// duplicating its content in `text`. When present, `text` must be
+    /// empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_context: Option<crate::DiscoveryContextDelivery>,
     /// Agent transcript receiving the injected message.
     pub agent_id: AgentId,
     /// Harness-owned immutable activation marker. True creates

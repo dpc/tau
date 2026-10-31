@@ -71,6 +71,7 @@ fn managed_history_internal_text_facts_are_exact_and_quantified() {
     let text = "x".repeat(64 * 1024);
     let injected = |text: String, message_class| {
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: agent_id.clone(),
             text,
             message_class,
@@ -1019,6 +1020,7 @@ fn overlapping_v1_owner_append_rejects_before_mutation() {
             agent_id.as_str(),
             None,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "H".to_owned(),
                 inference_activation: true,
@@ -1665,6 +1667,7 @@ fn encoded_record_length(text_len: usize, seq: u64) -> usize {
 /// Builds a message injection whose text can exercise the encoded record bound.
 fn injected_message_event(agent_id: &AgentId, text: String) -> Event {
     Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        discovery_context: None,
         agent_id: agent_id.clone(),
         text,
         inference_activation: false,

@@ -1727,12 +1727,13 @@ fn assert_restart_context(context: &tau_proto::PromptContext, h: &str, r: &str, 
     let items = context.flatten_iter().collect::<Vec<_>>();
     let [
         ContextItem::Message(h_item),
+        ContextItem::Message(discovery_item),
         ContextItem::Message(r_item),
         ContextItem::Message(restore_item),
         ContextItem::Message(q_item),
     ] = items.as_slice()
     else {
-        panic!("expected typed H, R, restore, Q context items, got {items:?}");
+        panic!("expected typed H, discovery, R, restore, Q context items, got {items:?}");
     };
     assert_exact_text_message(
         h_item,
@@ -1740,6 +1741,14 @@ fn assert_restart_context(context: &tau_proto::PromptContext, h: &str, r: &str, 
         &format!("<user source=\"ui\">{h}</user>"),
     );
     assert_exact_text_message(r_item, tau_proto::ContextRole::Assistant, r);
+    assert_eq!(discovery_item.role, tau_proto::ContextRole::User);
+    assert!(
+        matches!(discovery_item.content.as_slice(),
+            [tau_proto::ContentPart::Text { text }]
+                if tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+        ),
+        "restart must preserve exactly the original discovery occurrence"
+    );
     assert_exact_text_message(
         restore_item,
         tau_proto::ContextRole::User,

@@ -3691,6 +3691,7 @@ fn slow_healthy_worker_does_not_amplify_complete_projection_per_frame() {
             None,
             crate::AgentEventParent::InheritHead,
             tau_proto::Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "x".repeat(1024 * 1024),
                 inference_activation: false,

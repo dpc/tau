@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// Captured tool surface and bootstrap ownership needed for a discovery
-/// refresh.
+/// Captured tool surface needed for a discovery refresh.
 #[derive(Clone)]
 pub(crate) struct PromptDiscoveryRender {
     /// Discovery revision represented by the current request bytes.
@@ -17,9 +16,7 @@ pub(crate) struct PromptDiscoveryRender {
     pub(crate) providers: Vec<tau_core::ToolProvider>,
     /// Original effective capability names used for fragment selection.
     pub(crate) effective_names: HashSet<ToolName>,
-    /// Whether the synthetic initialization block occupies index zero.
-    pub(crate) has_bootstrap: bool,
-    /// Provenance guidance required by history independently of the bootstrap.
+    /// Provenance guidance required by the unchanged canonical history.
     pub(crate) history_provenance: bool,
 }
 

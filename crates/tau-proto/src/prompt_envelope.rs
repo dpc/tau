@@ -223,6 +223,16 @@ pub const TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope =
         carrier: PayloadEnvelopeCarrier::GenericUserText,
     };
 
+/// Registered envelope for lazy discovery guidance and current applicability.
+pub const TAU_DISCOVERY_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
+    name: "tau_discovery",
+    opening: PayloadEnvelopeOpening::Fixed("<tau_discovery>"),
+    ordered_attributes: &[],
+    exact_close: "</tau_discovery>",
+    visible_close: "&lt;/tau_discovery&gt;",
+    carrier: PayloadEnvelopeCarrier::GenericUserText,
+};
+
 /// Return every registered top-level model-facing payload-envelope family.
 #[must_use]
 pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelope] {
@@ -233,6 +243,7 @@ pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelo
         MESSAGE_PAYLOAD_ENVELOPE,
         TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
         TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
+        TAU_DISCOVERY_PAYLOAD_ENVELOPE,
     ]
 }
 

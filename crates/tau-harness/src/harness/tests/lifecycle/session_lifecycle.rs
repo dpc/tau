@@ -39,6 +39,7 @@ fn resumed_session_init_does_not_reinject_agents_context() {
         &cid,
         None,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: format!("# AGENTS.md instructions\n{marker}"),

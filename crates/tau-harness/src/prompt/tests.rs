@@ -90,6 +90,7 @@ fn compaction_prompt_uses_explicit_start_parent_not_write_cursor() {
         (
             tau_core::AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "owning branch".to_owned(),
                 inference_activation: false,
@@ -99,6 +100,7 @@ fn compaction_prompt_uses_explicit_start_parent_not_write_cursor() {
         (
             tau_core::AgentEventParent::Root,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "unrelated cursor".to_owned(),
                 inference_activation: false,
@@ -524,7 +526,7 @@ fn additional_prompt_templates_match_prompt_fragment_context() {
         vec![
             Some("plain alert".to_owned()),
             Some(
-                "builders/engineer /harness/session template-agent alpha=first skill \
+                "builders/engineer /harness/session template-agent  \
                  /agent/workdir compact-enabled"
                     .to_owned()
             ),
@@ -946,23 +948,23 @@ fn render_effective_prompt_wraps_system_and_agents_context() {
         file_path: "/repo/AGENTS.md".into(),
         content: "Read the docs.".to_owned(),
     }];
-    let agents_context = render_agents_context_message(agents.iter());
+    let items = discovery_context_items(&[], &agents);
+    let agents_context = tau_proto::DiscoveryContextDelivery {
+        scope: items
+            .iter()
+            .map(tau_proto::DiscoveryContextItem::reference)
+            .collect(),
+        items,
+    }
+    .render();
 
     let prompt = render_effective_prompt_message("System instructions", Some(&agents_context));
 
     assert!(prompt.starts_with("<message role=\"system\">\nSystem instructions\n</message>\n"));
-    assert!(prompt.contains("<message role=\"user\" synthetic=\"true\" source=\"AGENTS.md\">"));
-    assert_eq!(
-        prompt
-            .lines()
-            .filter(|line| *line == "# agents.md files")
-            .count(),
-        1
-    );
-    assert!(prompt.contains("# agents.md files\n\n<AGENTS_FILE"));
-    assert!(
-        prompt.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">\nRead the docs.\n</AGENTS_FILE>")
-    );
+    assert!(prompt.contains("<message role=\"user\" source=\"discovery\">"));
+    assert_eq!(prompt.matches("<tau_discovery>").count(), 1);
+    assert!(prompt.contains("agents:/repo/AGENTS.md"));
+    assert!(prompt.contains("Read the docs."));
 }
 
 #[test]
@@ -976,16 +978,6 @@ fn render_effective_prompt_can_omit_agents_context() {
     assert!(!prompt.contains("# agents.md files"));
 }
 
-/// An empty discovered-file iterator must not manufacture an empty files
-/// section, even when the lower-level context renderer is called directly.
-#[test]
-fn render_agents_context_omits_files_heading_for_empty_iterator() {
-    let files: [DiscoveredAgentsFile; 0] = [];
-    let context = render_agents_context_message(files.iter());
-
-    assert!(!context.contains("# agents.md files"));
-    assert!(!context.contains("<AGENTS_FILE"));
-}
 fn cwd_prompt_fragment() -> tau_proto::PromptFragment {
     tau_proto::PromptFragment::new(
         "shell.cwd",
@@ -1193,10 +1185,10 @@ fn build_system_prompt_exposes_shell_cwd_to_handlebars() {
     assert!(prompt.contains("EXACT"));
 }
 
-/// Templates receive the prompt-visible skills and can sort them
-/// explicitly so custom role prompts control their presentation.
+/// Even custom system fragments cannot pull discovery advertisements into the
+/// system channel through the legacy template key.
 #[test]
-fn build_system_prompt_exposes_sortable_skills_to_handlebars() {
+fn build_system_prompt_keeps_legacy_skills_key_empty() {
     let skills = path_std_collections::HashMap::from([
         (
             tau_proto::SkillName::from("zeta"),
@@ -1227,16 +1219,14 @@ fn build_system_prompt_exposes_sortable_skills_to_handlebars() {
         RolePromptTemplateContext::for_role("engineer"),
     );
 
-    let alpha = prompt.find("* alpha - first skill").expect("alpha skill");
-    let zeta = prompt.find("* zeta - last skill").expect("zeta skill");
-    assert!(alpha < zeta);
+    assert!(!prompt.contains("first skill"));
+    assert!(!prompt.contains("last skill"));
     assert!(!prompt.contains("hidden skill"));
 }
 
-/// The built-in skill catalog keeps ordinary punctuation literal rather than
-/// using full XML escaping, which preserves model-readable skill metadata.
+/// Dynamic catalog text does not leak through the built-in system template.
 #[test]
-fn build_system_prompt_keeps_builtin_skill_metadata_readable() {
+fn build_system_prompt_omits_builtin_skill_metadata() {
     let skills = path_std_collections::HashMap::from([(
         tau_proto::SkillName::from("a&b <fast> \"mode\""),
         discovered_skill("use <fast> & \"mode\" 'now'", true),
@@ -1244,8 +1234,8 @@ fn build_system_prompt_keeps_builtin_skill_metadata_readable() {
 
     let prompt = build_system_prompt(&skills, &[]);
 
-    assert!(prompt.contains("<name>a&b <fast> \"mode\"</name>"));
-    assert!(prompt.contains("<description>use <fast> & \"mode\" 'now'</description>"));
+    assert!(!prompt.contains("a&b"));
+    assert!(!prompt.contains("use <fast>"));
     assert!(!prompt.contains("a&amp;b"));
     assert!(!prompt.contains("use &lt;fast&gt;"));
 }
@@ -1275,10 +1265,9 @@ fn xml_escape_lax_neutralizes_only_closing_tag_prefixes() {
     );
 }
 
-/// The built-in skill catalog contains hostile closing tags without enumerating
-/// each trusted field or parent wrapper in the template.
+/// Discovery delimiter-like content never becomes system template content.
 #[test]
-fn build_system_prompt_contains_hostile_builtin_skill_closing_tags() {
+fn build_system_prompt_omits_hostile_builtin_skill_closing_tags() {
     let skills = path_std_collections::HashMap::from([
         (
             tau_proto::SkillName::from("name</name></skill></available_skills>"),
@@ -1296,20 +1285,14 @@ fn build_system_prompt_contains_hostile_builtin_skill_closing_tags() {
 
     let prompt = build_system_prompt(&skills, &[]);
 
-    assert!(prompt.contains("<name>name&lt;/name>&lt;/skill>&lt;/available_skills></name>"));
-    assert!(prompt.contains(
-        "<description>description&lt;/description>&lt;/skill>&lt;/available_skills></description>"
-    ));
-    assert!(prompt.contains("<name>cross-family&lt;/description></name>"));
-    assert!(prompt.contains("<description>cross-family&lt;/name></description>"));
-    assert_eq!(prompt.matches("</skill>").count(), 3);
-    assert_eq!(prompt.matches("</available_skills>").count(), 1);
+    assert!(!prompt.contains("ordinary description"));
+    assert!(!prompt.contains("cross-family"));
+    assert!(!prompt.contains("available_skills"));
 }
 
-/// The built-in skill catalog keeps every entry indented inside its XML-shaped
-/// wrapper without inserting blank lines between sorted entries.
+/// The same selected catalog is sampled as sorted user-context items instead.
 #[test]
-fn build_system_prompt_indents_builtin_skill_entries_compactly() {
+fn discovery_items_sort_skill_advertisements_without_loading_bodies() {
     let skills = path_std_collections::HashMap::from([
         (
             tau_proto::SkillName::from("zeta"),
@@ -1321,27 +1304,26 @@ fn build_system_prompt_indents_builtin_skill_entries_compactly() {
         ),
     ]);
 
-    let prompt = build_system_prompt(&skills, &[]);
-    let catalog = prompt
-        .split_once("<available_skills>\n")
-        .expect("built-in skill catalog opens")
-        .1
-        .split_once("</available_skills>")
-        .expect("built-in skill catalog closes")
-        .0;
-
+    let effective = skills
+        .into_iter()
+        .map(|(name, skill)| tau_proto::DiscoveryEffectiveSkill {
+            name,
+            description: skill.description,
+            source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+            visibility: Default::default(),
+            add_to_prompt: true,
+            user_invocable: true,
+            disable_model_invocation: false,
+            argument_hint: None,
+        })
+        .collect::<Vec<_>>();
+    let items = discovery_context_items(&effective, &[]);
     assert_eq!(
-        catalog,
-        concat!(
-            "  <skill>\n",
-            "    <name>alpha</name>\n",
-            "    <description>first skill</description>\n",
-            "  </skill>\n",
-            "  <skill>\n",
-            "    <name>zeta</name>\n",
-            "    <description>last skill</description>\n",
-            "  </skill>\n",
-        )
+        items
+            .iter()
+            .map(|item| (item.identity.as_str(), item.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("skill:alpha", "first skill"), ("skill:zeta", "last skill")]
     );
 }
 
@@ -1492,7 +1474,7 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
         RolePromptTemplateContext::for_agent("engineer", &agent_id),
     );
     assert!(prompt.contains("You are Tau, an autonomous coding agent."));
-    assert!(prompt.contains("- test-skill: test skill description (file: <builtin>/SKILL.md)"));
+    assert!(!prompt.contains("test skill description"));
     assert!(prompt.contains("FRAGMENT /tmp/work"));
     assert!(!prompt.contains("# Agent identity"));
     assert!(!prompt.contains(agent_id.as_str()));
@@ -1533,13 +1515,13 @@ fn built_in_prompts_place_payload_envelope_provenance_notice_between_tools_and_s
             BUILT_IN_SYSTEM_TEMPLATE_NAME,
             "## Tool calling",
             "## Skills and skill system",
-            "82f895606f78e2a4eb115c7885e84a122ec428bb65d96f1433ac69f38ecb96da",
+            "07740924aeb37d1d603e47b0957f27fe73f27f08c3e9f411f06a09ad8ec35023",
         ),
         (
             BIG_SYSTEM_TEMPLATE_NAME,
             "## Tool Use",
             "## Skills",
-            "f0436c130d781435dcacbbe4482bb45ac21864982378d149e0112a5948e72357",
+            "32e6d80a4614535929857e0f0d4eca703f207efb7f37cbc510ccf3a036be53b9",
         ),
     ] {
         let prompt = build_system_prompt_with_tool_template_context(
@@ -1595,7 +1577,7 @@ fn built_in_prompts_place_payload_envelope_provenance_notice_between_tools_and_s
         assert!(empty_prompt.contains(static_tool_heading));
         assert!(!empty_prompt.contains("## Payload envelope boundaries"));
         assert!(!empty_prompt.contains(rule));
-        assert!(!empty_prompt.contains(skills_heading));
+        assert!(empty_prompt.contains(skills_heading));
     }
 }
 
@@ -2169,6 +2151,7 @@ fn prompt_projection_frames_only_harness_internal_input() {
     ));
     tree.apply_event(&Event::AgentUserMessageInjected(
         tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             inference_activation: false,
             agent_id: crate::parse_agent_id("main"),
             text: "injected <user>literal</user>".to_owned(),

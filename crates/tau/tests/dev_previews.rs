@@ -731,7 +731,11 @@ fn print_skills_lists_only_effective_role_skills_in_markdown_and_json() {
     )
     .expect("write explicit role skill");
 
-    let markdown = preview(&home, None, &["dev", "print-skills"]);
+    let markdown = preview(
+        &home,
+        None,
+        &["dev", "print-skills", "--format", "markdown"],
+    );
     assert!(markdown.status.success(), "{:?}", markdown.stderr);
     let markdown = String::from_utf8(markdown.stdout).expect("UTF-8 Markdown");
     assert!(markdown.starts_with("# Available skills\n"));
@@ -792,7 +796,7 @@ fn print_skills_survives_prompt_materialization_failure_after_discovery() {
     .expect("write harness config");
     std::fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nname: available\ndescription: Available after discovery.\n---\n",
+        "---\nname: available\ndescription: Available after discovery.\nadvertise: true\n---\n",
     )
     .expect("write skill");
 
@@ -822,6 +826,82 @@ fn print_skills_survives_prompt_materialization_failure_after_discovery() {
         skills.iter().any(|skill| skill["name"] == "available"),
         "{skills:?}"
     );
+    std::fs::write(
+        home.path().join("work/AGENTS.md"),
+        "Preview instructions.\n",
+    )
+    .expect("AGENTS fixture");
+    for command in ["print-skills", "print-agents-md"] {
+        let output = preview(&home, None, &["--role", "preview", "dev", command]);
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let output = String::from_utf8(output.stdout).expect("envelope");
+        assert!(output.starts_with("<tau_discovery>\n"));
+        let expected = if command == "print-skills" {
+            "Available after discovery."
+        } else {
+            "Preview instructions."
+        };
+        assert!(output.contains(expected));
+    }
+}
+
+/// Explicit preview workdir uses the same role-filtered project discovery as
+/// launching from that directory; it does not leak the caller's project or
+/// loaded skill bodies.
+#[test]
+fn discovery_previews_match_launching_in_selected_workdir() {
+    let home = TempDir::new().expect("home");
+    let source = home.path().join("work");
+    let target = home.path().join("target");
+    let config = home.path().join(".config/tau");
+    std::fs::create_dir_all(&config).expect("config");
+    std::fs::write(config.join("harness.yaml"),
+        "agents:\n  enable: false\n  role_groups:\n    preview:\n      enable: true\n      roles:\n        default-preview: { order: -100 }\n        chosen-preview: {}\n"
+    ).expect("roles");
+    for (directory, sentinel) in [(&source, "caller-only"), (&target, "target-only")] {
+        let skills = directory.join(".agents/skills/example");
+        std::fs::create_dir_all(&skills).expect("project");
+        std::fs::write(directory.join("AGENTS.md"), format!(
+            "---\nonly-roles: [chosen-preview]\n---\n{sentinel} instructions </tau_discovery>\n",
+        )).expect("instructions");
+        std::fs::write(skills.join("SKILL.md"), format!(
+            "---\nname: example\ndescription: {sentinel} advertisement\nadvertise: true\nonly-roles: [chosen-preview]\n---\nNever preload this skill body.\n",
+        )).expect("skill");
+    }
+    let target_text = target.to_str().expect("target path");
+    for command in ["print-skills", "print-agents-md"] {
+        let args = ["--role", "chosen-preview", "dev", command];
+        let with_workdir = preview(
+            &home,
+            None,
+            &[args[0], args[1], args[2], args[3], "--workdir", target_text],
+        );
+        let direct = isolated_tau_command(env!("CARGO_BIN_EXE_tau"), home.path())
+            .current_dir(&target)
+            .args(args)
+            .output()
+            .expect("direct preview");
+        assert!(with_workdir.status.success(), "{:?}", with_workdir.stderr);
+        assert!(direct.status.success(), "{:?}", direct.stderr);
+        assert_eq!(with_workdir.stdout, direct.stdout, "same initial snapshot");
+        let text = String::from_utf8(with_workdir.stdout).expect("UTF-8");
+        assert!(text.starts_with("<tau_discovery>\n"));
+        assert!(text.contains("target-only"));
+        assert!(!text.contains("caller-only"));
+        assert!(!text.contains("only-roles:"));
+        assert!(!text.contains("Never preload this skill body."));
+        if command == "print-agents-md" {
+            assert!(text.contains("&lt;/tau_discovery&gt;"));
+        }
+        let default_role = preview(&home, None, &["dev", command, "--workdir", target_text]);
+        assert!(default_role.status.success(), "{:?}", default_role.stderr);
+        assert!(
+            !String::from_utf8(default_role.stdout)
+                .expect("UTF-8")
+                .contains("target-only"),
+            "ordinary configured role must retain role filtering"
+        );
+    }
 }
 
 /// Proves previews report exact-route uncertainty instead of inferring a

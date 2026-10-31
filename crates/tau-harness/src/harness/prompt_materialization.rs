@@ -1280,21 +1280,10 @@ impl Harness {
                 false,
             ),
         };
-        let mut contains_payload_envelope_provenance_projection =
+        let contains_payload_envelope_provenance_projection =
             prompt_context.contains_payload_envelope_provenance_projection;
         let history_provenance = contains_payload_envelope_provenance_projection;
-        let mut has_bootstrap = false;
         let mut context = prompt_context.context;
-        if let Some(initialization_block) =
-            tree.and_then(crate::prompt::initialization_agents_context_block)
-        {
-            contains_payload_envelope_provenance_projection |=
-                crate::prompt::context_block_contains_payload_envelope_provenance_projection(
-                    &initialization_block,
-                );
-            context.blocks.insert(0, initialization_block);
-            has_bootstrap = true;
-        }
         if compaction_transaction.is_some() {
             context.blocks.push(tau_proto::ContextBlock::UserInput(
                 tau_proto::UserInputBlock {
@@ -1371,7 +1360,6 @@ impl Harness {
             system_prompt,
             context_size_alerts,
         } = surface;
-        discovery_render.has_bootstrap = has_bootstrap;
         discovery_render.history_provenance = history_provenance;
         let durable_agent_id = agent_id_for_tree.as_deref().unwrap_or(cid.as_ref());
         let agent_prompt_id = reserved_compact_prompt_id
@@ -1567,15 +1555,7 @@ impl Harness {
         if render.revision == revision {
             return Ok(());
         }
-        let bootstrap = self
-            .session_runtime
-            .agent_store
-            .agent(prompt.agent_id.as_str())
-            .and_then(crate::prompt::initialization_agents_context_block);
-        let provenance = render.history_provenance
-            || bootstrap.as_ref().is_some_and(
-                crate::prompt::context_block_contains_payload_envelope_provenance_projection,
-            );
+        let provenance = render.history_provenance;
         let providers = render.providers.iter().collect::<Vec<_>>();
         let rendered = self
             .try_build_system_prompt_for_role_and_agent_with_snapshot(
@@ -1589,13 +1569,6 @@ impl Harness {
                 &render.effective_names,
             )
             .map_err(|error| format!("failed to refresh discovery prompt content: {error}"))?;
-        if render.has_bootstrap {
-            prompt.context.blocks.remove(0);
-        }
-        render.has_bootstrap = bootstrap.is_some();
-        if let Some(bootstrap) = bootstrap {
-            prompt.context.blocks.insert(0, bootstrap);
-        }
         prompt.system_prompt = rendered.system_prompt;
         self.prompt_coordination
             .prompt_runtime
@@ -1665,17 +1638,7 @@ impl Harness {
                     conv.selected_prompt_context_head(),
                 )
             })
-            .unwrap_or(false)
-            || conv
-                .identity
-                .agent_id
-                .as_deref()
-                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-                .and_then(crate::prompt::initialization_agents_context_block)
-                .as_ref()
-                .is_some_and(
-                    crate::prompt::context_block_contains_payload_envelope_provenance_projection,
-                );
+            .unwrap_or(false);
         match self.prepare_prompt_surface_for_dispatch_timed(
             &role_name,
             durable_agent_id.as_ref(),
@@ -1817,6 +1780,7 @@ impl Harness {
             context_agent_id,
             &specs,
             model.as_ref(),
+            false,
         )
     }
 
@@ -1827,6 +1791,7 @@ impl Harness {
         context_agent_id: &tau_proto::AgentId,
         specs: &[tau_proto::ToolSpec],
         model: Option<&ModelId>,
+        includes_discovery: bool,
     ) -> Result<String, handlebars::RenderError> {
         let preview_agent_id = crate::parse_agent_id(RENDERED_PROMPT_PREVIEW_AGENT_ID);
         self.try_build_system_prompt_for_role_and_agent(
@@ -1835,7 +1800,7 @@ impl Harness {
             Some(context_agent_id),
             specs,
             model,
-            false,
+            includes_discovery,
         )
     }
 
@@ -2020,7 +1985,6 @@ impl Harness {
                 capabilities: capability_specs,
                 providers: providers.into_iter().cloned().collect(),
                 effective_names: effective_tool_names,
-                has_bootstrap: false,
                 history_provenance: contains_payload_envelope_provenance_projection,
             },
             tool_specs: specs,

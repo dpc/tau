@@ -1,5 +1,6 @@
 //! Atomic discovery snapshot regressions.
 
+mod lazy_delivery;
 mod workdir_refresh;
 
 use std::collections::HashMap;
@@ -147,7 +148,12 @@ fn context_role_policy_freezes_winners_and_independent_agents_files() {
             .expect("agent")
             .initialization_context()
             .expect("frozen context");
-        let body = context.agents_message.as_deref().expect("bootstrap");
+        let body = context
+            .discovery_items
+            .iter()
+            .map(|item| item.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(body.contains("common instructions"));
         assert!(body.contains("recovered instructions"));
         assert_eq!(body.contains("other-only instructions"), other_visible);
@@ -770,7 +776,15 @@ fn agents_display_paths_preserve_canonical_identity_and_prompt() {
         files[0].file_path,
         resolved.canonicalize().expect("canonical")
     );
-    let prompt = crate::prompt::render_agents_context_message(files.iter());
+    let items = crate::prompt::discovery_context_items(&[], files);
+    let prompt = tau_proto::DiscoveryContextDelivery {
+        scope: items
+            .iter()
+            .map(tau_proto::DiscoveryContextItem::reference)
+            .collect(),
+        items,
+    }
+    .render();
     assert!(prompt.contains(&resolved.display().to_string()));
     assert!(!prompt.contains(&original.display().to_string()));
     assert!(prompt.contains("resolved instructions"));

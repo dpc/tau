@@ -1221,11 +1221,7 @@ impl Harness {
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
         let window = tree.active_provider_window(active_head.as_option());
         if window.replacement.is_none() && window.transcript.is_empty() {
-            let context = tau_proto::PromptContext {
-                blocks: crate::prompt::initialization_agents_context_block(tree)
-                    .into_iter()
-                    .collect(),
-            };
+            let context = tau_proto::PromptContext::default();
             let bytes = u64::try_from(serde_json::to_vec(&context).ok()?.len()).ok()?;
             return (tau_proto::ByteCount::new(bytes) <= budget)
                 .then_some(tau_proto::AgentHead::Root);

@@ -113,6 +113,7 @@ fn native_and_otlp_occurrences_preserve_persisted_fold_semantics() {
             agent_id.as_str(),
             None,
             Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                discovery_context: None,
                 agent_id: agent_id.clone(),
                 text: "inference input".to_owned(),
                 inference_activation: true,

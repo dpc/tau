@@ -124,6 +124,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             ctx_id: None,
         }),
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             inference_activation: true,
             agent_id: agent_id.clone(),
             text: "forged injected".to_owned(),

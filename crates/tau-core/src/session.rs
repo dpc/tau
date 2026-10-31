@@ -318,6 +318,9 @@ struct ProviderWindowIndex {
 /// Complete non-persisted query indexes rebuilt by agent-journal replay.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct AgentTreeIndexes {
+    /// Typed discovery receipts keyed by their canonical injected occurrence.
+    /// Replacement text cannot create these receipts.
+    discovery_by_event_seq: HashMap<PersistedAgentEventSeq, tau_proto::DiscoveryContextDelivery>,
     /// Retained worker receipts, independent of branch and provider context.
     released_peer_reviews: HashSet<tau_proto::PeerMessageReviewReference>,
     /// Publisher-scoped passive operations, retained independently of history
@@ -1936,6 +1939,43 @@ impl AgentTree {
     #[must_use]
     pub fn initialization_context(&self) -> Option<&tau_proto::AgentInitializationContextSet> {
         self.initialization_context.as_ref()
+    }
+
+    /// Discovery receipts still represented by original context occurrences.
+    /// Compaction narratives and opaque replacement windows never supply
+    /// authority.
+    #[must_use]
+    pub fn discovery_context_receipts(
+        &self,
+        head: Option<NodeId>,
+    ) -> Vec<&tau_proto::DiscoveryContextDelivery> {
+        let injected = self
+            .indexes
+            .discovery_by_event_seq
+            .iter()
+            .filter_map(|(seq, delivery)| {
+                self.indexes
+                    .context_nodes_by_event_seq
+                    .get(seq)
+                    .map(|node| (*node, delivery))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut receipts = Vec::new();
+        for (node, _) in self.active_provider_window(head).transcript {
+            if let Some(delivery) = injected.get(&node) {
+                receipts.push(*delivery);
+            }
+        }
+        receipts
+    }
+
+    /// Whether this original transcript node carries authenticated discovery.
+    #[must_use]
+    pub fn node_has_discovery_context(&self, node: NodeId) -> bool {
+        self.indexes
+            .discovery_by_event_seq
+            .keys()
+            .any(|seq| self.indexes.context_nodes_by_event_seq.get(seq) == Some(&node))
     }
 
     /// Returns latest committed durable metadata entries for this agent.
@@ -3625,17 +3665,27 @@ impl AgentTree {
                 prompt.internal_kind
                     == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
             ),
-            Event::AgentUserMessageInjected(injected) => self.record_context_entry(
-                parent,
-                Self::user_text_input_entry(
-                    injected.text.clone(),
-                    &[],
-                    None,
-                    injected.inference_activation,
-                ),
-                durable_event_seq,
-                false,
-            ),
+            Event::AgentUserMessageInjected(injected) => {
+                if let Some(delivery) = &injected.discovery_context {
+                    self.indexes
+                        .discovery_by_event_seq
+                        .insert(durable_event_seq, delivery.clone());
+                }
+                self.record_context_entry(
+                    parent,
+                    Self::user_text_input_entry(
+                        injected.discovery_context.as_ref().map_or_else(
+                            || injected.text.clone(),
+                            tau_proto::DiscoveryContextDelivery::render,
+                        ),
+                        &[],
+                        None,
+                        injected.inference_activation,
+                    ),
+                    durable_event_seq,
+                    false,
+                )
+            }
             Event::AgentPromptSteered(steered) => self.record_context_entry(
                 parent,
                 Self::user_text_input_entry(
@@ -4442,7 +4492,19 @@ impl AgentTree {
                 )))
             }
             Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
-                Some(Ok(()))
+                Some(
+                    if injected
+                        .discovery_context
+                        .as_ref()
+                        .is_some_and(|_| injected.inference_activation || !injected.text.is_empty())
+                    {
+                        Err(AgentEventValidationError::new(
+                            "invalid discovery context delivery",
+                        ))
+                    } else {
+                        Ok(())
+                    },
+                )
             }
             Event::AgentPassiveContextAppended(appended) if appended.agent_id == self.agent_id => {
                 Some(if self.passive_context_matches(appended).is_some() {

@@ -58,6 +58,7 @@ impl AllocationTrace {
 /// Produces a simple durable input with no transport or provenance allocations.
 fn allocation_input(text: String) -> Event {
     Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        discovery_context: None,
         agent_id: agent_id(),
         text,
         inference_activation: false,

@@ -2894,6 +2894,7 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
     h.publish_for_agent(
         &cid,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             agent_id: crate::parse_agent_id(&recipient_id),
             text: "selected sibling".to_owned(),
             inference_activation: false,
@@ -3577,7 +3578,7 @@ fn inbound_agent_message_events_are_ignored() {
 /// Ensures full prompt rendering uses only harness-owned discovered AGENTS.md
 /// state when AGENTS inclusion is enabled.
 #[test]
-fn rendered_prompt_with_seeded_agents_md_includes_synthetic_agents_message() {
+fn rendered_prompt_with_seeded_agents_md_includes_discovery_preview_without_inference() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     seed_render_prompt_role(&mut h);
@@ -3595,17 +3596,27 @@ fn rendered_prompt_with_seeded_agents_md_includes_synthetic_agents_message() {
     let prompt = result.prompt.expect("rendered prompt");
 
     assert_eq!(result.error, None);
-    assert!(prompt.contains("<message role=\"user\" synthetic=\"true\" source=\"AGENTS.md\">"));
+    let delivery = result.discovery_context.expect("initial discovery preview");
+    assert!(prompt.contains(&delivery.render()));
+    assert!(
+        prompt.contains("`<tau_discovery>`"),
+        "preview includes provenance guidance"
+    );
     assert_eq!(
         prompt
             .lines()
-            .filter(|line| *line == "# agents.md files")
+            .filter(|line| *line == "<tau_discovery>")
             .count(),
         1
     );
-    assert!(prompt.contains("# agents.md files\n\n<AGENTS_FILE"));
-    assert!(prompt.contains("<AGENTS_FILE path="));
     assert!(prompt.contains("seeded AGENTS instructions"));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptStarted(_)))
+            .count(),
+        0
+    );
 }
 
 /// The authoritative harness boundary must accept DAG shapes and repeated
@@ -4889,7 +4900,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
         })
         .expect("selected message checkpoint");
     assert_eq!(
-        first_checkpoint.through,
+        before_discovery_head(&h, &first_checkpoint.agent_id, first_checkpoint.through),
         tau_proto::AgentHead::Node(branch_b)
     );
     assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
@@ -5930,6 +5941,7 @@ fn initialization_payload_envelope_notice_matches_preflight_and_materialization(
     h.publish_for_agent(
         &cid,
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_items: Vec::new(),
             discovery_revision: 0,
             discovery_refreshes: Vec::new(),
             discovery_diagnostics: Vec::new(),

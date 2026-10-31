@@ -104,9 +104,17 @@ An undelivered prompt may retain its exact live checkpoint callback or full
 one-shot phase outside the publication queue while discovery is pending. A
 retained live checkpoint is not replay/disconnect uncertainty and cannot be
 superseded merely because another activating UI input arrives during that wait.
-Installation resumes that same owner, rebuilding only the current synthetic
-bootstrap and system discovery content from its captured capability surface.
+Installation resumes that same owner using its captured capability surface.
+It does not rewrite historical user context or add discovery to system templates.
 It never re-prepares accounting, changes prompt/model/compaction identity,
 duplicates `agent.prompt_started`, recreates replayed work, or resends a delivered
 request. This refines
 [SPEC-provider-prompt-materialization-authority](SPEC-provider-prompt-materialization-authority.md).
+
+After a persistent workdir mutation, the ordinary typed tool result is unchanged.
+Once the complete tool round closes and discovery installs, the harness appends
+any discovery delta as a separate passive user message after `ToolResults` in the
+existing continuation request. This starts no activation, outer turn, or additional
+provider call. A getter, call-local override, or unchanged effective scope/content
+adds no discovery message. Same-path setters can expose content edits. Readiness and
+cancellation remain source-owned; they do not grant an independent discovery wake.

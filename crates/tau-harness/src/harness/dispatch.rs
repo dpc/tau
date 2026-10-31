@@ -454,6 +454,16 @@ impl Harness {
                         agent.dispatch.pending_replay_activation || selected.had_ready_message_wake
                     });
             if has_durable_activation {
+                let before_discovery = self.selected_head_for_agent(&agent_id);
+                if self.deliver_discovery_for_activation(&agent_id) {
+                    if self.selected_head_for_agent(&agent_id) != before_discovery {
+                        continue;
+                    }
+                    // Interception or admission still owns publication. Do not
+                    // retry a rejected passive append in a tight drain loop.
+                    render_failed_agents.insert(agent_id);
+                    continue;
+                }
                 // Capture exact pre-fold authority, not a later descendant-head
                 // guess. This synchronous retry may fold queued input and claim
                 // a checkpoint with a new through node and activation cut.

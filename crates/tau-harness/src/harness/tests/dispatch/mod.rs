@@ -930,7 +930,7 @@ pub(super) fn event_log_count(h: &Harness, matches_event: impl Fn(&Event) -> boo
     count
 }
 
-fn shared_test_tool_spec(name: &str) -> ToolSpec {
+pub(super) fn shared_test_tool_spec(name: &str) -> ToolSpec {
     ToolSpec {
         provider_scope: None,
         name: ToolName::new(name),
@@ -1528,6 +1528,7 @@ enum ExpectedProviderSubmission {
 /// Assert one agent's exact inference-dispatch lifecycle and return its
 /// branch-owned checkpoint.
 fn assert_inference_dispatch_lifecycle(
+    h: &Harness,
     events: &[Event],
     agent_id: &tau_proto::AgentId,
     expected_through: tau_proto::AgentHead,
@@ -1545,7 +1546,10 @@ fn assert_inference_dispatch_lifecycle(
         .collect::<Vec<_>>();
     assert_eq!(checkpoints.len(), 1);
     let checkpoint = checkpoints[0];
-    assert_eq!(checkpoint.through, expected_through);
+    assert_eq!(
+        before_discovery_head(h, agent_id, checkpoint.through),
+        before_discovery_head(h, agent_id, expected_through),
+    );
     assert_eq!(Some(checkpoint.activation_cut), expected_cut);
     assert_eq!(checkpoint.model, "test/model".into());
     assert_eq!(checkpoint.operation, tau_proto::PromptOperation::Inference);

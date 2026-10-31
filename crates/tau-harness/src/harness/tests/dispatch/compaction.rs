@@ -51,6 +51,7 @@ fn standalone_prefix_byte_fit_matches_fully_materialized_context() {
     h.publish_for_agent(
         &cid,
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            discovery_items: Vec::new(),
             discovery_revision: 0,
             discovery_refreshes: Vec::new(),
             discovery_diagnostics: Vec::new(),
@@ -69,17 +70,13 @@ fn standalone_prefix_byte_fit_matches_fully_materialized_context() {
         .agent(&agent_id)
         .expect("tree");
     let materialized_bytes = |head| {
-        let mut context = crate::prompt::assemble_prompt_context_prefix_from(
+        let context = crate::prompt::assemble_prompt_context_prefix_from(
             tree,
             Some(head),
             tau_proto::AgentHead::Node(head),
         )
         .expect("prefix")
         .context;
-        context.blocks.insert(
-            0,
-            crate::prompt::initialization_agents_context_block(tree).expect("initialization"),
-        );
         tau_proto::ByteCount::new(
             u64::try_from(serde_json::to_vec(&context).expect("serialize").len()).expect("length"),
         )
@@ -793,7 +790,10 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
         })
         .expect("inference checkpoint");
     assert_eq!(checkpoint.activation_cut, prefix);
-    assert_eq!(checkpoint.through, results);
+    assert_eq!(
+        before_discovery_head(&h, &checkpoint.agent_id, checkpoint.through),
+        results
+    );
 
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("start reactive compaction");
@@ -953,7 +953,10 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
             _ => None,
         })
         .expect("reselected activation checkpoint");
-    assert_eq!(checkpoint.through, tau_proto::AgentHead::Node(branch_a));
+    assert_eq!(
+        before_discovery_head(&h, &checkpoint.agent_id, checkpoint.through),
+        tau_proto::AgentHead::Node(branch_a)
+    );
     assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 /// A done-policy decision on a post-tool continuation remains owned by the
@@ -4098,6 +4101,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         panic!("cold reopen suffix must be an initialization replacement");
     };
     let tau_proto::AgentInitializationContextSet {
+        discovery_items: _,
         discovery_revision: previous_revision,
         discovery_refreshes: previous_refreshes,
         discovery_diagnostics: previous_diagnostics,
@@ -4109,6 +4113,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         agents_files: previous_agents_files,
     } = previous;
     let tau_proto::AgentInitializationContextSet {
+        discovery_items: _,
         discovery_revision: current_revision,
         discovery_refreshes: current_refreshes,
         discovery_diagnostics: current_diagnostics,
@@ -8026,7 +8031,10 @@ fn reactive_compaction_includes_coalesced_agent_message_wakes() {
         checkpoint.activation_cut,
         tau_proto::AgentHead::Node(captured_cut)
     );
-    assert_eq!(checkpoint.through, tau_proto::AgentHead::Node(through));
+    assert_eq!(
+        before_discovery_head(&h, &checkpoint.agent_id, checkpoint.through),
+        tau_proto::AgentHead::Node(through)
+    );
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("start reactive compaction");
     let compact = read_nth_prompt_created(&h, 1);

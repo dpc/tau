@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 16.2 adds optional discovery snapshot items, canonical passive delivery
+receipts, and full initial preview content. Ordinary provider context and typed
+tool results retain their existing shapes. Older observers may omit
+discovery-only presentation. See
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
+
 Protocol 16.1 adds an optional notification presentation hint to delivered
 messages. It changes model-facing metadata only. Readers retain full presentation
 when the hint is absent; older readers ignore it. Proto/client SDK 0.17.0 exposes

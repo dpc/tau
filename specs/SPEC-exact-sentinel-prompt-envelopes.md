@@ -33,6 +33,7 @@ model-facing payload families:
 | `user` | Generic user-role text | Fixed `source="ui"`; direct Tau user-channel input |
 | `tau_extension_output` | Generic user-role text | `publisher`, `operation_id`; passive configured-extension output |
 | `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
+| `tau_discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher` and optional `sender_trust` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Canonical background-preview attributes |
@@ -148,5 +149,5 @@ Whenever selected context contains a registered envelope, prompt assembly suppli
 the model-visible provenance rule to every system-prompt template. The notice derives
 its top-level family list from `registered_payload_envelopes`; nested
 `tau_peer_message`, `prompt`, and `response` delimiters are not listed as outer
-families. Detection accounts for the AGENTS initialization block inserted after
-transcript assembly.
+families. Discovery detection uses canonical typed delivery provenance, including
+the initial preview, rather than a replaceable AGENTS initialization prefix.

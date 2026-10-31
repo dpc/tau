@@ -683,8 +683,8 @@ fn global_harness_flags_parse_before_dev_print_prompt() {
     ));
 }
 
-/// Ensures the skill diagnostic defaults to Markdown and accepts JSON without
-/// changing the global role selection surface.
+/// Ensures the skill diagnostic defaults to an envelope and accepts JSON
+/// without changing the global role selection surface.
 #[test]
 fn dev_print_skills_parses_output_format() {
     let markdown =
@@ -693,7 +693,8 @@ fn dev_print_skills_parses_output_format() {
         markdown.command,
         Some(super::super::cli::Command::Dev {
             command: super::super::cli::DevCommand::PrintSkills {
-                format: super::super::cli::SkillOutputFormat::Markdown,
+                format: super::super::cli::SkillOutputFormat::Envelope,
+                workdir: None,
             },
         })
     ));
@@ -705,9 +706,42 @@ fn dev_print_skills_parses_output_format() {
         Some(super::super::cli::Command::Dev {
             command: super::super::cli::DevCommand::PrintSkills {
                 format: super::super::cli::SkillOutputFormat::Json,
+                workdir: None,
             },
         })
     ));
+}
+
+/// Both discovery previews canonicalize their optional directory while
+/// retaining the global role selection.
+#[test]
+fn discovery_previews_parse_workdir_and_role() {
+    let tmp = tempfile::TempDir::new().expect("directory");
+    let directory = tmp.path().to_str().expect("UTF-8 directory");
+    for command in ["print-skills", "print-agents-md"] {
+        let cli = path_super_cli::Cli::parse_from([
+            "tau",
+            "--role",
+            "engineer",
+            "dev",
+            command,
+            "--workdir",
+            directory,
+        ]);
+        assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
+        let workdir = match cli.command {
+            Some(path_super_cli::Command::Dev {
+                command:
+                    path_super_cli::DevCommand::PrintSkills { workdir, .. }
+                    | path_super_cli::DevCommand::PrintAgentsMd { workdir },
+            }) => workdir,
+            _ => panic!("expected discovery preview"),
+        };
+        assert_eq!(
+            workdir,
+            Some(tmp.path().canonicalize().expect("canonical directory"))
+        );
+    }
 }
 
 #[test]

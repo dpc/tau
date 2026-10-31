@@ -1261,6 +1261,8 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
             original.agent_id != replacement.agent_id
                 || original.inference_activation != replacement.inference_activation
                 || original.message_class != replacement.message_class
+                || original.discovery_context != replacement.discovery_context
+                || (original.discovery_context.is_some() && original.text != replacement.text)
         }
         (Event::AgentPromptSteered(original), Event::AgentPromptSteered(replacement)) => {
             original.agent_id != replacement.agent_id
@@ -3766,6 +3768,13 @@ impl Harness {
             let cid = deferred.cid.clone();
             if !self.agent_runtime.agent_registry.agents.contains_key(&cid) {
                 self.runtime_io.publication.idle_dispatches.remove(index);
+                continue;
+            }
+            let before = self.selected_head_for_agent(&cid);
+            if self.deliver_discovery_for_activation(&cid) {
+                if self.selected_head_for_agent(&cid) == before {
+                    attempted.push(deferred);
+                }
                 continue;
             }
             if !deferred.obligation.is_committed() {

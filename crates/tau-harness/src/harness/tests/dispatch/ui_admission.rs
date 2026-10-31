@@ -201,8 +201,12 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     )
     .expect("navigate to raw assistant node explicitly");
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].identity.head,
-        Some(assistant_node)
+        before_discovery_head(
+            &h,
+            &agent_id,
+            h.selected_head_for_agent(&cid).expect("head")
+        ),
+        tau_proto::AgentHead::Node(assistant_node)
     );
 }
 
@@ -675,6 +679,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     h.publish_for_agent(
         &cid,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            discovery_context: None,
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "synthetic injected input should not be listed".to_owned(),
@@ -729,8 +734,12 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     .expect("navigate before second prompt");
     drive_harness_until_history_complete(&mut h);
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].identity.head,
-        Some(assistant_node)
+        before_discovery_head(
+            &h,
+            &agent_id,
+            h.selected_head_for_agent(&cid).expect("head")
+        ),
+        tau_proto::AgentHead::Node(assistant_node)
     );
 
     append_user_message_via_event(&mut h, "s1", "replacement second prompt");
@@ -738,7 +747,16 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
         .nodes()
         .last()
         .expect("branched prompt");
-    assert_eq!(branched.parent_id, Some(assistant_node));
+    assert_eq!(
+        before_discovery_head(
+            &h,
+            &agent_id,
+            branched
+                .parent_id
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+        ),
+        tau_proto::AgentHead::Node(assistant_node),
+    );
 }
 
 /// Admission rejects malformed request and prompt correlations before creating
@@ -2662,8 +2680,12 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
         .expect("navigate tree");
 
         assert_eq!(
-            h.agent_runtime.agent_registry.agents[&cid].identity.head,
-            Some(first_user_head)
+            before_discovery_head(
+                &h,
+                &agent_id,
+                h.selected_head_for_agent(&cid).expect("head")
+            ),
+            tau_proto::AgentHead::Node(first_user_head)
         );
         assert!(loaded_agent_events(&h, "s1").into_iter().any(|event| {
             matches!(
