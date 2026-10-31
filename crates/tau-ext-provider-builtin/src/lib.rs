@@ -9570,8 +9570,7 @@ impl RateLimitedResponseUpdateEmitter {
                                 } else {
                                     "ok".to_owned()
                                 },
-                                info_chips: action.into_iter().map(str::to_owned).collect(),
-                                ..Default::default()
+                                ..action.cloned().unwrap_or_default()
                             },
                             phase: if active {
                                 tau_proto::ProviderNativeToolPhase::Started

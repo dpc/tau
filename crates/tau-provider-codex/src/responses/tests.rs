@@ -3552,15 +3552,45 @@ fn hosted_web_search_activity_is_transient_and_completion_stays_opaque() {
     assert_eq!(item.raw_json(), raw);
 }
 
-/// Recognized hosted actions are bounded labels; unknown action names and
-/// potentially sensitive action arguments must not reach transient activity.
+/// Hosted activity exposes only recognized action targets in live and completed
+/// updates, while preserving the exact opaque completion for provider replay.
 #[test]
-fn hosted_web_search_actions_project_only_known_labels() {
+fn hosted_web_search_actions_project_known_targets() {
     for (action, label) in [
-        ("search", Some("search")),
-        ("open_page", Some("open page")),
-        ("find_in_page", Some("find in page")),
-        ("future_action", None),
+        (
+            serde_json::json!({"type": "search", "query": "Rust releases"}),
+            Some(("search", "Rust releases")),
+        ),
+        (
+            serde_json::json!({"type": "search", "queries": ["", "Rust news", "other"]}),
+            Some(("search", "Rust news")),
+        ),
+        (
+            serde_json::json!({"type": "open_page", "url": "https://example.com/page"}),
+            Some(("open page", "https://example.com/page")),
+        ),
+        (
+            serde_json::json!({"type": "find_in_page", "url": "https://example.com/page", "pattern": "not projected"}),
+            Some(("find in page", "https://example.com/page")),
+        ),
+        (serde_json::json!({"type": "search"}), Some(("search", ""))),
+        (
+            serde_json::json!({"type": "search", "query": 42}),
+            Some(("search", "")),
+        ),
+        (
+            serde_json::json!({"type": "open_page", "url": "  "}),
+            Some(("open page", "")),
+        ),
+        (
+            serde_json::json!({"type": "find_in_page", "url": null}),
+            Some(("find in page", "")),
+        ),
+        (
+            serde_json::json!({"type": "future_action", "query": "not projected"}),
+            None,
+        ),
+        (serde_json::Value::Null, None),
     ] {
         let mut state = StreamState::new();
         for (kind, event_type) in [
@@ -3571,7 +3601,7 @@ fn hosted_web_search_actions_project_only_known_labels() {
                 "type": "web_search_call",
                 "id": "ws_1",
                 "status": kind,
-                "action": {"type": action, "url": "https://private.example", "query": "secret"}
+                "action": action
             });
             let raw = serde_json::to_string(&item).expect("encode opaque test item");
             apply_parsed_json_event(
@@ -3582,8 +3612,44 @@ fn hosted_web_search_actions_project_only_known_labels() {
             )
             .expect("hosted web event");
             let (_, _, _, observed) = state.web_search_lifecycle().expect("lifecycle");
-            assert_eq!(observed, label);
+            assert_eq!(
+                observed.map(|display| (display.info_chips[0].as_str(), display.args.as_str())),
+                label
+            );
+            if kind == "completed" {
+                let ContextItem::UnknownProviderItem(item) = &state.output_items_snapshot()[0]
+                else {
+                    panic!("opaque hosted completion")
+                };
+                assert_eq!(item.raw_json(), raw);
+            }
         }
+    }
+}
+
+/// Targets cannot inject terminal/layout controls or grow unbounded, and
+/// shortening must not split a visible escape or a multibyte character.
+#[test]
+fn hosted_web_search_targets_are_escaped_and_bounded() {
+    for (query, expected) in [
+        (
+            "line\n\u{1b}[2J\u{202e}".to_owned(),
+            "line\\u{000A}\\u{001B}[2J\\u{202E}".to_owned(),
+        ),
+        (
+            format!("{}\nmore", "x".repeat(155)),
+            format!("{}…", "x".repeat(155)),
+        ),
+        (
+            format!("{}🦀🦀", "x".repeat(154)),
+            format!("{}…", "x".repeat(154)),
+        ),
+    ] {
+        let action = serde_json::json!({"type": "search", "query": query});
+        let display = super::web_activity::display_action(&action).expect("search label");
+        assert_eq!(display.args, expected);
+        assert!(display.args.len() <= 160);
+        assert!(!display.args.chars().any(tau_proto::requires_visible_escape));
     }
 }
 

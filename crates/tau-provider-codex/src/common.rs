@@ -559,7 +559,7 @@ pub struct StreamState {
     /// transient display state and never enters replay payload accounting.
     active_web_searches: std::collections::BTreeMap<usize, String>,
     /// Latest hosted web-search lifecycle transition and its revision.
-    web_search_lifecycle: Option<(u64, String, bool, Option<&'static str>)>,
+    web_search_lifecycle: Option<(u64, String, bool, Option<tau_proto::ToolUseState>)>,
     /// Monotonic revision for hosted web-search lifecycle transitions.
     web_search_lifecycle_revision: u64,
     /// Cumulative UTF-8 bytes across all assistant message slots.
@@ -1359,7 +1359,7 @@ impl StreamState {
         output_index: usize,
         call_id: String,
         active: bool,
-        action: Option<&'static str>,
+        action: Option<tau_proto::ToolUseState>,
     ) {
         if active {
             self.active_web_searches
@@ -1380,11 +1380,13 @@ impl StreamState {
 
     /// Returns the latest hosted web-search lifecycle transition.
     #[must_use]
-    pub fn web_search_lifecycle(&self) -> Option<(u64, &str, bool, Option<&'static str>)> {
+    pub fn web_search_lifecycle(
+        &self,
+    ) -> Option<(u64, &str, bool, Option<&tau_proto::ToolUseState>)> {
         self.web_search_lifecycle
             .as_ref()
             .map(|(revision, call_id, active, action)| {
-                (*revision, call_id.as_str(), *active, *action)
+                (*revision, call_id.as_str(), *active, action.as_ref())
             })
     }
 

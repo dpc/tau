@@ -1559,9 +1559,14 @@ Standard Responses routes default to cached hosted `web_search`; Lite and exact
 routes without that capability select `websearch_hybrid_search`.
 `websearch_hybrid_fetch` remains external.
 Hosted `web_search` may search, open a page, or find text within an open page.
-Its transient native activity shows the recognized action when supplied by the
-provider; an unspecified action stays generic. This does not make it an
-arbitrary-URL extraction tool. `web_fetch` uses a separate external extractor
+Its transient native activity row shows the recognized action and available
+search query or page URL supplied by the provider, using the first nonempty
+query from a query list. The provider visibly escapes and shortens targets for
+compact display. Missing targets leave just the action label; unknown or missing
+actions stay generic.
+Completed rows remain visible only in the current UI session, not after a cold
+restart. This does not make hosted `web_search` an arbitrary-URL extraction tool.
+`web_fetch` uses a separate external extractor
 pool and is useful when native page access is unavailable, stale, or incomplete,
 not a required second fetch after every search result. Neither path guarantees
 complete page extraction.

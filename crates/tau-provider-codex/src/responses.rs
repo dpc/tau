@@ -8,6 +8,7 @@ mod codex_response_wake_generation;
 mod compact_failure_capture;
 mod compact_stream;
 mod response_capture;
+mod web_activity;
 
 use std::time::{Duration, Instant, SystemTime};
 use std::{
@@ -2228,14 +2229,9 @@ fn apply_output_item_unknown(
     }
     state.unknown.observe("codex.output_item", Some(item_type));
     let hosted_web_search = item_type == "web_search_call";
-    // Only project known action names. The raw item stays in opaque provider
-    // replay; never expose a query, URL, pattern, or arbitrary provider string.
-    let web_action = match item["action"]["type"].as_str() {
-        Some("search") => Some("search"),
-        Some("open_page") => Some("open page"),
-        Some("find_in_page") => Some("find in page"),
-        _ => None,
-    };
+    let web_action = hosted_web_search
+        .then(|| web_activity::display_action(&item["action"]))
+        .flatten();
     let hosted_web_search_call_id = hosted_web_search.then(|| {
         item["id"]
             .as_str()

@@ -5709,67 +5709,98 @@ fn status_clear_response_removes_live_thinking_block() {
     assert!(!vt.screen_contains(80, "failed attempt thinking"));
 }
 
-/// Typed provider-native lifecycle must produce a generic live row and retain
-/// its completed row with a visibly distinct native qualifier.
+/// Native lifecycle rows retain targets and status in live and completed UI,
+/// including long targets shortened by the generic adaptive header.
 #[test]
 fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
-    let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    let update = |phase, status, status_text: &str| {
-        Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: test_agent_prompt_id("sp-native"),
-            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-            deltas: Vec::new(),
-            compaction: None,
-            status: Some(tau_proto::ProviderResponseStatusUpdate {
-                text: status_text.to_owned(),
-                clear_response: false,
-                retry: None,
-                native_tool: Some(tau_proto::ProviderNativeToolStatusUpdate {
-                    call_id: "ws_1".to_owned(),
-                    tool_name: tau_proto::ToolName::new("web_search"),
-                    display: tau_proto::ToolUseState {
-                        status,
-                        status_text: if phase == tau_proto::ProviderNativeToolPhase::Started {
-                            String::new()
-                        } else {
-                            "ok".to_owned()
+    for (width, target) in [
+        (100, "https://example.com/page".to_owned()),
+        (
+            64,
+            format!("https://example.com/{}", "long-path/".repeat(20)),
+        ),
+    ] {
+        let (_term, handle, vt) = setup(width, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        let update = |phase, status, status_text: &str| {
+            Event::ProviderResponseUpdated(ProviderResponseUpdated {
+                agent_prompt_id: test_agent_prompt_id("sp-native"),
+                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                deltas: Vec::new(),
+                compaction: None,
+                status: Some(tau_proto::ProviderResponseStatusUpdate {
+                    text: status_text.to_owned(),
+                    clear_response: false,
+                    retry: None,
+                    native_tool: Some(tau_proto::ProviderNativeToolStatusUpdate {
+                        call_id: "ws_1".to_owned(),
+                        tool_name: tau_proto::ToolName::new("web_search"),
+                        display: tau_proto::ToolUseState {
+                            status,
+                            status_text: if phase == tau_proto::ProviderNativeToolPhase::Started {
+                                String::new()
+                            } else {
+                                "ok".to_owned()
+                            },
+                            args: target.clone(),
+                            info_chips: vec!["open page".to_owned()],
+                            ..Default::default()
                         },
-                        ..Default::default()
-                    },
-                    phase,
+                        phase,
+                    }),
                 }),
-            }),
-            response_stats: None,
-            originator: tau_proto::PromptOriginator::User,
-        })
-    };
+                response_stats: None,
+                originator: tau_proto::PromptOriginator::User,
+            })
+        };
 
-    renderer.handle(&update(
-        tau_proto::ProviderNativeToolPhase::Started,
-        tau_proto::ToolUseStatus::InProgress,
-        "Searching web…",
-    ));
-    sync(&handle);
-    assert!(vt.screen_contains(100, "web_search (native)"));
+        renderer.handle(&update(
+            tau_proto::ProviderNativeToolPhase::Started,
+            tau_proto::ToolUseStatus::InProgress,
+            "Searching web…",
+        ));
+        sync(&handle);
+        assert!(
+            vt.screen_contains(width, "web_search"),
+            "{:?}",
+            vt.screen_text(width)
+        );
+        assert!(
+            vt.screen_contains(width, "https:"),
+            "{:?}",
+            vt.screen_text(width)
+        );
+        assert!(
+            vt.screen_contains(width, "open page"),
+            "{:?}",
+            vt.screen_text(width)
+        );
 
-    renderer.handle(&update(
-        tau_proto::ProviderNativeToolPhase::Completed,
-        tau_proto::ToolUseStatus::Success,
-        "Web search complete…",
-    ));
-    sync(&handle);
-    let screen = vt.screen_text(100);
-    assert!(
-        screen
-            .iter()
-            .any(|line| line.contains("web_search (native) ok")),
-        "{screen:?}"
-    );
+        renderer.handle(&update(
+            tau_proto::ProviderNativeToolPhase::Completed,
+            tau_proto::ToolUseStatus::Success,
+            "Web search complete…",
+        ));
+        sync(&handle);
+        let screen = vt.screen_text(width);
+        assert!(
+            screen
+                .iter()
+                .any(|line| line.contains("web_search") && line.contains("open page ok")),
+            "{screen:?}"
+        );
+        if width == 100 {
+            assert!(vt.screen_contains(width, "web_search (native)"));
+            assert!(vt.screen_contains(width, &target));
+        } else {
+            assert!(!vt.screen_contains(width, &target));
+            assert!(vt.screen_contains(width, "https:"));
+        }
+    }
 }
 
 /// The native qualifier uses the generic informational style rather than the
