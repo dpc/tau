@@ -128,7 +128,7 @@ results are partial and the command exits nonzero. This is a cooperative
 declaration preview, not the effective `print-tools`/`print-prompt` path or proof
 that a model can be invoked.
 
-ChatGPT/Codex Standard Responses routes advertise provider-hosted web search.
+Audited ChatGPT/Codex Standard Responses routes advertise provider-hosted web search.
 The harness selects it through each role's `agents.web_tools` policy and uses
 cached search by default. Lite never advertises hosted search. Hosted calls stay
 inside provider inference and never become Tau tool requests; an ambiguous
@@ -364,6 +364,20 @@ inference is WebSocket-only with no HTTP/SSE fallback. HTTPS is retained only fo
 OAuth and quota acquisition; native standalone compaction uses the ordinary
 Responses WebSocket route. It is not a public
 API-key OpenAI Responses provider.
+
+Select the provisional private catalog entry `gpt-6.2-astra` with
+`:model chatgpt/gpt-6.2-astra` (or the configured account namespace).
+It does not change selected defaults. The November 1, 2026 official Codex audit
+at `4b4a5cf25aa5b064c866218b405c848745fd280f` and stable `rust-v0.166.0`
+found no exact-model metadata or special handling. Tau keeps ordinary Standard
+client tools and local-summary compaction, with a conservative local fallback
+budget of 272,000 tokens (258,400 effective input), not verified capacity.
+Tau makes no native effort, summary, verbosity, phase, hosted search, image,
+native/inline compaction, output-cap, or model-specific pricing claims.
+The audit did not verify live rollout/account access; do not equate this entry
+with older `gpt-6-astra`, claim a successful live test, or change account/session
+defaults.
+See `docs/providers.md` for the audit and selection caveats.
 
 `responses` uses a generic API-key `/responses` adapter with explicit SSE or
 WebSocket transport. The setup wizard preselects WebSocket only for the exact

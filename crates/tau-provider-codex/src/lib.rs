@@ -54,6 +54,7 @@ const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-6-astra",
+    "gpt-6.2-astra",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -1865,8 +1866,8 @@ pub fn resolved_config_for_provider_model(
             model_id: model_id.to_owned(),
             raw_context_window: raw_context_window_for_model(model_id),
             account_id: credentials.account_id,
-            supports_reasoning_effort: true,
-            supports_reasoning_summary: true,
+            supports_reasoning_effort: !is_provisional_model(model_id),
+            supports_reasoning_summary: !is_provisional_model(model_id),
             supports_verbosity: model_id.starts_with("gpt-5"),
             supports_phase: is_known_phase_capable_model_id(model_id),
             supports_encrypted_reasoning: true,
@@ -1883,7 +1884,7 @@ fn model_info(
 ) -> ProviderModelInfo {
     let prices = estimated_api_prices(model);
     let publishes_explicit_cache_prices = is_gpt_6(model);
-    ProviderModelInfo {
+    let mut info = ProviderModelInfo {
         id: ModelId::new(provider.clone(), ModelName::new(model)),
         display_name: None,
         tags: vec![
@@ -1951,7 +1952,18 @@ fn model_info(
             .flatten(),
         est_output_cost_1m_usd: Some(prices.output),
         est_cache_storage_cost_1m_token_hour_usd: None,
+    };
+    // This rollout slug is absent from the audited November 1, 2026 Codex
+    // catalog. Keep the ordinary client-tool fallback usable without inheriting
+    // old Astra's optional capabilities or presenting guessed prices as facts.
+    if is_provisional_model(model) {
+        info.hosted_tool_capabilities.clear();
+        info.verbosities.clear();
+        info.thinking_summaries.clear();
+        info.est_uncached_input_cost_1m_usd = None;
+        info.est_output_cost_1m_usd = None;
     }
+    info
 }
 
 /// Return the conservative documented cache contract for the private
@@ -2108,10 +2120,19 @@ fn supports_native_standalone_compaction(model: &str) -> bool {
 }
 
 fn supports_inline_compaction(model: &str) -> bool {
-    !is_gpt_5_6(model) && !is_gpt_6(model)
+    !is_gpt_5_6(model) && !is_gpt_6(model) && !is_provisional_model(model)
+}
+
+/// Exact rollout entry awaiting authoritative model-specific capability
+/// metadata.
+fn is_provisional_model(model: &str) -> bool {
+    model == "gpt-6.2-astra"
 }
 
 fn efforts_for_model(model: &str) -> Vec<NativeReasoningEffort> {
+    if is_provisional_model(model) {
+        return Vec::new();
+    }
     if matches!(model, "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.1-terra") {
         return vec![
             NativeReasoningEffort::Low,

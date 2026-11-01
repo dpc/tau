@@ -1017,6 +1017,56 @@
         }
       },
       "context_window": 272000,
+      "efforts": {
+        "control": {
+          "kind": "unsupported"
+        }
+      },
+      "id": "chatgpt/gpt-6.2-astra",
+      "input_modalities": [
+        "text"
+      ],
+      "max_input_tokens": 258400,
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": false,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": true,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [],
+      "tool_result_modalities": [
+        "text"
+      ],
+      "verbosities": []
+    },
+    {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
+      "context_window": 272000,
       "default_affinity": 400,
       "efforts": {
         "control": {

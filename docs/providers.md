@@ -1445,6 +1445,38 @@ long-context, retention, service-tier, and regional adjustments.
 Sources: [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6.1-terra)
 and [audited Codex catalog](https://github.com/openai/codex/blob/19d730175f68d56aba23eae6c765b4e133299069/codex-rs/models-manager/models.json).
 
+### GPT-6.2 Astra (provisional rollout entry)
+
+Use `:model chatgpt/gpt-6.2-astra` in Tau, substituting your ChatGPT provider
+namespace if needed. Tau keeps the `gpt-6-sol` default and existing role
+selections unchanged. Adding this catalog entry does not activate the model in running
+sessions or establish account entitlement.
+
+The November 1, 2026 audit found no exact `gpt-6.2-astra` entry or special
+handling in official Codex main
+[`4b4a5cf25aa5b064c866218b405c848745fd280f`](https://github.com/openai/codex/tree/4b4a5cf25aa5b064c866218b405c848745fd280f)
+(committed at 16:44:41 UTC), or the stable release current at the time,
+[`rust-v0.166.0`](https://github.com/openai/codex/releases/tag/rust-v0.166.0)
+(October 29, 2026). The rollout report is not model-capability metadata.
+Tau uses the audited upstream unknown-slug fallback rather than metadata from
+the older `gpt-6-astra` entry.
+
+For this provisional selection, Tau uses Standard Responses WebSocket inference,
+ordinary Function/Custom client tools, parallel calls, and Tau's local-summary
+standalone compaction. Its **272,000-token local fallback budget** (258,400
+effective input tokens) is not a verified model context window. Tau leaves
+the output cap unknown and does not advertise native effort choices, reasoning
+summary controls, verbosity, phase support, native/inline compaction, hosted
+search, image input, or image tool results for this entry. It omits model-specific
+prices; any UI cost estimate uses Tau's generic fallback, not verified Astra 6.2
+pricing. Lite compatibility settings do not switch this entry to Lite/code mode.
+
+The audit did not verify live inference or rollout/account availability. A request
+for current model metadata using an existing local Codex credential returned
+HTTP 401; that does not establish whether the model is supported. This addition
+introduces no credential, client-version spoofing, automatic account change, or
+public API preset.
+
 ### GPT-6.1 Sol
 
 Select `chatgpt/gpt-6.1-sol` (or your ChatGPT namespace) for Tau's existing
@@ -1466,14 +1498,15 @@ not-yet-ready invocations stay inline. Text-only routes omit
 historical images without fetching them. See [artifact backup and compatibility
 requirements](artifacts.md#prepared-image-history-and-backups).
 
-All currently published ChatGPT/Codex models support `read_image` through native
+Audited ChatGPT/Codex models support `read_image` through native
 image tool-result blocks, including Sol 6.1 and account aliases such as
 `chatgpt-fedi/gpt-6-luna`. Tau's source audit checks upstream model modalities
 and Codex's native image function-output encoding, not just public API vision
 support; see
 [the exact supported models and evidence](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md#typed-image-tool-output).
-Unknown/experimental IDs remain text-only. This does not assert live account
-entitlement, change other provider adapters, or add a user-image message carrier.
+Unknown/experimental IDs and provisional `gpt-6.2-astra` remain text-only.
+This does not assert live account entitlement, change other provider adapters, or
+add a user-image message carrier.
 
 For the public API, create a `responses` profile pointing at
 `https://api.openai.com/v1` and use the tested

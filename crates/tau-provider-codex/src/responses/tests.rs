@@ -306,6 +306,7 @@ fn shell_command_wire_definition_uses_only_call_local_workdir() {
 /// Ensures every source-audited model lowers native image function output with
 /// tool-call causality intact. Only the effective Lite mode omits high detail;
 /// account aliases such as the Zulip bot's route must retain the same contract.
+/// The provisional rollout entry must instead omit image bytes.
 #[test]
 fn audited_models_lower_typed_image_inside_function_output() {
     let items = [ContextItem::ToolResult(ToolResultItem {
@@ -359,6 +360,12 @@ fn audited_models_lower_typed_image_inside_function_output() {
                     .find(|item| item["type"] == "function_call_output")
                     .expect("function output");
                 assert_eq!(output["call_id"], "call-image");
+                if model == "gpt-6.2-astra" {
+                    let output = output["output"].as_str().expect("text-only output");
+                    assert!(output.contains("image omitted"));
+                    assert!(!output.contains("iVBORw0KGgpEQVRB"));
+                    continue;
+                }
                 assert_eq!(output["output"][0]["type"], "input_text");
                 assert_eq!(output["output"][1]["type"], "input_image");
                 assert_eq!(
@@ -715,13 +722,44 @@ fn build_request_includes_prompt_cache_key_when_supported() {
 /// the exact subscription model slug without changing the existing default.
 #[test]
 fn build_request_lowers_new_model_ids_verbatim() {
-    for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"] {
+    for model in [
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6.2-astra",
+    ] {
         let config =
             crate::config_for_model(&tau_proto::ModelName::new(model), "token".to_owned(), None);
         let body = serde_json::to_value(build_request(&config, &basic_prompt_payload(), None))
             .expect("serialize Astra request");
 
         assert_eq!(body["model"], model);
+    }
+}
+
+/// Provisional rollout models must preserve ordinary client-tool requests
+/// without sending optional controls inferred from an older model with a
+/// similar name.
+#[test]
+fn provisional_astra_omits_unverified_wire_controls() {
+    for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+        let config = crate::config_for_model_mode(
+            &tau_proto::ModelName::new("gpt-6.2-astra"),
+            "token".to_owned(),
+            None,
+            mode,
+        );
+        let mut request = basic_prompt_payload();
+        request.compaction = Some(tau_proto::PromptCompactionContext {
+            compact_threshold: Some(tau_proto::TokenCount::new(100_000)),
+        });
+        let body = serde_json::to_value(build_request(&config, &request, None)).expect("request");
+        assert_eq!(body["model"], "gpt-6.2-astra");
+        assert_eq!(config.mode, ResponsesMode::Standard);
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("text").is_none());
+        assert!(body.get("context_management").is_none());
     }
 }
 

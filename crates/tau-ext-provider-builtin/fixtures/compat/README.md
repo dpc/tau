@@ -57,6 +57,14 @@ The approved configured-compaction change 4hk9 publishes standalone support for
 every Codex model, with native capability selecting native versus local-summary
 lowering. The routing snapshot changes only those four formerly native-absent
 model capability bits; it does not invent provider-default thresholds.
+The November 1, 2026 user-requested `gpt-6.2-astra` addition publishes one
+provisional exact-ID entry. Official Codex main
+`4b4a5cf25aa5b064c866218b405c848745fd280f` and stable `rust-v0.166.0`
+contain no model-specific metadata for it. For the new row, Tau keeps the
+conservative local 272,000-token fallback, ordinary client tools, and local-summary
+compaction. Tau makes no native effort, image, hosted search, native/inline
+compaction, output-cap, or price claims. Existing rows and default priority remain
+unchanged.
 
 Each `*.events.cbor` file is a length-prefixed, pre-`recorded_at`,
 pre-`observation_id` `PersistedAgentEvent` journal. Its matching JSON file is the

@@ -3112,6 +3112,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             "chatgpt/gpt-5.6-terra",
             "chatgpt/gpt-5.6-luna",
             "chatgpt/gpt-6-astra",
+            "chatgpt/gpt-6.2-astra",
             "chatgpt/gpt-5.5",
             "chatgpt/gpt-5.4",
             "chatgpt/gpt-5.4-mini",
@@ -3125,6 +3126,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
                 model.id.model.as_str().starts_with("gpt-5.6-")
                     || model.id.model.as_str().starts_with("gpt-6-")
                     || model.id.model.as_str().starts_with("gpt-6.1-")
+                    || model.id.model.as_str() == "gpt-6.2-astra"
             })
             .all(|model| !model.supports_compaction)
     );
@@ -3135,6 +3137,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
                 model.id.model.as_str().starts_with("gpt-5.6-")
                     || model.id.model.as_str().starts_with("gpt-6-")
                     || model.id.model.as_str().starts_with("gpt-6.1-")
+                    || model.id.model.as_str() == "gpt-6.2-astra"
             })
             .all(|model| model.supports_standalone_compaction)
     );
@@ -3145,6 +3148,7 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
                     && !model.id.model.as_str().starts_with("gpt-6-")
                     && !model.id.model.as_str().starts_with("gpt-6.1-")
+                    && model.id.model.as_str() != "gpt-6.2-astra"
             })
             .all(|model| model.supports_compaction)
     );

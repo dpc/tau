@@ -76,7 +76,7 @@ image bytes, or base64 enters diagnostic output; callers own artifact storage
 and ordinary tool lifecycle. Both Standard and Lite profiles may opt in, without
 claiming account entitlement or probing it.
 
-All currently published ChatGPT/Codex models explicitly publish image input and
+The audited ChatGPT/Codex models explicitly publish image input and
 image tool-result support: GPT-6 Sol, Sol 6.1, Terra 6.1, Luna, and Astra; GPT-5.6 Sol,
 Terra, and Luna; GPT-5.5, GPT-5.4, GPT-5.4 Mini, and GPT-5.3 Codex.
 One exact-model predicate controls both publication and wire lowering; catalog
@@ -100,6 +100,8 @@ checks model image-input metadata and emits native `function_call_output` image
 content, with no GPT-5.6-only wire restriction. This is source/metadata evidence,
 not a live account-entitlement or visual-fidelity test. Unknown/experimental
 model IDs remain text-only; Lite, phase, and compaction support remain separate.
+Tau keeps the provisional `gpt-6.2-astra` catalog entry text-only pending
+exact-model metadata; older Astra metadata does not authorize image disclosure.
 
 The Terra 6.1 audit uses the same modality and native function-output evidence from
 [Codex revision 19d730175](https://github.com/openai/codex/tree/19d730175f68d56aba23eae6c765b4e133299069)

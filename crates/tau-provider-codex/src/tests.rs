@@ -1662,6 +1662,8 @@ fn codex_local_summary_preserves_ordinary_prefix_and_usage() {
         ("gpt-5.3-codex", CodexMode::Standard),
         ("gpt-5.3-codex", CodexMode::LiteCompatibility),
         ("gpt-6.1-sol", CodexMode::Standard),
+        ("gpt-6.2-astra", CodexMode::Standard),
+        ("gpt-6.2-astra", CodexMode::LiteCompatibility),
     ] {
         let server = spawn_loopback_server(LoopbackResponseMode::LocalSummarySuccess);
         let mut config = resolved_config_for_model(
@@ -2944,6 +2946,67 @@ fn gpt_6_1_models_publish_conservative_private_capabilities() {
     }
 }
 
+/// The rollout entry must remain selectable under aliases without inheriting
+/// old Astra's unverified capabilities, prices, or default-selection priority.
+#[test]
+fn provisional_astra_catalog_uses_conservative_fallback() {
+    for provider in ["chatgpt", "work-chatgpt"] {
+        for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+            let models = models_for_provider_mode(&ProviderName::new(provider), mode);
+            let model = models
+                .iter()
+                .find(|model| model.id.model.as_str() == "gpt-6.2-astra")
+                .expect("provisional Astra");
+            assert_eq!(model.default_affinity, 0);
+            assert_eq!(
+                models
+                    .iter()
+                    .max_by_key(|model| model.default_affinity)
+                    .expect("default model")
+                    .id
+                    .model
+                    .as_str(),
+                "gpt-6-sol"
+            );
+            assert_eq!(model.context_window.get(), 272_000);
+            assert_eq!(
+                model.max_input_tokens.expect("fallback input budget").get(),
+                258_400
+            );
+            assert!(model.max_output_tokens.is_none());
+            assert_eq!(
+                model.efforts,
+                tau_proto::ReasoningEffortCapability::default()
+            );
+            assert!(model.verbosities.is_empty());
+            assert!(model.thinking_summaries.is_empty());
+            assert!(model.hosted_tool_capabilities.is_empty());
+            assert_eq!(model.input_modalities, vec![tau_proto::InputModality::Text]);
+            assert_eq!(model.tool_result_modalities, model.input_modalities);
+            assert_eq!(
+                model.supported_tool_types,
+                vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom]
+            );
+            assert!(model.supports_parallel_tool_calls);
+            assert!(!model.supports_compaction);
+            assert!(model.supports_standalone_compaction);
+            assert!(model.standalone_compaction_threshold.is_none());
+            assert!(model.est_uncached_input_cost_1m_usd.is_none());
+            assert!(model.est_cached_input_cost_1m_usd.is_none());
+            assert!(model.est_cache_write_input_cost_1m_usd.is_none());
+            assert!(model.est_output_cost_1m_usd.is_none());
+            assert!(model.est_cache_storage_cost_1m_token_hour_usd.is_none());
+            let config = config_for_model_mode(&model.id.model, "token".into(), None, mode);
+            assert_eq!(config.mode, CodexMode::Standard);
+            assert!(!config.supports_reasoning_effort);
+            assert!(!config.supports_reasoning_summary);
+            assert!(!config.supports_phase);
+            assert!(!config.supports_verbosity);
+            assert!(!config.supports_compaction);
+        }
+    }
+}
+
 /// Ensures the provider publishes the complete hardcoded ChatGPT model list
 /// with model-specific capabilities and effective context limits.
 #[test]
@@ -2967,6 +3030,7 @@ fn publishes_chatgpt_model_metadata() {
             "work-chatgpt/gpt-5.6-terra",
             "work-chatgpt/gpt-5.6-luna",
             "work-chatgpt/gpt-6-astra",
+            "work-chatgpt/gpt-6.2-astra",
             "work-chatgpt/gpt-5.5",
             "work-chatgpt/gpt-5.4",
             "work-chatgpt/gpt-5.4-mini",
@@ -3063,6 +3127,7 @@ fn publishes_chatgpt_model_metadata() {
             .filter(|model| {
                 !model.id.model.as_str().starts_with("gpt-5.6-")
                     && model.id.model.as_str() != "gpt-6-astra"
+                    && model.id.model.as_str() != "gpt-6.2-astra"
                     && !is_gpt_6_workhorse(model.id.model.as_str())
             })
             .all(|model| model.supports_compaction)
@@ -3126,14 +3191,19 @@ fn publishes_chatgpt_model_metadata() {
             })
             .all(|model| !model.efforts.contains(NativeReasoningEffort::Max))
     );
-    assert!(models.iter().all(|model| {
-        model
-            .input_modalities
-            .contains(&tau_proto::InputModality::Image)
-            && model
-                .tool_result_modalities
-                .contains(&tau_proto::InputModality::Image)
-    }));
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.model.as_str() != "gpt-6.2-astra")
+            .all(|model| {
+                model
+                    .input_modalities
+                    .contains(&tau_proto::InputModality::Image)
+                    && model
+                        .tool_result_modalities
+                        .contains(&tau_proto::InputModality::Image)
+            })
+    );
 }
 
 /// Publication must agree with the source-audited image wire contract for every
@@ -3145,6 +3215,9 @@ fn image_modalities_follow_exact_audited_routes() {
         for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
             let provider = ProviderName::new(provider);
             for model in CHATGPT_MODELS {
+                if *model == "gpt-6.2-astra" {
+                    continue;
+                }
                 let info = model_info(&provider, model, mode);
                 assert!(supports_image_tool_results(model), "{model}");
                 assert_eq!(info.id.provider, provider);
@@ -3162,6 +3235,7 @@ fn image_modalities_follow_exact_audited_routes() {
                 );
             }
             for model in [
+                "gpt-6.2-astra",
                 "gpt-6-luna-experimental",
                 "gpt-6.1-sol-experimental",
                 "gpt-5.6-experimental",
@@ -3249,6 +3323,7 @@ fn context_defaults_align_metadata_and_request_configuration() {
                 ("gpt-5.6-terra", 1_050_000, 997_500, Some(945_000)),
                 ("gpt-5.6-luna", 1_050_000, 997_500, Some(945_000)),
                 ("gpt-6-astra", 1_050_000, 997_500, Some(945_000)),
+                ("gpt-6.2-astra", 272_000, 258_400, None),
                 ("gpt-6-sol", 1_050_000, 997_500, None),
                 ("gpt-6-luna", 1_050_000, 997_500, None),
                 ("gpt-6.1-sol", 1_050_000, 997_500, None),
