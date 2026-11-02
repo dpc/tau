@@ -331,6 +331,45 @@ fn multiline_native_paste_redraws_without_followup_key() {
     }
 }
 
+/// Native payloads spanning the parser's read buffer must finish without a
+/// later key waking a stranded final response.
+#[test]
+fn long_native_paste_redraws_without_followup_key() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    let mut peer = PtyPeer::new("paste-long-redraw");
+    peer.wait_for(b"CHILD_READY");
+    peer.send(
+        b"\x1b[?5522;1$y\
+          \x1b]5522;type=read:status=OK\x1b\\\
+          \x1b]5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbg==\x1b\\\
+          \x1b]5522;type=read:status=DONE\x1b\\",
+    );
+    peer.wait_for(b";dGV4dC9wbGFpbg==\x1b\\");
+    let output = String::from_utf8_lossy(&peer.output);
+    let id = output
+        .split("type=read:id=")
+        .nth(1)
+        .expect("clipboard request")
+        .split(';')
+        .next()
+        .expect("request ID")
+        .to_owned();
+    let text = format!("{}\nnative-final-marker", "x".repeat(790));
+    let encoded = STANDARD.encode(text);
+    peer.send(
+        format!(
+            "\x1b]5522;type=read:id={id}:status=OK\x1b\\\
+         \x1b]5522;type=read:id={id}:status=DATA:mime=dGV4dC9wbGFpbg==;{encoded}\x1b\\\
+         \x1b]5522;type=read:id={id}:status=DONE\x1b\\"
+        )
+        .as_bytes(),
+    );
+    peer.wait_for(b"native-final-marker");
+    peer.send(b"\r");
+    peer.finish();
+}
+
 /// Runs only in the isolated PTY subprocess; the ordinary suite never shares
 /// its crossterm global input reader with this terminal.
 #[test]
@@ -339,6 +378,20 @@ fn clipboard_handoff_pty_child() {
         return;
     };
     let (term, handle) = Term::new("> ", TerminalOptions::default()).expect("real PTY terminal");
+    if case == "paste-long-redraw" {
+        println!("CHILD_READY");
+        io::stdout().flush().expect("publish ready marker");
+        assert!(matches!(
+            term.get_next_event().expect("paste event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(
+            handle.get_buffer(),
+            format!("{}\nnative-final-marker", "x".repeat(790))
+        );
+        term.get_next_event().expect("finish key");
+        return;
+    }
     if case == "paste-redraw" {
         println!("CHILD_READY");
         io::stdout().flush().expect("publish ready marker");

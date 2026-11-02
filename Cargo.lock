@@ -912,9 +912,9 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-crossterm"
-version = "0.28.1"
+version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "195ddd3382dbc3ca2016ea97bd4c0bc5c9c7b23d73f9ddf8361ad3c6c2cbf548"
+checksum = "0f1f88eb9b0e33c6c48dc2b108e01e72afdecbee01ed84303b52497bb4b4f9f3"
 dependencies = [
  "bitflags",
  "mio",
