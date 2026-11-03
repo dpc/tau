@@ -36,11 +36,12 @@ interval to publish typed transient provider-native started/completed status
 with the upstream call id and generic display state. Their completed upstream
 item remains an opaque replay sidecar; the native lifecycle does not become a
 Tau tool call or durable transcript fact.
-The provider may project known action types as display labels with an available
+The provider may project known action types as display labels with any available
 search query or page URL, using the first nonempty query from a query list. It
 bounds and visibly escapes targets for compact transient display. Missing
-targets leave just the action label; unknown actions and other action arguments
-remain opaque.
+targets show `query unavailable` or `URL unavailable`; the extension marks unknown
+or missing actions as `action unavailable`. The provider updates the same call's
+live row as metadata arrives. Other action arguments remain opaque.
 
 The response sampler also captures first semantic output against the backend's
 single finite-attempt dispatch instant before rate limiting. Assistant text,

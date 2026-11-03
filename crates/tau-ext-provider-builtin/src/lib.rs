@@ -9570,7 +9570,10 @@ impl RateLimitedResponseUpdateEmitter {
                                 } else {
                                     "ok".to_owned()
                                 },
-                                ..action.cloned().unwrap_or_default()
+                                ..action.cloned().unwrap_or_else(|| tau_proto::ToolUseState {
+                                    info_chips: vec!["action unavailable".to_owned()],
+                                    ..Default::default()
+                                })
                             },
                             phase: if active {
                                 tau_proto::ProviderNativeToolPhase::Started
@@ -9602,9 +9605,9 @@ impl RateLimitedResponseUpdateEmitter {
         let status = (activity_transition.is_some() || native_tool.is_some()).then(|| {
             ProviderResponseStatusUpdate {
                 text: if state.web_search_active() {
-                    "Searching web…".to_owned()
+                    "Using web…".to_owned()
                 } else {
-                    "Web search complete…".to_owned()
+                    "Web activity complete…".to_owned()
                 },
                 clear_response: false,
                 retry: None,

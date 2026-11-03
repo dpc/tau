@@ -3611,18 +3611,21 @@ fn hosted_web_search_actions_project_known_targets() {
             serde_json::json!({"type": "find_in_page", "url": "https://example.com/page", "pattern": "not projected"}),
             Some(("find in page", "https://example.com/page")),
         ),
-        (serde_json::json!({"type": "search"}), Some(("search", ""))),
+        (
+            serde_json::json!({"type": "search"}),
+            Some(("search", "query unavailable")),
+        ),
         (
             serde_json::json!({"type": "search", "query": 42}),
-            Some(("search", "")),
+            Some(("search", "query unavailable")),
         ),
         (
             serde_json::json!({"type": "open_page", "url": "  "}),
-            Some(("open page", "")),
+            Some(("open page", "URL unavailable")),
         ),
         (
             serde_json::json!({"type": "find_in_page", "url": null}),
-            Some(("find in page", "")),
+            Some(("find in page", "URL unavailable")),
         ),
         (
             serde_json::json!({"type": "future_action", "query": "not projected"}),

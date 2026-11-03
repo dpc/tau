@@ -3,7 +3,7 @@
 /// Describe a known action and its available query or page target. Unknown
 /// fields stay opaque; this label never changes provider replay or diagnostics.
 pub(super) fn display_action(action: &serde_json::Value) -> Option<tau_proto::ToolUseState> {
-    let (label, target) = match action["type"].as_str()? {
+    let (label, target, unavailable) = match action["type"].as_str()? {
         "search" => (
             "search",
             action["query"]
@@ -16,16 +16,17 @@ pub(super) fn display_action(action: &serde_json::Value) -> Option<tau_proto::To
                         .filter_map(serde_json::Value::as_str)
                         .find(|query| !query.trim().is_empty())
                 }),
+            "query unavailable",
         ),
-        "open_page" => ("open page", action["url"].as_str()),
-        "find_in_page" => ("find in page", action["url"].as_str()),
+        "open_page" => ("open page", action["url"].as_str(), "URL unavailable"),
+        "find_in_page" => ("find in page", action["url"].as_str(), "URL unavailable"),
         _ => return None,
     };
     Some(tau_proto::ToolUseState {
         args: target
             .filter(|target| !target.trim().is_empty())
             .map(bounded_target)
-            .unwrap_or_default(),
+            .unwrap_or_else(|| unavailable.to_owned()),
         info_chips: vec![label.to_owned()],
         ..Default::default()
     })

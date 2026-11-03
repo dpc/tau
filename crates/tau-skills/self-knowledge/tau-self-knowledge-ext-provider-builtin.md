@@ -136,10 +136,12 @@ transport retry may repeat billable search.
 During a hosted call, the terminal shows a transient `web_search (native)` row
 and retains its completed row for the current UI session. For recognized upstream
 actions, the row shows a short `search`, `open page`, or `find in page` chip with
-the available search query or page URL, using the first nonempty query from a
+any available search query or page URL, using the first nonempty query from a
 query list. The provider visibly escapes and shortens targets for compact
-display. Missing targets leave just the action label; unknown or missing actions
-remain generic.
+display. Missing targets show `query unavailable` or `URL unavailable`; unknown
+or missing actions show `action unavailable`. The upstream provider may withhold
+this metadata until completion or omit it. Tau updates the same row
+when metadata arrives, without inventing an operation or target.
 These rows are not Tau tool facts and do not affect tool counters. Tau cannot
 reconstruct them after a cold restart.
 Hosted search may read and navigate accessible pages without a second fetch.

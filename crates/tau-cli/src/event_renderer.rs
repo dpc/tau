@@ -26,6 +26,8 @@ const MAX_SUBMITTED_PROMPT_CORRELATIONS: usize = 64;
 
 use self::compaction_presentation::{append_compaction_progress, update_compaction_status};
 use self::completed_prompt_ids::CompletedPromptIds;
+#[cfg(test)]
+pub(crate) use self::native_tool_activity::provider_native_tool_display;
 use self::prepared_renderer_event::{DeferredRendererEvent, PreparedRendererEvent};
 pub(crate) use self::presentation_facts::PresentationFactClass;
 #[cfg(test)]
@@ -136,23 +138,6 @@ fn set_tool_terminal_descriptor_observer_for_test(
     observer: Option<ToolTerminalDescriptorObserver>,
 ) {
     TOOL_TERMINAL_DESCRIPTOR_OBSERVER.with(|slot| *slot.borrow_mut() = observer);
-}
-
-/// Renders a provider-native tool through the generic tool state while keeping
-/// the execution-boundary qualifier as a subdued informational segment.
-pub(crate) fn provider_native_tool_display(
-    update: &tau_proto::ProviderNativeToolStatusUpdate,
-) -> ToolCallDisplay {
-    let mut display = render_tool_use_state(&update.tool_name, &update.display);
-    display.leading_segments.insert(
-        0,
-        ToolLineSegment {
-            text: "(native)".to_owned(),
-            status: ToolStatus::Info,
-            no_leading_space: false,
-        },
-    );
-    display
 }
 
 /// Rolling UI↔harness socket throughput maxima for one terminal UI.
@@ -7704,89 +7689,6 @@ impl EventRenderer {
         self.update_live_response_block(spid, &text, response_update);
     }
 
-    /// Projects one transient provider-native lifecycle through the generic
-    /// tool renderer without creating Tau tool runtime state or counters.
-    fn handle_provider_native_tool(
-        &mut self,
-        prompt_id: &tau_proto::AgentPromptId,
-        update: &tau_proto::ProviderNativeToolStatusUpdate,
-    ) {
-        let key = (prompt_id.clone(), update.call_id.clone());
-        let display = provider_native_tool_display(update);
-        match update.phase {
-            tau_proto::ProviderNativeToolPhase::Started => {
-                if self.transcript.runtime.native_tool_calls.contains_key(&key) {
-                    return;
-                }
-                let live_block = self.render_live_tool_block(&display);
-                let live_id = self.resources.handle.new_block(
-                    format!(
-                        "provider-native-tool-live:{}:{}:{}",
-                        prompt_id, update.tool_name, update.call_id
-                    ),
-                    live_block,
-                );
-                self.resources
-                    .handle
-                    .push_above_active_before_any(live_id, self.non_tool_activity_anchor_ids());
-                let history_id = self.resources.handle.new_block(
-                    format!(
-                        "provider-native-tool-history:{}:{}:{}",
-                        prompt_id, update.tool_name, update.call_id
-                    ),
-                    Self::empty_block(),
-                );
-                self.resources.handle.push_history(history_id);
-                self.transcript.runtime.native_tool_calls.insert(
-                    key,
-                    ToolCallState {
-                        block_id: Some(live_id),
-                        history_block_id: Some(history_id),
-                        live_display: Some(display),
-                        started_at: Some(Instant::now()),
-                        ..ToolCallState::default()
-                    },
-                );
-                self.resources.handle.redraw();
-            }
-            tau_proto::ProviderNativeToolPhase::Completed => {
-                let prior = self.transcript.runtime.native_tool_calls.remove(&key);
-                if let Some(block_id) = prior.as_ref().and_then(|state| state.block_id) {
-                    self.resources.handle.remove_block(block_id);
-                }
-                self.record_tool_result_block(
-                    prior.and_then(|state| state.history_block_id),
-                    display,
-                    None,
-                );
-                self.resources.handle.redraw();
-            }
-        }
-    }
-
-    /// Removes unfinished transient native-tool rows owned by a terminal prompt
-    /// without synthesizing completion or durable tool history.
-    fn retire_provider_native_tools_for_prompt(&mut self, prompt_id: &tau_proto::AgentPromptId) {
-        let keys = self
-            .transcript
-            .runtime
-            .native_tool_calls
-            .keys()
-            .filter(|(owner, _)| owner == prompt_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            if let Some(state) = self.transcript.runtime.native_tool_calls.remove(&key) {
-                if let Some(block_id) = state.block_id {
-                    self.resources.handle.remove_block(block_id);
-                }
-                if let Some(block_id) = state.history_block_id {
-                    self.resources.handle.remove_block(block_id);
-                }
-            }
-        }
-    }
-
     fn is_stale_terminal_stats_only_update(
         &self,
         update: &tau_proto::ProviderResponseUpdated,
@@ -9969,6 +9871,7 @@ mod completed_prompt_ids;
 mod effort_completion;
 mod finished_response_projection;
 mod inner_turns;
+mod native_tool_activity;
 mod prepared_renderer_event;
 mod presentation_facts;
 mod prompt_projection;

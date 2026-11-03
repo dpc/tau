@@ -1592,17 +1592,23 @@ Standard Responses routes default to cached hosted `web_search`; Lite and exact
 routes without that capability select `websearch_hybrid_search`.
 `websearch_hybrid_fetch` remains external.
 Hosted `web_search` may search, open a page, or find text within an open page.
-Its transient native activity row shows the recognized action and available
-search query or page URL supplied by the provider, using the first nonempty
+Its transient native activity row shows the recognized action and any
+search query or page URL the provider supplies, using the first nonempty
 query from a query list. The provider visibly escapes and shortens targets for
-compact display. Missing targets leave just the action label; unknown or missing
-actions stay generic.
+compact display. Missing targets show `query unavailable` or `URL unavailable`;
+unknown or missing actions show `action unavailable` rather than implying a
+search. The upstream provider may withhold the action or target until completion,
+or omit it. Tau updates the same row when metadata arrives; it cannot
+show a query or URL the provider has not supplied.
 Completed rows remain visible only in the current UI session, not after a cold
 restart. This does not make hosted `web_search` an arbitrary-URL extraction tool.
 `web_fetch` uses a separate external extractor
 pool and is useful when native page access is unavailable, stale, or incomplete,
 not a required second fetch after every search result. Neither path guarantees
 complete page extraction.
+External search shows the submitted query. External fetch shows only
+the requested URL's host, keeping URL userinfo, paths, and query secrets out of
+its compact display.
 
 `access: cached` means provider index/cache access, not local, offline, private,
 or free search. `access: live` permits current external pages.

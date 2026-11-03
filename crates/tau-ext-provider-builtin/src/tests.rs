@@ -6092,8 +6092,8 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
     );
 }
 
-/// Hosted search lifecycle transitions must bypass ordinary stream cadence and
-/// retain the provider call id in typed transient native-tool status.
+/// Hosted activity must honestly mark missing metadata and enrich the same call
+/// immediately when its action arrives, bypassing ordinary stream cadence.
 #[test]
 fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
     let prompt = minimal_prompt();
@@ -6109,6 +6109,8 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
+        tau_provider_codex::test_set_web_search_active(&mut state, 0, "ws_1", true);
+        emitter.emit_at(&target, &state, &mut writer, start, false);
         tau_provider_codex::test_set_web_search_action(
             &mut state,
             0,
@@ -6145,15 +6147,29 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(updates.len(), 2);
+    assert_eq!(updates.len(), 3);
+    let pending = updates[0]
+        .status
+        .as_ref()
+        .and_then(|status| status.native_tool.as_ref())
+        .expect("native status without action metadata");
+    assert_eq!(pending.call_id, "ws_1");
+    assert_eq!(pending.phase, tau_proto::ProviderNativeToolPhase::Started);
+    assert_eq!(pending.display.info_chips, ["action unavailable"]);
+    assert!(pending.display.args.is_empty());
+    assert_eq!(pending.display.status_text, "pending");
+    assert_eq!(
+        updates[0].status.as_ref().expect("pending status").text,
+        "Using web…"
+    );
     for (update, phase, status) in [
         (
-            &updates[0],
+            &updates[1],
             tau_proto::ProviderNativeToolPhase::Started,
             tau_proto::ToolUseStatus::InProgress,
         ),
         (
-            &updates[1],
+            &updates[2],
             tau_proto::ProviderNativeToolPhase::Completed,
             tau_proto::ToolUseStatus::Success,
         ),
@@ -6170,6 +6186,10 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
         assert_eq!(native.display.info_chips, ["open page"]);
         assert_eq!(native.display.args, "https://example.com/page");
     }
+    assert_eq!(
+        updates[2].status.as_ref().expect("completed status").text,
+        "Web activity complete…"
+    );
 }
 
 /// Overlapping hosted searches must publish each per-call transition even when

@@ -5709,8 +5709,9 @@ fn status_clear_response_removes_live_thinking_block() {
     assert!(!vt.screen_contains(80, "failed attempt thinking"));
 }
 
-/// Native lifecycle rows retain targets and status in live and completed UI,
-/// including long targets shortened by the generic adaptive header.
+/// Native lifecycle rows replace unavailable metadata in place and retain
+/// targets through completion, including targets shortened by the generic
+/// adaptive header.
 #[test]
 fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
     for (width, target) in [
@@ -5726,7 +5727,7 @@ fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
             tau_cli_term::CompletionData::new(),
             cli_test_theme(),
         );
-        let update = |phase, status, status_text: &str| {
+        let update = |phase, status, status_text: &str, available| {
             Event::ProviderResponseUpdated(ProviderResponseUpdated {
                 agent_prompt_id: test_agent_prompt_id("sp-native"),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -5742,12 +5743,20 @@ fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
                         display: tau_proto::ToolUseState {
                             status,
                             status_text: if phase == tau_proto::ProviderNativeToolPhase::Started {
-                                String::new()
+                                "pending".to_owned()
                             } else {
                                 "ok".to_owned()
                             },
-                            args: target.clone(),
-                            info_chips: vec!["open page".to_owned()],
+                            args: if available {
+                                target.clone()
+                            } else {
+                                String::new()
+                            },
+                            info_chips: vec![if available {
+                                "open page".to_owned()
+                            } else {
+                                "action unavailable".to_owned()
+                            }],
                             ..Default::default()
                         },
                         phase,
@@ -5761,13 +5770,34 @@ fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
         renderer.handle(&update(
             tau_proto::ProviderNativeToolPhase::Started,
             tau_proto::ToolUseStatus::InProgress,
-            "Searching web…",
+            "Using web…",
+            false,
+        ));
+        sync(&handle);
+        assert!(vt.screen_contains(width, "action unavailable"));
+        assert!(vt.screen_contains(width, "pending"));
+        assert!(!vt.screen_contains(width, "open page"));
+
+        renderer.handle(&update(
+            tau_proto::ProviderNativeToolPhase::Started,
+            tau_proto::ToolUseStatus::InProgress,
+            "Using web…",
+            true,
         ));
         sync(&handle);
         assert!(
             vt.screen_contains(width, "web_search"),
             "{:?}",
             vt.screen_text(width)
+        );
+        assert!(!vt.screen_contains(width, "action unavailable"));
+        assert_eq!(
+            vt.screen_text(width)
+                .iter()
+                .filter(|line| line.contains("web_search"))
+                .count(),
+            1,
+            "enrichment must replace rather than duplicate the pending row"
         );
         assert!(
             vt.screen_contains(width, "https:"),
@@ -5783,7 +5813,8 @@ fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
         renderer.handle(&update(
             tau_proto::ProviderNativeToolPhase::Completed,
             tau_proto::ToolUseStatus::Success,
-            "Web search complete…",
+            "Web activity complete…",
+            true,
         ));
         sync(&handle);
         let screen = vt.screen_text(width);
