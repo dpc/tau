@@ -83,18 +83,23 @@ or external pins match them.
    details. Distinguish harmless example placeholders and declared secret
    *names* from credential values, and record any specific identifying values
    the owner has approved for public use rather than treating every path as
-    an automatic leak. The owner authorizes routine replacement of the known
-    private classes without asking again: personal names/usernames and home
-    paths, private identifying project names, and private network addresses or
-    endpoints. Replace these with clearly fictional, consistent placeholders
-    (for example `/home/example/projects/example-project`, `bot@example.org`,
-    or `https://service.example.org`), preserving the configuration semantics.
-    Never record the original private values in this skill, logs, history, or
-    shared artifacts. Omit credential/token/secret values entirely; declared
-    secret names may remain. This authorization does not cover genuinely
-    ambiguous or unexpected sensitive content: if its safety is uncertain,
-    **stop the release immediately** and ask the owner to clean the source or
-    explicitly approve a specific safe resolution before importing it.
+   an automatic leak. The owner authorizes routine replacement or omission of
+   known classes of private data without asking again: personal names, usernames,
+   home paths, identifying private project names, network addresses and endpoints,
+   account identifiers (including numeric IDs), broker identities, access-context
+   identifiers, and credential-generation metadata. Sanitize values regardless
+   of YAML type; numeric values are not public by default. Omit sensitive parts or
+   optional experimental examples, including dependent roles and tools, when
+   that is clearer than placeholders. Do not escalate these ordinary cases.
+   Otherwise use consistent, fictional placeholders
+   (for example `/home/example/projects/example-project`, `bot@example.org`,
+   or `https://service.example.org`), preserving the configuration semantics.
+   Never record the original private values in this skill, logs, history, or
+   shared artifacts. Omit credential, token, and secret values; declared
+   secret names may remain. This authorization does not cover ambiguous or
+   unexpected sensitive content: if its safety is uncertain,
+   **stop the release immediately** and ask the owner to clean the source or
+   explicitly approve a specific safe resolution before importing it.
    Never edit the owner's live config as part of this step. Obtain independent
    privacy review of the complete
    proposed example before any source-history snapshot or publication. Do not

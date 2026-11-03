@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.17.0",
+        "dpc-tau-proto": "=0.18.0",
     },
 }
 
@@ -162,8 +162,43 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 1));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 2));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// Registry consumers can preserve typed passive discovery receipts and previews.
+#[test]
+fn packaged_sdk_preserves_discovery_context() {
+    use tau_proto::*;
+    let item = DiscoveryContextItem {
+        identity: "skill:example".into(),
+        version: "example-version".into(),
+        content: "Example skill advertisement".into(),
+    };
+    let delivery = DiscoveryContextDelivery {
+        scope: vec![item.reference()],
+        items: vec![item],
+    };
+    let event = Event::AgentUserMessageInjected(AgentUserMessageInjected {
+        agent_id: "worker".parse().expect("agent"),
+        discovery_context: Some(delivery.clone()),
+        inference_activation: false,
+        text: String::new(),
+        message_class: PromptMessageClass::default(),
+    });
+    let bytes = encode_message_to_vec(&event).expect("encode discovery receipt");
+    let decoded: Event = decode_message_from_slice(&bytes).expect("decode discovery receipt");
+    assert_eq!(decoded, event);
+    let preview = RenderedPromptResult {
+        request_id: "preview".into(),
+        prompt: Some("Example system prompt".into()),
+        error: None,
+        discovery_context: Some(delivery),
+    };
+    let bytes = encode_message_to_vec(&preview).expect("encode discovery preview");
+    let decoded: RenderedPromptResult =
+        decode_message_from_slice(&bytes).expect("decode discovery preview");
+    assert_eq!(decoded, preview);
 }
 
 /// Notification hints survive the packaged wire API without losing delivery identity.

@@ -3,6 +3,9 @@
 # An annotated example of one personal setup. Adapt it to your own roles,
 # extensions, models, credentials, and paths. Private endpoint and account
 # details live in harness.d/ drop-ins and are not part of this example.
+# This example omits the experimental GitHub watcher configuration and its
+# development profile, including broker/account metadata and watcher-specific
+# role tools.
 
 # Use `:prompt <name>` to fill the editable prompt without submitting it.
 custom_prompts:
@@ -76,16 +79,10 @@ extensions:
     #   credential_secret: TAU_SWARM_WORKER_V1
     config: {}
 
-  # `tau-ext-telegram` config
+  # Leave Telegram disabled, even if you have installed the extension.
   std-telegram:
     enable: false
     require: false
-    secrets:
-      telegram_gateway_client: {}
-    config:
-      mode: gateway_client
-      gateway_socket_path: /run/tau-telegram-gateway/gateway.sock
-      gateway_client_secret: telegram_gateway_client
 
   # Disabled by default. Supply your own account and routing in a local drop-in.
   std-xmpp:

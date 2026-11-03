@@ -20,6 +20,23 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Prepared SDK 0.18.0
+
+Protocol **16.2** adds typed discovery snapshots and passive delivery receipts.
+The new public `discovery_items` field on `AgentInitializationContextSet` and
+`discovery_context` fields on `AgentUserMessageInjected` and `RenderedPromptResult`
+require a new Rust SDK minor line, **0.18.0**. The client pins proto `=0.18.0`;
+the two unchanged leaf packages remain 0.1.0.
+
+Consumers constructing these structs must supply the new fields. Discovery DTOs
+describe applicable guidance, newly delivered text and preview content; a passive
+receipt does not activate inference on its own. Missing fields in older
+records default to empty or absent. Older 16.x extensions may ignore the metadata
+and remain admitted; this addition does not require all extensions to rebuild.
+
+This section records preparation for application 0.3.0, not publication acceptance.
+Run registry-only consumer verification after authorized publication.
+
 ### Published SDK 0.17.0
 
 Protocol **16.1** adds optional `MessageDelivered.presentation`, with

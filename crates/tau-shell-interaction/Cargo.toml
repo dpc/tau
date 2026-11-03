@@ -1,6 +1,6 @@
 [package]
 name = "dpc-tau-shell-interaction"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 description = "Endpoint-owned shell interaction protocol for Tau."
 repository.workspace = true

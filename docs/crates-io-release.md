@@ -3,6 +3,41 @@
 Publishing `dpc-tau` requires publishing its internal Rust crate closure first.
 Package preparation does not authorize uploads, tags, or GitHub releases.
 
+## Tau 0.3.0 preparation
+
+The application and CLI advance together to **0.3.0**. The recomputed runtime
+and package-verification closure, including dev-dependencies, has **36 packages**:
+30 changed application/internal crates at 0.3.0, independently versioned proto/client at
+**0.18.0**, and four reused packages (`actions`, `blocking-notify-channel` and
+`util-fs-err` at 0.1.0, plus `vcr` at 0.2.0). Exact dependency changes require
+new versions even for dependents with unchanged source, such as `socket` and
+`delivery-memory`. The changed `themes` crate advances to 0.3.0.
+The workspace default and unrelated evaluation/supervisor packages remain 0.1.0.
+
+The closure now includes `shell-interaction` and the extracted `provider-chatgpt`
+package. The executable embeds the CLI version; it does not inherit the workspace
+default. No workspace-wide version-inheritance policy changes here.
+
+Core protocol **16.2** uses SDK **0.18.0** for source-incompatible public discovery
+fields. All seven native external pins advance to published SDK **0.16.0**
+sources, admitted under the same-major minor-skew policy. This release does not
+require every external project to adopt SDK 0.18.0. Slack's upstream Cargo
+version is **0.5.0**; the other six remain 0.1.0. The native verifier requires the
+exact core 0.18.0 / external 0.16.0 SDK lock inventory.
+
+Official sparse-index checks confirmed that all 32 proposed new versions were
+absent on November 3, 2026. The four reusable archives matched their unyanked index
+checksums and clean VCS provenance. Their source files remain unchanged;
+`util-fs-err` has only an equivalent explicit README declaration since publication.
+Recheck registry state immediately before any upload.
+
+This record documents preparation only; it does not establish publication or
+deployment acceptance. Run verified locked dry-runs in dependency order. Defer
+dependent packages until their exact registry dependencies exist. After publication,
+verify the registry-only SDK consumer and an isolated locked application install. Source publication,
+immutable tagging, native asset publication, curated hosted notes and public-link
+updates remain separate gates in the release skill.
+
 ## Tau 0.2.1 release record
 
 The application and CLI advance together to **0.2.1** to ship GPT-6.1 Sol support.
@@ -113,10 +148,10 @@ At the time of the 0.1.1 application release, the external pins selected SDK
 
 ## Complete dependency closure
 
-The application has 33 runtime crates. Cargo also resolves dev-dependencies
+The application has 35 runtime crates. Cargo also resolves dev-dependencies
 while verifying a package archive. `dpc-tau-cli` uses
-`dpc-tau-test-support` for tests, so a fully verified dependencies-first
-publication has 34 crates.
+`dpc-tau-test-support` for tests, bringing the verified dependencies-first
+publication closure to 36 crates.
 
 `dpc-tau-e2e-tests`, `dpc-tau-summary-eval`, and `dpc-tau-supervisor` are not
 needed. They remain ordinary workspace packages rather than being marked
@@ -145,8 +180,9 @@ Protocol 13.0's source-only SDK revision is proto/client 0.12.0. Configured
 extensions must rebuild with the harness; older readers cannot decode new
 passive-append journal variants. This is not a release or migration instruction.
 
-The current workspace also includes `dpc-tau-shell-interaction` (0.2.1), a shared
-endpoint codec/state crate depending on `dpc-tau-proto`. The checked publication
+The shell-interaction crate was introduced at 0.2.1 after that historical
+release; current versions and closure are described above. This shared
+endpoint codec/state crate depends on `dpc-tau-proto`. The checked publication
 order places it after proto and before its ext-shell and CLI consumers. This
 addition does not authorize publishing any package.
 
@@ -200,15 +236,15 @@ published that new protocol line even though its own Rust source was otherwise
 unchanged.
 
 The separately maintained extensions used exact registry SDK `=0.4.0` pins and
-advertised protocol 7.0 for the 0.1.1 release. Their current independently
-published revisions deliberately use exact SDK `=0.8.0` dependencies and
-advertise protocol 10.0. Updating those repositories remains outside the
+advertised protocol 7.0 for the 0.1.1 release. The 0.2.1 release pinned independently
+published revisions using exact SDK `=0.8.0` dependencies and
+protocol 10.0. Updating those repositories remains outside the
 application release procedure; this checkout consumes their published
 revisions through its flake lock.
 
 ## Upload-time procedure
 
-For each unpublished entry, in the order above:
+For each unpublished entry, follow the dependency order in `check-crates-io-packages.py`:
 
 1. Confirm the exact version is absent using the official crates.io sparse
    index. Preserve HTTP errors; do not interpret every failed request as 404.
@@ -230,7 +266,7 @@ After all crates resolve, run:
 
 ```console
 ./.config/selfci/check-sdk-packages.sh --registry
-cargo install --locked dpc-tau --version '=0.2.1' --root /path/to/isolated/install
+cargo install --locked dpc-tau --version '=0.3.0' --root /path/to/isolated/install
 ```
 
 The public `v0.1.0` tag and GitHub release already identify the original

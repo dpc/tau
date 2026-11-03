@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-cli",
  "dpc-tau-core",
@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "built",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-cli-picker"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-crossterm",
  "dpc-tau-term-screen",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-cli-term"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-cli-term-raw",
  "dpc-tau-crossterm",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-cli-term-raw"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bon",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-client"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "blake3",
  "ciborium",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-config"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "config",
  "dirs",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "ciborium",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-delivery-memory"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ciborium",
  "dpc-tau-proto",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-provider-builtin"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "dialoguer",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-rhai"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ciborium",
  "dpc-tau-client",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-shell"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-std-notifications"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-client",
  "dpc-tau-proto",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-test-dummy"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-client",
  "dpc-tau-proto",
@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-utils"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "dpc-tau-client",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-ext-websearch"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-client",
  "dpc-tau-proto",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-harness"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "bon",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-harness-tools"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-harness",
  "dpc-tau-proto",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-proto"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "ciborium",
  "dpc-tau-actions",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-provider"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "dirs",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-provider-chat-completions"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "dpc-tau-proto",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-provider-chatgpt"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "dpc-tau-proto",
@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-provider-codex"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-provider-grok"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "dpc-tau-proto",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-provider-responses"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-proto",
  "dpc-tau-provider",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-session-inspect"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-shell-interaction"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-proto",
  "rand 0.8.6",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-skills"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-proto",
  "serde",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-socket"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-proto",
  "socket2",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-term-screen"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bon",
  "dpc-tau-crossterm",
@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-test-support"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dpc-tau-config",
  "dpc-tau-core",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-themes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "json5",
  "serde",
