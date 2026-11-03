@@ -16,11 +16,10 @@ closed without replacement.
 The identity and attachment contract is specified by
 [SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md).
 Target rejections report only a fixed `ExternalAgentMessageFailure`
-classification. In particular, a reached bare target with no available
-inter-session receiver reports that condition separately from a target that
-cannot be reached. The sender renders a compact fixed diagnostic that directs
-the caller to configure a main role, and never exposes arbitrary
-target-local errors.
+classification. A reached bare target with no available canonical main reports
+a distinct condition from an unreachable target. The sender renders a compact
+fixed diagnostic that directs the caller to configure a main role and never
+exposes arbitrary target-local errors.
 
 Remote routing uses cooperative same-UID Tau IPC. Callback correlation proves
 that the claimed sender harness owns a matching live pending request and binds

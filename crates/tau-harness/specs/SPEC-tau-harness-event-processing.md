@@ -109,13 +109,14 @@ Tool/Core ambient-indicator declarations likewise cross ordinary interception
 and commit before current-generation and live-agent revalidation updates the
 harness-owned transient per-source contribution. They never enter semantic
 history or replay.
-Dedicated configured-extension notice requests are handled inline and converted
-to harness-authored `extension.notice` events. The request carries only message
-and level; the harness caps critical to warning and fixes source, kind,
+The harness handles dedicated configured-extension notice requests inline,
+converting them to harness-authored `harness.notice` events with
+`kind = "extension.notice"`. The request carries only message and level;
+the harness caps critical to warning and fixes source, kind,
 `purpose = diagnostic`, and live-only publication. The resulting event uses ordinary
 interception, commit, and live broadcast but never semantic persistence or
 replay. Debug JSONL and protocol metering retain the raw
-`message.extension_notice_request` input separately from the later published
+`message.extension_notice_request` input separately from the published
 event. See
 [SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 

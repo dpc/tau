@@ -110,15 +110,16 @@ disconnect drops unreleased frames. For their post-activation contracts, see:
 - [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md)
 - [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md)
 
-Configured extensions of every configured kind request user-visible diagnostics
+Configured extensions of any configured kind request user-visible diagnostics
 with `extension_notice_request(message, level)`. The request is operational
 traffic: pre-Ready requests consume the existing activation message and encoded
 byte quotas, retain global input order, release after Ready and the global
 barrier, and disappear on disconnect before release. Unconfigured or disconnected
 origins are silently denied; an illegal-phase request follows the normal protocol
 failure path. The handler caps `critical` to `warning` and creates a harness-sourced,
-live-only `extension.notice` with `purpose = diagnostic`. The result then crosses
-ordinary interception and broadcasts to every current matching subscriber. A
+live-only `harness.notice` with `kind = "extension.notice"` and
+`purpose = diagnostic`. The result passes through ordinary interception
+and broadcast to every current matching subscriber. A
 publisher disconnect after inline handling does not cancel a parked
 harness-authored output. Generic extension `Emit(harness.notice)` remains denied,
 and `ConfigError` retains its separate mandatory replayable diagnostic path. See
@@ -140,9 +141,14 @@ validation occurs on the event loop before publishing the harness-owned inbound
 `agent.message_received` projection. A bounded in-memory continuation sends
 success only after that exact projection commits. Generic peer-authored
 `agent.message_sent`/`agent.message_received` emits remain rejected.
-Bare route capabilities are authenticated before the target selects one
-configured inter-session receiver; exact capabilities preserve known-address
-delivery to agents without receiver capability. Authenticated peer bodies remain
+The target authenticates bare route capabilities before resolving the session's
+optional canonical main, creating it without a prompt on demand. No matching-role
+worker substitutes for main; the target fails closed if main is missing or
+unavailable. For exact capabilities, the target authenticates the original exact
+recipient before applying any target-local main-review policy. See
+[SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md) and
+[SPEC-tau-harness-peer-routing](SPEC-tau-harness-peer-routing.md).
+Authenticated peer bodies remain
 escaped agent content in a typed peer-message prompt envelope, never harness
 instructions.
 Runtime-dir discovery verifies matching session claims by exact socket

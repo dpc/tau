@@ -244,9 +244,10 @@ Subsequent preprocessing and prompt execution use the separate correlated
 prompt lifecycle; pre-materialization failures publish transient
 `agent.prompt_failed` terminals. See
 [SPEC-ui-create-agent-admission](../../../specs/SPEC-ui-create-agent-admission.md).
-Configured extensions now use the dedicated `extension_notice_request`; the
-harness creates a sanitized live-only `extension.notice` through ordinary
-interception and broadcast. Extension-authored generic
+Configured extensions use the dedicated `extension_notice_request`. The
+harness creates a sanitized live-only `harness.notice` with
+`kind = "extension.notice"` and sends it through ordinary interception and
+broadcast. Extension-authored generic
 `Emit(harness.notice)` remains denied. See
 [SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 The general protocol-level authenticated publisher envelope and remaining peer
