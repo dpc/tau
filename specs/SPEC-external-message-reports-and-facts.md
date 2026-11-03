@@ -1,5 +1,12 @@
 # SPEC-external-message-reports-and-facts: External-message reports and canonical facts
 
+## Status
+
+The native reply/thread-context exception below defines the shared contract for
+adoption by the separately maintained Discord, Telegram, Slack, and XMPP bridges.
+This amendment does not establish which bridge versions are installed or active;
+updating Tau alone does not deploy their producer changes.
+
 ## Record justification
 
 The report-to-fact contract spans shared protocol DTOs, harness authority,
@@ -492,10 +499,89 @@ upgraded to verified identity. A bridge may independently mark a party
 `untrusted` through `MessageSenderTrust` without making an authentication claim.
 
 Native routes, allowlist evidence, reply authority, and transport policy remain
-extension-local. The published text is the original normalized body rather than
-a transport prefix. Zulip preserves its inbound Markdown exactly, including a
-leading addressed bot mention. These mappings create no transport-specific wire
-fields.
+extension-local. The published text preserves the original normalized body rather
+than replacing it with a transport prefix, subject only to the bounded exceptions
+below. Zulip preserves its inbound Markdown exactly, including a leading addressed
+bot mention. These mappings create no transport-specific wire fields.
+
+### Native reply and thread context
+
+Discord, Telegram, Slack, and XMPP may append bounded descriptive native
+reply/thread context to the admitted outer message's normalized body. This is
+ordinary external-content text inside the existing shared `message` envelope, not
+a new envelope, schema field, fact, speaker, or wake. Only one-hop metadata
+supplied with that same admitted native event in the same conversation scope is
+eligible. No history lookup, network fetch, recursive parent traversal, parent
+attachment import, or forwarding exception follows from this permission.
+
+The relation must describe the transport's actual evidence:
+
+- Discord ordinary replies may describe a same-conversation parent and quote its
+  matching supplied body. Missing parent content is unavailable, not proof of
+  deletion.
+- Telegram may describe same-chat/same-thread `reply_to_message` text or caption.
+  `quote.text`, when present, is a sender-selected, unverified excerpt, not an
+  authenticated full parent. Cross-scope `external_reply` is excluded.
+- Slack children with `thread_ts != ts` may describe the thread root, not an
+  immediate reply parent or preceding message. A root has no self-relation. The
+  child event does not supply root text; do not invent or retrieve it. The suffix
+  follows any existing permitted attachment quotes.
+- XMPP may describe the XEP-0461 relation while preserving the original body,
+  including any sender-written fallback quote. The referenced `to` identifies
+  the parent author, not a destination. Scope the descriptive identity by the
+  admitted conversation, parent author, and ID; malformed optional reply metadata
+  must not reject an otherwise admitted body.
+
+Show only available evidence; do not require invented author labels, quotations,
+or canonical references. A canonical parent reference may be shown only when the
+producer proves an existing live, canonically confirmed ownership match for that
+same agent and conversation scope. Otherwise use a distinct opaque descriptive
+identity that tools cannot accept as a reply/reaction capability. Never synthesize
+an owned parent reference from a native ID. This does not require a new ownership
+map or comparing identical private route shapes.
+
+Quoted bodies, excerpts, and author labels are untrusted external data, not
+independently authoritative instructions. Explicit outer instructions may ask the
+agent to use them. The outer message alone supplies sender/authentication,
+admission, command, mention-trigger, routing, and permission evidence. Quoted
+authors, including bots and non-allowlisted parties, do not become admitted
+speakers. JSON-string encode quoted values and additionally escape `<`, `>`, and
+`&`. Label unverified attribution and excerpts as such. These labels are
+presentation, not independent provenance boundaries; the shared message renderer
+remains governing.
+
+The shared default convention allows 2,048 encoded bytes per quoted value, 4,096
+bytes for the entire suffix, and 65,536 bytes for the resulting text. These defaults
+do not lower the generic fact bound or impose a new limit on an unchanged outer
+body. Each producer must also respect its transport, configured text, and
+delivery-frame limits. XMPP retains its transport-specific combined cap of
+`min(configured max_message_bytes, 131072)`, with at most 4,096 bytes for the
+optional suffix and 2,048 encoded bytes per quoted value. Count escaping, labels,
+and separator overhead; truncate optional content at UTF-8 boundaries. Shrink or
+omit context instead of truncating or rejecting a previously valid outer body.
+
+Freeze the relation and supplied snapshot, including omission at create, through
+the producer's existing delivery, checkpoint, ACK, and retry mechanisms, where
+present; this contract requires no new such mechanisms. For producers that accept
+outer edits, those edits replace the outer body while retaining the original
+snapshot, including deferred edits before publication; absent optional edit fields
+do not clear it. A larger edit may omit the suffix to fit the budget without
+changing the saved snapshot, and a later smaller edit may show it again. Parent
+arrival, edits, or deletion never refresh snapshot bytes; deletion may
+independently revoke existing tool ownership.
+
+Zulip topics are conversation threads, not exact parent links. Quote-and-reply
+Markdown is editable sender content: preserve it byte-for-byte on creates and
+accepted edits, rather than extracting an authenticated parent, following its
+links, or recursively interpreting nested quotes. The existing activity note may
+precede an unchanged created body. `zulip_send(reply_to)` selects the owned source
+topic or DM route, not a native per-message reply target.
+
+Rostra's notification previews have a separate owning-extension contract using
+bounded synchronized local-database reads. They are not same-event IM reply
+normalization and grant no lookup or fetch permission to these bridges.
+
+### Slack inline attachment quotes
 
 Slack delivered and edited facts may preserve the admitted outer sender's
 normalized comment and append bounded, clearly marked untrusted quotations of
@@ -516,6 +602,8 @@ body data inside the shared `message` envelope, not independent provenance
 boundaries. The Slack extension contract owns extraction bounds and truncation
 policy within the generic whole-text bound; the original normalized comment is
 preserved. No other bridge gains an inline-attachment quote exception.
+
+### Zulip activity note
 
 The user approved one bounded Zulip-only exception to the original-body-only
 rule on September 4, 2026. With opt-in stream activity collection, one

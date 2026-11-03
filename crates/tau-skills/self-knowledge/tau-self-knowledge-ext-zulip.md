@@ -273,8 +273,18 @@ delivered fact returns on the post-persistence downpath. First use establishes
 the current baseline without replay. Offline edits, deletes, and reactions are
 not recovered; filter changes do not rescan before the checkpoint. Crash
 recovery is at-least-once and can duplicate messages. Runtime reply/reaction
-references disappear on restart. Admitted Zulip Markdown remains exact through canonical facts, replay, and
-provider context, including a leading addressed bot mention.
+references disappear on restart. Admitted Zulip Markdown remains exact through
+canonical facts, replay, and provider context, including a leading addressed bot
+mention.
+
+Zulip topics are conversation threads, not exact parent-message links.
+Quote-and-reply inserts editable Markdown attribution, a message link, and quoted
+text. The bridge preserves that exact body on admitted creates and accepted edits.
+The optional activity summary can precede a created message's unchanged body.
+Quoted attribution and links remain unverified external content and grant no
+sender, admission, route, or reply authority. The bridge does not extract or fetch
+a native parent from quote Markdown. `zulip_send(reply_to)` selects the live owned
+source topic or DM participants, not a native per-message reply target.
 
 Configure receive selection per ordinary-mode extension instance:
 

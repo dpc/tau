@@ -130,6 +130,20 @@ message needs usable text. Extraction is bounded and rejects malformed/oversized
 content instead of truncating; the final comment-plus-quotes must fit the
 configured message limit. No new Slack scopes, configuration or tools are needed.
 
+Slack thread children may also carry a bounded descriptive thread-root suffix
+when it fits after the normalized body and attachment quotes. The suffix describes
+the thread root, not the immediately preceding message or an immediate reply
+parent. The opaque `slack-thread-root:` identity is not a `reply_to` or reaction
+selector. The bridge neither supplies nor retrieves root content; thread roots get
+no self-relation. The bridge JSON-string encodes quoted values and additionally
+escapes `<`, `>`, and `&`. The suffix adds no admission, command, mention, or send
+authority.
+The bridge retains the fixed create snapshot through retries and owned edits.
+If a larger edit leaves no room, that edit omits the optional suffix without
+changing the snapshot; a later smaller edit may show it again. A suffix omitted
+at create stays omitted. Root arrival, edits, and deletion never refresh the
+snapshot.
+
 The 1,024-entry incoming native-owner index retains sources pinned by owned or
 in-flight agent reactions. Evicting an unpinned source also revokes its reply and
 reaction selectors and deferred activation, without consuming pending reports.

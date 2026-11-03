@@ -160,11 +160,19 @@ both local database initialization and the current follow epoch.
 The preference activates live delivery only after its agent is loaded and its
 replay completes. Each such opted-in agent gets independent serial batches.
 Tau reports after 30 seconds of quiet or five minutes of batch age, at most
-once per five minutes per agent. Each report is a count-only lossy wake:
+once per five minutes per agent. Each report starts with a lossy wake count:
 `Rostra received 1 new followed post.` or `Rostra received {count} new followed
-posts.` It contains no post body, ID, author, tags, or timestamp beyond Tau's
-generic authenticated external-message envelope. Inspect the current following
-timeline with `rostra_list_posts({"timeline":"following"})`, then
+posts.` Nonreply-only reports remain count-only. Reply batches may append up to
+eight bounded previews with IDs/authors for the current post and exact referenced
+parent, plus parent content when already available in the synchronized local
+database. Missing content means unavailable locally, not globally absent. Tau
+labels replacement content as the latest local version and includes both referenced
+and resolved IDs. Tau marks truncation and omitted previews. Rostra-derived fields
+and bodies remain untrusted external content; the pending preview snapshot stays
+frozen.
+This separate local-database contract does not permit IM bridges to fetch reply
+history. Inspect the current following timeline with
+`rostra_list_posts({"timeline":"following"})`, then
 `rostra_read_post`; concurrent activity means this cannot recover the exact
 announced batch. Harness busy-agent batching can still coalesce or delay model
 runs.

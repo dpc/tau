@@ -11,8 +11,8 @@ project owns the exact credential, route, and transport schema. Consult its
 `docs/setup.md` for private maintainer guild-channel setup, `SECURITY.md` for
 trust boundaries, and `docs/design.md` and `docs/runtime.md` for the full contract
 and limits. Do not infer compatibility from the Cargo package version:
-for Tau protocol 13.1, rebuild with exact registry
-`dpc-tau-client`/`dpc-tau-proto` SDK 0.13.0 and update the extension together with
+for Tau protocol 16.2, rebuild with exact registry
+`dpc-tau-client`/`dpc-tau-proto` SDK 0.18.0 and update the extension together with
 the harness. Historical SDK 0.7.0 / protocol 9.0 and SDK 0.10.0 / protocol 10.2
 binaries are rejected before configuration. Updating the SDK does not establish
 full live Discord connectivity.
@@ -77,6 +77,26 @@ All writes suppress user, role, everyone/here, and reply-notification mentions.
 Mention-like text is not a supported notifying ping. Do not automatically retry
 failed or uncertain writes: a send may have taken effect without a confirmed
 receipt.
+
+## Native reply context
+
+The reply-context producer preserves the normalized outer request and may append
+a bounded suffix for an ordinary same-conversation native reply. It quotes only
+the matching parent body supplied with that event, or marks content
+unavailable. It never fetches a parent, follows nested replies, or imports parent
+attachments. Quoted authors use opaque sender identities, not authenticated
+current-speaker claims.
+
+A parent reference is canonical only after an exact existing same-agent,
+same-conversation ownership match confirmed on the canonical downpath. Otherwise
+`discord-reply-parent:` identifies opaque descriptive data, not a tool capability.
+The producer JSON-string encodes quoted text and labels and additionally escapes
+`<`, `>`, and `&`. They remain untrusted data, not independently authoritative;
+only the admitted outer message drives commands, mentions, routing, and admission.
+The create snapshot stays fixed through delivery, ACKs, retries, and outer edits;
+parent changes never refresh it. The producer shrinks or omits optional context
+to preserve the unchanged outer body within its limits. Installing this skill
+does not deploy or activate the separately maintained producer.
 
 ## Receiver designation
 
