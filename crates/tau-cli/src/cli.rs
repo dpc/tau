@@ -38,7 +38,7 @@ pub struct HarnessArgs {
     #[command(flatten)]
     pub extension_overrides: ExtensionOverrideArgs,
 
-    /// Select the startup/rendered role.
+    /// Select the startup/rendered role (defaults to main, then role ordering).
     #[arg(short = 'r', long = "role")]
     pub role: Option<String>,
 

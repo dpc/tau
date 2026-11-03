@@ -28,8 +28,15 @@ duplicate priority group produces a startup warning. An unavailable winning role
 fails explicitly rather than falling back. Ordinary workers can still use that
 role. Tau creates main on demand without a prompt and binds its identity to the
 session; it does not select an idle worker. Existing mainless sessions still
-resume. Explicit `--role` and role/group order
-select ordinary work; main designation does not replace those controls.
+resume.
+
+Tau now defaults to the effective main role for ordinary startup, serve bootstrap,
+and developer previews instead of using role/group order. You can override this
+default with `TAU_STARTUP_ROLE` or CLI `--role`; the CLI flag takes precedence.
+Configurations with no main candidate retain ordered fallback. If a launcher
+relied on ordering despite a configured main role, add `tau --role ROLE ...` to
+retain that ordinary role. Tau does not bind canonical main identity through role
+selection, change saved agents' roles, or rerun an existing bootstrap ID.
 
 The equivalent attributes in a Nix-generated harness configuration are:
 
@@ -50,8 +57,9 @@ the minimum.
 Explicit null clears a role's priority where the configuration format supports
 null; omitting the field from an overlay keeps its earlier value. Tau rejects the
 unshipped boolean role field `main`.
-New priorities apply only to an unbound session; they never replace a previously
-bound canonical main on restart.
+Tau uses new priorities to select canonical main only for an unbound session;
+it preserves an existing canonical main binding on restart. For ordinary startup,
+Tau uses the current effective priorities even when canonical main is already bound.
 
 Remote exact-worker messages now default to main review. Set
 `inter_session.review_direct_messages = false;` to retain direct delivery.

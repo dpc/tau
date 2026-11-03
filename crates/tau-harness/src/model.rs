@@ -55,7 +55,14 @@ fn select_startup_role(
     roles: &HashMap<String, AgentRole>,
     role_groups: &[tau_proto::HarnessRoleGroup],
 ) -> (String, Option<MissingDefaultRole>) {
-    let fallback = first_grouped_role(role_groups).unwrap_or_else(|| fallback_role(roles));
+    // Reuse main-role selection without assigning canonical main identity to
+    // ordinary agents. Deliberately mainless configurations keep ordered
+    // startup.
+    let fallback = harness_settings
+        .main_role()
+        .map(str::to_owned)
+        .or_else(|| first_grouped_role(role_groups))
+        .unwrap_or_else(|| fallback_role(roles));
     let Some(default_role) = harness_settings.startup_role.as_ref() else {
         return (fallback, None);
     };

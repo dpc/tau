@@ -282,7 +282,11 @@ set `TAU_PROFILE` before launching it to override that fallback. Normal
 `tau --profile NAME[,NAME...]` startup and render commands forward the resolved selection
 to their spawned harness daemon.
 
-Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. Ordinary work uses explicit `--role` or the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
+Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. For ordinary startup, Tau uses an explicit startup role when supplied; otherwise it selects the effective main role (the lowest `main_priority`). With no main role configured, Tau falls back to the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
+
+Tau uses the same default for headless `tau serve` bootstrap and developer previews. You can override it with `TAU_STARTUP_ROLE` or CLI `--role`; the CLI flag takes precedence. Tau applies profiles and configuration overlays before selecting the effective main role. Winning priority ties remain configuration errors, even with explicit `--role`.
+
+Migration: if an existing launcher relied on group ordering despite a configured main role, pass `tau --role ROLE serve ...` (or `tau --role ROLE ...` for other commands) to retain that ordinary role. Selecting the main role does not make an ordinary or bootstrap agent the canonical session main. Tau keeps saved agents' roles and existing main bindings, and does not rerun an already-admitted bootstrap ID.
 
 Named context-size alerts can be set globally, on a role group, or on one role.
 Their fields merge from broad to specific scope, so a role can customize or
@@ -452,8 +456,11 @@ configuration changes. Creation alone does not start inference. Ordinary unload
 cannot remove main, and the harness cannot replace it when unavailable. UI selection
 stays local to each attachment: explicit selection or creation wins over delayed
 main discovery.
-Explicit `--role` starts ordinary work separately; bootstrap and explicit-role
-stdin keep their usual behavior.
+Explicit `--role` starts ordinary work separately. Without an explicit startup
+role, Tau uses the effective main role for ordinary startup and bootstrap, with
+ordered role fallback in mainless configurations. These agents remain ordinary
+workers; role selection does not bind canonical main identity. Explicit-role
+stdin keeps its usual behavior.
 
 Bare peer input goes to main. Ordinary remote exact-worker input goes to main
 for review by default; set `inter_session.review_direct_messages: false` for
@@ -464,8 +471,9 @@ direct worker delivery. See [agent messaging](agent-messaging.md).
 Remove `agents.default_role` and `inter_session.receiver` (including `role` and
 `auto_start`); these retired keys now fail unknown-field validation. Put
 `main_priority` on candidate roles instead. There is no role-pool or auto-start
-switch: main is optional and created on demand. For ordinary-role selection use
-`--role` or role/group ordering, not main designation. Profiles can replace or
+switch: main is optional and created on demand. Ordinary startup defaults to the
+effective main role, with role/group ordering as the mainless fallback. Use
+`--role` to override that default. Profiles can replace or
 clear role priorities; an existing bound main is never replaced by a new winner.
 The unshipped boolean `main` role field is not accepted.
 See [the migration handoff](main-agent-migration.md) for Nix-generated config

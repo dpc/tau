@@ -138,9 +138,15 @@ is reviewed by default; `inter_session.review_direct_messages: false` permits
 direct delivery, including in mainless sessions. Input that requires review fails
 closed without an available main. Remove retired `agents.default_role` and
 `inter_session.receiver` keys and the unshipped boolean role field `main`; they
-fail unknown-field validation. Use explicit
-`--role` or role ordering for ordinary work. External bridge receiver policies
-remain independent.
+fail unknown-field validation. Tau defaults to the effective main role for ordinary
+startup, serve bootstrap, and developer previews, with ordered role fallback in
+mainless configurations. You can override this default with `TAU_STARTUP_ROLE` or
+CLI `--role`; the CLI flag takes precedence. Tau applies profiles and config
+overlays before selecting the effective main role. If a launcher relied on group
+ordering with a main configured, add explicit `--role` to retain that role. Tau
+does not bind main identity through role selection, change saved agents' roles,
+or rerun an existing bootstrap ID. External bridge receiver
+policies remain independent.
 
 `tool_policy.rules` is harness-owned declarative tool-surface policy. Rules are
 keyed so a user can disable built-ins such as `builtin.chatgpt-shell` with

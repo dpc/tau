@@ -90,10 +90,10 @@ fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
     command.output().expect("run tau preview")
 }
 
-/// Ensures a render subprocess forwards comma-separated profiles to its daemon
-/// and lets later role ordering choose the ordinary fallback.
+/// Ensures a render subprocess applies profile main priorities before startup
+/// selection, rather than falling back to navigation ordering.
 #[test]
-fn print_prompt_applies_ordered_profile_stack_in_spawned_harness() {
+fn print_prompt_applies_main_priority_profile_stack_in_spawned_harness() {
     let home = TempDir::new().expect("temporary home");
     let config_dir = home.path().join(".config/tau");
     std::fs::create_dir_all(&config_dir).expect("config directory");
@@ -106,13 +106,13 @@ profiles:
       role_groups:
         preview:
           roles:
-            first-role: { order: -100 }
+            first-role: { main_priority: 100 }
   second:
     agents:
       role_groups:
         preview:
           roles:
-            second-role: { order: -200 }
+            second-role: { main_priority: 0 }
 agents:
   enable: false
   role_groups:
@@ -624,7 +624,7 @@ fn print_prompt_supplies_workdir_context_to_strict_role_template() {
 /// Ensures role-less developer previews use normal startup-role selection while
 /// `--role` continues to select an explicit prompt and tool policy.
 #[test]
-fn previews_use_ordinary_fallback_unless_explicitly_overridden() {
+fn previews_use_main_unless_explicitly_overridden() {
     let home = TempDir::new().expect("temporary home");
     let config_dir = home.path().join(".config/tau");
     std::fs::create_dir_all(&config_dir).expect("create config directory");
@@ -637,12 +637,15 @@ fn previews_use_ordinary_fallback_unless_explicitly_overridden() {
       enable: true
       roles:
         preview-default:
+          main_priority: 10
+          order: 100
           prompt_fragments:
             - name: preview.default
               priority: 10
               text: DEFAULT PREVIEW ROLE
           tools: [read]
         preview-explicit:
+          order: 0
           prompt_fragments:
             - name: preview.explicit
               priority: 10
@@ -677,6 +680,24 @@ fn previews_use_ordinary_fallback_unless_explicitly_overridden() {
     assert!(!String::from_utf8_lossy(&default_prompt.stdout).contains("EXPLICIT PREVIEW ROLE"));
     assert!(String::from_utf8_lossy(&explicit_prompt.stdout).contains("EXPLICIT PREVIEW ROLE"));
     assert!(!String::from_utf8_lossy(&explicit_prompt.stdout).contains("DEFAULT PREVIEW ROLE"));
+
+    // Exercise environment transport through the spawned render harness, not
+    // just the in-process role selector.
+    for (args, expected) in [
+        (vec!["dev", "print-prompt"], "EXPLICIT PREVIEW ROLE"),
+        (
+            vec!["--role", "preview-default", "dev", "print-prompt"],
+            "DEFAULT PREVIEW ROLE",
+        ),
+    ] {
+        let output = isolated_tau_command(env!("CARGO_BIN_EXE_tau"), home.path())
+            .env("TAU_STARTUP_ROLE", "preview-explicit")
+            .args(args)
+            .output()
+            .expect("preview with environment startup selection");
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
+    }
 
     let tool_names = |output: &Output| {
         serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)

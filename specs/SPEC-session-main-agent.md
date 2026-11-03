@@ -44,9 +44,12 @@ worker.
 The replay boundary includes canonical main identity, independently of which
 agents are eligible for selection.
 
-Explicit `--role` starts ordinary work separately; bootstrap and explicit-role
-stdin retain their existing semantics. Main designation does not become a
-global ordinary-role default. `agents.default_role` and the former
+An explicit startup role starts ordinary work separately. Without one, the harness
+selects the effective main role for ordinary startup, serve bootstrap, and developer
+previews. Mainless configurations retain ordered role fallback. Selecting this
+role does not bind canonical main identity: bootstrap agents remain ordinary
+agents. The harness leaves existing bootstrap IDs and session-main bindings unchanged.
+`agents.default_role` and the former
 `inter_session.receiver` selection keys are not accepted.
 
 ## Peer input

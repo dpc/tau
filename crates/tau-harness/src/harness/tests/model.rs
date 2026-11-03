@@ -255,9 +255,10 @@ fn role_groups_sort_roles_by_order_then_name() {
     );
 }
 
-/// The main designation remains role metadata independent of navigation order.
+/// Ordinary startup follows the main role rather than navigation order, without
+/// changing the navigation groups or overriding explicit process selection.
 #[test]
-fn main_priority_remains_role_metadata_independent_of_navigation() {
+fn startup_role_prefers_main_without_changing_navigation_or_explicit_selection() {
     let mut settings = path_tau_config_settings::HarnessSettings::built_in();
     settings
         .roles
@@ -268,6 +269,41 @@ fn main_priority_remains_role_metadata_independent_of_navigation() {
     let loaded = load_roles(&settings);
 
     assert_eq!(loaded.roles["engineer"].main_priority, Some(100));
+    assert_eq!(loaded.selected_role, "engineer");
+    assert_eq!(loaded.role_groups[0].roles[0], "engineer-junior");
+
+    settings.startup_role = Some("engineer-senior".to_owned());
+    assert_eq!(load_roles(&settings).selected_role, "engineer-senior");
+
+    settings.startup_role = Some("missing-role".to_owned());
+    let loaded = load_roles(&settings);
+    assert_eq!(loaded.selected_role, "engineer");
+    assert_eq!(
+        loaded.missing_default_role,
+        Some(crate::model::MissingDefaultRole {
+            requested: "missing-role".to_owned(),
+            fallback: "engineer".to_owned(),
+        })
+    );
+}
+
+/// Deliberately mainless settings retain ordered startup instead of inventing a
+/// main role, including when an explicit startup role is unavailable.
+#[test]
+fn startup_role_without_main_preserves_ordered_fallback() {
+    let mut settings = path_tau_config_settings::HarnessSettings::built_in();
+    for role in settings.roles.values_mut() {
+        role.main_priority = None;
+    }
+    assert_eq!(settings.main_role(), None);
+    assert_eq!(load_roles(&settings).selected_role, "engineer-junior");
+    settings.startup_role = Some("missing-role".to_owned());
+    let loaded = load_roles(&settings);
+    assert_eq!(loaded.selected_role, "engineer-junior");
+    assert_eq!(
+        loaded.missing_default_role.expect("warning").fallback,
+        "engineer-junior"
+    );
 }
 
 /// Nonwinning priority ties surface once as configuration warnings while a
@@ -302,6 +338,7 @@ agents:
     )
     .expect("nonwinning tie remains loadable");
     assert_eq!(h.config.accepted_harness_settings.main_role(), Some("bot"));
+    assert_eq!(h.config.selected_role, "bot");
     let warnings = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {

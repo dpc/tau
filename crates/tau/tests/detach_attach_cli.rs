@@ -2549,7 +2549,9 @@ fn assert_created_session_server_handles_stock_attach_signal_and_strict_resume(s
 
 /// Managed create-or-existing serve admits one bootstrap generation on first
 /// creation, resumes it without touching a missing source, and creates a new
-/// agent only when the operator supplies a different bootstrap id.
+/// agent only when the operator supplies a different bootstrap id. The actual
+/// role-less serve path must choose main over the earlier engineer group, while
+/// an explicit CLI role still wins over main and environment selection.
 #[test]
 fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
     fn wait_for_agents(environment: &TestEnvironment, session_id: &str, count: usize) -> String {
@@ -2592,6 +2594,20 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
     }
 
     let environment = TestEnvironment::new();
+    std::fs::write(
+        environment.config_home.join("tau/harness.yaml"),
+        r#"
+extensions:
+  provider-builtin: { enable: false }
+  core-shell: { enable: false }
+agents:
+  role_groups:
+    coordination:
+      roles:
+        coordinator: { main_priority: 10, order: 0 }
+"#,
+    )
+    .expect("configure main after built-in engineer group");
     let session_id = "serve-bootstrap";
     let source = environment.temp.path().join("bootstrap.prompt");
     let secret = "bootstrap-secret-27e8bca041";
@@ -2618,6 +2634,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
     let first_metadata = environment.wait_for_metadata();
     let first_socket = environment.socket_for_claim(&first_metadata);
     let first_rows = wait_for_agents(&environment, session_id, 1);
+    assert!(first_rows.contains("coordinator"), "{first_rows}");
     let first_output = stop_server(&environment, first, &first_metadata, &first_socket);
     assert!(!String::from_utf8_lossy(&first_output.stdout).contains(secret));
     assert!(!String::from_utf8_lossy(&first_output.stderr).contains(secret));
@@ -2642,7 +2659,10 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
         String::from_utf8_lossy(&trace.stderr)
     );
     let trace = String::from_utf8(trace.stdout).expect("UTF-8 agent trace");
-    assert!(trace.contains("engineer"), "role was not durable: {trace}");
+    assert!(
+        trace.contains("\"value\":\"coordinator\""),
+        "main role was not durable: {trace}"
+    );
     assert!(
         trace.contains("tau.bootstrap_prompt") && trace.contains("assistant-v1"),
         "canonical trace lost the bootstrap marker: {trace}"
@@ -2651,6 +2671,7 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
     std::fs::remove_file(&source).expect("remove bootstrap source");
     let restart = environment
         .command()
+        .env("TAU_STARTUP_ROLE", "engineer-junior")
         .args([
             "serve",
             "--session",
@@ -2680,7 +2701,10 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
         .expect("write next bootstrap prompt");
     let next = environment
         .command()
+        .env("TAU_STARTUP_ROLE", "engineer-junior")
         .args([
+            "--role",
+            "engineer-senior",
             "serve",
             "--session",
             session_id,
@@ -2697,7 +2721,10 @@ fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
         .expect("start next bootstrap generation");
     let next_metadata = environment.wait_for_metadata();
     let next_socket = environment.socket_for_claim(&next_metadata);
-    let _ = wait_for_agents(&environment, session_id, 2);
+    let next_rows = wait_for_agents(&environment, session_id, 2);
+    assert!(next_rows.contains("coordinator"), "{next_rows}");
+    assert!(next_rows.contains("engineer-senior"), "{next_rows}");
+    assert!(!next_rows.contains("engineer-junior"), "{next_rows}");
     let _ = stop_server(&environment, next, &next_metadata, &next_socket);
 }
 

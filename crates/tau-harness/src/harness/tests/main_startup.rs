@@ -3,16 +3,15 @@
 
 use super::*;
 
-/// A fresh UI can select a valid main despite an unavailable implicit worker,
-/// while explicit-role, mainless, and headless startup retain strict
-/// validation.
+/// UI and headless startup select the valid main despite an unavailable earlier
+/// worker; explicit-role and mainless startup still validate their chosen role.
 #[test]
-fn fresh_main_ui_skips_only_unused_ordinary_role_skill_failure() {
+fn main_startup_ignores_unused_worker_skill_failure_but_validates_selected_role() {
     for (ui_demand, configured_main, explicit_role, succeeds) in [
         (true, true, false, true),
         (true, true, true, false),
         (true, false, false, false),
-        (false, true, false, false),
+        (false, true, false, true),
     ] {
         let td = TempDir::new().expect("tempdir");
         let config_dir = td.path().join("config");
@@ -54,7 +53,14 @@ agents:
             tau_proto::SessionStartReason::Initial,
             crate::HarnessStorageMode::Durable,
             Some(Box::new(move |h| {
-                assert_eq!(h.config.selected_role, "engineer-junior");
+                assert_eq!(
+                    h.config.selected_role,
+                    if configured_main {
+                        "coordinator"
+                    } else {
+                        "engineer-junior"
+                    }
+                );
                 assert!(!h.session_initialized(&h.session_runtime.current_session_id));
                 assert_eq!(
                     h.config.accepted_harness_settings.main_role(),
@@ -63,6 +69,7 @@ agents:
                 if explicit_role {
                     h.config.accepted_harness_settings.startup_role =
                         Some("engineer-junior".to_owned());
+                    h.config.selected_role = "engineer-junior".to_owned();
                 }
                 if ui_demand {
                     let sink = connect_test_client(h, "startup-ui", tau_proto::ClientKind::Ui);
@@ -97,8 +104,14 @@ agents:
             continue;
         }
         let mut h = result.expect("unused ordinary role must not block main");
-        assert_eq!(h.config.selected_role, "engineer-junior");
+        assert_eq!(h.config.selected_role, "coordinator");
         assert!(!h.config.available_roles.contains_key("engineer-junior"));
+        if !ui_demand {
+            assert!(h.main_agent_id().is_none(), "selection does not bind main");
+            assert!(h.agent_runtime.agent_registry.agents.is_empty());
+            h.shutdown().expect("headless shutdown");
+            continue;
+        }
         let main = h.main_agent_id().expect("canonical main").clone();
         let cid = &h.agent_runtime.agent_registry.agent_routes[&main];
         assert_eq!(
