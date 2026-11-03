@@ -553,22 +553,32 @@ remains governing.
 The shared default convention allows 2,048 encoded bytes per quoted value, 4,096
 bytes for the entire suffix, and 65,536 bytes for the resulting text. These defaults
 do not lower the generic fact bound or impose a new limit on an unchanged outer
-body. Each producer must also respect its transport, configured text, and
-delivery-frame limits. XMPP retains its transport-specific combined cap of
-`min(configured max_message_bytes, 131072)`, with at most 4,096 bytes for the
-optional suffix and 2,048 encoded bytes per quoted value. Count escaping, labels,
-and separator overhead; truncate optional content at UTF-8 boundaries. Shrink or
-omit context instead of truncating or rejecting a previously valid outer body.
+body. Apply each transport, configured text, and delivery-frame limit only at the
+layer it governs. An outer-admission limit does not imply a combined-report limit.
+Discord's configured `max_message_bytes` bounds outer admission; its existing
+combined-report cap is 65,536 bytes. XMPP retains its transport-specific combined
+cap of `min(configured max_message_bytes, 131072)`, with at most 4,096 bytes for
+the optional suffix and 2,048 encoded bytes per quoted value. Count escaping,
+labels, and separator overhead; truncate optional content at UTF-8 boundaries.
+Shrink or omit context instead of truncating or rejecting a previously valid
+outer body.
 
-Freeze the relation and supplied snapshot, including omission at create, through
-the producer's existing delivery, checkpoint, ACK, and retry mechanisms, where
-present; this contract requires no new such mechanisms. For producers that accept
-outer edits, those edits replace the outer body while retaining the original
-snapshot, including deferred edits before publication; absent optional edit fields
-do not clear it. A larger edit may omit the suffix to fit the budget without
-changing the saved snapshot, and a later smaller edit may show it again. Parent
-arrival, edits, or deletion never refresh snapshot bytes; deletion may
-independently revoke existing tool ownership.
+Freeze the supplied native snapshot, including its absence, at create. At
+publication, freeze the rendered relation and snapshot through the producer's
+existing delivery, checkpoint, ACK, and retry mechanisms, where present; this
+contract requires no new such mechanisms. For producers that accept outer edits,
+those edits replace the outer body while retaining the original native snapshot,
+including deferred edits before publication; absent optional edit fields do not
+clear it.
+
+Omitting a suffix to fit a report's byte budget does not require discarding the
+retained snapshot. Discord may show that same snapshot on a later smaller edit
+even when it did not fit the create report. Slack retains its stronger
+producer-specific rule: a suffix omitted at create stays omitted. After a suffix
+has appeared, a larger Slack edit may suppress it and a later smaller edit may
+show it again. Per-report suppression never changes published bytes or ACK
+evidence. Parent arrival, edits, or deletion never refresh snapshot bytes;
+deletion may independently revoke existing tool ownership.
 
 Zulip topics are conversation threads, not exact parent links. Quote-and-reply
 Markdown is editable sender content: preserve it byte-for-byte on creates and
