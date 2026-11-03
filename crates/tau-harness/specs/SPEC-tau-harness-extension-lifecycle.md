@@ -100,36 +100,15 @@ Tool examples are registration metadata, not prompt-surface definitions: rendere
 tool definitions omit them, and the harness surfaces at most one bounded relevant
 example after a failed call in an agent branch.
 
-Extensions that need to turn an internal wakeup into an agent prompt use
-`extension.internal_prompt_submit_request`. The harness accepts this narrow
-request only from authenticated configured extension entries. It crosses
-ordinary interception and commit before the harness validates the target loaded agent and
-submits internal model-classified text through the ordinary prompt queue. It
-has no user-message class and does not update user-interaction metadata, but
-still wakes queued agents. The durable transcript fact remains the
-harness-owned internal `agent.prompt_submitted` or `agent.prompt_steered`,
-stamped with the authenticated configured extension name. External user
-messages use immutable `message.delivered` facts; extensions may not forge
-prompt transcript facts.
-Pre-Ready requests are operational traffic ordered behind activation. See
-[SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
+Internal prompt requests, agent starts, terminal-output events, and custom emits
+are globally ordered operational traffic, not activation declarations. Their
+pre-Ready frames remain in the bounded queue until Ready and global activation;
+disconnect drops unreleased frames. For their post-activation contracts, see:
 
-`agent.start_request` is also globally ordered operational traffic rather than
-an activation declaration. Its complete raw Emit remains in the bounded
-deferred-message queue until Ready and global activation, then crosses ordinary
-interception and commit before any acceptance, rejection, rebinding, or side-agent
-work. See
-[SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
-
-Terminal-output events are the same globally ordered operational traffic rather
-than activation declarations. Pre-Ready bells and OSC requests remain deferred
-until activation, then enter ordinary publication in original arrival order. See
-[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
-
-Custom extension-owned emits are also globally ordered operational traffic.
-Their complete pre-Ready frames remain deferred until activation, and disconnect
-drops unreleased frames. See
-[SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
+- [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md)
+- [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md)
+- [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md)
+- [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md)
 
 Configured extensions of every configured kind request user-visible diagnostics
 with `extension_notice_request(message, level)`. The request is operational

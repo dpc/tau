@@ -4,66 +4,12 @@
 
 Compaction and recovery span core transcript cuts and boundaries, harness transaction/checkpoint ownership, provider execution, typed message activation, context accounting, cold restore, and CLI/model authority, so no component-local documentation can state the complete closed-prefix and recovery contract.
 
-The user explicitly approved the durable failure, retry, suppression, replay,
-and successor semantics added for ticket `9dvw`, satisfying
+Changes to this contract follow
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
-The user separately approved the bounded, durable rolling recovery semantics
-for ticket `b1yw`, including provider-rejection authority, per-pass progress,
-replay, and typed no-progress termination, satisfying the same gate.
-The user subsequently approved replacing successful rolling with ordinary
-outer-loop recurrence for `xs14`: all entrypoints retreat on canonical capacity
-rejection, complete on the first successful prefix summary, and rely on fresh
-ordinary usage or no-output rejection to authorize further compaction.
-The user explicitly accepted breaking historical journal compatibility for the
-replacement-boundary cut meaning and requested protocol minor revision `3.1`;
-there is no legacy cut discriminator or migration.
-The user also approved the native Codex semantic-progress retry and cost
-boundary for ticket `gtdq`, satisfying the same gate.
-The user approved bounded pre-output transient retries for local as well as
-native standalone compaction for ticket `71od`, and rearming exhausted transient
-failures on fresh ordinary inference terminals. Historical failures without
-typed no-output evidence remain conservative.
-The user approved bounded recovery for unusable local summaries in `l2h9`:
-clean reasoning-only or empty completed summaries may retreat to smaller
-prefixes, up to four such successors per episode, and a fresh ordinary terminal
-may rearm exhaustion. This includes the Tau-owned Codex local fallback, not
-native opaque compaction, cancellation, or stream errors after progress.
-The user separately approved letting that typed fresh-terminal automatic
-successor compact the current eligible history rather than only the failed cut;
-manual and post-semantic-output recovery retain their existing cut safeguards.
-The user separately approved protocol revision `4.0` for typed local-summary
-continuation requests and their durable successor trigger, including rejection
-of all `3.x` extensions and UI clients until compatible rebuilds or updates.
-The user separately approved the Chat Completions local-summary semantic-idle
-and absolute request deadlines for ticket `boo4`, satisfying the same gate.
-The user separately approved public Responses max-output incompletion,
-continuation, truncated-tool, accounting, retry, and standalone-compaction
-semantics for ticket `8ds8`, satisfying the same gate.
-The user separately approved synthetic local-summary provenance and exact
-reserved-envelope rejection semantics for ticket `8qm2`, satisfying the same
-gate.
-The user separately approved replacing ChatGPT-v2's adapter-local copied-prefix
-policy with exactly the one validated provider compaction item while leaving
-the harness-owned post-cut suffix unchanged. The user also approved reporting
-actual context reduction only from the transaction-owned first continuation's
-provider input usage. These exact semantics satisfy the same gate.
-The user approved ignore-and-log backend compatibility and durable-derived
-inference pauses after final compaction failure for `e7xd`, including manual
-failure and cancellation below threshold. This supersedes fresh-terminal
-rearming in current scheduling; previously valid journals remain replayable.
-The user approved transport-only delayed retry bursts for `w7lq`, retaining the
-same live provider job without new durable recovery authority. Interrupted work
-after restart and historical exhausted failures still require explicit recovery.
-For `w4bh` R10, the user approved removing the lifetime 64-attempt accounting
-ceiling: count only consecutive correlated retry reports, ignore duplicates,
-diagnose gaps without inventing attempts, and derive the terminal ordinal from
-that sequence. Cancellation and restart behavior remain unchanged. Exact physical
-counts require the complete valid report sequence; dropped reports leave
-accounting incomplete. Checked finite-counter arithmetic reserves the last
-ordinal for a terminal and prevents wrapping, reused identities, and dispatch
-of an unrepresentable successor.
-This approval satisfies the persistence/interface gate above and grants no new
-recovery authority.
+Standalone retry accounting, including correlated ordinals and finite-counter
+safety, follows
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md)
+and grants no new recovery authority.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
@@ -613,15 +559,6 @@ Agent-record writes must also satisfy the loader's 64 MiB encoded-record bound.
 Provider request lowering independently enforces its raw-image and data-URL
 aggregate limits.
 
-Proactive compaction requires a nonzero provider-reported ordinary-input token
-count at or above the selected exact `TokenCount` threshold. New durable starts
-carry the correlated provider prompt, reported count, threshold, and threshold
-source. Transcript bytes, image dimensions, and local summaries never authorize
-threshold scheduling. Exact serialized transcript-growth bytes remain
-independent telemetry. Threshold-fired standalone compaction persists exact
-evidence; explicit manual recovery without a queued request uses the `manual`
-trigger.
-
 Configured automatic-compaction boundaries may be an absolute used-context
 `threshold` or a remaining-context `reserve`, but never both in one policy.
 Reserve resolution uses the selected provider-qualified model declaration's
@@ -647,14 +584,17 @@ adapter-published context-limit-safe threshold. Other named policies augment it;
 only disabling `default` or legacy replace-all disabling removes that safety
 policy.
 
-Protected proactive scheduling uses only a nonzero provider-reported input count
-from an accepted ordinary request for the same selected model. The durable start
+Protected proactive scheduling requires a nonzero provider-reported input count
+from an accepted ordinary request for the same selected model, at or above the
+selected exact `TokenCount` threshold. The durable start
 records the exact provider prompt, count, threshold, and threshold source. Core
 reconstructs and validates that evidence on replay. Transcript growth,
 replacement output, serialized bytes, image dimensions, and local summaries
 never supply or extend token authority. Missing or zero provider usage therefore
 runs ordinary inference. A proactive success also runs inference; it never
 remeasures locally or independently schedules a second pass.
+Exact serialized transcript-growth bytes remain independent telemetry.
+Explicit manual recovery without a queued request uses the `manual` trigger.
 
 An adapter's optional `standalone_compaction_prefix_budget` is an exact
 `ByteCount` work/resource limit, not a token guard. When present, Tau selects the

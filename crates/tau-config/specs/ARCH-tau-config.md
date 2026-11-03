@@ -253,13 +253,7 @@ array replacement:
   identity edges terminate, while any other cycle (including an unused cycle)
   fails startup. The resulting `HarnessSettings` contains only canonical model
   IDs and does not retain alias maps.
-- `main_priority` is a role-only optional nonnegative integer; roles cannot
-  inherit it from agent/group defaults. After effective enabled-role merging,
-  the lowest number wins, including zero. An absent or null effective value
-  means no candidate.
-  Overlays replace values. A tied winning minimum is a configuration error;
-  the harness emits one startup warning for each tied nonwinning group.
-  Session identity and lazy demand follow
+- Role-only `main_priority` merging, selection, diagnostics, session identity, and lazy demand follow
   [SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md).
 - `inter_session.review_direct_messages` is a startup session policy, defaulting
   to true. False permits ordinary remote exact-worker delivery without main

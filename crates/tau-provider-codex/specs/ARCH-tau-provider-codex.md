@@ -341,9 +341,7 @@ identity from prompt provenance.
 
 WebSocket pool keys follow the same identity as request `prompt_cache_key` values
 so upstream thread/session headers and request bodies target the same cache bucket.
-Both modes are labeled, intentionally causing one cold cache/socket transition
-when upgrading from the former model-name-derived identity. Quota and retry
-cooldown identity remain account/provider based and do not include the mode.
+Quota and retry cooldown identity remain account/provider based and do not include the mode.
 
 Provider-visible replay fidelity, sidecar validation, and typed semantic authority are
 specified by
@@ -357,11 +355,7 @@ the harness owns all policy that maps them to tool alternatives.
 
 ## WebSocket turn cancellation
 
-The synchronous WebSocket turn loop receives ordered provider data through its
-one-event lane. Cooperative abort and local writer failure use a separate,
-coalesced constant-size control wake path that preempts queued provider data.
-Pool checkout and connection setup share the same typed abort source. Exact
-observable behavior is specified by
+For control-wake priority, typed abort ownership, pool cleanup, and deadlines, see
 [SPEC-tau-provider-codex-cancellation](SPEC-tau-provider-codex-cancellation.md).
 
 ## Tool definitions

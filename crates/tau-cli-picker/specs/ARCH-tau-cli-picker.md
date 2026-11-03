@@ -4,19 +4,13 @@
 
 ## Terminal ownership
 
-The crate exposes three entry points with explicit ownership contracts:
-
-- `pick` enables raw mode and renders to `stderr`.
-- `pick_with_writer` enables raw mode and renders to a caller-provided writer.
-- `pick_with_io` does not manage raw mode and is intended for tests or simple byte-stream hosts.
+The [README](../README.md#terminal-ownership) documents which entry points own raw mode and output.
 
 Do not call the raw-mode entry points from a parent TUI that already owns raw mode. Dropping the picker guard disables raw mode and would leave the parent in cooked mode. Embedded TUI use needs a separate API that accepts host-provided events, resize notifications, and size samples.
 
 ## Input model
 
 Terminal events and byte-stream input both funnel through a shared logical key map. Keep key behavior centralized so tests can protect parity between `crossterm` events and byte-stream fixtures.
-
-The picker recognizes Enter for selection; Up/Down, `k`/`j`, and BackTab/Tab for navigation; Escape, Ctrl-C, Ctrl-D/EOF, and `q` for cancellation. Space is intentionally ignored and reserved for possible future multi-select behavior.
 
 ## Rendering and resize behavior
 
@@ -27,15 +21,6 @@ Resize events are part of the picker event stream. A resize erases the current f
 ## Cleanup and errors
 
 Successful selection clears the picker frame and returns cleanup I/O errors. Cancellation and input errors preserve the original user-facing error; cleanup on those paths is best-effort. Raw-mode-owning entry points explicitly restore cooked mode before returning; raw-mode restoration failures are reported as I/O errors even if the picker otherwise selected, cancelled, or encountered an input/rendering error so callers are not told terminal ownership was safely released when it was not.
-
-## Testing strategy
-
-Keep key-map tests close to `key.rs`, where terminal events and byte-stream
-bytes are converted into logical picker actions. Picker-loop tests belong in
-`src/tests.rs` and should cover navigation, validation, cancellation, cleanup,
-resize redraws, and raw-mode restoration precedence through injected readers,
-writers, and guards. Rendering tests should assert pure `picker_lines` output so
-layout behavior stays deterministic without requiring a live terminal.
 
 ## Non-goals
 
