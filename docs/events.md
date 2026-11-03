@@ -39,6 +39,12 @@ extension-private authority. A malformed or unavailable target cannot veto
 persistence; deterministic projection failures remain visible as bounded
 diagnostics without exposing fact text or extension data.
 
+Delivered and edited facts may carry optional descriptive `reply_context`.
+Shared projection keeps the admitted body in `message` and renders supplied
+parent text as an adjacent `quoted_message` text part in the same `MessageItem`.
+The quote is not a second delivery, speaker, activation, or source of reply
+authority. Older facts without this field retain their existing projection.
+
 The tau bus mostly carries facts: components broadcast what happened, while the
 `ui.*` category carries user-intent requests from attached UIs to the harness.
 Every event has a dotted name `<category>.<call>` and a typed payload defined in

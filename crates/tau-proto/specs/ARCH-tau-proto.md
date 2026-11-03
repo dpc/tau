@@ -1,5 +1,13 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 16.4 carries optional descriptive native reply context on delivered and
+edited reports and facts. Shared projection produces adjacent `message` and
+`quoted_message` text parts in one `MessageItem`; sender, activation, and tool
+ownership remain those of the outer delivery. The unpublished proto/client source SDK 0.19.0
+includes the field. Older readers can ignore it; absent fields preserve prior
+projection. See
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
 Protocol 16.3 carries optional descriptive native mention evidence on delivered
 and edited reports and facts. The shared projection maps optional validated body spans
 to stable opaque participant identities without rewriting message text or changing

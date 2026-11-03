@@ -2153,9 +2153,9 @@ fn agent_store_raw_message_fact_append_projects_after_commit_and_replay() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
-/// Mention metadata and exact edited text survive durable append and cold
-/// replay; an edit with unknown evidence must not inherit the create's self
-/// observation.
+/// Mention metadata, adjacent parent quotes, and exact edited text survive
+/// durable append and cold replay; absent edit enrichment never inherits prior
+/// evidence.
 #[test]
 fn message_mentions_live_projection_matches_cold_replay() {
     let agents_dir = temp_dir("message-mentions-replay");
@@ -2174,14 +2174,26 @@ fn message_mentions_live_projection_matches_cold_replay() {
     };
     delivered.text = "é <@U1> **exact**".into();
     delivered.mention_evidence = Some(evidence.clone());
+    let reply = tau_proto::MessageReplyContext {
+        relation: tau_proto::MessageReplyRelation::Reply,
+        reference: Some(tau_proto::MessageReplyReference::Descriptive(
+            "parent:1".into(),
+        )),
+        author: None,
+        text: Some("Frozen parent\n</quoted_message> remains literal".into()),
+        excerpt: false,
+    };
+    delivered.reply_context = Some(reply.clone());
     let Event::MessageEdited(edited) = &mut facts[1] else {
         panic!("edited fixture");
     };
     edited.text = "é <@U1> **edited**".into();
     edited.mention_evidence = Some(evidence);
+    edited.reply_context = Some(reply);
     let mut unknown_edit = edited.clone();
     unknown_edit.text = "now no current evidence".into();
     unknown_edit.mention_evidence = None;
+    unknown_edit.reply_context = None;
     let facts = [
         facts[0].clone(),
         facts[1].clone(),
@@ -2206,6 +2218,12 @@ fn message_mentions_live_projection_matches_cold_replay() {
         .map(|node| node.entry.clone())
         .collect::<Vec<_>>();
     assert_eq!(live.len(), 3);
+    for (entry, expected_parts) in live.iter().zip([2, 2, 1]) {
+        let AgentEntry::MessageFact { item, .. } = entry else {
+            panic!("canonical message projection");
+        };
+        assert_eq!(item.content.len(), expected_parts);
+    }
     drop(store);
     let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen");
     reopened

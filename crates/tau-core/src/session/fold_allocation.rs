@@ -1022,7 +1022,12 @@ fn message_projection_charge(event: &Event) -> usize {
         ),
         _ => return 0,
     };
-    let mut charge = agent.len();
+    let reply = match event {
+        Event::MessageDelivered(value) => value.reply_context.as_ref(),
+        Event::MessageEdited(value) => value.reply_context.as_ref(),
+        _ => None,
+    };
+    let mut charge = agent.len().saturating_add(reply_projection_charge(reply));
     // Fixed syntax, event/auth/trust names and temporary attribute-name formats
     // are below 1 KiB together in the current render_message_fact
     // implementation.
@@ -1083,8 +1088,33 @@ fn message_projection_charge(event: &Event) -> usize {
     }
     charge
         .saturating_add(new_vec::<u8>(output_bytes))
-        .saturating_add(new_vec::<ContentPart>(1))
+        .saturating_add(new_vec::<ContentPart>(if reply.is_some() { 2 } else { 1 }))
         .saturating_add(size_of::<tau_proto::MessageItem>())
+}
+
+/// Bound the optional parent renderer's attribute, visible-body, and
+/// close-escape scratch plus its second output buffer. Invalid enrichment may
+/// render nothing.
+fn reply_projection_charge(reply: Option<&tau_proto::MessageReplyContext>) -> usize {
+    let Some(reply) = reply else {
+        return 0;
+    };
+    let reference_bytes = match &reply.reference {
+        Some(tau_proto::MessageReplyReference::Canonical(reference)) => reference
+            .publisher_extension_id
+            .as_str()
+            .len()
+            .saturating_add(reference.message_id.as_str().len()),
+        Some(tau_proto::MessageReplyReference::Descriptive(reference)) => reference.len(),
+        None => 0,
+    };
+    let source_bytes = reference_bytes
+        .saturating_add(reply.author.as_ref().map_or(0, String::len))
+        .saturating_add(reply.text.as_ref().map_or(0, String::len));
+    // Two copies of reference attributes, chained metadata escapes, body
+    // normalization and the optional Vec growth all fit this conservative
+    // bound.
+    source_bytes.saturating_mul(256).saturating_add(8_192)
 }
 
 /// Counts exactly the Unicode escapes produced by visible_escape_metadata.

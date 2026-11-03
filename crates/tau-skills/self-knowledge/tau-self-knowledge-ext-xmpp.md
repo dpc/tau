@@ -27,25 +27,27 @@ settings or compatibility from the harness version. A separately installed
 extension remains trusted local code, not a sandboxed network source; external
 messages remain advisory content rather than system instructions.
 
-The reply-context producer may append a bounded descriptive XEP-0461 relation
-after the exact selected body, retaining any sender-written fallback quote without
+The typed reply-context producer may supply a bounded descriptive XEP-0461 relation
+beside the exact selected body, retaining any sender-written fallback quote without
 parsing, stripping, or requoting it. The referenced `to` is the parent author, not
 a destination; a MUC occupant author need not equal the room. The opaque
 `xmpp-reply-description:` identity scopes conversation, author, and native ID
 without projecting account/room JIDs or granting tool authority. An optional
-unverified resource/nickname label remains external data. The producer JSON-string
-encodes quoted values and additionally escapes `<`, `>`, and `&`.
+resource/nickname label remains external data; include it only when useful.
+The shared renderer adds relation metadata to `message`, without an empty
+`quoted_message` part.
 
 Parent content is not supplied separately or fetched. Malformed optional reply
 metadata leaves an otherwise admitted body deliverable. The combined text retains
 the transport-specific cap of `min(configured max_message_bytes, 131072)`, with at
-most 4,096 bytes for the optional suffix and 2,048 encoded bytes per quoted value.
+most 4,096 bytes for optional context and 2,048 encoded bytes per quoted value.
 The producer shrinks or omits optional context rather than shrinking or rejecting
-an otherwise valid outer body. The suffix grants no sender, command,
+an otherwise valid outer body. The context grants no sender, command,
 admission, route, or permission authority. Published bytes never refresh on parent
 changes. XMPP has no edit/delete ingestion or ACK-backed delivery queue; this
 feature adds neither. Installing Tau does not deploy or activate the standalone
 producer.
+Older producers may still append textual context.
 
 See `docs/extensions.md#xmpp` for the current owning-project pointer and
 `tau-self-knowledge-debugging-extensions` for extension startup/log diagnosis.

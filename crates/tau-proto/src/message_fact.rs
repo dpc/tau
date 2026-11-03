@@ -65,8 +65,8 @@ impl MessageProjectionFailure {
 /// Successful generic model projection of one committed message fact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MessageFactProjection {
-    /// Ordinary context message carrying the escaped external `message`
-    /// boundary.
+    /// One ordinary context message carrying the external message and optional
+    /// adjacent parent-quote text parts.
     pub item: MessageItem,
     /// Whether a live commit requests one agent activation.
     pub activates_model: bool,
@@ -241,6 +241,10 @@ pub struct MessageDelivered<Publisher = MessagePublisherId> {
     /// Optional descriptive native mentions for this exact text version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mention_evidence: Option<crate::MessageMentionEvidence>,
+    /// Frozen descriptive native parent context, independent of outer
+    /// authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_context: Option<crate::MessageReplyContext>,
     /// Optional descriptive conversation provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<MessageConversation>,
@@ -267,6 +271,7 @@ impl<Publisher> MessageDelivered<Publisher> {
             sender,
             presentation: None,
             mention_evidence: None,
+            reply_context: None,
             conversation,
             text: text.into(),
             extension_data: MessageExtensionData::default(),
@@ -285,6 +290,7 @@ impl<Publisher> MessageDelivered<Publisher> {
             sender: self.sender,
             presentation: self.presentation,
             mention_evidence: self.mention_evidence,
+            reply_context: self.reply_context,
             conversation: self.conversation,
             text: self.text,
             extension_data: self.extension_data,
@@ -319,6 +325,10 @@ pub struct MessageEdited<Publisher = MessagePublisherId> {
     /// Optional current-version native mentions, never inherited from the base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mention_evidence: Option<crate::MessageMentionEvidence>,
+    /// This report's explicit frozen parent snapshot; never inherited by
+    /// projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_context: Option<crate::MessageReplyContext>,
     /// Optional descriptive conversation provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<MessageConversation>,
@@ -344,6 +354,7 @@ impl<Publisher> MessageEdited<Publisher> {
             target,
             actor,
             mention_evidence: None,
+            reply_context: None,
             conversation,
             text: text.into(),
             extension_data: MessageExtensionData::default(),
@@ -361,6 +372,7 @@ impl<Publisher> MessageEdited<Publisher> {
             target: self.target,
             actor: self.actor,
             mention_evidence: self.mention_evidence,
+            reply_context: self.reply_context,
             conversation: self.conversation,
             text: self.text,
             extension_data: self.extension_data,
@@ -652,12 +664,22 @@ pub fn project_message_fact(
         }
     }
 
+    let reply = view.reply_context();
+    let reply_attributes = reply.map(render_reply_attributes);
+    let quote = reply
+        .and_then(render_quoted_message)
+        .filter(|quote| quote.len() + reply_attributes.as_ref().map_or(0, String::len) <= 4_096);
+    let mut content = Vec::with_capacity(if reply.is_some() { 2 } else { 1 });
+    content.push(ContentPart::Text {
+        text: render_message_fact(&view, reply_attributes.as_deref()),
+    });
+    if let Some(quote) = quote {
+        content.push(ContentPart::Text { text: quote });
+    }
     Some(Ok(MessageFactProjection {
         item: MessageItem {
             role: view.role(),
-            content: vec![ContentPart::Text {
-                text: render_message_fact(&view),
-            }],
+            content,
             phase: None,
             responses_raw_json: None,
         },
@@ -797,6 +819,16 @@ impl<'a> MessageFactView<'a> {
         }
     }
 
+    /// Borrow only this fact's valid optional native parent snapshot.
+    fn reply_context(&self) -> Option<&crate::MessageReplyContext> {
+        let context = match self {
+            Self::Delivered(fact) => fact.reply_context.as_ref(),
+            Self::Edited(fact) => fact.reply_context.as_ref(),
+            _ => None,
+        }?;
+        context.valid().then_some(context)
+    }
+
     /// Derive the provider context role from the concrete fact type.
     fn role(&self) -> ContextRole {
         match self {
@@ -855,7 +887,7 @@ pub(crate) fn valid_display(value: &str) -> bool {
 }
 
 /// Render one validated fact with centralized visible Unicode and XML escaping.
-fn render_message_fact(view: &MessageFactView<'_>) -> String {
+fn render_message_fact(view: &MessageFactView<'_>, reply_attributes: Option<&str>) -> String {
     // Keep this common transport-neutral projection aligned with
     // SPEC-external-message-reports-and-facts.
     let mut output = String::from("<message");
@@ -916,6 +948,9 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
     if let Some(metadata) = evidence.and_then(|evidence| evidence.projection(view.text()?)) {
         push_attribute(&mut output, "mentions", &metadata);
     }
+    if let Some(attributes) = reply_attributes {
+        output.push_str(attributes);
+    }
     match view.text() {
         Some(text) => {
             if !matches!(view, MessageFactView::Sent(_)) {
@@ -929,6 +964,80 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
         None => output.push_str("/>"),
     }
     output
+}
+
+/// Render relation metadata independently of whether optional parent text fits.
+fn render_reply_attributes(reply: &crate::MessageReplyContext) -> String {
+    let mut output = String::new();
+    push_attribute(
+        &mut output,
+        "reply_relation",
+        match reply.relation {
+            crate::MessageReplyRelation::Reply => "reply",
+            crate::MessageReplyRelation::ThreadRoot => "thread_root",
+        },
+    );
+    push_reply_reference(
+        &mut output,
+        reply.reference.as_ref(),
+        "reply_to_publisher",
+        "reply_to",
+    );
+    output
+}
+
+/// Render a supplied parent body as a second text part, not a delivery or
+/// speaker.
+fn render_quoted_message(reply: &crate::MessageReplyContext) -> Option<String> {
+    let text = reply.text.as_deref().filter(|text| !text.is_empty())?;
+    let visible = visible_escape_message_body(text);
+    let envelope = crate::QUOTED_MESSAGE_PAYLOAD_ENVELOPE;
+    let body = envelope.escape_body(&visible);
+    if body.len() > 2_048 {
+        return None;
+    }
+    let mut output = String::from("<quoted_message");
+    push_reply_reference(
+        &mut output,
+        reply.reference.as_ref(),
+        "message_ref_publisher",
+        "message_ref",
+    );
+    if let Some(author) = &reply.author {
+        push_attribute(&mut output, "author", author);
+    }
+    if reply.excerpt {
+        push_attribute(&mut output, "excerpt", "true");
+    }
+    push_attribute(&mut output, "content_trust", "external");
+    output.push('>');
+    output.push_str(&body);
+    output.push_str(envelope.exact_close);
+    (output.len() <= 4_096).then_some(output)
+}
+
+/// Keep canonical publisher identity separate from descriptive native
+/// references.
+fn push_reply_reference(
+    output: &mut String,
+    reference: Option<&crate::MessageReplyReference>,
+    publisher_attribute: &str,
+    reference_attribute: &str,
+) {
+    match reference {
+        Some(crate::MessageReplyReference::Canonical(reference)) => {
+            push_attribute(
+                output,
+                publisher_attribute,
+                reference.publisher_extension_id.as_str(),
+            );
+            push_attribute(output, reference_attribute, reference.message_id.as_str());
+        }
+        Some(crate::MessageReplyReference::Descriptive(reference)) => {
+            push_attribute(output, reference_attribute, reference);
+        }
+        None => {}
+    }
 }
 
 /// Preserve body line feeds while exposing other structural Unicode as metadata

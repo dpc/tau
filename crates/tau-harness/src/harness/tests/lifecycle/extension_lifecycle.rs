@@ -3875,6 +3875,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
     )
     .expect("subscribe");
     let report = tau_proto::MessageDelivered {
+        reply_context: None,
         mention_evidence: Some(tau_proto::MessageMentionEvidence {
             mentions_self: Some(false),
             people: Vec::new(),
@@ -4016,6 +4017,7 @@ fn extension_message_report_requires_exact_authenticated_publisher_claim() {
         "unicode-☃",
     ] {
         let report = tau_proto::MessageDelivered {
+            reply_context: None,
             mention_evidence: None,
             presentation: None,
             publisher_extension_id: tau_proto::RawMessagePublisherId::new(claim),

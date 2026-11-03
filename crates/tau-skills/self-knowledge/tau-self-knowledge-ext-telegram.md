@@ -29,21 +29,24 @@ routes are restored only for agents still loaded after replay completes.
 `telegram_send` can use only the configured or linked chat; the model cannot
 choose a native destination.
 
-The reply-context producer may append bounded same-event, same-chat/same-thread
-`reply_to_message` context after the unchanged normalized outer request in both
-local-poll and gateway-client delivery. It uses only supplied parent text/caption
-and unverified labels. It JSON-string encodes quoted values and additionally
-escapes `<`, `>`, and `&`. `quote.text` is a sender-selected,
-unverified excerpt, not a full authenticated parent. It excludes `external_reply`,
-parent attachments, recursion, and fetching. Missing content is unavailable, not
-proof of deletion. Native parent identities are opaque descriptive data, not
+The typed reply-context producer may supply bounded `reply_to_message` context
+from the same event, chat, and thread beside the unchanged normalized outer
+request in both local-poll and gateway-client delivery. It uses only supplied
+parent text/caption and available author labels. Shared rendering uses adjacent
+`message` and `quoted_message` text parts. Older producers may still append
+textual context. `quote.text` is a sender-selected, unverified excerpt, not a full
+authenticated parent. The producer excludes `external_reply`, parent attachments,
+recursion, and fetching. Missing content is unavailable, not proof of deletion.
+Native parent identities are opaque descriptive data, not
 fabricated canonical references or `telegram_send` capabilities. Only the outer
 message drives admission, `/to`, route selection, and mentions.
 
 The producer freezes context with its delivery/checkpoint text through retries and
 ACKs; parent changes never refresh it. The producer shrinks or omits optional
-context to preserve the original outer body within delivery limits. This adds no
-native per-message send routing, new SDK requirement, deployment, or activation.
+context to preserve the original outer body within delivery limits. Typed context
+requires rebuilding the producer against the unpublished 0.19.0 source SDK; the
+legacy 0.16 producer remains unchanged. This adds no native per-message send
+routing and does not deploy or activate the producer.
 
 Assign a distinct generic `tool_prefix` to each configured bot instance.
 Tau preserves the `std-telegram` identity, tool role, disabled default,

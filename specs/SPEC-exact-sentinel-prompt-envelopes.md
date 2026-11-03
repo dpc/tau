@@ -35,6 +35,7 @@ model-facing payload families:
 | `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
 | `tau_discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher`, optional `sender_trust`, and optional descriptive JSON `mentions` before `content_trust` |
+| `quoted_message` | Generic user-role text attached to a canonical delivered/edited message | Optional descriptive reference, author, and excerpt metadata; `content_trust="external"` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Canonical background-preview attributes |
 
@@ -101,7 +102,12 @@ Ordinary `tool_payload` remains in the typed result channel with an exact
 the default presentation. Compaction retains both typed discriminators.
 
 Canonical message facts retain raw typed data and render through the shared
-`message` family. Provider adapters preserve assembled envelope bytes and never
+`message` family. Optional typed native reply context adds relation metadata to
+that part and, when text is available, one adjacent `quoted_message` text part in
+the same `MessageItem`. The quote adds descriptive context, not a second sender
+event or activation. Each part follows the one-outer-family rule; payload-local
+tags cannot produce either part.
+Provider adapters preserve assembled envelope bytes and never
 synthesize, remove, or reinterpret a family. Historical raw/default projections,
 provider replacement windows, and payload-local wrappers retain their existing
 replay behavior until a separately approved migration.

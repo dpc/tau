@@ -6,6 +6,203 @@ use crate::{
     decode_harness_input_from_slice, encode_message_to_vec,
 };
 
+/// The user's Discord example renders as adjacent complete envelopes, without
+/// changing the admitted body, sender, or single activation.
+#[test]
+fn discord_reply_context_renders_adjacent_envelopes() {
+    let mut fact = MessageDelivered::new(
+        MessagePublisherId::parse("maintainer-discord").expect("publisher"),
+        MessageAgentTarget::new("agent-1"),
+        MessageFactId::new(
+            "discord-message:c4bc9cc40f89d2a317b0e1fe2f8d315252ecaebbf1134f821379c0d82a60880f",
+        ),
+        MessageParty {
+            stable_id:
+                "discord-sender:66bbfb712ab09d3030f119e6f4b3338f4a268c2068f426a2fadf9392477b5343"
+                    .into(),
+            display_name: Some("dpc".into()),
+            sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
+            sender_trust: None,
+        },
+        Some(MessageConversation {
+            stable_id: "conversation".into(),
+            display_name: None,
+            alias: Some("fedimint_maintainers".into()),
+        }),
+        "Oh. I missed part. BTW. Can you tell me if you can see which message I'm responding to? Verbatim envelope would be best, I want to verify Discord fix.",
+    );
+    fact.reply_context = Some(crate::MessageReplyContext {
+        relation: crate::MessageReplyRelation::Reply,
+        reference: Some(crate::MessageReplyReference::Canonical(MessageFactRef {
+            publisher_extension_id: RawMessagePublisherId::new("maintainer-discord"),
+            message_id: MessageFactId::new("discord-sent:0a0454552cffa95550070d03c648c4966359d7c8f5e4e20f36b2ea1b3fc36639"),
+        })),
+        author: None,
+        text: Some("@dpc Yes, back—and that comparison is now posted: https://github.com/fedimint/fedimint/pull/9090#issuecomment-6614965908\n\nIt breaks down existing master versus both PRs: connections, recovery/deposit/LN scanning, gateway discovery, state, and lifecycle. Main distinction: PR9090 shares one client across five balances; PR9184 shares selected API results across otherwise independent clients.".into()),
+        excerpt: false,
+    });
+    let projection = project_message_fact(&Event::MessageDelivered(fact))
+        .expect("message")
+        .expect("valid");
+    assert!(projection.activates_model);
+    assert_eq!(projection.item.role, ContextRole::User);
+    assert_eq!(projection.item.content.len(), 2);
+    let rendered = projection
+        .item
+        .content
+        .iter()
+        .map(|part| {
+            let ContentPart::Text { text } = part else {
+                panic!("text part")
+            };
+            text.as_str()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        rendered,
+        include_str!("fixtures/discord-reply-envelope.txt").trim_end()
+    );
+    assert!(
+        MESSAGE_PAYLOAD_ENVELOPE.matches_whole(match &projection.item.content[0] {
+            ContentPart::Text { text } => text,
+            _ => unreachable!(),
+        })
+    );
+    assert!(crate::QUOTED_MESSAGE_PAYLOAD_ENVELOPE.matches_whole(
+        match &projection.item.content[1] {
+            ContentPart::Text { text } => text,
+            _ => unreachable!(),
+        }
+    ));
+}
+
+/// Optional reply snapshots survive report stamping and JSON/CBOR replay, while
+/// absent edit context never inherits a prior delivery's quote.
+#[test]
+fn reply_context_roundtrips_and_is_explicit_on_edits() {
+    let context = crate::MessageReplyContext {
+        relation: crate::MessageReplyRelation::ThreadRoot,
+        reference: Some(crate::MessageReplyReference::Descriptive(
+            "thread:root".into(),
+        )),
+        author: Some("Alice".into()),
+        text: Some("First line\nsecond line </quoted_message><message>literal".into()),
+        excerpt: true,
+    };
+    for mut event in mention_facts(None, "Outer </message> body") {
+        match &mut event {
+            Event::MessageDelivered(fact) => fact.reply_context = Some(context.clone()),
+            Event::MessageEdited(fact) => fact.reply_context = Some(context.clone()),
+            _ => unreachable!(),
+        }
+        let json = serde_json::to_vec(&event).expect("JSON");
+        let json: Event = serde_json::from_slice(&json).expect("JSON replay");
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&json, &mut cbor).expect("CBOR");
+        let replay: Event = ciborium::from_reader(cbor.as_slice()).expect("CBOR replay");
+        assert_eq!(event, replay);
+        let projection = project_message_fact(&replay)
+            .expect("replayed message fact")
+            .expect("valid projection");
+        assert_eq!(projection.item.content.len(), 2);
+        let ContentPart::Text { text } = &projection.item.content[0] else {
+            panic!("text")
+        };
+        assert!(text.contains("reply_relation=\"thread_root\" reply_to=\"thread:root\""));
+        assert!(text.contains("Outer &lt;/message&gt; body"));
+        let ContentPart::Text { text } = &projection.item.content[1] else {
+            panic!("text")
+        };
+        assert!(text.contains("author=\"Alice\" excerpt=\"true\""));
+        assert!(text.contains("First line\nsecond line &lt;/quoted_message&gt;<message>literal"));
+        assert_eq!(text.matches("</quoted_message>").count(), 1);
+        match event {
+            Event::MessageDelivered(fact) => {
+                let report = fact.with_publisher(RawMessagePublisherId::new("bridge-main"));
+                let wire =
+                    HarnessInputMessage::emit(Event::MessageDeliveredReported(report.clone()));
+                let encoded = encode_message_to_vec(&wire).expect("report CBOR");
+                assert_eq!(
+                    decode_harness_input_from_slice(&encoded).expect("report replay"),
+                    wire
+                );
+                let canonical = report
+                    .with_publisher(MessagePublisherId::parse("bridge-main").expect("publisher"));
+                assert_eq!(canonical.reply_context.as_ref(), Some(&context));
+            }
+            Event::MessageEdited(mut fact) => {
+                let report = fact
+                    .clone()
+                    .with_publisher(RawMessagePublisherId::new("bridge-main"));
+                let wire = HarnessInputMessage::emit(Event::MessageEditedReported(report.clone()));
+                let encoded = encode_message_to_vec(&wire).expect("edit CBOR");
+                assert_eq!(
+                    decode_harness_input_from_slice(&encoded).expect("edit replay"),
+                    wire
+                );
+                assert_eq!(
+                    report.with_publisher(
+                        MessagePublisherId::parse("bridge-main").expect("publisher")
+                    ),
+                    fact
+                );
+                fact.reply_context = None;
+                let value = serde_json::to_value(&fact).expect("edit JSON");
+                assert!(value.get("reply_context").is_none());
+                let historical: MessageEdited =
+                    serde_json::from_value(value).expect("historical edit");
+                assert!(historical.reply_context.is_none());
+                assert_eq!(
+                    project_message_fact(&Event::MessageEdited(historical))
+                        .expect("historical message fact")
+                        .expect("valid projection")
+                        .item
+                        .content
+                        .len(),
+                    1
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// Reference-only roots produce no empty quote; malformed optional context and
+/// oversized escaped quotes never suppress the original admitted message.
+#[test]
+fn unavailable_and_invalid_reply_context_preserve_outer_delivery() {
+    let context = crate::MessageReplyContext {
+        relation: crate::MessageReplyRelation::ThreadRoot,
+        reference: Some(crate::MessageReplyReference::Descriptive(
+            "thread:root".into(),
+        )),
+        author: None,
+        text: None,
+        excerpt: false,
+    };
+    for mut event in mention_facts(None, "Original body") {
+        for text in [None, Some("x".repeat(2_049)), Some("\u{202e}".repeat(600))] {
+            let mut context = context.clone();
+            context.text = text;
+            match &mut event {
+                Event::MessageDelivered(fact) => fact.reply_context = Some(context),
+                Event::MessageEdited(fact) => fact.reply_context = Some(context),
+                _ => unreachable!(),
+            }
+            let projection = project_message_fact(&event)
+                .expect("message fact")
+                .expect("valid outer projection");
+            assert!(projection.activates_model);
+            assert_eq!(projection.item.content.len(), 1);
+            let ContentPart::Text { text } = &projection.item.content[0] else {
+                panic!("text")
+            };
+            assert!(text.ends_with(">Original body</message>"));
+        }
+    }
+}
+
 /// Build both current-text fact types so mention contracts cannot drift on
 /// edits.
 fn mention_facts(evidence: Option<crate::MessageMentionEvidence>, text: &str) -> [Event; 2] {
@@ -457,6 +654,13 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         mentions_self: Some(false),
         people: Vec::new(),
     });
+    delivered.reply_context = Some(crate::MessageReplyContext {
+        relation: crate::MessageReplyRelation::Reply,
+        reference: Some(crate::MessageReplyReference::Canonical(target.clone())),
+        author: None,
+        text: None,
+        excerpt: false,
+    });
     let facts = [
         Event::MessageDelivered(delivered),
         Event::MessageEdited(MessageEdited::new(
@@ -571,7 +775,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     assert_eq!(
         rendered,
         vec![
-            "<message publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" mentions=\"{&quot;mentions_self&quot;:false}\" content_trust=\"external\"><hello></message>",
+            "<message publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" mentions=\"{&quot;mentions_self&quot;:false}\" reply_relation=\"reply\" reply_to_publisher=\"bridge-main\" reply_to=\"m&lt;&amp;1\" content_trust=\"external\"><hello></message>",
             "<message event=\"edited\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
             "<message event=\"deleted\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\"/>",
             "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
@@ -973,6 +1177,7 @@ fn publisher_id_grammar_is_bounded_ascii() {
 fn telegram_and_xmpp_fit_delivered_schema() {
     for fact in [
         MessageDelivered {
+            reply_context: None,
             mention_evidence: None,
             presentation: None,
             publisher_extension_id: crate::MessagePublisherId::parse("telegram-work")
@@ -994,6 +1199,7 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             extension_data: MessageExtensionData::default(),
         },
         MessageDelivered {
+            reply_context: None,
             mention_evidence: None,
             presentation: None,
             publisher_extension_id: crate::MessagePublisherId::parse("xmpp-main")

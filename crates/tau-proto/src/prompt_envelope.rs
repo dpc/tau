@@ -180,11 +180,31 @@ pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloa
         "conversation",
         "reaction",
         "mentions",
+        "reply_relation",
+        "reply_to_publisher",
+        "reply_to",
         "content_trust",
     ],
     exact_close: "</message>",
     visible_close: "&lt;/message&gt;",
     carrier: PayloadEnvelopeCarrier::GenericUserOrAssistantText,
+};
+
+/// Registered parent quote attached to the preceding canonical message text
+/// part.
+pub const QUOTED_MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
+    name: "quoted_message",
+    opening: PayloadEnvelopeOpening::Attributed("<quoted_message "),
+    ordered_attributes: &[
+        "message_ref_publisher",
+        "message_ref",
+        "author",
+        "excerpt",
+        "content_trust",
+    ],
+    exact_close: "</quoted_message>",
+    visible_close: "&lt;/quoted_message&gt;",
+    carrier: PayloadEnvelopeCarrier::GenericUserText,
 };
 
 /// Registered attributed envelope for typed web-search tool results.
@@ -242,6 +262,7 @@ pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelo
         TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE,
         TAU_INTERNAL_PAYLOAD_ENVELOPE,
         MESSAGE_PAYLOAD_ENVELOPE,
+        QUOTED_MESSAGE_PAYLOAD_ENVELOPE,
         TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
         TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
         TAU_DISCOVERY_PAYLOAD_ENVELOPE,

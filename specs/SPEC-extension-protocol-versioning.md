@@ -8,6 +8,15 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.4 adds optional descriptive native reply context to delivered and
+edited reports and facts. Shared projection renders supplied parent text in a
+`quoted_message` envelope adjacent to `message` within one `MessageItem`, not a
+second delivery.
+Older readers may ignore this field; absent fields preserve prior projection.
+Delivery, activation, authority, durability, and journal framing are unchanged.
+The still-unpublished proto/client source SDK 0.19.0 includes this field;
+publication and producer adoption remain separate.
+
 Protocol 16.3 adds optional descriptive native mention evidence to delivered and
 edited message facts and reports. Missing evidence remains unknown; older readers may
 ignore it. Delivery, activation, authority, durability, and journal framing remain

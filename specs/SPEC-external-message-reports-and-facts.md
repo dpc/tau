@@ -2,10 +2,11 @@
 
 ## Status
 
-The native reply/thread-context exception below defines the shared contract for
-adoption by the separately maintained Discord, Telegram, Slack, and XMPP bridges.
-This amendment does not establish which bridge versions are installed or active;
-updating Tau alone does not deploy their producer changes.
+The typed native reply/thread-context presentation below defines the shared
+contract for adoption by the separately maintained Discord, Telegram, Slack, and
+XMPP bridges. Older producer versions may still append a textual suffix; stored
+suffixes are not extracted or migrated.
+Updating Tau alone does not deploy or activate those producer changes.
 
 ## Record justification
 
@@ -506,13 +507,17 @@ bot mention. These mappings create no transport-specific wire fields.
 
 ### Native reply and thread context
 
-Discord, Telegram, Slack, and XMPP may append bounded descriptive native
-reply/thread context to the admitted outer message's normalized body. This is
-ordinary external-content text inside the existing shared `message` envelope, not
-a new envelope, schema field, fact, speaker, or wake. Only one-hop metadata
-supplied with that same admitted native event in the same conversation scope is
-eligible. No history lookup, network fetch, recursive parent traversal, parent
-attachment import, or forwarding exception follows from this permission.
+Discord, Telegram, Slack, and XMPP may supply bounded descriptive native
+`reply_context` on delivered and edited reports. Keep the admitted normalized body
+unchanged. Shared projection renders one `MessageItem`: a `message` text part
+with the native relation and available reference, followed by an adjacent
+`quoted_message` text part when supplied parent text exists. Each text part uses
+its registered envelope and exact-close handling. The quote is attached context,
+not a second fact, admitted speaker, or activation.
+
+Use only one-hop metadata supplied with the same admitted native event in the same
+conversation scope. Do not look up history, fetch or traverse parents, or import
+parent attachments. This permission adds no forwarding exception.
 
 The relation must describe the transport's actual evidence:
 
@@ -524,8 +529,8 @@ The relation must describe the transport's actual evidence:
   authenticated full parent. Cross-scope `external_reply` is excluded.
 - Slack children with `thread_ts != ts` may describe the thread root, not an
   immediate reply parent or preceding message. A root has no self-relation. The
-  child event does not supply root text; do not invent or retrieve it. The suffix
-  follows any existing permitted attachment quotes.
+  child event does not supply root text; do not invent or retrieve it. Existing
+  permitted attachment quotes remain part of the normalized body.
 - XMPP may describe the XEP-0461 relation while preserving the original body,
   including any sender-written fallback quote. The referenced `to` identifies
   the parent author, not a destination. Scope the descriptive identity by the
@@ -545,36 +550,43 @@ independently authoritative instructions. Explicit outer instructions may ask th
 agent to use them. The outer message alone supplies sender/authentication,
 admission, command, mention-trigger, routing, and permission evidence. Quoted
 authors, including bots and non-allowlisted parties, do not become admitted
-speakers. JSON-string encode quoted values and additionally escape `<`, `>`, and
-`&`. Label unverified attribution and excerpts as such. These labels are
-presentation, not independent provenance boundaries; the shared message renderer
-remains governing.
+speakers. The shared renderer owns both adjacent envelopes; producers must not
+simulate them with close/open tags inside message text.
+
+Keep the quote readable, with literal newlines rather than JSON-string prose.
+Use the relation attributes to distinguish a reply from a thread root, and the
+excerpt attribute to distinguish sender-selected text from a full parent quote.
+Include an author only when a useful identity is available; do not invent or fetch
+display names. Omit per-field trust disclaimers, routine omission notices, and
+extra end markers. A reference-only relation needs no empty quote.
+Omit invalid optional enrichment without suppressing the outer message.
 
 The shared default convention allows 2,048 encoded bytes per quoted value, 4,096
-bytes for the entire suffix, and 65,536 bytes for the resulting text. These defaults
+bytes for optional context, and 65,536 bytes for body plus context. These defaults
 do not lower the generic fact bound or impose a new limit on an unchanged outer
 body. Apply each transport, configured text, and delivery-frame limit only at the
 layer it governs. An outer-admission limit does not imply a combined-report limit.
 Discord's configured `max_message_bytes` bounds outer admission; its existing
 combined-report cap is 65,536 bytes. XMPP retains its transport-specific combined
 cap of `min(configured max_message_bytes, 131072)`, with at most 4,096 bytes for
-the optional suffix and 2,048 encoded bytes per quoted value. Count escaping,
+the optional context and 2,048 encoded bytes per quoted value. Count escaping,
 labels, and separator overhead; truncate optional content at UTF-8 boundaries.
 Shrink or omit context instead of truncating or rejecting a previously valid
 outer body.
 
 Freeze the supplied native snapshot, including its absence, at create. At
-publication, freeze the rendered relation and snapshot through the producer's
+publication, freeze the reported relation and snapshot through the producer's
 existing delivery, checkpoint, ACK, and retry mechanisms, where present; this
 contract requires no new such mechanisms. For producers that accept outer edits,
 those edits replace the outer body while retaining the original native snapshot,
 including deferred edits before publication; absent optional edit fields do not
-clear it.
+clear the producer's retained snapshot. Each edited report explicitly carries its
+chosen context; shared projection never inherits context from a prior fact.
 
-Omitting a suffix to fit a report's byte budget does not require discarding the
+Omitting context to fit a report's byte budget does not require discarding the
 retained snapshot. Discord may show that same snapshot on a later smaller edit
 even when it did not fit the create report. Slack retains its stronger
-producer-specific rule: a suffix omitted at create stays omitted. After a suffix
+producer-specific rule: context omitted at create stays omitted. After context
 has appeared, a larger Slack edit may suppress it and a later smaller edit may
 show it again. Per-report suppression never changes published bytes or ACK
 evidence. Parent arrival, edits, or deletion never refresh snapshot bytes;

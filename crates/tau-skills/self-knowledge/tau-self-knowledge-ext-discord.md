@@ -80,23 +80,25 @@ receipt.
 
 ## Native reply context
 
-The reply-context producer preserves the normalized outer request and may append
-a bounded suffix for an ordinary same-conversation native reply. It quotes only
-the matching parent body supplied with that event, or marks content
-unavailable. It never fetches a parent, follows nested replies, or imports parent
-attachments. Quoted authors use opaque sender identities, not authenticated
-current-speaker claims.
+The typed reply-context producer preserves the normalized outer request and may
+supply bounded context for an ordinary same-conversation native reply. It quotes
+only the matching parent body supplied with that event. Missing content does not
+prove deletion. Shared rendering places the request and quote in adjacent
+`message` and `quoted_message` text parts, with an available author identity when
+useful. The producer never fetches a parent, follows nested replies, or imports
+parent attachments. Quoted authors are not authenticated current speakers.
 
 A parent reference is canonical only after an exact existing same-agent,
 same-conversation ownership match confirmed on the canonical downpath. Otherwise
 `discord-reply-parent:` identifies opaque descriptive data, not a tool capability.
-The producer JSON-string encodes quoted text and labels and additionally escapes
-`<`, `>`, and `&`. They remain untrusted data, not independently authoritative;
+Quoted text and labels remain external data under the shared message renderer;
 only the admitted outer message drives commands, mentions, routing, and admission.
 The create snapshot stays fixed through delivery, ACKs, retries, and outer edits;
 parent changes never refresh it. The producer shrinks or omits optional context
 to preserve the unchanged outer body within its limits. Installing this skill
 does not deploy or activate the separately maintained producer.
+Older producers may still append textual context; the renderer does not parse
+those suffixes into typed quotes.
 
 ## Receiver designation
 
