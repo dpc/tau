@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 16.3 carries optional descriptive native mention evidence on delivered
+and edited reports and facts. The shared projection maps optional validated body spans
+to stable opaque participant identities without rewriting message text or changing
+activation or authority. Proto/client source SDK 0.19.0 exposes the fields;
+publication and producer adoption remain separate.
+See [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
 Protocol 16.2 adds optional discovery snapshot items, canonical passive delivery
 receipts, and full initial preview content. Ordinary provider context and typed
 tool results retain their existing shapes. Older observers may omit

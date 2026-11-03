@@ -8,6 +8,16 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.3 adds optional descriptive native mention evidence to delivered and
+edited message facts and reports. Missing evidence remains unknown; older readers may
+ignore it. Delivery, activation, authority, durability, and journal framing remain
+unchanged. The new public struct fields require proto/client source SDK 0.19.0;
+existing 16.x extensions need not rebuild unless they adopt the new producer API.
+Publication, external producer rebuilds, and activation of installed binaries are
+separate operations.
+SDK 0.18.0 and the application 0.3.0 release remain immutable and independent.
+See [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
+
 Protocol 16.2 adds optional typed discovery snapshots, passive user-message
 receipts, and full initial preview content. Configured providers still receive the
 ordinary materialized user context, and workdir tools retain their existing

@@ -17,7 +17,7 @@ use crate::{
 };
 
 const MESSAGE_ID_MAX_BYTES: usize = 256;
-const STABLE_ID_MAX_BYTES: usize = 4_096;
+pub(crate) const STABLE_ID_MAX_BYTES: usize = 4_096;
 const DISPLAY_MAX_BYTES: usize = 256;
 const DISPLAY_MAX_SCALARS: usize = 80;
 const REACTION_MAX_BYTES: usize = 128;
@@ -238,6 +238,9 @@ pub struct MessageDelivered<Publisher = MessagePublisherId> {
     /// authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation: Option<MessagePresentation>,
+    /// Optional descriptive native mentions for this exact text version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention_evidence: Option<crate::MessageMentionEvidence>,
     /// Optional descriptive conversation provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<MessageConversation>,
@@ -263,6 +266,7 @@ impl<Publisher> MessageDelivered<Publisher> {
             message_id,
             sender,
             presentation: None,
+            mention_evidence: None,
             conversation,
             text: text.into(),
             extension_data: MessageExtensionData::default(),
@@ -280,6 +284,7 @@ impl<Publisher> MessageDelivered<Publisher> {
             message_id: self.message_id,
             sender: self.sender,
             presentation: self.presentation,
+            mention_evidence: self.mention_evidence,
             conversation: self.conversation,
             text: self.text,
             extension_data: self.extension_data,
@@ -311,6 +316,9 @@ pub struct MessageEdited<Publisher = MessagePublisherId> {
     /// Optional external actor described by the publisher.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<MessageParty>,
+    /// Optional current-version native mentions, never inherited from the base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention_evidence: Option<crate::MessageMentionEvidence>,
     /// Optional descriptive conversation provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<MessageConversation>,
@@ -335,6 +343,7 @@ impl<Publisher> MessageEdited<Publisher> {
             agent_id,
             target,
             actor,
+            mention_evidence: None,
             conversation,
             text: text.into(),
             extension_data: MessageExtensionData::default(),
@@ -351,6 +360,7 @@ impl<Publisher> MessageEdited<Publisher> {
             agent_id: self.agent_id,
             target: self.target,
             actor: self.actor,
+            mention_evidence: self.mention_evidence,
             conversation: self.conversation,
             text: self.text,
             extension_data: self.extension_data,
@@ -840,7 +850,7 @@ fn valid_conversation(conversation: &MessageConversation) -> bool {
 }
 
 /// Validate one optional presentation label.
-fn valid_display(value: &str) -> bool {
+pub(crate) fn valid_display(value: &str) -> bool {
     value.len() <= DISPLAY_MAX_BYTES && value.chars().count() <= DISPLAY_MAX_SCALARS
 }
 
@@ -897,6 +907,14 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
     }
     if let Some(reaction) = view.reaction() {
         push_attribute(&mut output, "reaction", reaction);
+    }
+    let evidence = match view {
+        MessageFactView::Delivered(fact) => fact.mention_evidence.as_ref(),
+        MessageFactView::Edited(fact) => fact.mention_evidence.as_ref(),
+        _ => None,
+    };
+    if let Some(metadata) = evidence.and_then(|evidence| evidence.projection(view.text()?)) {
+        push_attribute(&mut output, "mentions", &metadata);
     }
     match view.text() {
         Some(text) => {

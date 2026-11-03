@@ -34,7 +34,7 @@ model-facing payload families:
 | `tau_extension_output` | Generic user-role text | `publisher`, `operation_id`; passive configured-extension output |
 | `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
 | `tau_discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
-| `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher` and optional `sender_trust` |
+| `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher`, optional `sender_trust`, and optional descriptive JSON `mentions` before `content_trust` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Canonical background-preview attributes |
 

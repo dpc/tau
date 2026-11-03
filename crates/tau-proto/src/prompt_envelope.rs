@@ -179,6 +179,7 @@ pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloa
         "recipient_display",
         "conversation",
         "reaction",
+        "mentions",
         "content_trust",
     ],
     exact_close: "</message>",

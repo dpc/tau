@@ -66,6 +66,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
                 "recipient_display",
                 "conversation",
                 "reaction",
+                "mentions",
                 "content_trust",
             ],
             exact_close: "</message>",

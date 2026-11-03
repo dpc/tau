@@ -2153,6 +2153,75 @@ fn agent_store_raw_message_fact_append_projects_after_commit_and_replay() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
+/// Mention metadata and exact edited text survive durable append and cold
+/// replay; an edit with unknown evidence must not inherit the create's self
+/// observation.
+#[test]
+fn message_mentions_live_projection_matches_cold_replay() {
+    let agents_dir = temp_dir("message-mentions-replay");
+    let mut facts = all_message_facts("agent-1");
+    let evidence = tau_proto::MessageMentionEvidence {
+        mentions_self: Some(false),
+        people: vec![tau_proto::MessageMentionPerson {
+            stable_id: "opaque-person".into(),
+            display_name: Some("Other Bot".into()),
+            is_self: Some(false),
+            source_spans: vec![tau_proto::MessageMentionSpan { start: 3, end: 8 }],
+        }],
+    };
+    let Event::MessageDelivered(delivered) = &mut facts[0] else {
+        panic!("delivered fixture");
+    };
+    delivered.text = "é <@U1> **exact**".into();
+    delivered.mention_evidence = Some(evidence.clone());
+    let Event::MessageEdited(edited) = &mut facts[1] else {
+        panic!("edited fixture");
+    };
+    edited.text = "é <@U1> **edited**".into();
+    edited.mention_evidence = Some(evidence);
+    let mut unknown_edit = edited.clone();
+    unknown_edit.text = "now no current evidence".into();
+    unknown_edit.mention_evidence = None;
+    let facts = [
+        facts[0].clone(),
+        facts[1].clone(),
+        Event::MessageEdited(unknown_edit),
+    ];
+    let mut store = AgentStore::open_fixture(&agents_dir).expect("open");
+    for fact in &facts {
+        store
+            .append_agent_message_fact_at(
+                "agent-1",
+                None,
+                fact.clone(),
+                tau_proto::UnixMicros::now(),
+            )
+            .expect("append");
+    }
+    let live = store
+        .agent("agent-1")
+        .expect("agent")
+        .nodes()
+        .iter()
+        .map(|node| node.entry.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(live.len(), 3);
+    drop(store);
+    let mut reopened = AgentStore::open_fixture(&agents_dir).expect("reopen");
+    reopened
+        .append_agent_event("agent-1", None, agent_prompt("agent-1", "resume"))
+        .expect("load cold agent");
+    let events = reopened.agent_events("agent-1").expect("events");
+    for (index, fact) in facts.iter().enumerate() {
+        assert_eq!(&events[index].event, fact);
+    }
+    let cold = reopened.agent("agent-1").expect("agent").nodes();
+    for (index, entry) in live.iter().enumerate() {
+        assert_eq!(&cold[index].entry, entry);
+    }
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
 /// Raw agent append rejects non-message events and a fact whose claimed target
 /// differs from the selected journal before creating any record.
 #[test]

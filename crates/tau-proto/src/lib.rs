@@ -40,6 +40,7 @@ mod activity_lease;
 mod inspection;
 mod message_extension_data;
 mod message_fact;
+mod message_mention_evidence;
 mod messages;
 pub mod notice_kind;
 mod observation;
@@ -86,6 +87,7 @@ pub use inter_session_notice::*;
 pub use interception::*;
 pub use message_extension_data::*;
 pub use message_fact::*;
+pub use message_mention_evidence::*;
 pub use messages::*;
 pub use observation::*;
 pub use passive_context::*;
@@ -117,7 +119,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(16, 2);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(16, 3);
 
 /// Reporter-owned filename used by the locked papercut history RPC.
 pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";

@@ -20,6 +20,28 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Prepared SDK 0.19.0 (unpublished)
+
+Protocol **16.3** adds optional descriptive `mention_evidence` to
+`MessageDelivered` and `MessageEdited`. Add `mention_evidence: None` to existing
+public struct literals unless opting in; constructors default to absent.
+Proto/client source versions are **0.19.0**, and client pins proto `=0.19.0`;
+the two unchanged leaf packages remain 0.1.0.
+
+The evidence carries independently optional bridge-self observations and a
+potentially partial participant list. Optional validated UTF-8 byte spans map
+participants to exact tokens in the final fact body. Unknown is not false; each edit
+supplies current evidence or unknown, without inheriting metadata. Mentions, sender
+admission, and reply capability do not establish an invitation to respond. The source API and projection
+preserve existing participant disclosure policies and exact message text.
+
+This is source preparation only, separate from application 0.3.0 and SDK 0.18.0.
+It does not publish packages, rebuild external producers, or activate installed
+binaries. Existing 16.x producers remain admitted; older readers ignore the optional
+field. To expose the new metadata to the model, update the producer's proto/client
+pins, rebuild the extension, and use an updated harness. Publish proto before client
+under separate authorization, then verify registry-only consumers before adoption.
+
 ### Prepared SDK 0.18.0
 
 Protocol **16.2** adds typed discovery snapshots and passive delivery receipts.

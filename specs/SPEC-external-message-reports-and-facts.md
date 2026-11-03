@@ -330,7 +330,7 @@ projection-failure/UI reasons. Logs and notices carry no raw message or
 ## Uniform safe model presentation
 
 Project facts to the shared external `message` boundary specified below.
-Optional prompt metadata is carried by typed party and conversation fields;
+Typed party, conversation, and mention fields carry optional prompt metadata;
 `extension_data` remains opaque and is never included automatically. `agent_id`
 is omitted because it is the owner of the rendered prompt.
 
@@ -347,6 +347,53 @@ typed identifiers, delivery, acknowledgement, activation, or UI rendering.
 Persist the hint with the fact so live projection and cold replay agree.
 Omitting the hint retains full message metadata, including references used by
 chat tools; older readers may ignore the hint and show that full presentation.
+
+### Descriptive native mention evidence
+
+Delivered and edited reports and facts may carry optional `mention_evidence`.
+Absence means unknown or unreported, not false. Within an observation,
+`mentions_self` is independently optional: its value compares native references
+with the bridge's authenticated transport identity. False requires a complete
+self-mention observation for this message version. The `people` list may be partial
+and never proves the absence of self or other mentions. Each entry carries a
+`stable_id` participant reference that Tau treats as opaque, using the publisher's
+existing identity namespace and disclosure policy. Numeric or native references
+remain valid where the publisher already uses them; this feature does not authorize
+new raw-ID exposure. Entries also carry optional resolved display-name snapshots
+and independently optional `is_self` comparisons.
+Names serve as presentation hints, not identity; targets do not inherit sender
+authentication, admission, or trust. No per-person platform is needed.
+
+Evidence describes references, not universal recipient classification or an
+invitation to respond. The bridge's identity does not identify a particular Tau agent. Sender admission,
+delivery/activation, and reply capabilities remain independent of social
+addressing; all-messages delivery may include conversations with other bots.
+Mention metadata never changes those mechanisms.
+
+Each edit supplies its own current evidence. Omission does not inherit the original
+message's observation. Producers preserve exact canonical body bytes, collect authoritative
+evidence separately, and compute optional half-open UTF-8 byte `source_spans`
+against the final delivered/edited text after any existing normalization. Spans
+map opaque identities to retained body tokens without exposing additional raw
+transport IDs. Omit spans for stripped tokens or uncertain mappings; do not infer
+identity from plain labels, quoted references, or sender-authored markup.
+
+The shared renderer emits one compact JSON `mentions` attribute after `reaction`
+and before `content_trust`, using the registered metadata escaping. For each projected
+span, the renderer slices the exact source `text` from the body and escapes it
+with the rest of the metadata. This makes the mappings readable
+without rewriting Markdown or trusting inline mention tags.
+
+Bounds are 32 people, the existing 4096-byte stable-ID and 256-byte/80-scalar
+display limits, eight spans per person, and 256 bytes per source token. Each span
+must be nonempty, in range, and aligned to UTF-8 boundaries. If optional enrichment
+is invalid, the renderer omits the entire `mentions` attribute, retaining the original typed
+fact, body projection, and activation. Producers should omit unavailable or
+excess enrichment rather than fail delivery; truncation never asserts completeness.
+Absent fields preserve the previous projection byte-for-byte, and older
+readers may ignore the optional evidence.
+
+### Shared escaping and provenance
 
 Attributes use the existing centralized validation, XML-delimiter, quote, and
 visible-Unicode metadata escaping. For bodies, preserve literal line feeds (LF)
