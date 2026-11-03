@@ -3,7 +3,7 @@
 Publishing `dpc-tau` requires publishing its internal Rust crate closure first.
 Package preparation does not authorize uploads, tags, or GitHub releases.
 
-## Tau 0.3.0 preparation
+## Tau 0.3.0 release record
 
 The application and CLI advance together to **0.3.0**. The recomputed runtime
 and package-verification closure, including dev-dependencies, has **36 packages**:
@@ -25,18 +25,30 @@ require every external project to adopt SDK 0.18.0. Slack's upstream Cargo
 version is **0.5.0**; the other six remain 0.1.0. The native verifier requires the
 exact core 0.18.0 / external 0.16.0 SDK lock inventory.
 
-Official sparse-index checks confirmed that all 32 proposed new versions were
+Official sparse-index checks confirmed that all 32 new versions were
 absent on November 3, 2026. The four reusable archives matched their unyanked index
 checksums and clean VCS provenance. Their source files remain unchanged;
 `util-fs-err` has only an equivalent explicit README declaration since publication.
-Recheck registry state immediately before any upload.
+All 32 new versions were then published from
+`3eae7dc621b3f2d2f953a182b85cde03c0037fbb`. All locked dry-runs passed verification;
+each unyanked registry archive matched its dry-run checksum and clean source identity.
+The registry-only SDK consumer passed 11 tests on Rust 1.91, and a fresh isolated
+`cargo install --locked dpc-tau --version '=0.3.0'` passed. Its version probe reports
+`tau 0.3.0 (unknown)` because registry builds have no Git checkout; archive provenance
+independently identifies the release source.
 
-This record documents preparation only; it does not establish publication or
-deployment acceptance. Run verified locked dry-runs in dependency order. Defer
-dependent packages until their exact registry dependencies exist. After publication,
-verify the registry-only SDK consumer and an isolated locked application install. Source publication,
-immutable tagging, native asset publication, curated hosted notes and public-link
-updates remain separate gates in the release skill.
+Normal MQ preserved that exact commit, published to both Radicle and GitHub.
+The immutable `v0.3.0` tag names the same source. Native workflow `41579181240`
+built both architectures successfully. Its first publisher attempt created a matching
+empty draft but could not immediately see it; after verifying the draft and unexpired
+build artifacts, a failed-only retry published the complete 67-asset release.
+Downloaded public assets matched API digests and sizes, aggregate checksums, and
+the frozen release verifier's source, toolchain, license, and inventory checks.
+These checks do not cover distro installation/removal, service behavior, or broad
+runtime testing.
+No running installation was replaced or restarted.
+
+Later source changes and prepared SDK 0.19.0 are separate from this tagged release.
 
 ## Tau 0.2.1 release record
 

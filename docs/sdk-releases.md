@@ -42,7 +42,7 @@ field. To expose the new metadata to the model, update the producer's proto/clie
 pins, rebuild the extension, and use an updated harness. Publish proto before client
 under separate authorization, then verify registry-only consumers before adoption.
 
-### Prepared SDK 0.18.0
+### Published SDK 0.18.0
 
 Protocol **16.2** adds typed discovery snapshots and passive delivery receipts.
 The new public `discovery_items` field on `AgentInitializationContextSet` and
@@ -56,8 +56,11 @@ receipt does not activate inference on its own. Missing fields in older
 records default to empty or absent. Older 16.x extensions may ignore the metadata
 and remain admitted; this addition does not require all extensions to rebuild.
 
-This section records preparation for application 0.3.0, not publication acceptance.
-Run registry-only consumer verification after authorized publication.
+Proto and client 0.18.0 were published on November 3, 2026 from
+`3eae7dc621b3f2d2f953a182b85cde03c0037fbb` for application 0.3.0.
+Both unyanked registry archives matched their verified dry-run checksums and clean
+source identity. A fresh registry-only consumer passed all 11 tests on Rust 1.91.
+The prepared SDK 0.19.0 above remains unpublished.
 
 ### Published SDK 0.17.0
 
