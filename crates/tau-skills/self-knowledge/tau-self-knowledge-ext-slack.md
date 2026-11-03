@@ -9,7 +9,12 @@ advertise: false
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
 `slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`; `tool_prefix` scopes
 all four tools and their group for multiple accounts. Slack text is always
-untrusted external content. For Tau protocol 16.0, rebuild the executable with
+untrusted external content. The reviewed provisional mention producer targets
+SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is unpublished; registry-only acceptance
+and adoption remain pending. Do not assume an installed bridge supports mention
+evidence.
+
+For Tau protocol 16.0, rebuild the executable with
 registry SDK crates `dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update it
 with the compatible harness before separately authorized activation. Check the
 standalone project's compatibility guidance; changing the advertised version
@@ -37,7 +42,7 @@ configured alias takes display precedence over the bounded
 For inbound exact mentions of the authenticated installation bot, exactly one
 eligible leading mention is removed for routing/command compatibility and
 remaining eligible mentions become the semantic token `@slack_bridge` in
-published text. The generic fact schema carries no separate mention field. Complete
+published text. Complete
 equal-length backtick code ranges suppress recognition. Escaped, labeled,
 partial, case-changed, and literal `@slack_bridge` text do not count. Successful
 registration returns exactly
@@ -45,6 +50,25 @@ registration returns exactly
 unregister returns `{"status":"unregistered"}`. The token discloses no native
 id, grants no authority or capability, and does not expand egress; outbound
 `@slack_bridge` remains literal text.
+
+With the provisional producer and a supporting harness, delivered and edited
+facts also carry optional descriptive mention evidence. For native outer
+references, the producer uses the same installation-scoped opaque identity as
+senders, includes optional bounded names (including other bots), and compares
+each reference with the authenticated bridge identity.
+A stripped leading self mention retains its comparison without a
+source span; retained spans point into the exact final body. Code, prose
+blockquotes, and appended attachment quotes do not contribute. Each edit supplies
+fresh evidence; replay does not resolve names again.
+
+Mention evidence describes references, not invitations to answer. Admission,
+delivery, activation, and an available reply selector do not mean the message
+addresses this agent. `is_self` compares with the bridge account, not a particular
+Tau agent. Missing evidence or a missing boolean means unknown; a partial people
+list never proves absence. Optional name lookup accepts bots without admitting
+bot senders, requires no new Slack scope, and stops on failure without dropping
+the message. At most eight optional lookup requests share a two-second budget
+per report. Older harnesses may ignore this metadata.
 
 Dynamic DMs are opt-in, bounded to 64 exact D-to-allowlisted-U/W links,
 receive-and-source-reply only, multi-link, and runtime-only. Static receive DM policy wins over

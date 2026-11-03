@@ -17,8 +17,10 @@ email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
 revision used Tau protocol 9 and registry SDK 0.7.0, with the receiver-admission
 fix first published in Tau commit
 `30c8b43410a84294f31f74451f9f7f09a94df473`. That historical requirement is not a
-compatibility guarantee for newer harnesses. The standalone Zulip bridge uses
-registry crates `dpc-tau-client` and `dpc-tau-proto` pinned to 0.16.0 (protocol 16.0).
+compatibility guarantee for newer harnesses. The reviewed provisional mention
+producer targets SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is unpublished;
+registry-only acceptance and adoption remain pending. Do not assume an installed
+bridge supports mention evidence.
 Rebuild it with the compatible harness and configured peers before separately
 authorized activation. Older-protocol binaries are rejected before configuration or
 receiver registration; changing Zulip routes or registration settings does not
@@ -34,6 +36,25 @@ Old readers cannot decode journal records containing the new
 Neither partial-answer text nor a continuation grants Zulip send, route, or
 scheduling authority. Continue is provider/harness turn control, not an
 instruction to the bridge.
+
+With the provisional producer and a supporting harness, delivered and edited
+facts carry optional descriptive self-mention evidence from Zulip's authoritative
+current `mentioned` flag. The people list may be empty or partial; this producer
+does not look up directory entries or rewrite native mention tokens. It preserves
+raw Markdown byte for byte. For edits, it recomputes evidence from the current
+complete list of string flags: `mentioned` means true, a complete list without it
+means false, and missing or malformed flags mean unknown. Edits never inherit
+create evidence.
+Buffered edits replace body and evidence together only when the existing queue
+budgets admit both; rejection preserves both.
+
+Mention evidence describes references, not invitations to answer. Self comparison
+refers to the authenticated bridge identity, not a particular Tau agent.
+Missing evidence or a missing boolean means unknown; a partial people list never
+proves absence. Older harnesses may ignore this metadata. Admission, routing,
+activation, reply authority, and catch-up handling remain independent of this
+evidence; delivery or an available reply selector does not mean the message
+addresses this agent.
 
 An immediate reply for an already queued event, or a non-blocking poll reply,
 may omit the queue-ID echo. The bridge accepts that omission only for its
