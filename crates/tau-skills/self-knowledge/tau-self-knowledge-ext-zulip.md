@@ -290,15 +290,54 @@ sender, admission, route, or reply authority. The bridge does not extract or fet
 a native parent from quote Markdown. `zulip_send(reply_to)` selects the live owned
 source topic or DM participants, not a native per-message reply target.
 
+### Room participants
+
+`zulip_list_room_participants {"message_ref":"zulip-message:…","limit":20,"offset":0}`
+requires the separate default-off `zulip:participants:read` grant, outside the text
+group. Call it as the current receiver in ordinary mode. The reference must
+identify a currently owned admitted inbound message; historical reads and
+proactive sends do not create this authority.
+
+Stream sources require whole-stream receive authorization, not a topic-only grant.
+Their `basis: "stream_subscribers"` means active subscribed humans and bots, not
+topic followers, everyone who can read or people who posted. DMs use
+`direct_recipients`: the admitted source's exact recipients, including self.
+Membership is not presence or live account status.
+
+`limit` defaults to 20 and accepts 1–32; `offset` defaults to zero and accepts
+0–131072. Continue with the returned `next_offset`, which is null at the end.
+Opaque IDs are sorted before paging; self need not appear on every page. `complete` means the
+page reaches the end, not an atomic snapshot. Past-end offsets return an empty
+complete page. Every stream call fetches membership anew, so changes can repeat
+or skip rows.
+
+Rows contain opaque `user_id`, `is_self`, nullable `display_name` and `is_bot`,
+and `name_state`. Names are untrusted and bounded to 512 UTF-8 bytes.
+Registration feature level 384 or newer enables one selected-user name batch
+for the page. Older or unknown servers return `name_state: "unsupported"`;
+missing or failed names return `"unavailable"` without invalidating membership.
+There is no directory fallback, per-user fan-out, presence lookup or avatar import.
+Each response is capped at 256 KiB; an oversized roster fails even for a small
+page. At most two requests share a ten-second budget, with five seconds per request
+and no redirects or retries.
+
+Successfully submitted rows can support independently authorized
+`zulip_get_user_profile` through a receiver-scoped queue of at most 256 locators.
+Eviction, expiry, receiver retirement, reconfiguration or restart can invalidate
+them; provider visibility and `zulip:profiles:read` remain necessary.
+Listings emit no canonical facts and grant no sender admission, source ownership,
+send authority, routes, subscriptions or activation.
+
 ### User profiles and automatic avatars
 
 `zulip_get_user_profile {"user_id":"123"}` is default-off, tagged
 `zulip:profiles:read`, outside the ordinary group and absent in send-only mode.
 It requires the current receiver and queue identity. Canonical nonzero decimal
 native u64 IDs permit lookup of API-visible realm users or bots independently of
-ingress sender tiers. Known opaque `zulip-sender:…` references work only for
-configured sender tiers or self; unknown opaque IDs cannot trigger directory
-search. Results expose only opaque identity and bounded untrusted metadata.
+ingress sender tiers. Known opaque `zulip-sender:…` references work for configured
+sender tiers, self, or retained receiver-scoped participant locators; unknown
+opaque IDs cannot trigger directory search. Results expose only opaque identity
+and bounded untrusted metadata.
 Lookup grants no admission, message facts, source ownership or route authority.
 
 Profiles include available name, timezone identifier, join date, account state,
@@ -420,10 +459,10 @@ names, not roles, tags, groups, aliases, or dotted instance names. Normal tool
 grants remain necessary. For a prefixed instance, use its actual
 `<tool_prefix>_<local_tool_name>` inventory. The unprefixed locals are
 `zulip_register`, `zulip_conversations`, `zulip_send`, `zulip_get_user_profile`,
-`zulip_list_attachments`, `zulip_download_attachment`, `zulip_react`, and
-`zulip_get_message`. Audit the complete eight-tool inventory and explicit main-only
-tool/veto policy before a source bump or read grant; the new read tool is outside the
-text group and needs its own authorization.
+`zulip_list_attachments`, `zulip_download_attachment`, `zulip_react`,
+`zulip_get_message`, and `zulip_list_room_participants`. Audit the listed inventory
+and explicit main-only tool/veto policy before a source bump or read grant; the new
+read tool is outside the text group and needs its own authorization.
 Same-role children and ordinary parentless agents do not inherit canonical-main
 authority. Nix owns the dedicated profile, credentials, participant and route
 restrictions, and outbound policy; this feature alone does not restrict DMs to

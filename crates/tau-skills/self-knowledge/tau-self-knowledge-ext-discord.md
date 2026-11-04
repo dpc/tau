@@ -99,6 +99,35 @@ writes. Inbound `discord_list_attachments` and `discord_download_attachment`
 remain separately tagged `discord:attachments`, requiring current same-agent
 canonical incoming references; importing an original grants no send authority.
 
+## Room participants
+
+`discord_list_room_participants {"message_id":"…","limit":20}` requires the
+separate default-off `discord:participants:read` grant, outside the core group.
+It is unavailable in send-only mode. Use an existing read locator; every call
+requires the current receiver and fresh receive-authorized proof of that exact
+room, without fetching the message body.
+
+DMs return `basis: "direct_recipients"`, including authenticated self.
+Threads return `basis: "thread_members"`: joined members, not current viewers.
+Ordinary guild channels return `status: "unsupported"` and `complete: false`;
+group DMs remain rejected. Thread reads require the application's `GUILD_MEMBERS`
+entitlement; this does not change Gateway subscriptions or automatically enable
+intents, scopes or portal settings.
+
+`limit` defaults to 20 and accepts 1–100. Pass the returned `next_after` as `after`,
+an exclusive canonical nonzero decimal u64 user-ID string. A full thread page
+requires continuation, possibly to an empty terminal page. `complete` marks the
+end of traversal after the current cursor; it does not promise an atomic snapshot
+or the whole roster.
+Rows contain native string `user_id`, `is_self` and optional untrusted
+`display_name` bounded to 256 UTF-8 bytes.
+
+One call reads one bounded thread page, with no profile fan-out or avatar import,
+under a 1-MiB response cap and 30-second deadline. Provider denial is a redacted
+error, not an empty success. Membership is not presence and grants no source
+ownership, send authority or independent profile permission. Source support does
+not prove live application entitlement or authorize activation.
+
 ## User profiles and automatic avatars
 
 `discord_get_user_profile {"user_id":"123456789"}` is default-off, tagged
