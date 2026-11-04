@@ -187,15 +187,18 @@ fn discovery_failure_timeout_and_private_artifacts() {
         fs::create_dir(&agent).unwrap();
         fs::write(agent.join("events.cbor"), "").unwrap();
     }
-    let executable = temp.path().join("tau");
-    fs::write(&executable, format!("#!/bin/sh\ncase \"$3\" in\nold) exit 1;;\nslow) exec sleep 10;;\nbad) echo '{{}}';;\nok) cat <<'EOF'\n{}EOF\n;;\nesac\n",trace(&[prompt(0)]))).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(root.join("trace.jsonl"), trace(&[prompt(0)])).unwrap();
+    // Never write an executable while parallel tests spawn: their children can
+    // inherit its writer until exec, causing ETXTBSY even after our close.
+    let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/trace-command.sh");
     let args = Args {
         agents_dir: root,
         tau: executable,
         since: None,
         until: None,
-        timeout: 0.15,
+        // Leave room for ordinary shell startup under parallel CI load; the
+        // timeout fixture sleeps ten seconds and still exercises cancellation.
+        timeout: 1.0,
         out: temp.path().join("out"),
     };
     let mut counts = Counts::new();
