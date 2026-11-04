@@ -133,6 +133,29 @@ failure is a tool error. Profile imports share the binary-transfer reservation.
 Cancellation or receiver/session retirement suppresses stale results but may
 leave committed artifacts. Reads create no canonical facts or source-write rights.
 
+## Editing the bot's own profile
+
+`discord_update_self_profile` patches only the authenticated bot. Supply any
+combination of `username`, `avatar`, and `banner`; omitted fields stay unchanged.
+`username` must be a non-null string of 2–32 characters, subject to Discord's
+additional name rules. For images, supply canonical `<tau-artifact:blake3:…>`
+references or bare `blake3:…` keys; explicit `null` clears that image.
+For example, `{"avatar":"<tau-artifact:blake3:…>","banner":null}` replaces the
+avatar and clears the banner without changing the username.
+
+The separate default-off `discord:profiles:write` grant is outside the core
+group. The tool requires the current registered ordinary receiver and is absent
+in strict send-only mode. Read/send grants do not authorize profile edits.
+Obtain explicit user authorization before changing grants or live configuration.
+
+The bridge rejects empty patches, unknown fields, target IDs, URLs, paths and
+inline image bytes. Images must be PNG/JPEG/GIF originals up to 1 MiB each; signature
+and framing checks do not decode images or prove safety. The bridge verifies
+all originals and receives their Close acknowledgements before one self-only
+PATCH. Discord decides whether to accept the images.
+The bridge does not retry or roll back edits. An uncertain outcome may mean the
+profile has changed. Treat returned profile metadata as untrusted.
+
 ## Startup versus live delivery
 
 A credential-free, network-isolated smoke test of the verified extension reached

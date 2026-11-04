@@ -327,6 +327,31 @@ attachment admission. Cancellation may leave committed artifacts, which persist
 independently of transcripts. Source availability neither changes configuration
 nor activates a live bridge.
 
+### Editing the bot's own avatar
+
+`zulip_update_self_profile` edits only the authenticated bot's avatar. Supply
+`{"avatar":"<tau-artifact:blake3:…>"}` to upload; a bare canonical `blake3:…`
+key also works. Use `{"avatar":null}` to reset to the realm default, which may
+not be blank. Other profile fields stay unchanged.
+
+The separate default-off `zulip:profiles:write` grant is outside the text
+group. The tool requires the current ordinary receiver and is absent in
+send-only mode. Read/send grants do not authorize avatar edits.
+Obtain explicit user authorization before changing grants or live configuration.
+
+The bridge rejects empty patches, unknown fields, target IDs, URLs, paths and
+inline bytes. Ordinary bot credentials cannot edit names, timezones, statuses
+or custom-profile maps. Incoming-webhook credentials cannot use this avatar
+endpoint, and realm policy can reject edits.
+
+The bridge verifies original Artifact bytes and receives the Close
+acknowledgement before upload. It accepts PNG/JPEG/GIF/WebP signatures up to
+2 MiB and ignores filename/MIME hints. Signature checks do not prove image safety.
+The provider may enforce a smaller limit or transform the image.
+Each call makes one upload or reset without automatic retry or rollback.
+An unknown outcome may mean the avatar has changed. Results omit raw avatar
+URLs.
+
 ### Linked messages
 
 Enable `zulip_get_message` (`zulip:messages:read`) separately, then use
