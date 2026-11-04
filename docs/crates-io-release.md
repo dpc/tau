@@ -3,6 +3,26 @@
 Publishing `dpc-tau` requires publishing its internal Rust crate closure first.
 Package preparation does not authorize uploads, tags, or GitHub releases.
 
+## SDK 0.21.0: linked-message retrieval
+
+The independently versioned `dpc-tau-proto` and `dpc-tau-client` SDK advances to
+**0.21.0** and advertises protocol **16.6**. Optional `MessageLinks` on delivered,
+edited, and sent messages expose thread-root, previous-message, and immediate
+reply IDs alongside the message's own `message_ref`. Older 16.x readers may ignore
+the new fields; rendering remains unchanged without links.
+
+Bridge-owned `get_message` tools accept the self reference or a returned link as
+`message_id`. Bridges remain responsible for platform retrieval, current
+read-policy checks, and reference lifetime. Retrieval grants no reply or reaction
+authority and adds no generic archive, history list, or search.
+
+Using Rust 1.91, the package consumer checks the exact 0.21.0 dependency closure,
+protocol revision, and link preservation and projection on all three message
+shapes. The SDK-only upload order is proto, then client, followed by the
+registry-only consumer check and source-identifying
+`dpc-tau-proto-v0.21.0` / `dpc-tau-client-v0.21.0` tags. The application version,
+`v0.3.0` tag, deployment, and activation remain unchanged.
+
 ## Tau 0.3.0 release record
 
 The application and CLI advance together to **0.3.0**. The recomputed runtime

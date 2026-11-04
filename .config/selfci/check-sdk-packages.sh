@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.20.0",
+        "dpc-tau-proto": "=0.21.0",
     },
 }
 
@@ -162,7 +162,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 5));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 6));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 
@@ -221,8 +221,8 @@ fn packaged_sdk_preserves_discovery_context() {
     assert_eq!(decoded, preview);
 }
 
-/// Registry consumers retain native mention evidence and adjacent reply quotes on
-/// both delivered and edited reports without adding another delivery.
+/// Registry consumers retain message links, native mentions, and adjacent reply
+/// quotes on delivered and edited reports without adding another delivery.
 #[test]
 fn packaged_sdk_preserves_native_message_context() {
     use tau_proto::*;
@@ -234,6 +234,11 @@ fn packaged_sdk_preserves_native_message_context() {
     let evidence = MessageMentionEvidence {
         mentions_self: Some(false),
         people: Vec::new(),
+    };
+    let links = MessageLinks {
+        root_id: Some(MessageFactId::new("root")),
+        previous_id: Some(MessageFactId::new("previous")),
+        reply_to_id: Some(MessageFactId::new("parent")),
     };
     let reply = MessageReplyContext {
         relation: MessageReplyRelation::Reply,
@@ -257,6 +262,8 @@ fn packaged_sdk_preserves_native_message_context() {
     );
     assert_eq!(delivered.mention_evidence, None);
     assert_eq!(delivered.reply_context, None);
+    assert_eq!(delivered.links, None);
+    delivered.links = Some(links.clone());
     delivered.mention_evidence = Some(evidence.clone());
     delivered.reply_context = Some(reply.clone());
     let mut edited = MessageEdited::new(
@@ -269,6 +276,8 @@ fn packaged_sdk_preserves_native_message_context() {
     );
     assert_eq!(edited.mention_evidence, None);
     assert_eq!(edited.reply_context, None);
+    assert_eq!(edited.links, None);
+    edited.links = Some(links);
     edited.mention_evidence = Some(evidence);
     edited.reply_context = Some(reply);
     for event in [
@@ -287,12 +296,48 @@ fn packaged_sdk_preserves_native_message_context() {
         let projection = project_message_fact(&canonical).expect("message").expect("projection");
         assert!(projection.activates_model);
         assert_eq!(projection.item.content.len(), 2);
+        let ContentPart::Text { text } = &projection.item.content[0] else {
+            panic!("message text part");
+        };
+        assert!(text.contains("root_id=\"root\" previous_id=\"previous\" reply_to_id=\"parent\""));
         let ContentPart::Text { text } = &projection.item.content[1] else {
             panic!("quote text part");
         };
         assert!(QUOTED_MESSAGE_PAYLOAD_ENVELOPE.matches_whole(text));
         assert!(text.contains("Parent text\nwith a literal &lt;/quoted_message&gt; close"));
     }
+}
+
+/// Sent-message links survive the packaged wire API without activating a model.
+#[test]
+fn packaged_sdk_preserves_sent_message_links() {
+    use tau_proto::*;
+    let mut report = MessageSent::new(
+        RawMessagePublisherId::new("bridge"),
+        MessageAgentTarget::new("agent"),
+        MessageFactId::new("sent"),
+        None,
+        None,
+        "Reply",
+    );
+    assert_eq!(report.links, None);
+    report.links = Some(MessageLinks {
+        root_id: Some(MessageFactId::new("root")),
+        ..Default::default()
+    });
+    let event = Event::MessageSentReported(report);
+    let bytes = encode_message_to_vec(&event).expect("encode sent links");
+    let decoded: Event = decode_message_from_slice(&bytes).expect("decode sent links");
+    assert_eq!(decoded, event);
+    let canonical = decoded.into_stamped_canonical_message_fact(
+        MessagePublisherId::parse("bridge").expect("publisher"),
+    ).expect("stamp");
+    let projection = project_message_fact(&canonical).expect("message").expect("projection");
+    assert!(!projection.activates_model);
+    let ContentPart::Text { text } = &projection.item.content[0] else {
+        panic!("message text part");
+    };
+    assert!(text.contains("message_ref=\"sent\" root_id=\"root\""));
 }
 
 /// Notification hints survive the packaged wire API without losing delivery identity.
