@@ -422,14 +422,34 @@ authority; it still confirms its report and releases its admission slot.
 Replies and proactive sends use the agent-supplied message unchanged. Message
 limits, the text-only retry budget, Tau-issued reply authority, routing, threads,
 authorization, and configuration freeze remain independent of its contents.
-Agent-authored text may use ordinary mrkdwn but raw `<@`, `<!`, and `<#` Slack
-native controls are rejected. Bridge help/control/error output is escaped,
-bounded, and sent with mrkdwn/link expansion disabled.
+Ordinary send permission also allows native inline user mentions (`<@U123>` or
+`<@W123>`), group mentions (`<!subteam^S123>`), broadcasts (`<!here>`,
+`<!channel>`, `<!everyone>`), and channel links (`<#C123>`). Channel links are
+not mentions. You can use this syntax in proactive sends, source replies, and the single
+attachment-group comment, without a separate mention grant, recipient allowlist,
+or membership check. Plain `@name` and `@slack_bridge` remain literal text.
+
+Use the optional `mention_users` convenience array to supply 1–32 exact native U/W account
+IDs or current retained same-agent `slack-sender:…` references from live messages,
+history, profiles, participant discovery, or native-mention locators. Each entry
+must be 1–128 bytes. The bridge resolves retained references locally and prepends
+`<@ID> ` in list order; you can include U/W bot accounts, but B integration IDs are
+not account mention targets. Malformed, unknown, stale, or other-agent references
+fail before I/O or configuration freeze. The bridge performs no directory lookup or
+fresh account verification and adds no recipient or membership gate.
+
+Bridge help/control/error output remains escaped, bounded, and sent with
+mrkdwn/link expansion disabled.
 For source replies only, optional `mention_source_user: true` prepends a mention
 of the exact verified human already bound to `reply_to`; it defaults false,
 accepts no identity argument, and is invalid with `destination`. The bridge freezes
 it into the exact body reused by the sole text-only retry, or into the grouped
 attachment comment described above.
+The bridge orders combined content as the source-user mention, `mention_users`,
+then the authored text. Generated mentions stay wire-only; authored native markup
+remains in logical sent text. The final composed body must fit the existing
+40,000-Unicode-scalar limit; the bridge does not truncate it. Native inline mentions do not
+enable slash commands, administrative actions, or thread broadcasts.
 
 `slack_conversations` is disabled by default and separately authorizable through
 its exact prefixed name or `slack:discover` tag. It returns all static routes,
