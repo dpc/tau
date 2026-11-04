@@ -96,6 +96,9 @@ Provider tool calls are evaluated against the tool snapshot owned by the prompt
 that produced them. Model-visible rejection diagnostics for those calls must use
 that same snapshot for availability wording and near-name suggestions; current
 role/model policy is only the authority when no prompt-owned snapshot exists.
+For opt-in canonical-main-only tools, the harness also checks the current
+committed, available main identity at dispatch, even when an older snapshot
+contains those tools.
 Tool examples are registration metadata, not prompt-surface definitions: rendered
 tool definitions omit them, and the harness surfaces at most one bounded relevant
 example after a failed call in an agent branch.

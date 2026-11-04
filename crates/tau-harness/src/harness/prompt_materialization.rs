@@ -197,6 +197,8 @@ pub(super) enum PromptSurfaceError {
     Render(handlebars::RenderError),
     /// Logical web policy required a capability unavailable on the exact route.
     WebUnavailable(String),
+    /// Required role tools were withheld from this actual agent's surface.
+    RequiredToolsUnavailable(String),
 }
 
 /// Count serialized JSON bytes without retaining schema content.
@@ -1345,7 +1347,10 @@ impl Harness {
                 self.terminalize_owned_dispatch_error(cid, message);
                 return None;
             }
-            Err(PromptSurfaceError::WebUnavailable(message)) => {
+            Err(
+                PromptSurfaceError::WebUnavailable(message)
+                | PromptSurfaceError::RequiredToolsUnavailable(message),
+            ) => {
                 self.emit_harness_failure(&message);
                 self.terminalize_owned_dispatch_error(cid, message);
                 return None;
@@ -1657,7 +1662,8 @@ impl Harness {
                     PromptSurfaceError::Render(error) => format!(
                         "cannot dispatch prompt for role `{role_name}` until its template is repaired: {error}"
                     ),
-                    PromptSurfaceError::WebUnavailable(message) => message,
+                    PromptSurfaceError::WebUnavailable(message)
+                    | PromptSurfaceError::RequiredToolsUnavailable(message) => message,
                 };
                 self.emit_harness_failure(&message);
                 self.fail_initial_prompt_materialization(
@@ -1880,6 +1886,15 @@ impl Harness {
             Some(model),
             &providers,
         );
+        let mut withheld_names = HashSet::new();
+        specs.retain(|spec| {
+            if self.tool_identity_is_authorized(&spec.name, agent_id) {
+                true
+            } else {
+                withheld_names.insert(self.tool_model_visible_name(spec).clone());
+                false
+            }
+        });
         let mut hosted_tools = Vec::new();
         let mut invocation_policies = HashMap::new();
         // Scope alone does not declare cached/live/context-size semantics.
@@ -1925,6 +1940,7 @@ impl Harness {
         if let Some(name) = duplicate_model_visible_tool_name(&specs) {
             return Err(PromptSurfaceError::DuplicateToolName(name.to_string()));
         }
+        self.validate_identity_withheld_requirements(role_name, &withheld_names, &specs)?;
         let mut capability_specs = if hide_tool_capabilities {
             Vec::new()
         } else {
@@ -2003,6 +2019,7 @@ impl Harness {
         role_name: &str,
     ) -> Result<Vec<ToolDefinition>, PromptSurfaceError> {
         let mut specs = self.gather_effective_tool_specs_for_role_model(role_name, None);
+        specs.retain(|spec| self.tool_identity_is_authorized(&spec.name, None));
         if let Some(policy) = self
             .config
             .available_roles
@@ -2583,6 +2600,38 @@ impl Harness {
         ))
     }
 
+    /// Reject only requirements removed by the opt-in identity veto, preserving
+    /// the existing provisioning-only semantics for disconnected ordinary
+    /// tools.
+    fn validate_identity_withheld_requirements(
+        &self,
+        role_name: &str,
+        withheld_names: &HashSet<ToolName>,
+        specs: &[tau_proto::ToolSpec],
+    ) -> Result<(), PromptSurfaceError> {
+        let Some(role) = self.config.available_roles.get(role_name) else {
+            return Ok(());
+        };
+        let missing = role
+            .required_tools
+            .iter()
+            .filter(|name| {
+                withheld_names.contains(*name)
+                    && !specs
+                        .iter()
+                        .any(|spec| self.tool_model_visible_name(spec) == *name)
+            })
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(PromptSurfaceError::RequiredToolsUnavailable(format!(
+            "role `{role_name}` cannot dispatch: required tool(s) restricted to the available canonical session main: {}",
+            missing.join(", ")
+        )))
+    }
+
     /// Resolve a new agent's model before checking its role's tool
     /// requirements.
     pub(super) fn validate_required_tools_for_role(&self, role_name: &str) -> Result<(), String> {
@@ -2783,6 +2832,9 @@ impl Harness {
         if let Some(agent_prompt_id) = agent_prompt_id {
             let spec =
                 self.resolve_enabled_tool_spec_for_prompt(requested_name, agent_prompt_id)?;
+            if !self.tool_identity_is_authorized(&spec.name, Some(cid)) {
+                return None;
+            }
             if self
                 .tool_routing
                 .registry
@@ -2810,6 +2862,7 @@ impl Harness {
             .flat_map(|stage| stage.tool_registrations.iter())
             .find(|registration| {
                 self.is_registered_tool_enabled_for_role(registration, &role_name)
+                    && self.tool_identity_is_authorized(&registration.tool.name, Some(cid))
                     && (registration.tool.name == *requested_name
                         || self.tool_model_visible_name(&registration.tool) == requested_name)
             })
@@ -3151,6 +3204,7 @@ impl Harness {
         let Some(model) = model else {
             return self
                 .resolve_enabled_tool_spec_for_role(requested_name, &role_name)
+                .filter(|spec| self.tool_identity_is_authorized(&spec.name, Some(cid)))
                 .cloned();
         };
         self.prepare_prompt_surface_for_dispatch_timed(
@@ -3166,6 +3220,18 @@ impl Harness {
         .tool_specs
         .into_iter()
         .find(|spec| self.tool_model_visible_name(spec) == requested_name)
+    }
+
+    /// Final harness-owned veto; in-flight main candidates confer no authority.
+    pub(super) fn tool_identity_is_authorized(
+        &self,
+        name: &ToolName,
+        agent_id: Option<&AgentId>,
+    ) -> bool {
+        !self.config.tool_policy.canonical_main_only.contains(name)
+            || agent_id.is_some_and(|id| {
+                self.main_agent_id() == Some(id) && self.main_agent_is_eligible(id)
+            })
     }
 
     pub(super) fn resolve_enabled_tool_spec_for_prompt(

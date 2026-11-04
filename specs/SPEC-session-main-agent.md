@@ -34,6 +34,16 @@ remove main, and the harness must not replace an unavailable main with a same-ro
 agent. Old mainless sessions remain valid and resumable. Configuration with no
 main continues ordinary explicit-role and fallback work.
 
+`tool_policy.canonical_main_only` restricts exact final registered tool names to
+the committed, available main. The harness applies this final veto when
+materializing model-visible tools and dispatching authenticated calls, including
+calls from old prompt snapshots. Role and model grants cannot override it;
+parentlessness, a main role, bootstrap metadata, and a pending main candidate
+confer no authority. Role-level `required_tools`
+validation checks provisioning; prompt validation checks the final instance tool
+surface and rejects requirements for withheld tools rather than granting them.
+Ordinary same-role construction remains supported.
+
 ## Attachment and startup
 
 Normal create/attach UI demand defaults to canonical main when available.

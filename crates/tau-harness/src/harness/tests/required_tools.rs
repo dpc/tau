@@ -338,6 +338,17 @@ fn required_tools_disconnect_blocks_new_agents_not_running_agents() {
         tau_core::DurabilityBarrierOutcome::Durable
     );
     assert_eq!(journal_bytes(tmp.path()), before);
+    // Requirements remain admission gates for ordinary tools, not a new runtime
+    // kill switch when an unrelated main-only policy is configured.
+    h.config.tool_policy.canonical_main_only = vec![ToolName::new("other_scoped_tool")];
+    h.dispatch_prompt_for_agent(
+        &existing,
+        PendingPrompt::user("continue after disconnect".to_owned()),
+    )
+    .expect("existing bot can continue");
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event, Event::AgentPromptStarted(started) if started.agent_id == existing
+    )));
     h.create_durable_user_agent("s1".parse().expect("session"), "engineer");
     register_bot_tool(&mut h);
     h.create_durable_user_agent("s1".parse().expect("session"), "bot");

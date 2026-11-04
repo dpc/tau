@@ -2,6 +2,48 @@
 
 use super::*;
 
+/// Full prompt previews use ordinary ephemeral identities, so their capability
+/// template must not advertise tools restricted to the committed main.
+#[test]
+fn canonical_main_tools_are_hidden_from_full_prompt_preview() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let role = h.config.selected_role.clone();
+    let spec = shared_test_tool_spec("bot_zulip_send");
+    h.tool_routing
+        .registry
+        .register(&crate::test_connection_id("preview-tools"), spec.clone());
+    h.prompt_coordination
+        .context_discovery
+        .system_prompt_templates
+        .insert(
+            "main-only-preview".to_owned(),
+            "allowed={{tool_available capabilities.tools \"bot_zulip_send\"}}".to_owned(),
+        );
+    h.config
+        .available_roles
+        .get_mut(&role)
+        .expect("role")
+        .prompt_override = Some("main-only-preview".to_owned());
+    let ordinary = request_rendered_prompt(&mut h, &role, false);
+    assert!(
+        ordinary
+            .prompt
+            .expect("ordinary prompt")
+            .contains("allowed=true")
+    );
+    h.config.tool_policy.canonical_main_only = vec![spec.name];
+    let restricted = request_rendered_prompt(&mut h, &role, false);
+    assert_eq!(restricted.error, None);
+    assert!(
+        restricted
+            .prompt
+            .expect("restricted prompt")
+            .contains("allowed=false")
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A prospective role's preview must use its own filtered bootstrap and skill
 /// advertisement, never the selected UI role or raw session AGENTS inventory.
 #[test]

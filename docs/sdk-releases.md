@@ -20,6 +20,40 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Prepared SDK 0.20.0
+
+Protocol **16.5** adds `BridgeReceiverTarget::{Ordinary, CanonicalMain}`.
+`BridgeReceiverRequest.target` and `BridgeReceiverConfig.target` default to
+`Ordinary`; existing Rust struct literals must supply the field. Proto/client
+source versions are **0.20.0**, with client pinning proto `=0.20.0`; the leaf
+packages remain 0.1.0. Package publication and activation are separate.
+
+`BridgeReceiverClient::start_request` retains ordinary behavior. Bridges opting in
+use `start_request_with_target(session_id, role, mode, target,
+harness_protocol_version)` for every operation, passing Configure's advertised
+revision. The client rejects canonical-main requests unless that revision is
+16.5 or newer within 16.x, preventing older harnesses from ignoring the
+constraint. Shared `resolution_mode` permits main Ensure without an explicit
+role, but only with `register_on_start` and admitted input.
+
+Harness config `tool_policy.canonical_main_only` lists exact final registered
+internal tool names, such as `fedi_zulip_send` when the assigned tool prefix is
+`fedi_zulip` and the local tool is `send`. Entries are exact tool names, not
+instance names, aliases, groups, or tag patterns. Role/model grants and old prompt
+snapshots cannot bypass the final committed-main identity check. A same-role worker
+with a withheld `required_tools` entry fails prompt validation rather than
+receiving the tool.
+
+Receiver targeting and outbound tool restriction are separate controls; apply
+both to a main-only bridge. Manage dedicated Zulip credentials, permitted DM
+participants, routes, and prompt fragments in the deployment and bridge.
+Existing serve bootstrap creates an ordinary agent, not main. To start main
+using existing CLI support, start a fixed session without bootstrap prompt/id,
+then submit once with `tau message '&SESSION' < recovery.txt` after readiness.
+Use `tau serve --session SESSION --create` only for an absent session; use
+`--existing` or the explicit `--create-or-existing` policy for restart.
+Do not retry a message without checking delivery if you lost its acknowledgement.
+
 ### Published SDK 0.19.0
 
 Protocol **16.3** adds optional descriptive `mention_evidence` to

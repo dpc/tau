@@ -2051,8 +2051,14 @@ impl Harness {
                 .cloned()
         });
         let current_role_tool_spec = || self.resolve_enabled_tool_spec_for_agent(&tool_name, cid);
-        let Some(tool_spec) = prompt_tool_spec.unwrap_or_else(current_role_tool_spec) else {
-            let message = if prompt_id.is_some() && self.has_registered_tool_name(&tool_name) {
+        let resolved_spec = prompt_tool_spec.unwrap_or_else(current_role_tool_spec);
+        let identity_denied = resolved_spec
+            .as_ref()
+            .is_some_and(|spec| !self.tool_identity_is_authorized(&spec.name, Some(cid)));
+        let Some(tool_spec) = resolved_spec.filter(|_| !identity_denied) else {
+            let message = if identity_denied {
+                format!("Tool `{tool_name}` is restricted to the available canonical session main.")
+            } else if prompt_id.is_some() && self.has_registered_tool_name(&tool_name) {
                 prompt_snapshot_tool_error_message(&tool_name)
             } else if self.has_registered_tool_name(&tool_name) {
                 disabled_tool_error_message(&tool_name)

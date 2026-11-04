@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.19.0",
+        "dpc-tau-proto": "=0.20.0",
     },
 }
 
@@ -162,8 +162,28 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 4));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 5));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// Packaged bridge consumers can opt in without changing ordinary defaults.
+#[test]
+fn packaged_sdk_preserves_canonical_main_receiver_target() {
+    use tau_proto::*;
+    let mut config = tau_client::BridgeReceiverConfig::default();
+    assert_eq!(config.target, BridgeReceiverTarget::Ordinary);
+    config.target = BridgeReceiverTarget::CanonicalMain;
+    config.register_on_start = true;
+    let request = BridgeReceiverRequest {
+        request_id: "main".to_owned(),
+        session_id: SessionId::parse("session").expect("session"),
+        role: None,
+        target: config.target,
+        mode: config.resolution_mode(None, true),
+    };
+    assert!(matches!(request.mode, BridgeReceiverMode::Ensure { .. }));
+    let encoded = encode_message_to_vec(&request).expect("encode");
+    assert_eq!(decode_message_from_slice::<BridgeReceiverRequest>(&encoded).expect("decode"), request);
 }
 
 /// Registry consumers can preserve typed passive discovery receipts and previews.

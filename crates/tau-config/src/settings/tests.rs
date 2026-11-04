@@ -1498,6 +1498,23 @@ fn tool_policy_shell_style_accepts_values_and_blank_reset() {
     );
 }
 
+/// Main-only restrictions are opt-in exact final names, not role or tag
+/// selectors.
+#[test]
+fn canonical_main_tool_policy_preserves_exact_scoped_names() {
+    let policy: ToolPolicy =
+        serde_yaml_ng::from_str("canonical_main_only: [fedi_zulip_send, fedi_zulip_register]\n")
+            .expect("policy");
+    assert_eq!(
+        policy.canonical_main_only,
+        vec![
+            ToolName::new("fedi_zulip_send"),
+            ToolName::new("fedi_zulip_register"),
+        ]
+    );
+    assert!(ToolPolicy::default().canonical_main_only.is_empty());
+}
+
 /// Ensures a higher-precedence null or blank style clears a lower-layer choice
 /// rather than retaining it through generic config layering.
 #[test]

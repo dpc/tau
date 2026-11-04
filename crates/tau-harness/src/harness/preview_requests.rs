@@ -164,8 +164,11 @@ impl Harness {
                     request_id,
                     ..
                 } => {
-                    let specs =
+                    let mut specs =
                         self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
+                    specs.retain(|spec| {
+                        self.tool_identity_is_authorized(&spec.name, Some(agent_id))
+                    });
                     let result = self
                         .build_system_prompt_for_role_preview_with_snapshot(
                             &role,
@@ -183,8 +186,11 @@ impl Harness {
                     enable_agents_md,
                     ..
                 } => {
-                    let specs =
+                    let mut specs =
                         self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
+                    specs.retain(|spec| {
+                        self.tool_identity_is_authorized(&spec.name, Some(agent_id))
+                    });
                     let result = self
                         .build_system_prompt_for_role_preview_with_snapshot(
                             &role,
@@ -234,7 +240,8 @@ impl Harness {
                                 PromptSurfaceError::Render(error) => {
                                     format!("failed to render system prompt: {error}")
                                 }
-                                PromptSurfaceError::WebUnavailable(error) => error,
+                                PromptSurfaceError::WebUnavailable(error)
+                                | PromptSurfaceError::RequiredToolsUnavailable(error) => error,
                             })
                     } else {
                         self.prepare_provisional_tool_surface_for_preview(&role)
@@ -254,7 +261,8 @@ impl Harness {
                                 PromptSurfaceError::Render(error) => {
                                     format!("failed to render system prompt: {error}")
                                 }
-                                PromptSurfaceError::WebUnavailable(error) => error,
+                                PromptSurfaceError::WebUnavailable(error)
+                                | PromptSurfaceError::RequiredToolsUnavailable(error) => error,
                             })
                     };
                     self.send_rendered_tools(&connection_id, request_id, result);

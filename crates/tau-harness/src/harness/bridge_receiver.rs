@@ -5,7 +5,8 @@
 
 use tau_proto::{
     BridgeReceiverErrorKind as ErrorKind, BridgeReceiverMode, BridgeReceiverOutcome as Outcome,
-    BridgeReceiverRequest, BridgeReceiverResult, BridgeReceiverUnavailable as Unavailable,
+    BridgeReceiverRequest, BridgeReceiverResult, BridgeReceiverTarget,
+    BridgeReceiverUnavailable as Unavailable,
 };
 
 use super::start_coordinator::StartPhase;
@@ -117,8 +118,10 @@ impl Harness {
             }
             let caller = self.tool_routing.tool_runtime.tool_agents.get(tool_call_id);
             return match caller.filter(|id| {
-                self.bridge_receiver_candidate(id, request.role.as_deref())
-                    .is_some()
+                self.bridge_receiver_target_matches(id, request.target)
+                    && self
+                        .bridge_receiver_candidate(id, request.role.as_deref())
+                        .is_some()
             }) {
                 Some(agent_id) => Outcome::Selected {
                     agent_id: agent_id.clone(),
@@ -128,6 +131,9 @@ impl Harness {
                     "register caller is not an eligible receiving agent",
                 ),
             };
+        }
+        if request.target == BridgeReceiverTarget::CanonicalMain {
+            return self.resolve_main_bridge_receiver(request);
         }
         let preferred = match &request.mode {
             BridgeReceiverMode::Restore { agent_id } => agent_id.as_ref(),
@@ -171,6 +177,81 @@ impl Harness {
             return unavailable(Unavailable::NoEligibleAgent);
         }
         self.create_bridge_receiver(source, request)
+    }
+
+    /// Canonical targeting is an additional constraint, never role inference.
+    fn bridge_receiver_target_matches(&self, id: &AgentId, target: BridgeReceiverTarget) -> bool {
+        target == BridgeReceiverTarget::Ordinary
+            || (self.main_agent_id() == Some(id) && self.main_agent_is_eligible(id))
+    }
+
+    /// Resolve the retained main only; admitted Ensure may lazily construct it.
+    fn resolve_main_bridge_receiver(&mut self, request: &BridgeReceiverRequest) -> Outcome {
+        if let BridgeReceiverMode::Restore { agent_id } = &request.mode {
+            return match agent_id.as_ref().filter(|id| {
+                self.bridge_receiver_target_matches(id, request.target)
+                    && self
+                        .bridge_receiver_candidate(id, request.role.as_deref())
+                        .is_some()
+            }) {
+                Some(id) => Outcome::Selected {
+                    agent_id: id.clone(),
+                },
+                None => unavailable(Unavailable::NoEligibleAgent),
+            };
+        }
+        if self.main_agent_id().is_none()
+            && self
+                .session_runtime
+                .current_session_state
+                .main_candidate
+                .is_some()
+        {
+            return unavailable(Unavailable::NotReady);
+        }
+        if self.main_agent_id().is_none()
+            && matches!(request.mode, BridgeReceiverMode::Ensure { .. })
+        {
+            // Reject a contradictory role before creating any durable
+            // candidate.
+            if request
+                .role
+                .as_deref()
+                .is_some_and(|role| self.config.accepted_harness_settings.main_role() != Some(role))
+            {
+                return unavailable(Unavailable::NoEligibleAgent);
+            }
+            match self.ensure_main_agent() {
+                Ok(Some(_)) => {}
+                Ok(None) => return unavailable(Unavailable::NoEligibleAgent),
+                Err(error) => return receiver_error(ErrorKind::CreationFailed, error),
+            }
+        }
+        let Some(id) = self.main_agent_id() else {
+            return unavailable(
+                if self
+                    .session_runtime
+                    .current_session_state
+                    .main_candidate
+                    .is_some()
+                {
+                    Unavailable::NotReady
+                } else {
+                    Unavailable::NoEligibleAgent
+                },
+            );
+        };
+        if self.bridge_receiver_target_matches(id, request.target)
+            && self
+                .bridge_receiver_candidate(id, request.role.as_deref())
+                .is_some()
+        {
+            Outcome::Selected {
+                agent_id: id.clone(),
+            }
+        } else {
+            unavailable(Unavailable::NoEligibleAgent)
+        }
     }
 
     /// Inspect only loaded runtime and retained immutable creation facts.

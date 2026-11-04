@@ -19,6 +19,7 @@ fn resolve(h: &mut Harness, role: Option<&str>, mode: Mode) -> Outcome {
             request_id: "resolve-1".to_owned(),
             session_id: h.session_runtime.current_session_id.clone(),
             role: role.map(str::to_owned),
+            target: Default::default(),
             mode,
         },
         &h.current_extension_frame_admission(),
@@ -324,6 +325,7 @@ fn bridge_receiver_authority_readiness_and_ephemeral_lifecycle() {
             &crate::test_connection_id("bridge"),
             &BridgeReceiverRequest {
                 request_id: "wrong-session".to_owned(),
+                target: Default::default(),
                 session_id: test_session_id("other"),
                 role: Some("engineer".to_owned()),
                 mode: Mode::Ensure {
@@ -519,6 +521,7 @@ fn bridge_receiver_directed_fixture_retains_endpoint_after_response() {
         &crate::test_connection_id("bridge"),
         HarnessInputMessage::BridgeReceiverRequest(BridgeReceiverRequest {
             request_id: "directed".to_owned(),
+            target: Default::default(),
             session_id: test_session_id("s1"),
             role: Some("engineer".to_owned()),
             mode: Mode::Ensure {
@@ -588,6 +591,7 @@ fn bridge_receiver_directed_fixture_retains_endpoint_after_response() {
 fn ingress_ensure() -> HarnessInputMessage {
     HarnessInputMessage::BridgeReceiverRequest(BridgeReceiverRequest {
         request_id: "ingress".to_owned(),
+        target: Default::default(),
         session_id: test_session_id("s1"),
         role: Some("engineer".to_owned()),
         mode: Mode::Ensure {
@@ -775,6 +779,7 @@ fn bridge_receiver_ingress_after_shutdown_cannot_create() {
             &crate::test_connection_id("bridge"),
             HarnessInputMessage::BridgeReceiverRequest(BridgeReceiverRequest {
                 request_id: request_id.to_owned(),
+                target: Default::default(),
                 session_id,
                 role: Some("engineer".to_owned()),
                 mode: Mode::Ensure {

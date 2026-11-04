@@ -1368,6 +1368,9 @@ impl<'de> Deserialize<'de> for HarnessSettings {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolPolicy {
+    /// Exact registered tool names restricted to the committed, available
+    /// canonical session main. This final veto cannot be overridden by roles.
+    pub canonical_main_only: Vec<ToolName>,
     /// Optional global shell edit implementation override. `None` uses the
     /// selected model's declared preference, or exact-text except for ChatGPT.
     #[serde(default, deserialize_with = "deserialize_shell_tool_style")]

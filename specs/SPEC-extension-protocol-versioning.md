@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.5 adds an optional canonical-main target to bridge receiver requests.
+Omitted targets preserve ordinary behavior. Before sending this target,
+extensions must require Configure's advertised revision to be at least 16.5
+within 16.x; older harnesses could ignore the constraint. Ordinary 16.x peers
+remain compatible. The public request and config fields use source SDK 0.20.0.
+Journal semantics and canonical main identity facts are unchanged. SDK/source
+publication and deployment remain separate operations.
+
 Protocol 16.4 adds optional descriptive native reply context to delivered and
 edited reports and facts. Shared projection renders supplied parent text in a
 `quoted_message` envelope adjacent to `message` within one `MessageItem`, not a

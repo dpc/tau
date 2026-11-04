@@ -2831,6 +2831,7 @@ mod agent_unload;
 mod agent_watch_wait;
 mod artifacts;
 mod bridge_receiver;
+mod canonical_main_capabilities;
 mod cli_messaging;
 mod config_error;
 mod dedup;

@@ -18,8 +18,22 @@ pub struct BridgeReceiverRequest {
     pub session_id: SessionId,
     /// Optional immutable creation-role constraint; unknown roles are errors.
     pub role: Option<String>,
+    /// Identity constraint, independent of the optional immutable role.
+    #[serde(default)]
+    pub target: BridgeReceiverTarget,
     /// Whether to restore, select, lazily ensure, or validate a tool caller.
     pub mode: BridgeReceiverMode,
+}
+
+/// Identity eligible for a configured bridge's receiving designation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeReceiverTarget {
+    /// Preserve ordinary loaded-agent selection and explicit-role creation.
+    #[default]
+    Ordinary,
+    /// Only the committed canonical session main; never a same-role substitute.
+    CanonicalMain,
 }
 
 /// Receiver resolution authority requested by a configured bridge.

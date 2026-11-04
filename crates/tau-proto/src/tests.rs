@@ -4528,7 +4528,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 4})
+        serde_json::json!({"major": 16, "minor": 5})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4638,7 +4638,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 16, "minor": 4})
+        serde_json::json!({"major": 16, "minor": 5})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4730,7 +4730,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 4})
+        serde_json::json!({"major": 16, "minor": 5})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

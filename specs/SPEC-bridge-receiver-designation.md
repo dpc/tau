@@ -34,12 +34,25 @@ creation decisions.
 `register_on_start` defaults false: restore a saved manual designation but never
 first-select or create automatically. True selects automatically; only a request
 following actual admitted external input may create, and only for an explicit
-role. Missing role selects existing any-role agents and never guesses a creation
+role in ordinary target mode. Missing role selects existing any-role agents and never guesses a creation
 role. Creation uses ordinary role preparation without a bootstrap prompt and
 records a reserved noninheritable bridge receiving purpose in `agent.started`.
 It retains ordinary tool-capable lifecycle after replies and on cold restore,
 without pretending to be a cooperative peer endpoint. Peer pool fairness remains
 unchanged.
+
+An opt-in `canonical_main` target replaces ordinary selection with the committed
+current-session main identity. Register and Restore reject any other identity,
+including saved same-role designations. Select and Ensure may choose main through
+the bridge's normal successful designation update; they never rewrite a saved
+designation on failure. An optional immutable creation-role constraint
+applies. Only Ensure after admitted input may call the existing prompt-free main
+construction operation. A pending candidate has no authority until binding
+commits. If bound main is missing or unavailable, the harness must not fall back
+to an ordinary agent or rebind main. This target adds no durable identity fact.
+SDK callers must require the harness's advertised protocol to be 16.5 or newer
+within 16.x before sending this target; older harnesses could ignore the added
+field.
 
 ## Bridge-owned designation
 

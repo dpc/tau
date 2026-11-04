@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    AgentId, BridgeReceiverMode, BridgeReceiverRequest, HarnessInputMessage, SessionId,
+    AgentId, BridgeReceiverMode, BridgeReceiverRequest, BridgeReceiverTarget, HarnessInputMessage,
+    ProtocolVersion, SessionId,
 };
 
 use crate::{ClientError, ClientHandle};
@@ -22,6 +23,10 @@ pub struct BridgeReceiverConfig {
     /// Optional immutable creation-role constraint and lazy creation role.
     #[serde(default)]
     pub role: Option<String>,
+    /// Optional canonical-main identity constraint; ordinary selection is
+    /// default.
+    #[serde(default)]
+    pub target: BridgeReceiverTarget,
 }
 
 impl BridgeReceiverConfig {
@@ -36,7 +41,9 @@ impl BridgeReceiverConfig {
             BridgeReceiverMode::Restore {
                 agent_id: preferred_agent_id,
             }
-        } else if admitted_input && self.role.is_some() {
+        } else if admitted_input
+            && (self.role.is_some() || self.target == BridgeReceiverTarget::CanonicalMain)
+        {
             BridgeReceiverMode::Ensure { preferred_agent_id }
         } else {
             BridgeReceiverMode::Select { preferred_agent_id }
@@ -105,6 +112,22 @@ impl BridgeReceiverClient {
         role: Option<String>,
         mode: BridgeReceiverMode,
     ) -> Result<String, ClientError> {
+        self.start_request_with_target(session_id, role, mode, BridgeReceiverTarget::Ordinary, None)
+    }
+
+    /// Resolve with an explicit identity constraint using the revision
+    /// advertised by Configure. Canonical-main requests fail locally on
+    /// absent/older revisions: older harnesses could silently ignore the
+    /// target field.
+    pub fn start_request_with_target(
+        &self,
+        session_id: SessionId,
+        role: Option<String>,
+        mode: BridgeReceiverMode,
+        target: BridgeReceiverTarget,
+        harness_protocol_version: Option<ProtocolVersion>,
+    ) -> Result<String, ClientError> {
+        validate_receiver_target_version(target, harness_protocol_version)?;
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let request_id = format!("bridge-{}", NEXT.fetch_add(1, Ordering::Relaxed));
         self.handle
@@ -113,11 +136,27 @@ impl BridgeReceiverClient {
                     request_id: request_id.clone(),
                     session_id,
                     role,
+                    target,
                     mode,
                 },
             ))?;
         Ok(request_id)
     }
+}
+
+/// Fail closed before enqueueing a constraint an older harness could ignore.
+fn validate_receiver_target_version(
+    target: BridgeReceiverTarget,
+    version: Option<ProtocolVersion>,
+) -> Result<(), ClientError> {
+    if target == BridgeReceiverTarget::CanonicalMain
+        && !version.is_some_and(|version| version.major == 16 && version.minor >= 5)
+    {
+        return Err(ClientError::handler(
+            "canonical_main bridge receivers require harness protocol 16.5 or newer within 16.x",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
