@@ -602,15 +602,20 @@ impl EventLog {
         }
     }
 
-    /// Returns the largest active consumer lag in logical stream positions.
-    pub(crate) fn max_consumer_lag(&self) -> u64 {
+    /// Returns a maximally lagging active consumer and its cursor distance in
+    /// logical stream positions, including positions targeting other consumers.
+    pub(crate) fn max_consumer_lag(&self) -> Option<(tau_core::SharedDeliveryTarget, u64)> {
         let inner = self.inner.lock().expect("event log mutex poisoned");
         inner
             .consumers
-            .values()
-            .map(|state| inner.next_egress_seq.distance_from(state.cursor))
-            .max()
-            .unwrap_or_default()
+            .iter()
+            .map(|(&consumer, state)| {
+                (
+                    tau_core::SharedDeliveryTarget::new(self.group, consumer),
+                    inner.next_egress_seq.distance_from(state.cursor),
+                )
+            })
+            .max_by_key(|(_, lag)| *lag)
     }
 
     /// Returns active consumer count for lifecycle regression tests.

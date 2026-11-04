@@ -718,8 +718,22 @@ impl Harness {
     }
 
     pub(super) fn process_runtime_deadlines_at(&mut self, now: Instant) {
-        let max_live_lag = self.runtime_io.event_log.max_consumer_lag();
-        if LIVE_EGRESS_LAG_WARNING_POSITIONS <= max_live_lag
+        let max_lag = self.runtime_io.event_log.max_consumer_lag();
+        let lag = max_lag.map_or(0, |(_, lag)| lag);
+        if self.runtime_io.live_egress_lag_warning_active && lag < LIVE_EGRESS_LAG_WARNING_POSITIONS
+        {
+            self.runtime_io.live_egress_lag_warning_active = false;
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_NOTICE,
+                tau_proto::NoticeLevel::Info,
+                tau_proto::NoticePurpose::Alert,
+                &format!(
+                    "egress lag: status=cleared max_cursor_lag={lag} threshold={LIVE_EGRESS_LAG_WARNING_POSITIONS} positions"
+                ),
+            );
+        }
+        if let Some((target, lag)) = max_lag
+            && LIVE_EGRESS_LAG_WARNING_POSITIONS <= lag
             && self
                 .runtime_io
                 .last_live_egress_lag_warning
@@ -728,8 +742,17 @@ impl Harness {
                 })
         {
             self.runtime_io.last_live_egress_lag_warning = Some(now);
+            self.runtime_io.live_egress_lag_warning_active = true;
+            let source = self
+                .runtime_io
+                .bus
+                .connection_for_delivery_target(target)
+                .map(|connection| {
+                    format!("component={} connection={}", connection.name, connection.id)
+                })
+                .unwrap_or_else(|| format!("consumer={:?}", target.consumer()));
             self.emit_info_important(&format!(
-                "a connected component is pathologically behind the live event stream ({max_live_lag} pending positions); delivery remains active and retention may grow"
+                "egress lag: status=active {source} max_cursor_lag={lag} threshold={LIVE_EGRESS_LAG_WARNING_POSITIONS} positions"
             ));
         }
         // ast-grep-ignore: debug-assert-expression-must-not-mutate

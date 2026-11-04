@@ -387,6 +387,18 @@ impl EventBus {
             .map(|entry| &entry.metadata)
     }
 
+    /// Resolves a shared-stream consumer generation to its current connection.
+    #[must_use]
+    pub fn connection_for_delivery_target(
+        &self,
+        target: crate::SharedDeliveryTarget,
+    ) -> Option<&ConnectionMetadata> {
+        self.connections
+            .values()
+            .find(|entry| entry.sink.shared_delivery_target() == Some(target))
+            .map(|entry| &entry.metadata)
+    }
+
     /// Returns a snapshot of all connected clients.
     #[must_use]
     pub fn connections(&self) -> Vec<ConnectionMetadata> {

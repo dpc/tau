@@ -371,6 +371,32 @@ fn stalled_consumer_pins_until_explicit_retirement() {
     assert!(log.inner.lock().expect("log").retained.is_empty());
 }
 
+/// Lag attribution follows the oldest active cursor, counts unrelated stream
+/// positions rather than queued messages, and stops naming retired generations.
+#[test]
+fn consumer_lag_tracks_cursor_distance_and_retirement() {
+    let log = EventLog::new();
+    assert_eq!(log.max_consumer_lag(), None);
+    let first = log.register_consumer();
+    let first_target = tau_core::SharedDeliveryTarget::new(log.group(), first);
+    let _ = log.append_egress(routed_notice("first"), &[first_target]);
+    let second = log.register_consumer();
+    let second_target = tau_core::SharedDeliveryTarget::new(log.group(), second);
+    let _ = log.append_egress(routed_notice("second"), &[second_target]);
+
+    assert_eq!(log.max_consumer_lag(), Some((first_target, 2)));
+    let pending = log.next_egress(first).expect("first delivery");
+    log.acknowledge_egress(first, &pending);
+    log.retire_consumer(first);
+    assert_eq!(log.max_consumer_lag(), Some((second_target, 1)));
+
+    let pending = log.next_egress(second).expect("second delivery");
+    log.acknowledge_egress(second, &pending);
+    assert_eq!(log.max_consumer_lag(), Some((second_target, 0)));
+    log.retire_consumer(second);
+    assert_eq!(log.max_consumer_lag(), None);
+}
+
 /// A terminal close must release replay pause, deliver only through its
 /// captured tail, and retire without retaining a later targeted frame.
 #[test]

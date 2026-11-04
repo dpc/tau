@@ -236,6 +236,28 @@ fn model_bus() -> (EventBus, DeliveryTrace) {
     (bus, trace)
 }
 
+/// Diagnostic attribution must match both stream and consumer generation and
+/// must not retain a connection identity after disconnect.
+#[test]
+fn delivery_target_attribution_requires_current_connection_and_stream() {
+    let (mut bus, _) = model_bus();
+    let target = SharedDeliveryTarget::new(SharedDeliveryGroup::new(7), SharedConsumerId::new(1));
+    let connection = bus
+        .connection_for_delivery_target(target)
+        .expect("shared consumer connection");
+    assert_eq!(connection.id, test_connection_id("shared-admitted"));
+    assert_eq!(connection.name, test_extension_name("shared-admitted"));
+    assert!(
+        bus.connection_for_delivery_target(SharedDeliveryTarget::new(
+            SharedDeliveryGroup::new(8),
+            target.consumer(),
+        ))
+        .is_none()
+    );
+    bus.disconnect(&test_connection_id("shared-admitted"));
+    assert!(bus.connection_for_delivery_target(target).is_none());
+}
+
 /// The no-report collector must execute the same selector, filter, exclusion,
 /// shared-generation, retirement, failure, and direct delivery decisions.
 #[test]

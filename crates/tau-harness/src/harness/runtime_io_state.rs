@@ -32,6 +32,9 @@ pub(crate) struct RuntimeIoState {
     pub(crate) protocol_version_skew_warned: HashSet<tau_proto::ConnectionId>,
     /// Last diagnostic warning about a lagging live follower.
     pub(crate) last_live_egress_lag_warning: Option<Instant>,
+    /// Whether an emitted lag warning still awaits a global below-threshold
+    /// notice.
+    pub(crate) live_egress_lag_warning_active: bool,
     /// Producer for the best-effort debug event log.
     pub(crate) debug_log: Option<DebugEventLog>,
     /// Test-visible synchronous debug writer rollback poison.
