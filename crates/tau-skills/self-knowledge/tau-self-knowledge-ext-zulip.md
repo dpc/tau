@@ -163,6 +163,40 @@ For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all
 
 In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the text tool group. `zulip_register {}` means “make the authenticated caller this instance's receiving agent.” The legacy `{"enabled":true}` spelling remains accepted, while `{"enabled":false}` is rejected rather than pausing reception. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
 
+### Ordinary send mentions
+
+With an existing send grant, you can include mentions in authored Markdown,
+including native `@**|123**` user mentions, without a separate mention grant or
+configuration. The bridge preserves inline mentions. Mentioning someone does not
+select a DM recipient or grant route, membership or send authority. Zulip policy and
+notification settings determine notification effects.
+
+For convenience, both ordinary and send-only `zulip_send` accept optional
+`mention_users`: 1–32 strings, each at most 128 characters. Use canonical nonzero decimal u64 IDs
+without leading zeroes, or locally resolvable `zulip-sender:` references from
+configured normal/untrusted senders, the queue's bot identity and the bounded
+retained participant locator queue. Use these values as locators, not mention
+authorization: decimal targets may be outside sender tiers, including bots. The option adds no
+network identity lookup, name guessing, grant, recipient selector, membership gate
+or configuration. Send-only supports decimal IDs without a queue; opaque
+references normally cannot resolve there.
+
+The bridge prepends generated ID-only native tokens in caller order, preserving
+duplicates. It separates tokens with spaces and adds a space before nonempty
+authored text or captions. Authored Markdown, including inline mentions, remains
+byte-identical. Omitting `mention_users` preserves existing behavior; an empty
+list fails. Existing nonblank-text and attachment requirements stay unchanged.
+Before provider effects, the bridge checks all targets and expanded wire/report
+budgets, including attachment reservations.
+
+In sent reports, the bridge replaces only generated prefixes: native wire tokens
+`@**|123**` become presentation-only `@**|zulip-sender:<opaque hash>**` tokens.
+These report tokens are not native syntax and do not claim to match the wire. Authored bytes
+and attachment links remain identical in both bodies; the bridge does not
+globally redact content or strip inline mentions. Failed or uncertain sends do
+not publish confirmed sent reports. Existing frozen-route and lifecycle fences
+remain unchanged.
+
 ### Unified sends and original files
 
 Ordinary `zulip_send` accepts text, files or both through optional

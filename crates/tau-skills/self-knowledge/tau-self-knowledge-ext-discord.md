@@ -195,10 +195,25 @@ permissions, receive admission, or actual delivery. Normal sends require current
 registration and a live writable transport; use `discord_conversations` (with
 the configured prefix) to discover aliases rather than supplying native IDs.
 
-All writes suppress user, role, everyone/here, and reply-notification mentions.
-Mention-like text is not a supported notifying ping. Do not automatically retry
-failed or uncertain writes: a send may have taken effect without a confirmed
-receipt.
+Do not automatically retry failed or uncertain writes: a send may have taken
+effect without a confirmed receipt.
+
+## Ordinary send mentions
+
+With an existing send grant, you can include mentions in authored content without
+a separate mention grant, configuration or argument. Use native `<@USER_ID>`,
+`<@&ROLE_ID>`, `@everyone` or `@here` syntax. Profile and participant tools return
+native user IDs when their separate read grants are available; opaque sender
+references are not native mention syntax.
+
+The bridge preserves caller content across text and attachment sends, DMs,
+strict send-only mode, replies and thread starts, including forum starters.
+Both ordinary messages and forum starters allow user, role and everyone/here
+mentions. Discord permissions and notification settings determine their effects;
+successful posting does not guarantee a notification. A reply alone does not
+notify its author (`replied_user: false`); include an explicit mention to request
+that notification.
+Mentions do not change destination, thread-creation or send authority.
 
 ## Native mention evidence
 
