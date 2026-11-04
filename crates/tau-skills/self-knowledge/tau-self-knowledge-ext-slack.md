@@ -10,9 +10,9 @@ advertise: false
 `slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`; `tool_prefix` scopes
 all four tools and their group for multiple accounts. Slack text is always
 untrusted external content. The reviewed provisional mention producer targets
-SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is unpublished; registry-only acceptance
-and adoption remain pending. Do not assume an installed bridge supports mention
-evidence.
+SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is published; Slack-specific registry-only
+acceptance and adoption remain pending. Do not assume an installed bridge supports
+mention evidence.
 
 For Tau protocol 16.0, rebuild the executable with
 registry SDK crates `dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update it

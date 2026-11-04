@@ -18,9 +18,9 @@ revision used Tau protocol 9 and registry SDK 0.7.0, with the receiver-admission
 fix first published in Tau commit
 `30c8b43410a84294f31f74451f9f7f09a94df473`. That historical requirement is not a
 compatibility guarantee for newer harnesses. The reviewed provisional mention
-producer targets SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is unpublished;
-registry-only acceptance and adoption remain pending. Do not assume an installed
-bridge supports mention evidence.
+producer targets SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is published;
+Zulip-specific registry-only acceptance and adoption remain pending. Do not assume
+an installed bridge supports mention evidence.
 Rebuild it with the compatible harness and configured peers before separately
 authorized activation. Older-protocol binaries are rejected before configuration or
 receiver registration; changing Zulip routes or registration settings does not

@@ -44,8 +44,8 @@ message drives admission, `/to`, route selection, and mentions.
 The producer freezes context with its delivery/checkpoint text through retries and
 ACKs; parent changes never refresh it. The producer shrinks or omits optional
 context to preserve the original outer body within delivery limits. Typed context
-requires rebuilding the producer against the unpublished 0.19.0 source SDK; the
-legacy 0.16 producer remains unchanged. This adds no native per-message send
+requires rebuilding the producer against the 0.19.0 source SDK; the legacy 0.16
+producer remains unchanged. This adds no native per-message send
 routing and does not deploy or activate the producer.
 
 Assign a distinct generic `tool_prefix` to each configured bot instance.

@@ -20,7 +20,7 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.19.0 (unpublished)
+### Published SDK 0.19.0
 
 Protocol **16.3** adds optional descriptive `mention_evidence` to
 `MessageDelivered` and `MessageEdited`. Add `mention_evidence: None` to existing
@@ -44,12 +44,26 @@ admission, routing, ownership, and activation remain those of the outer message.
 Each edit supplies its chosen frozen snapshot; projection does not
 inherit a prior quote.
 
-This is source preparation only, separate from application 0.3.0 and SDK 0.18.0.
-It does not publish packages, rebuild external producers, or activate installed
-binaries. Existing 16.x producers remain admitted; older readers ignore the optional
-field. To expose the new metadata to the model, update the producer's proto/client
-pins, rebuild the extension, and use an updated harness. Publish proto before client
-under separate authorization, then verify registry-only consumers before adoption.
+Proto and client 0.19.0 were published in dependency order on November 4, 2026
+from `170d4b513af0e2558788760fbe6aae7e8b7f8b19`. Both official sparse-index
+records are unyanked. The downloaded archives match the verified dry-run bytes
+and identify the same clean source in Cargo VCS metadata:
+
+| Package | SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `7c89a9f94ae029854a0a49118962032d0695fd11fd305c0c701d6357976e7d42` |
+| `dpc-tau-client` | `caa0d58e339e3d4bc0c16661b256b09d3290c7502de89b3f2c830a5ca1469de1` |
+
+The package check passed all 12 tests on Rust 1.91 using a fresh, isolated Cargo
+home and only registry dependencies. The
+`dpc-tau-proto-v0.19.0` and `dpc-tau-client-v0.19.0` tags identify that source on
+Radicle and GitHub. Source publication used normal MQ and passed final local CI.
+
+This SDK-only release is separate from application 0.3.0 and SDK 0.18.0; the
+immutable application tag remains unchanged. Existing 16.x producers remain
+admitted, and older readers may ignore the optional fields. To expose the new
+metadata, update the producer's proto/client pins, rebuild the extension, and use
+an updated harness. Publication does not deploy or activate those binaries.
 
 ### Published SDK 0.18.0
 
@@ -69,7 +83,6 @@ Proto and client 0.18.0 were published on November 3, 2026 from
 `3eae7dc621b3f2d2f953a182b85cde03c0037fbb` for application 0.3.0.
 Both unyanked registry archives matched their verified dry-run checksums and clean
 source identity. A fresh registry-only consumer passed all 11 tests on Rust 1.91.
-The prepared SDK 0.19.0 above remains unpublished.
 
 ### Published SDK 0.17.0
 
