@@ -272,6 +272,13 @@ policy, startup-only provider/model aliases, the global `tau_state_access`
 default, agent provider defaults, agent/global role
 metadata, role groups and roles, plus `extensions.<name>.enable` and arbitrary
 `extensions.<name>.config` for a built-in or base-configured extension.
+Within profile `tool_policy`, the loader accepts only `canonical_main_only`.
+It resolves the ordinary global/CLI list, then adds exact internal tool names
+from every selected raw profile layer in selection/source order, keeping the
+first occurrence of each name. Omission or an empty list adds nothing; no
+profile or CLI replacement removes profile additions. Unselected profiles add
+nothing. The loader bypasses generic array replacement for this field; other
+top-level tool-policy layering remains unchanged.
 Inter-session fields keep their ordinary layered semantics: omission inherits,
 the review boolean overrides its inherited value, notice nulls clear advisory
 text, and project-root list nulls restore their unrestricted/no-veto defaults.

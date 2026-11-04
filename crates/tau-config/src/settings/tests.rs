@@ -1515,6 +1515,146 @@ fn canonical_main_tool_policy_preserves_exact_scoped_names() {
     assert!(ToolPolicy::default().canonical_main_only.is_empty());
 }
 
+/// Every selected raw profile layer adds exact restrictions in stable order,
+/// even across empty patches, repeated selections, and duplicate tool names.
+#[test]
+fn profile_canonical_main_tool_policy_unions_raw_layers() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+tool_policy:
+  canonical_main_only: [global, shared, global]
+profiles:
+  manager:
+    tool_policy:
+      canonical_main_only: [manager_send, shared]
+  empty:
+    tool_policy:
+      canonical_main_only: []
+  omitted: {}
+  secondary:
+    tool_policy:
+      canonical_main_only: [secondary_send, manager_register]
+  dormant:
+    tool_policy:
+      canonical_main_only: [dormant_send]
+"#,
+    )
+    .expect("write config");
+    std::fs::create_dir(td.path().join("harness.d")).expect("dropins");
+    std::fs::write(
+        td.path().join("harness.d/10-manager.yaml"),
+        "profiles:\n  manager:\n    tool_policy:\n      canonical_main_only: [manager_register, manager_send]\n",
+    )
+    .expect("write additive layer");
+    std::fs::write(
+        td.path().join("harness.d/20-manager.yaml"),
+        "profiles:\n  manager:\n    tool_policy:\n      canonical_main_only: []\n",
+    )
+    .expect("write empty layer");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile_selection(
+            "manager,empty,secondary,omitted,manager",
+        )),
+        &[],
+        &[],
+    )
+    .expect("selected policy");
+    assert_eq!(
+        settings.tool_policy.canonical_main_only,
+        [
+            "global",
+            "shared",
+            "manager_send",
+            "manager_register",
+            "secondary_send"
+        ]
+        .map(ToolName::new)
+    );
+    let unselected = load_harness_settings_in(&dirs_with_config(td.path())).expect("base");
+    assert!(
+        !unselected
+            .tool_policy
+            .canonical_main_only
+            .contains(&ToolName::new("manager_send"))
+    );
+    assert!(
+        !unselected
+            .tool_policy
+            .canonical_main_only
+            .contains(&ToolName::new("dormant_send"))
+    );
+}
+
+/// CLI retains ordinary top-level replacement but cannot erase restrictions
+/// supplied by the selected profile, including with an explicit empty array.
+#[test]
+fn profile_canonical_main_tool_policy_survives_cli_replacement() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+tool_policy:
+  canonical_main_only: [global]
+profiles:
+  manager:
+    tool_policy:
+      canonical_main_only: [manager_send]
+"#,
+    )
+    .expect("write config");
+    for (value, expected) in [
+        ("[]", vec!["manager_send"]),
+        ("[cli,manager_send]", vec!["cli", "manager_send"]),
+    ] {
+        let overrides = [HarnessConfigCliOverride::from_str(&format!(
+            "tool_policy.canonical_main_only={value}"
+        ))
+        .expect("override")];
+        let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+            &dirs_with_config(td.path()),
+            Some(&profile_selection("manager")),
+            &[],
+            &overrides,
+        )
+        .expect("selected policy");
+        assert_eq!(
+            settings.tool_policy.canonical_main_only,
+            expected.into_iter().map(ToolName::new).collect::<Vec<_>>()
+        );
+        let ordinary = load_harness_settings_with_profile_and_cli_overrides_in(
+            &dirs_with_config(td.path()),
+            None,
+            &[],
+            &overrides,
+        )
+        .expect("ordinary policy");
+        assert_eq!(
+            ordinary.tool_policy.canonical_main_only.is_empty(),
+            value == "[]"
+        );
+    }
+}
+
+/// Profiles reject unrelated policy fields even when inactive, rather than
+/// silently accepting a broader tool-policy schema that profiles do not apply.
+#[test]
+fn profile_canonical_main_tool_policy_rejects_unknown_fields() {
+    let td = TempDir::new().expect("tempdir");
+    for field in ["rules: {}", "default_shell_tool_style: edit", "typo: []"] {
+        std::fs::write(
+            td.path().join("harness.yaml"),
+            format!("profiles:\n  dormant:\n    tool_policy:\n      {field}\n"),
+        )
+        .expect("write config");
+        let error = load_harness_settings_in(&dirs_with_config(td.path()))
+            .expect_err("invalid inactive policy");
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+}
+
 /// Ensures a higher-precedence null or blank style clears a lower-layer choice
 /// rather than retaining it through generic config layering.
 #[test]

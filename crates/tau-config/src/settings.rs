@@ -6,7 +6,7 @@
 //!
 //! Uses the `config` crate for layered YAML loading.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::num::{NonZeroU8, NonZeroU16, NonZeroU64};
 use std::path::{Path, PathBuf};
@@ -1582,8 +1582,9 @@ struct HarnessAliasesWire {
 ///
 /// Profiles deliberately expose only the session inter-session policy, startup
 /// default role, role metadata, the global extension Tau-state access default,
-/// extension enablement, and arbitrary extension-owned config patches. This
-/// avoids making a profile a second copy of the complete harness schema while
+/// extension enablement, arbitrary extension-owned config patches, and additive
+/// canonical-main tool restrictions. This avoids making a profile a second copy
+/// of the complete harness schema while
 /// allowing supported settings to compose through their normal layering rules.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1599,6 +1600,17 @@ struct HarnessProfile {
     /// Enablement and extension-owned config patches for normally resolved
     /// extensions, including built-ins.
     extensions: BTreeMap<String, HarnessProfileExtension>,
+    /// Add-only tool restrictions replayed outside generic YAML array layering.
+    tool_policy: HarnessProfileToolPolicy,
+}
+
+/// The narrow, add-only tool policy supported by configuration profiles.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HarnessProfileToolPolicy {
+    /// Exact registered tool names requiring the available canonical session
+    /// main.
+    canonical_main_only: Vec<ToolName>,
 }
 
 /// Presence-aware inter-session policy fields supported by one profile.
@@ -4408,6 +4420,19 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
         harness_config_overrides,
     )?;
 
+    // Profiles can only add restrictions, never replace the effective ordinary
+    // global/CLI list or another selected raw profile layer's additions.
+    let mut seen = HashSet::new();
+    settings.tool_policy.canonical_main_only.extend(
+        profiles
+            .iter()
+            .flat_map(|profile| profile.tool_policy.canonical_main_only.iter().cloned()),
+    );
+    settings
+        .tool_policy
+        .canonical_main_only
+        .retain(|name| seen.insert(name.clone()));
+
     // Generic YAML layering replaces arrays, but role metadata is additive.
     // Recompute it from raw source patches. Source order still controls patches
     // at one scope, while scope precedence controls the result across sources:
@@ -4778,6 +4803,9 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
 
 /// Serializes the intentionally small non-role-replay subset of a selected
 /// profile.
+///
+/// Tool restrictions are deliberately excluded: generic array replacement would
+/// let later profiles or CLI layers remove them. The loader unions raw layers.
 fn profile_config_source(
     profile: &HarnessProfile,
 ) -> Result<config::File<config::FileSourceString, config::FileFormat>, SettingsError> {

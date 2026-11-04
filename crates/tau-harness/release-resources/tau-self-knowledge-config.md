@@ -82,6 +82,18 @@ Within `inter_session`, omitted fields inherit; null clears a notice/list using
 the same semantics as top-level configuration. The review boolean overrides
 its inherited value.
 
+The exception to ordinary profile array replacement is
+`tool_policy.canonical_main_only`: an add-only list of exact final registered
+internal tool names (not model-visible aliases). Tau first resolves the ordinary
+global/CLI list, then adds names from every selected raw profile layer in
+selection/source order, keeping the first occurrence of each name. Omission,
+`[]`, later profiles, and CLI `[]` cannot remove profile additions; unselected
+profiles add nothing. Tau rejects all other `tool_policy` fields in profiles.
+Only the committed, available canonical main may use these tools, not same-role
+workers. Define integrations globally with `enable: false`, then enable them and
+restrict their tools in a profile. Tau applies the same restrictions in manual
+and service use.
+
 ```yaml
 profiles:
   zulip:

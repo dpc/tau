@@ -276,6 +276,36 @@ mismatches replace, while top-level `config: null` remains absent/no-op.
 Profiles do not expose per-instance outer extension fields or unrelated harness
 settings; keep those in base files or use a normal command-line override.
 
+Profiles also support `tool_policy.canonical_main_only`, an add-only list of
+exact final registered internal tool names, not model-visible aliases. Tau first
+resolves the ordinary global/CLI list, then adds names from every selected raw
+profile layer in selection/source order, keeping the first occurrence of each
+name. Omission, `[]`, later profiles, and CLI `[]` cannot remove profile
+restrictions. Unselected profiles add nothing. Tau rejects other tool-policy
+fields in profiles.
+
+For a self-contained integration profile, define the extension globally with
+`enable: false`, then enable it and restrict its tools in the profile:
+
+```yaml
+extensions:
+  manager-bridge:
+    enable: false
+    command: [my-bridge]
+profiles:
+  manager:
+    extensions:
+      manager-bridge:
+        enable: true
+    tool_policy:
+      canonical_main_only: [bridge_register, bridge_send]
+```
+
+Use the integration's final internal tool names. Tau applies these restrictions
+to both manual profile selection and service startup; they neither enable tools
+nor grant authority. Only the committed, available canonical main can
+use restricted tools, regardless of a worker's role.
+
 `tau component harness` runs in the current process, so it cannot apply
 `--profile`; its normal base-configured `default_profile` still applies, and
 set `TAU_PROFILE` before launching it to override that fallback. Normal

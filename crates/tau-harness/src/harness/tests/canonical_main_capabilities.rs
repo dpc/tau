@@ -25,19 +25,52 @@ fn resolve(h: &mut Harness, role: Option<&str>, mode: Mode) -> Outcome {
 
 /// Register an aliased, explicitly re-enabled tool to challenge the final veto.
 fn register_restricted_tool(h: &mut Harness) -> ToolSpec {
+    let spec = register_aliased_tool(h);
+    h.config.tool_policy.canonical_main_only = vec![spec.name.clone()];
+    spec
+}
+
+/// Provision the aliased tool without changing the configured identity policy.
+fn register_aliased_tool(h: &mut Harness) -> ToolSpec {
     connect_ready_message_publisher(h, "bridge", "test-bridge");
     let mut spec = super::dispatch::shared_test_tool_spec("bot_zulip_send");
     spec.model_visible_name = Some(ToolName::new("bot_dm"));
     h.tool_routing
         .registry
         .register(&crate::test_connection_id("bridge"), spec.clone());
-    h.config.tool_policy.canonical_main_only = vec![spec.name.clone()];
     h.config
         .available_roles
         .get_mut("engineer")
         .expect("role")
         .enable_tools = vec![spec.name.clone()];
     spec
+}
+
+/// Profile-loaded restrictions reach real harness construction and both final
+/// vetoes without granting access to a same-role worker or stale prompt.
+#[test]
+fn canonical_main_profile_policy_reaches_visibility_and_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::create_dir(td.path().join("config")).expect("config directory");
+    std::fs::write(
+        td.path().join("config/harness.yaml"),
+        r#"
+default_profile: manager
+profiles:
+  manager:
+    tool_policy:
+      canonical_main_only: [bot_zulip_send]
+"#,
+    )
+    .expect("profile fixture");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    configure_main_role(&mut h, "engineer");
+    let spec = register_aliased_tool(&mut h);
+    let worker = h.create_durable_user_agent("s1".parse().expect("session"), "engineer");
+    let main = h.ensure_main_agent().expect("ensure").expect("main");
+    assert_tool_access(&mut h, &spec, &worker, false);
+    assert_tool_access(&mut h, &spec, &main, true);
+    h.shutdown().expect("shutdown");
 }
 
 /// Exercise visibility and actual dispatch, including a stale privileged
