@@ -35,6 +35,15 @@ supplies current evidence or unknown, without inheriting metadata. Mentions, sen
 admission, and reply capability do not establish an invitation to respond. The source API and projection
 preserve existing participant disclosure policies and exact message text.
 
+Protocol **16.4** also adds optional `reply_context` to delivered and edited
+reports and facts. Add `reply_context: None` to existing public struct literals
+unless opting in; constructors default to absent. When parent text is supplied,
+the renderer projects one incoming fact as adjacent `message` and `quoted_message`
+text parts. Reference-only replies and thread roots need no empty quote. Sender,
+admission, routing, ownership, and activation remain those of the outer message.
+Each edit supplies its chosen frozen snapshot; projection does not
+inherit a prior quote.
+
 This is source preparation only, separate from application 0.3.0 and SDK 0.18.0.
 It does not publish packages, rebuild external producers, or activate installed
 binaries. Existing 16.x producers remain admitted; older readers ignore the optional

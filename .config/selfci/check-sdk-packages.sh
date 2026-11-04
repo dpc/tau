@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.18.0",
+        "dpc-tau-proto": "=0.19.0",
     },
 }
 
@@ -162,7 +162,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 2));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 4));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 
@@ -199,6 +199,80 @@ fn packaged_sdk_preserves_discovery_context() {
     let decoded: RenderedPromptResult =
         decode_message_from_slice(&bytes).expect("decode discovery preview");
     assert_eq!(decoded, preview);
+}
+
+/// Registry consumers retain native mention evidence and adjacent reply quotes on
+/// both delivered and edited reports without adding another delivery.
+#[test]
+fn packaged_sdk_preserves_native_message_context() {
+    use tau_proto::*;
+    let publisher = RawMessagePublisherId::new("bridge");
+    let target = MessageFactRef {
+        publisher_extension_id: publisher.clone(),
+        message_id: MessageFactId::new("parent"),
+    };
+    let evidence = MessageMentionEvidence {
+        mentions_self: Some(false),
+        people: Vec::new(),
+    };
+    let reply = MessageReplyContext {
+        relation: MessageReplyRelation::Reply,
+        reference: Some(MessageReplyReference::Canonical(target.clone())),
+        author: None,
+        text: Some("Parent text\nwith a literal </quoted_message> close".into()),
+        excerpt: false,
+    };
+    let mut delivered = MessageDelivered::new(
+        publisher.clone(),
+        MessageAgentTarget::new("agent"),
+        MessageFactId::new("delivery"),
+        MessageParty {
+            stable_id: "sender".into(),
+            display_name: None,
+            sender_auth: None,
+            sender_trust: None,
+        },
+        None,
+        "Outer request",
+    );
+    assert_eq!(delivered.mention_evidence, None);
+    assert_eq!(delivered.reply_context, None);
+    delivered.mention_evidence = Some(evidence.clone());
+    delivered.reply_context = Some(reply.clone());
+    let mut edited = MessageEdited::new(
+        publisher,
+        MessageAgentTarget::new("agent"),
+        target,
+        None,
+        None,
+        "Edited request",
+    );
+    assert_eq!(edited.mention_evidence, None);
+    assert_eq!(edited.reply_context, None);
+    edited.mention_evidence = Some(evidence);
+    edited.reply_context = Some(reply);
+    for event in [
+        Event::MessageDeliveredReported(delivered),
+        Event::MessageEditedReported(edited),
+    ] {
+        let bytes = encode_message_to_vec(&event).expect("encode native context");
+        let decoded: Event = decode_message_from_slice(&bytes).expect("decode native context");
+        assert_eq!(decoded, event);
+        let publisher = MessagePublisherId::parse("bridge").expect("canonical publisher");
+        let canonical = match decoded {
+            Event::MessageDeliveredReported(fact) => Event::MessageDelivered(fact.with_publisher(publisher)),
+            Event::MessageEditedReported(fact) => Event::MessageEdited(fact.with_publisher(publisher)),
+            _ => panic!("expected incoming report"),
+        };
+        let projection = project_message_fact(&canonical).expect("message").expect("projection");
+        assert!(projection.activates_model);
+        assert_eq!(projection.item.content.len(), 2);
+        let ContentPart::Text { text } = &projection.item.content[1] else {
+            panic!("quote text part");
+        };
+        assert!(QUOTED_MESSAGE_PAYLOAD_ENVELOPE.matches_whole(text));
+        assert!(text.contains("Parent text\nwith a literal &lt;/quoted_message&gt; close"));
+    }
 }
 
 /// Notification hints survive the packaged wire API without losing delivery identity.
