@@ -256,10 +256,15 @@ configuration, credential, or installation change.
 `slack:profiles:read`, and outside the ordinary group. It requires current
 registration. Native U/W account IDs and B workspace bot IDs work independently
 of mapping retention; A application IDs do not identify installed accounts.
-Current same-agent retained `slack-sender:…` references also work, through live
-canonical reply ownership or bounded historical/profile mappings. Mention-only
-references are not guaranteed to resolve; restart or eviction can invalidate them.
-Use a known native ID or separately authorized exact-message read to refresh.
+Retained same-agent `slack-sender:…` references also work through live
+canonical reply ownership or a 2,048-entry FIFO of historical/profile and native
+mention locators, scoped to the original agent and lifecycle. Fresh same-agent
+creates and owned edits retain locators for the bounded projected native people
+mentions only after exact canonical confirmation, even when optional names are unavailable.
+Pending reports and canonical replay install no locators. Mention locators neither
+verify identity nor authorize disclosure: every lookup still checks current policy
+and exact provider identity. Restart, eviction or retirement can invalidate them.
+Use a known native ID or a separately authorized exact-message read to refresh.
 
 Strict mode permits allowlisted canonical U/W (or unmapped B) principals and
 exact bridge self; lax mode permits token-visible directory targets. Lookup
