@@ -20,7 +20,7 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.20.0
+### Published SDK 0.20.0
 
 Protocol **16.5** adds `BridgeReceiverTarget::{Ordinary, CanonicalMain}`.
 `BridgeReceiverRequest.target` and `BridgeReceiverConfig.target` default to
@@ -53,6 +53,24 @@ then submit once with `tau message '&SESSION' < recovery.txt` after readiness.
 Use `tau serve --session SESSION --create` only for an absent session; use
 `--existing` or the explicit `--create-or-existing` policy for restart.
 Do not retry a message without checking delivery if you lost its acknowledgement.
+
+Proto and client 0.20.0 were published in dependency order on November 4, 2026
+from `70e8a4eb068c9daf427aa37853cac23bed8048e3`. Both official sparse-index
+records are unyanked. The downloaded registry archives match the verified bytes
+from locked dry-runs. Their Cargo VCS metadata identifies the same clean source:
+
+| Package | SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `cc9bbcae914828b6bd22c752ddd2c473163ebb6d6c61ab93df0821d10638ecd9` |
+| `dpc-tau-client` | `42e98315efa67bdbbfbdaa8fc0588c114ee5ee415ba5c9834d10324cfb260331` |
+
+The registry-only SDK consumer passed all 13 tests on Rust 1.91 with a fresh,
+isolated Cargo home and no local dependency patches. The source passed independent
+review and final local CI, then landed through normal MQ. The immutable
+`dpc-tau-proto-v0.20.0` and `dpc-tau-client-v0.20.0` tags identify the published
+source on GitHub and the Radicle owner namespace. Application tag `v0.3.0` remains
+unchanged. Zulip API adoption, deployment activation and service restarts remain
+separate from this publication.
 
 ### Published SDK 0.19.0
 
