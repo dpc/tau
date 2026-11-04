@@ -9,16 +9,15 @@ advertise: false
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
 `slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`; `tool_prefix` scopes
 all four tools and their group for multiple accounts. Slack text is always
-untrusted external content. The reviewed provisional mention producer targets
-SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is published; Slack-specific registry-only
-acceptance and adoption remain pending. Do not assume an installed bridge supports
-mention evidence.
+untrusted external content. The published mention producer uses registry SDK
+0.19.0 / protocol 16.4. Source publication does not install or activate a bridge;
+check the installed executable separately and update it with a compatible harness
+before activation, which requires separate authorization. Changing the advertised version alone
+does not make an older binary compatible.
 
-For Tau protocol 16.0, rebuild the executable with
-registry SDK crates `dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update it
-with the compatible harness before separately authorized activation. Check the
-standalone project's compatibility guidance; changing the advertised version
-alone does not make an older binary compatible.
+For Tau protocol 16.0, historical registry builds pinned `dpc-tau-client` and
+`dpc-tau-proto` to 0.16.0. That pairing does not describe the current mention
+producer.
 
 For development, `just policy` keeps intended package-root files root-anchored
 and rejects Cargo package membership beneath `.direnv`.
@@ -42,8 +41,8 @@ configured alias takes display precedence over the bounded
 For inbound exact mentions of the authenticated installation bot, exactly one
 eligible leading mention is removed for routing/command compatibility and
 remaining eligible mentions become the semantic token `@slack_bridge` in
-published text. Complete
-equal-length backtick code ranges suppress recognition. Escaped, labeled,
+published text. Complete equal-length backtick code ranges suppress recognition.
+Escaped, labeled,
 partial, case-changed, and literal `@slack_bridge` text do not count. Successful
 registration returns exactly
 `{"status":"registered","incoming_transport_reference":"@slack_bridge"}`;
@@ -51,9 +50,9 @@ unregister returns `{"status":"unregistered"}`. The token discloses no native
 id, grants no authority or capability, and does not expand egress; outbound
 `@slack_bridge` remains literal text.
 
-With the provisional producer and a supporting harness, delivered and edited
-facts also carry optional descriptive mention evidence. For native outer
-references, the producer uses the same installation-scoped opaque identity as
+With a supporting harness, delivered and edited facts also carry optional
+descriptive `mention_evidence`. For native outer references, the producer uses
+the same installation-scoped opaque identity as
 senders, includes optional bounded names (including other bots), and compares
 each reference with the authenticated bridge identity.
 A stripped leading self mention retains its comparison without a
@@ -69,6 +68,13 @@ list never proves absence. Optional name lookup accepts bots without admitting
 bot senders, requires no new Slack scope, and stops on failure without dropping
 the message. At most eight optional lookup requests share a two-second budget
 per report. Older harnesses may ignore this metadata.
+The people list contains at most 32 unique native personal targets, including
+bots and unadmitted users, with no redundant per-person platform field.
+Names are untrusted hints bounded to 256 bytes and 80 Unicode scalars.
+The producer completes authenticated self comparison before truncating the list. Retained
+spans describe exact final-body UTF-8 ranges, not prose guesses; thread-root
+context contributes no outer mention evidence. Mentions grant no recipient,
+invitation, admission, trust, selector, or tool capability.
 
 Dynamic DMs are opt-in, bounded to 64 exact D-to-allowlisted-U/W links,
 receive-and-source-reply only, multi-link, and runtime-only. Static receive DM policy wins over

@@ -11,9 +11,11 @@ project owns the exact credential, route, and transport schema. Consult its
 `docs/setup.md` for private maintainer guild-channel setup, `SECURITY.md` for
 trust boundaries, and `docs/design.md` and `docs/runtime.md` for the full contract
 and limits. Do not infer compatibility from the Cargo package version:
-for Tau protocol 16.2, rebuild with exact registry
-`dpc-tau-client`/`dpc-tau-proto` SDK 0.18.0 and update the extension together with
-the harness. Historical SDK 0.7.0 / protocol 9.0 and SDK 0.10.0 / protocol 10.2
+the published mention producer uses registry
+`dpc-tau-client`/`dpc-tau-proto` SDK 0.19.0 / protocol 16.4. Update the installed
+extension together with a compatible harness before activation, which requires
+separate authorization.
+Historical SDK 0.7.0 / protocol 9.0 and SDK 0.10.0 / protocol 10.2
 binaries are rejected before configuration. Updating the SDK does not establish
 full live Discord connectivity.
 
@@ -77,6 +79,25 @@ All writes suppress user, role, everyone/here, and reply-notification mentions.
 Mention-like text is not a supported notifying ping. Do not automatically retry
 failed or uncertain writes: a send may have taken effect without a confirmed
 receipt.
+
+## Native mention evidence
+
+Delivered messages and full-body edits may carry optional typed
+`mention_evidence`. Absence or a missing boolean means unknown, not false.
+The evidence describes at most 32 unique native personal targets using opaque
+IDs comparable with sender IDs. Targets can include bots and unadmitted users; role and
+everyone/here mentions are excluded. Optional names are untrusted hints bounded
+to 256 bytes and 80 Unicode scalars. There is no per-person platform field,
+source span, prose guessing, or directory lookup.
+
+Before truncating the list, the producer compares targets with the authenticated
+bridge identity, not a particular Tau agent. The people list is partial and cannot
+prove absence.
+Full and buffered edits replace evidence atomically with their current body.
+Frozen typed parent snapshots remain separate; parent mentions do not become
+outer-message evidence. Mentions grant no recipient, invitation, admission,
+trust, reply selector, or tool capability. Delivery, activation, or an available
+reply selector does not mean the message addresses this agent.
 
 ## Native reply context
 

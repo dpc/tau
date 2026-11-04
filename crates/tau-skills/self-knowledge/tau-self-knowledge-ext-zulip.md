@@ -17,13 +17,13 @@ email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
 revision used Tau protocol 9 and registry SDK 0.7.0, with the receiver-admission
 fix first published in Tau commit
 `30c8b43410a84294f31f74451f9f7f09a94df473`. That historical requirement is not a
-compatibility guarantee for newer harnesses. The reviewed provisional mention
-producer targets SDK 0.19.0 / protocol 16.3. SDK 0.19.0 is published;
-Zulip-specific registry-only acceptance and adoption remain pending. Do not assume
-an installed bridge supports mention evidence.
-Rebuild it with the compatible harness and configured peers before separately
-authorized activation. Older-protocol binaries are rejected before configuration or
-receiver registration; changing Zulip routes or registration settings does not
+compatibility guarantee for newer harnesses. The published mention producer uses
+registry SDK 0.19.0 / protocol 16.4; the separately reviewed canonical-main
+receiver adoption uses registry SDK 0.20.0 / protocol 16.5.
+Source readiness does not establish the installed bridge's version or activation.
+Rebuild it with the compatible harness and configured peers before activation,
+which requires separate authorization. Older-protocol binaries are rejected before
+configuration or receiver registration; changing Zulip routes or registration settings does not
 repair a wire-version mismatch. Zulip remains an original-byte attachment bridge,
 not a prepared-image producer or model provider: attachment downloads return
 original Artifact keys, and observed typed image references do not grant fetch,
@@ -37,9 +37,9 @@ Neither partial-answer text nor a continuation grants Zulip send, route, or
 scheduling authority. Continue is provider/harness turn control, not an
 instruction to the bridge.
 
-With the provisional producer and a supporting harness, delivered and edited
-facts carry optional descriptive self-mention evidence from Zulip's authoritative
-current `mentioned` flag. The people list may be empty or partial; this producer
+With a supporting harness, delivered and edited facts carry optional descriptive
+`mention_evidence` from Zulip's authoritative current `mentioned` flag.
+The people list may be empty or partial; this producer
 does not look up directory entries or rewrite native mention tokens. It preserves
 raw Markdown byte for byte. For edits, it recomputes evidence from the current
 complete list of string flags: `mentioned` means true, a complete list without it
@@ -55,6 +55,9 @@ proves absence. Older harnesses may ignore this metadata. Admission, routing,
 activation, reply authority, and catch-up handling remain independent of this
 evidence; delivery or an available reply selector does not mean the message
 addresses this agent.
+Mention evidence grants no recipient, invitation, admission, trust, selector, or
+tool capability. This producer does not emit typed reply context: editable
+quote-and-reply remains exact Markdown, without parent extraction or fetching.
 
 An immediate reply for an already queued event, or a non-blocking poll reply,
 may omit the queue-ID echo. The bridge accepts that omission only for its
@@ -302,6 +305,32 @@ for lazy creation. Creation can follow only actually admitted external input.
 Without a role, automatic mode selects existing agents only and never guesses a
 role. Unknown roles and unreadable designation snapshots fail closed. An unloaded
 saved ID is never force-loaded.
+
+### Opt-in canonical-main receiver
+
+The reviewed SDK 0.20.0 / protocol 16.5 adoption also accepts top-level
+`target: canonical_main`; omission defaults to the ordinary selection described
+above.
+With `register_on_start: true`, admitted input can Ensure the canonical
+main through prompt-free construction without an explicit `role`. An optional
+role still constrains immutable creation-role eligibility. Every Register,
+Restore, Select, and Ensure uses the targeted SDK helper and Configure's harness
+protocol revision. Missing revisions, revisions below 16.5, and other major
+versions fail closed before sending; the bridge never silently downgrades.
+A saved non-main Restore fails without rewriting the designation or granting
+authority. A pending or unavailable main does not authorize an ordinary substitute.
+
+Receiver targeting is separate from outbound tool restrictions. Harness
+`tool_policy.canonical_main_only` selects exact final registered internal tool
+names, not roles, tags, groups, aliases, or dotted instance names. Normal tool
+grants remain necessary. For a prefixed instance, use its actual
+`<tool_prefix>_<local_tool_name>` inventory. The unprefixed locals are
+`zulip_register`, `zulip_conversations`, `zulip_send`, `zulip_send_attachment`,
+`zulip_list_attachments`, `zulip_download_attachment`, and `zulip_react`.
+Same-role children and ordinary parentless agents do not inherit canonical-main
+authority. Nix owns the dedicated profile, credentials, participant and route
+restrictions, and outbound policy; this feature alone does not restrict DMs to
+one person or activate a live bridge.
 
 The extension saves one versioned concrete receiving-agent designation per
 persistent session and configured instance; ephemeral sessions retain it only in
