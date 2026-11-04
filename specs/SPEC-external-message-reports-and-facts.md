@@ -668,6 +668,33 @@ boundaries. The Slack extension contract owns extraction bounds and truncation
 policy within the generic whole-text bound; the original normalized comment is
 preserved. No other bridge gains an inline-attachment quote exception.
 
+### Slack attachment presence
+
+Slack delivered and edited facts may append one bounded, clearly identified
+bridge-authored attachment-presence note to the admitted message's unchanged
+normalized comment and any permitted inline quotes. The note reports only file
+presence or an observed file count from that same native message version; it
+does not claim that file contents were fetched or are currently readable.
+Otherwise-admissible file-only messages may use this note as their body.
+
+The note is ordinary untrusted descriptive content inside the existing
+`message` envelope, not sender-authored text, a quote, or an independent
+provenance boundary. Sender identity and authentication describe only the
+native message sender, not the note. The note grants no command, mention,
+routing, identity, reply, attachment-read, or other tool authority.
+
+Construct the note only after native command, mention, sender, and receive-route
+decisions; file presence does not satisfy a native-mention requirement. Publish
+at most the ordinary fact and activation for the admitted native message,
+never an additional attachment fact or wake. Edits describe their own current
+file observation rather than inheriting a prior count.
+
+This exception permits no file fetch, URL disclosure, new wire field,
+envelope family, or core transport-specific rendering. The Slack extension
+validates observations and enforces complete-text bounds without truncating the
+normalized comment. This exception gives no other bridge permission to
+synthesize body text.
+
 ### Zulip activity note
 
 The user approved one bounded Zulip-only exception to the original-body-only
