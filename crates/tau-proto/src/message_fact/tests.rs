@@ -6,6 +6,111 @@ use crate::{
     decode_harness_input_from_slice, encode_message_to_vec,
 };
 
+/// Links survive report stamping and replay while edits without links do not
+/// inherit an older version's traversal metadata.
+#[test]
+fn message_links_roundtrip_and_project_without_changing_delivery() {
+    let links = crate::MessageLinks {
+        root_id: Some(MessageFactId::new("root")),
+        previous_id: Some(MessageFactId::new("before")),
+        reply_to_id: Some(MessageFactId::new("parent")),
+    };
+    let mut events = mention_facts(None, "body").to_vec();
+    events.push(Event::MessageSent(MessageSent::new(
+        MessagePublisherId::parse("bridge-main").expect("publisher"),
+        MessageAgentTarget::new("agent-1"),
+        MessageFactId::new("sent"),
+        None,
+        None,
+        "body",
+    )));
+    for event in events {
+        let old_projection = project_message_fact(&event).expect("fact").expect("valid");
+        let linked = match event.clone() {
+            Event::MessageDelivered(mut fact) => {
+                fact.links = Some(links.clone());
+                Event::MessageDeliveredReported(
+                    fact.with_publisher(RawMessagePublisherId::new("bridge-main")),
+                )
+            }
+            Event::MessageEdited(mut fact) => {
+                fact.links = Some(links.clone());
+                Event::MessageEditedReported(
+                    fact.with_publisher(RawMessagePublisherId::new("bridge-main")),
+                )
+            }
+            Event::MessageSent(mut fact) => {
+                fact.links = Some(links.clone());
+                Event::MessageSentReported(
+                    fact.with_publisher(RawMessagePublisherId::new("bridge-main")),
+                )
+            }
+            _ => unreachable!(),
+        };
+        let wire = HarnessInputMessage::emit(linked.clone());
+        let encoded = encode_message_to_vec(&wire).expect("report CBOR");
+        assert_eq!(
+            decode_harness_input_from_slice(&encoded).expect("report"),
+            wire
+        );
+        let canonical = linked
+            .into_stamped_canonical_message_fact(
+                MessagePublisherId::parse("bridge-main").expect("publisher"),
+            )
+            .expect("stamp");
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&canonical, &mut bytes).expect("CBOR");
+        let replay: Event = ciborium::from_reader(bytes.as_slice()).expect("replay");
+        assert_eq!(canonical, replay);
+        let projected = project_message_fact(&replay).expect("fact").expect("valid");
+        assert_eq!(
+            projected,
+            project_message_fact(&canonical)
+                .expect("fact")
+                .expect("valid")
+        );
+        assert_eq!(projected.activates_model, old_projection.activates_model);
+        assert_eq!(projected.item.role, old_projection.item.role);
+        assert_eq!(projected.item.content.len(), 1);
+        let ContentPart::Text { text } = &projected.item.content[0] else {
+            panic!("text")
+        };
+        assert!(text.contains("root_id=\"root\" previous_id=\"before\" reply_to_id=\"parent\""));
+        assert!(text.contains("message_ref=\""));
+        let old_json = serde_json::to_value(&event).expect("old JSON");
+        assert!(!old_json.to_string().contains("\"links\""));
+        let old: Event = serde_json::from_value(old_json).expect("old event");
+        assert_eq!(
+            project_message_fact(&old).expect("fact").expect("valid"),
+            old_projection
+        );
+    }
+}
+
+/// Invalid optional links do not hide admitted content; valid IDs use shared
+/// escaping, and notifications expose no traversal selectors.
+#[test]
+fn message_links_omit_invalid_ids_and_notification_selectors() {
+    let Event::MessageDelivered(mut fact) = mention_facts(None, "body")[0].clone() else {
+        panic!("delivery")
+    };
+    fact.links = Some(crate::MessageLinks {
+        root_id: Some(MessageFactId::new("root\"<&")),
+        previous_id: Some(MessageFactId::new("")),
+        reply_to_id: Some(MessageFactId::new("x".repeat(MESSAGE_ID_MAX_BYTES + 1))),
+    });
+    let rendered = mention_projection(&Event::MessageDelivered(fact.clone()));
+    assert!(rendered.contains("root_id=\"root&quot;&lt;&amp;\""));
+    assert!(!rendered.contains("previous_id="));
+    assert!(!rendered.contains("reply_to_id="));
+    assert!(rendered.ends_with(">body</message>"));
+    fact.presentation = Some(MessagePresentation::Notification);
+    let rendered = mention_projection(&Event::MessageDelivered(fact));
+    assert!(!rendered.contains("root_id="));
+    assert!(!rendered.contains("message_ref="));
+    assert!(rendered.ends_with(">body</message>"));
+}
+
 /// The user's Discord example renders as adjacent complete envelopes, without
 /// changing the admitted body, sender, or single activation.
 #[test]
@@ -1177,6 +1282,7 @@ fn publisher_id_grammar_is_bounded_ascii() {
 fn telegram_and_xmpp_fit_delivered_schema() {
     for fact in [
         MessageDelivered {
+            links: None,
             reply_context: None,
             mention_evidence: None,
             presentation: None,
@@ -1199,6 +1305,7 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             extension_data: MessageExtensionData::default(),
         },
         MessageDelivered {
+            links: None,
             reply_context: None,
             mention_evidence: None,
             presentation: None,

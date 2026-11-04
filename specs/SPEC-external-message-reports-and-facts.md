@@ -505,7 +505,50 @@ than replacing it with a transport prefix, subject only to the bounded exception
 below. Zulip preserves its inbound Markdown exactly, including a leading addressed
 bot mention. These mappings create no transport-specific wire fields.
 
+### Linked-message retrieval
+
+Delivered, edited, and sent reports may carry optional `MessageLinks`. The
+shared projection keeps the existing `message_ref` as the message's own ID and
+adds available `root_id`, `previous_id`, and `reply_to_id` attributes. Links use
+the containing fact's publisher namespace. Each optional ID has the ordinary
+message-ID bounds; projection omits each malformed link without suppressing the
+body. Notification presentation hides links along with the self reference.
+Without links, projection remains unchanged.
+
+`root_id` identifies the root of the thread or conversation branch, not an
+arbitrary first post in an unbounded channel. `reply_to_id` identifies the
+immediate native reply target independently of the root. `previous_id` identifies
+the immediately preceding message in the same thread, topic, or DM, never merely
+the last message Tau received or surrounding channel traffic. Publishers omit
+unavailable or unproven links. An edit supplies only its own current links;
+generic projection never inherits links from earlier facts or quoted context.
+
+A participating bridge exposes its own separately granted `get_message` tool.
+Its `message_id` argument accepts the exact projected `message_ref` or a returned
+link ID. A successful ordinary tool result includes `message_id`, `author`,
+`text`, and available `root_id`, `previous_id`, and `reply_to_id`; author details
+remain bridge-specific. These IDs identify retrievable platform messages,
+including permitted messages never delivered to Tau; descriptive-only hashes do
+not qualify. Retrieval returns current platform content, not a durable second
+archive. Edits may change that content; deleted, inaccessible, or unknown messages
+may be unavailable. Bridges document ID lifetime and any legacy-reference limitation,
+and must not substitute a neighboring message when the requested ID is missing.
+Unavailable links stay absent; a once-known link may later fail to resolve.
+
+For each read, the bridge rechecks the caller's permitted route and participant
+policy, including the authenticated bridge bot's own messages. Live mention-trigger
+requirements do not restrict explicitly requested reads of otherwise permitted
+messages. Retrieval creates no delivered fact or activation and grants no send,
+reply, reaction, or attachment authority. Model-visible IDs are not bearer
+capabilities. The harness neither resolves IDs nor reconstructs bridge authority
+from replay. History lists, search, and a generic journal-recall tool are outside
+this interface.
+
 ### Native reply and thread context
+
+This section governs the frozen native quote supplied with a delivery. Explicit
+read-only retrieval through the linked-message interface above is separate and
+does not enrich or rewrite that snapshot.
 
 Discord, Telegram, Slack, and XMPP may supply bounded descriptive native
 `reply_context` on delivered and edited reports. Keep the admitted normalized body
@@ -515,7 +558,7 @@ with the native relation and available reference, followed by an adjacent
 its registered envelope and exact-close handling. The quote is attached context,
 not a second fact, admitted speaker, or activation.
 
-Use only one-hop metadata supplied with the same admitted native event in the same
+For these frozen quotes, use only one-hop metadata supplied with the same admitted native event in the same
 conversation scope. Do not look up history, fetch or traverse parents, or import
 parent attachments. This permission adds no forwarding exception.
 

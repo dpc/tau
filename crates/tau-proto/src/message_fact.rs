@@ -229,6 +229,9 @@ pub struct MessageDelivered<Publisher = MessagePublisherId> {
     pub agent_id: MessageAgentTarget,
     /// Publisher-scoped opaque base-message identifier.
     pub message_id: MessageFactId,
+    /// Optional read-only links supplied for this message version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<crate::MessageLinks>,
     /// External sender described by the publisher.
     pub sender: MessageParty,
     /// Optional model-facing presentation hint; absence retains full message
@@ -268,6 +271,7 @@ impl<Publisher> MessageDelivered<Publisher> {
             publisher_extension_id,
             agent_id,
             message_id,
+            links: None,
             sender,
             presentation: None,
             mention_evidence: None,
@@ -287,6 +291,7 @@ impl<Publisher> MessageDelivered<Publisher> {
             publisher_extension_id,
             agent_id: self.agent_id,
             message_id: self.message_id,
+            links: self.links,
             sender: self.sender,
             presentation: self.presentation,
             mention_evidence: self.mention_evidence,
@@ -319,6 +324,9 @@ pub struct MessageEdited<Publisher = MessagePublisherId> {
     pub agent_id: MessageAgentTarget,
     /// Opaque referenced base message.
     pub target: MessageFactRef,
+    /// This version's read-only links; absent links are never inherited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<crate::MessageLinks>,
     /// Optional external actor described by the publisher.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<MessageParty>,
@@ -352,6 +360,7 @@ impl<Publisher> MessageEdited<Publisher> {
             publisher_extension_id,
             agent_id,
             target,
+            links: None,
             actor,
             mention_evidence: None,
             reply_context: None,
@@ -370,6 +379,7 @@ impl<Publisher> MessageEdited<Publisher> {
             publisher_extension_id,
             agent_id: self.agent_id,
             target: self.target,
+            links: self.links,
             actor: self.actor,
             mention_evidence: self.mention_evidence,
             reply_context: self.reply_context,
@@ -564,6 +574,9 @@ pub struct MessageSent<Publisher = MessagePublisherId> {
     pub agent_id: MessageAgentTarget,
     /// Publisher-scoped opaque base-message identifier.
     pub message_id: MessageFactId,
+    /// Optional read-only links for the successfully sent message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<crate::MessageLinks>,
     /// Optional external recipient described by the publisher.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient: Option<MessageParty>,
@@ -590,6 +603,7 @@ impl<Publisher> MessageSent<Publisher> {
             publisher_extension_id,
             agent_id,
             message_id,
+            links: None,
             recipient,
             conversation,
             text: text.into(),
@@ -606,6 +620,7 @@ impl<Publisher> MessageSent<Publisher> {
             publisher_extension_id,
             agent_id: self.agent_id,
             message_id: self.message_id,
+            links: self.links,
             recipient: self.recipient,
             conversation: self.conversation,
             text: self.text,
@@ -829,6 +844,17 @@ impl<'a> MessageFactView<'a> {
         context.valid().then_some(context)
     }
 
+    /// Borrow explicit retrieval links without inferring them from quotes or
+    /// history.
+    fn links(&self) -> Option<&crate::MessageLinks> {
+        match self {
+            Self::Delivered(fact) => fact.links.as_ref(),
+            Self::Edited(fact) => fact.links.as_ref(),
+            Self::Sent(fact) => fact.links.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Derive the provider context role from the concrete fact type.
     fn role(&self) -> ContextRole {
         match self {
@@ -907,6 +933,19 @@ fn render_message_fact(view: &MessageFactView<'_>, reply_attributes: Option<&str
             reference.publisher_extension_id.as_str(),
         );
         push_attribute(&mut output, "message_ref", reference.message_id.as_str());
+    }
+    if !view.is_notification()
+        && let Some(links) = view.links()
+    {
+        for (name, id) in [
+            ("root_id", links.root_id.as_ref()),
+            ("previous_id", links.previous_id.as_ref()),
+            ("reply_to_id", links.reply_to_id.as_ref()),
+        ] {
+            if let Some(id) = id.filter(|id| valid_opaque_id(id.as_str())) {
+                push_attribute(&mut output, name, id.as_str());
+            }
+        }
     }
     if let Some(party) = view.party() {
         let party_label = if matches!(view, MessageFactView::Sent(_)) {

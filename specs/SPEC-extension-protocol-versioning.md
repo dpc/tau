@@ -8,6 +8,15 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.6 adds optional publisher-scoped message links to delivered, edited,
+and sent facts and reports. Older 16.x readers may ignore the links; omitted
+fields preserve prior rendering. SDK 0.21.0 exposes the new public fields.
+The shared renderer preserves `message_ref` and adds available root, previous,
+and immediate-reply IDs for bridge-owned read tools. Event families, journal
+framing, activation, and write authority remain unchanged. Publication and bridge
+adoption remain separate from activation. See
+[SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
+
 Protocol 16.5 adds an optional canonical-main target to bridge receiver requests.
 Omitted targets preserve ordinary behavior. Before sending this target,
 extensions must require Configure's advertised revision to be at least 16.5

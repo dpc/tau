@@ -902,6 +902,7 @@ fn socket_client_cannot_emit_message_reports_or_canonical_facts() {
     let client_id = "ui";
     connect_test_client(&mut h, client_id, tau_proto::ClientKind::Ui);
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered {
+        links: None,
         reply_context: None,
         mention_evidence: None,
         presentation: None,

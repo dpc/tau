@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 16.6 and source SDK 0.21.0 carry optional `MessageLinks` on delivered,
+edited, and sent reports and facts. Projection exposes publisher-scoped root,
+previous, and immediate-reply IDs alongside the message's own `message_ref`;
+bridge-owned read tools resolve them under current policy without granting write
+authority. Older readers may ignore links. See
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
 Protocol 16.4 carries optional descriptive native reply context on delivered and
 edited reports and facts. Shared projection produces adjacent `message` and
 `quoted_message` text parts in one `MessageItem`; sender, activation, and tool
