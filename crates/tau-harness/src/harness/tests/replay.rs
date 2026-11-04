@@ -521,6 +521,7 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
         .cloned()
         .expect("ephemeral runtime route");
     let prompt = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id.clone(),
         text: "ephemeral history".to_owned(),
@@ -1859,6 +1860,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             "main",
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: "before restart".to_owned(),
@@ -1951,6 +1953,7 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                     seq: tau_core::PersistedAgentEventSeq::new(0),
                     source: None,
                     event: Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                        delayed: false,
                         inference_activation: false,
                         agent_id: crate::parse_agent_id("orphan"),
                         text: "orphan prompt".to_owned(),
@@ -2064,6 +2067,7 @@ fn seed_restored_tool_round_for_agent(
             agent_id,
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: crate::parse_agent_id(agent_id),
                 text: format!("before restart for {agent_id}"),
@@ -2817,6 +2821,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             agent_id.as_str(),
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: agent_id.clone(),
                 text: "history before load".to_owned(),

@@ -1184,6 +1184,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             corrected_cache_efficiency: 0.0,
         }),
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: crate::parse_agent_id("forged-agent"),
             text: "forged submitted".to_owned(),
@@ -1203,6 +1204,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             message_class: tau_proto::PromptMessageClass::Internal,
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -1425,6 +1427,7 @@ fn cold_restore_classifies_legacy_extension_worker_without_creator_as_unavailabl
             ephemeral: false,
         }),
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: agent_id.clone(),
             text: "unfinished legacy extension work".to_owned(),
@@ -1440,6 +1443,7 @@ fn cold_restore_classifies_legacy_extension_worker_without_creator_as_unavailabl
             ctx_id: None,
         }),
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: agent_id.clone(),
             text: "later user navigation prompt".to_owned(),

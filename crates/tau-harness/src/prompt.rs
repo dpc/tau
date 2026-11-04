@@ -1729,6 +1729,7 @@ fn assemble_prompt_context_window(
             AgentEntry::UserInput {
                 items,
                 submission_source,
+                delayed,
                 ..
             } => {
                 let background_completion_prompt = tree
@@ -1755,6 +1756,7 @@ fn assemble_prompt_context_window(
                             items,
                             submission_source.as_ref(),
                             background_completion_prompt,
+                            *delayed,
                         ),
                     },
                 ));
@@ -2153,6 +2155,7 @@ fn project_user_prompt_items(
     items: &[ContextItem],
     submission_source: Option<&tau_proto::PromptSubmissionSource>,
     background_completion_prompt: bool,
+    delayed: bool,
 ) -> Vec<ContextItem> {
     let mut projected = items.to_vec();
     let human_ui = submission_source == Some(&tau_proto::PromptSubmissionSource::HumanUi);
@@ -2180,8 +2183,12 @@ fn project_user_prompt_items(
                             crate::internal_envelope::TAU_INTERNAL_CLOSE_VISIBLE,
                         );
                         if human_ui {
+                            let mut attributes = vec![("source", "ui".to_owned())];
+                            if delayed {
+                                attributes.push(("delayed", "true".to_owned()));
+                            }
                             *text = tau_proto::USER_PAYLOAD_ENVELOPE
-                                .render_attributed(&[("source", "ui".to_owned())], &body)
+                                .render_attributed(&attributes, &body)
                                 .expect("registered HumanUi envelope attributes");
                         } else {
                             *text = body.into_owned();

@@ -431,6 +431,8 @@ impl DeferredPublish {
 /// breaks when an interceptor parks the publish.
 #[derive(Clone)]
 pub(crate) struct ConversationHeadSync {
+    /// Authenticated UI submission baseline retained until semantic admission.
+    pub(crate) user_response_baseline: Option<u64>,
     /// Runtime conversation whose durable branch advances on commit.
     pub(crate) cid: AgentId,
     /// Durable agent identity retained if the runtime conversation disappears.
@@ -1253,6 +1255,7 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
                 ) && original.text != replacement.text)
                 || original.originator != replacement.originator
                 || original.submission_source != replacement.submission_source
+                || original.delayed != replacement.delayed
         }
         (
             Event::AgentUserMessageInjected(original),
@@ -1269,6 +1272,7 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
                 || original.inference_activation != replacement.inference_activation
                 || original.trusted_internal_spans != replacement.trusted_internal_spans
                 || original.submission_source != replacement.submission_source
+                || original.delayed != replacement.delayed
                 || original.message_class != replacement.message_class
                 || original.internal_kind != replacement.internal_kind
                 || original.self_compaction_terminal != replacement.self_compaction_terminal
@@ -2099,6 +2103,13 @@ impl Harness {
             AgentPublishCompletion::UncertainSupersession { .. }
                 | AgentPublishCompletion::OrdinarySteer { .. }
         );
+        let user_response_baseline = match &completion {
+            AgentPublishCompletion::OrdinarySteer { retry_prompts, .. }
+            | AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
+                .first()
+                .and_then(|prompt| prompt.user_response_baseline),
+            _ => None,
+        };
         let persist = event.defaults_to_persist()
             || matches!(
                 &event,
@@ -2117,6 +2128,7 @@ impl Harness {
             event.clone(),
             persist,
             Some(ConversationHeadSync {
+                user_response_baseline,
                 cid: cid.clone(),
                 agent_id,
                 session_generation: self.session_runtime.current_session_generation,

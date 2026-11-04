@@ -2257,6 +2257,7 @@ fn randomized_streaming_runnable_selection_matches_collecting_reference() {
 
     fn input(agent_id: tau_proto::AgentId, text: &str) -> Event {
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id,
             text: text.to_owned(),
@@ -3838,6 +3839,7 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
         (
             "steered deferred Q",
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                delayed: false,
                 self_compaction_terminal: None,
                 inference_activation: true,
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -3896,6 +3898,7 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
         append_seed_agent_event(
             &mut store,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: agent_id.clone(),
                 text: "H".to_owned(),
@@ -4009,6 +4012,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
     let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
     let cases = [
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "passive submitted".to_owned(),
@@ -4028,6 +4032,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
             message_class: tau_proto::PromptMessageClass::Internal,
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: false,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,

@@ -18,6 +18,7 @@ pub(super) fn append_byte_fit_text(h: &mut Harness, cid: &AgentId, text: String)
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text,
@@ -499,6 +500,7 @@ fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
         h.publish_for_agent(
             &cid,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: agent_id.clone(),
                 text: text.to_owned(),
@@ -703,6 +705,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "reactive prefix".to_owned(),
@@ -3494,6 +3497,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: originating_text.clone(),
@@ -4842,6 +4846,7 @@ fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() 
     h.publish_for_agent(
         &target,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: target_id.clone(),
             text: "content to compact".to_owned(),
@@ -6847,6 +6852,7 @@ fn cold_resume_restores_exact_usage_for_first_activation_compaction() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id,
             text: "historical prefix ".repeat(80),
@@ -7450,6 +7456,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             agent_id: agent_id.clone(),
             inference_activation: true,
             text: "owed activation".to_owned(),
@@ -7608,6 +7615,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             agent_id: agent_id.clone(),
             inference_activation: true,
             text: "owed".to_owned(),
@@ -7839,6 +7847,7 @@ fn reactive_context_overflow_includes_activation_and_preserves_late_suffix() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             agent_id: agent_id.clone(),
             inference_activation: false,
             text: "stable prefix".to_owned(),
@@ -7884,6 +7893,7 @@ fn reactive_context_overflow_includes_activation_and_preserves_late_suffix() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             agent_id: crate::parse_agent_id(&agent_id),
             inference_activation: false,
             text: "suffix B".to_owned(),
@@ -7928,6 +7938,7 @@ fn reactive_compaction_includes_coalesced_agent_message_wakes() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "stable prefix".to_owned(),
@@ -7992,6 +8003,7 @@ fn reactive_compaction_includes_coalesced_agent_message_wakes() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "mixed activation after coalesced wakes".to_owned(),
@@ -8432,6 +8444,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "prompt after failed UI compaction".to_owned(),
@@ -8998,6 +9011,7 @@ fn rewind_discards_off_branch_usage_before_tiny_and_new_agent_activations() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "old large branch".to_owned(),
@@ -9121,6 +9135,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
         h.publish_for_agent(
             &cid,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: crate::parse_agent_id(&agent_id),
                 text: "stable prefix ".repeat(80),
@@ -9266,6 +9281,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "stable prefix ".repeat(80),
@@ -9309,6 +9325,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "activation B".to_owned(),
@@ -9389,6 +9406,7 @@ fn standalone_auto_compaction_includes_complete_mixed_tool_round() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "prefix".to_owned(),
@@ -9616,6 +9634,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             agent_id: agent_id.clone(),
             inference_activation: true,
             text: "owed".to_owned(),

@@ -2439,6 +2439,7 @@ fn compact_mode_dominates_status_reminder_internal_prompt_subfilter() {
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.apply_setting("show-internal-prompts", "on");
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -2484,6 +2485,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
     }));
     let visible_prompt = |text: &str| {
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: agent_id("engineer_abc12345"),
             text: text.to_owned(),
@@ -2498,6 +2500,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
     };
     renderer.handle(&visible_prompt("before submitted alert"));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("engineer_abc12345"),
         text: "untagged internal prompt".to_owned(),
@@ -2510,6 +2513,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
         ctx_id: None,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("engineer_abc12345"),
         text: "Use the `compact` tool after finishing your current task.".to_owned(),
@@ -2556,6 +2560,7 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
     }));
     let visible_prompt = |text: &str| {
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: agent_id("engineer_abc12345"),
             text: text.to_owned(),
@@ -2570,6 +2575,7 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
     };
     renderer.handle(&visible_prompt("before steered alert"));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,

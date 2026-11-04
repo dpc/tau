@@ -13,6 +13,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
         (
             "submitted activation",
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: "submitted activation".to_owned(),
@@ -38,6 +39,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
         (
             "steered activation",
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                delayed: false,
                 self_compaction_terminal: None,
                 inference_activation: true,
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -330,6 +332,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
                 agent_id.as_str(),
                 None,
                 Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    delayed: false,
                     agent_id: agent_id.clone(),
                     text: "resume outstanding activation".to_owned(),
                     trusted_internal_spans: Vec::new(),
@@ -1624,6 +1627,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
         append_seed_agent_event(
             &mut store,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: text.to_owned(),
@@ -1666,6 +1670,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id,
             text: "activation C".to_owned(),

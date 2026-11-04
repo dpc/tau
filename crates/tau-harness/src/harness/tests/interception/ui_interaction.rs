@@ -31,6 +31,32 @@ fn release_interaction(h: &mut Harness) {
     .expect("release interaction");
 }
 
+/// An interaction held before prompt dispatch retains the input's original
+/// completion baseline, even when the terminal waits in the publication FIFO.
+#[test]
+fn delayed_ui_input_retains_baseline_across_interaction_interception() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let id = durable_agent_id_for_conversation(&h, &cid);
+    submit(&mut h, &id, "first");
+    let first = read_nth_prompt_created(&h, 0);
+    intercept_interactions(&mut h);
+    submit(&mut h, &id, "held input");
+    h.handle_provider_response_finished(provider_text_response(
+        &first.agent_prompt_id,
+        id.clone(),
+        "intervening response",
+    ))
+    .expect("queue completion behind interaction");
+    release_interaction(&mut h);
+    assert!(event_log_events(&h).iter().any(|event| match event {
+        Event::AgentPromptSubmitted(prompt) => prompt.text == "held input" && prompt.delayed,
+        Event::AgentPromptSteered(prompt) => prompt.text == "held input" && prompt.delayed,
+        _ => false,
+    }));
+}
+
 /// Submit a visible input through authenticated UI intake.
 fn submit(h: &mut Harness, agent_id: &AgentId, text: &str) {
     h.handle_authenticated_ui_prompt_submitted(

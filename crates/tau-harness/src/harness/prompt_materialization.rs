@@ -710,6 +710,7 @@ impl Harness {
             false,
             true,
             Some(ConversationHeadSync {
+                user_response_baseline: None,
                 cid: cid.clone(),
                 agent_id: Some(agent_id),
                 session_generation: self.session_runtime.current_session_generation,
@@ -857,6 +858,7 @@ impl Harness {
             false,
             true,
             Some(ConversationHeadSync {
+                user_response_baseline: None,
                 cid: cid.clone(),
                 agent_id: Some(agent_id),
                 session_generation: self.session_runtime.current_session_generation,

@@ -495,6 +495,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
         h.publish_for_agent(
             &cid,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: agent_id.clone(),
                 text: "independent sibling".to_owned(),
@@ -683,6 +684,7 @@ fn reactive_recovery_respects_durable_failure_model_and_branch() {
             h.publish_for_agent(
                 &cid,
                 Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    delayed: false,
                     inference_activation: false,
                     agent_id: agent_id.clone(),
                     text: "independent reactive branch".to_owned(),

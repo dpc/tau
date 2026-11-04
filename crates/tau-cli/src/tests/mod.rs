@@ -642,6 +642,7 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
     }));
     renderer.handle(&ui_prompt("promoted queued prompt"));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
@@ -653,6 +654,7 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
         ctx_id: None,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("main"),
         text: "replayed submitted prompt".to_owned(),

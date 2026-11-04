@@ -1097,6 +1097,7 @@ fn assert_terminal_byte_pressure_recovers(standalone: bool) {
     h.publish_for_agent(
         &blocker_cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: blocker_id,
             text: "b".repeat(1024 * 1024),

@@ -2214,6 +2214,7 @@ fn intercepted_prompt(prompt: AgentPromptSubmitted) -> HarnessOutputMessage {
 
 fn test_prompt(text: &str) -> AgentPromptSubmitted {
     AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: text.to_owned(),

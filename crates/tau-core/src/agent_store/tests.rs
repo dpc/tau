@@ -79,6 +79,7 @@ fn managed_history_internal_text_facts_are_exact_and_quantified() {
         })
     };
     let submitted = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         agent_id: agent_id.clone(),
         text: "submitted".to_owned(),
         trusted_internal_spans: Vec::new(),
@@ -91,6 +92,7 @@ fn managed_history_internal_text_facts_are_exact_and_quantified() {
         inference_activation: false,
     });
     let steered = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        delayed: false,
         agent_id: agent_id.clone(),
         text: "steered".to_owned(),
         trusted_internal_spans: Vec::new(),

@@ -2018,6 +2018,11 @@ impl Harness {
         }
         if will_accept && is_user_interaction {
             let cid = self.agent_runtime.agent_registry.agent_routes[agent_id.as_str()].clone();
+            pending.user_response_baseline = Some(
+                self.agent_runtime.agent_registry.agents[&cid]
+                    .dispatch
+                    .visible_response_generation,
+            );
             self.enqueue_ui_interaction(
                 client_id,
                 cid,

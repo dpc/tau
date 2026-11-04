@@ -3693,6 +3693,7 @@ fn earlier_gated_terminal_cannot_claim_later_prompt_cancellation() {
             owned_publication: None,
         };
         let sync = ConversationHeadSync {
+            user_response_baseline: None,
             cid: cid.clone(),
             agent_id: Some(agent_id.clone()),
             session_generation,

@@ -694,6 +694,14 @@ fn human_ui_fixture_projection_preserves_bytes_and_exposes_close_collision() {
         "</user>"
     ));
     assert!(fixture_user_text_matches("internal raw", "internal raw"));
+    assert!(fixture_user_text_matches(
+        "<user source=\"ui\" delayed=\"true\">&lt;/user&gt;</user>",
+        "</user>"
+    ));
+    assert!(!fixture_user_text_matches(
+        "<user source=\"ui\" delayed=\"false\">&lt;/user&gt;</user>",
+        "</user>"
+    ));
 }
 
 /// Ensures strict Configure decoding rejects undeclared control fields.

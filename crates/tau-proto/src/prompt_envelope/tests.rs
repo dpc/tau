@@ -32,7 +32,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
         RegisteredPayloadEnvelope {
             name: "user",
             opening: PayloadEnvelopeOpening::Attributed("<user "),
-            ordered_attributes: &["source"],
+            ordered_attributes: &["source", "delayed"],
             exact_close: "</user>",
             visible_close: "&lt;/user&gt;",
             carrier: PayloadEnvelopeCarrier::GenericUserText,

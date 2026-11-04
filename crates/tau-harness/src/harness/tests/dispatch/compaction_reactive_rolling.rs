@@ -303,6 +303,7 @@ fn append_capacity_history(h: &mut Harness, cid: &AgentId, text: &str) {
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id,
             text: text.to_owned(),

@@ -519,6 +519,7 @@ fn bootstrap_prompt_debug_sensitivity_is_exact_through_interception() {
     h.publish_event(
         None,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id,
             text: ordinary_submitted.to_owned(),
@@ -697,6 +698,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "internal prompt should not be listed".to_owned(),

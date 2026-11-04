@@ -402,6 +402,7 @@ fn ordinary_preemption_reconciliation_clears_all_target_queue_slots() {
     ));
     renderer.handle(&tau_proto::Event::AgentPromptSubmitted(
         tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: target.clone(),
             text: fresh_text.to_owned(),
@@ -703,6 +704,7 @@ fn promoted_submitted_prompt_retains_the_queued_raw_text_allocation() {
         .as_ptr();
 
     renderer.handle_agent_prompt_submitted(&tau_proto::AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("main"),
         text: queued.text.clone(),
@@ -1206,6 +1208,7 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
         message_class: tau_proto::PromptMessageClass::User,
     });
     let submitted = tau_proto::Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("visible"),
         text: "prompt".to_owned(),
@@ -1218,6 +1221,7 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
         ctx_id: None,
     });
     let steered = tau_proto::Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: PromptSubmissionSource::HumanUi,
@@ -2858,6 +2862,7 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
 
     renderer.handle_recorded_at(
         &tau_proto::Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id("agent-a"),
             text: "submitted".to_owned(),

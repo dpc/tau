@@ -270,6 +270,7 @@ fn hosted_search_citations_and_opaque_call_survive_live_cold_restart() {
         &live,
         1,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id(),
             text: "find source".to_owned(),
@@ -1287,6 +1288,7 @@ fn other_agent_id() -> AgentId {
 
 fn prompt_event(agent_id: AgentId) -> Event {
     Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id,
         text: "hello".to_owned(),
@@ -1888,6 +1890,7 @@ fn compaction_chain_view_tracks_correlated_provider_response_cut() {
 fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {
     tree.apply_event(&Event::AgentPromptSubmitted(
         tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id(),
             text: text.to_owned(),
@@ -4542,6 +4545,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         .apply_event_at(
             AgentEventParent::Root,
             &Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: "root prompt".to_owned(),
@@ -4910,6 +4914,7 @@ fn deferred_background_preview_provenance_matches_live_and_cold_replay() {
             output_length_continuation: None,
         });
     let preview = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         agent_id: agent_id.clone(),
         text: preview_text.to_owned(),
@@ -5016,6 +5021,7 @@ fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
             seq: PersistedAgentEventSeq::new(2),
             source: None,
             event: Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                delayed: false,
                 self_compaction_terminal: None,
                 agent_id: agent_id.clone(),
                 text: preview_text.to_owned(),
@@ -6396,6 +6402,7 @@ fn self_compaction_terminal_delivery_is_correlated_and_exactly_once() {
         },
     };
     let delivery = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: Some(terminal.clone()),
         agent_id: agent_id(),
         inference_activation: true,
@@ -6838,6 +6845,7 @@ fn output_length_record(
 
 fn output_length_steer(agent_id: tau_proto::AgentId) -> tau_proto::AgentPromptSteered {
     tau_proto::AgentPromptSteered {
+        delayed: false,
         agent_id,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -8160,6 +8168,7 @@ fn manual_completion_notification_lookup_is_branch_specific() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let input = |text: &str| {
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             agent_id: agent_id(),
             text: text.to_owned(),
@@ -9030,6 +9039,7 @@ fn randomized_branched_provider_windows_match_reference_live_and_cold() {
 
     let user = |text: String| {
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id(),
             text,
@@ -9179,6 +9189,7 @@ fn provider_window_index_transition_arms_match_allocating_reference() {
                 responses_raw_json: None,
             })],
             submission_source: None,
+            delayed: false,
             inference_activation: false,
         }
     }
@@ -9311,6 +9322,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
     };
     let user = |text: &str, inference_activation| {
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation,
             agent_id: agent_id(),
             text: text.to_owned(),

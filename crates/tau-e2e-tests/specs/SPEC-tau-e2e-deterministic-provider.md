@@ -56,6 +56,10 @@ same literal syntax requires a typed scenario distinction rather than heuristic
 inference. V1's first text and tool-call actions additionally require the exact
 HumanUi envelope, so the always-on deterministic lane fails if interactive
 prompt projection disappears or changes structure.
+The V2 semantic-text matcher accepts the same exact HumanUi form with an optional
+`delayed="true"` attribute because a sender's follow-up input can race completion
+of its visible response. Direct harness admission tests verify the causal
+annotation; V1's initial-input oracle still requires an unannotated envelope.
 
 The closed task-text matcher skips whole registered `tau_discovery` user
 envelopes so lazy harness guidance does not replace the scenario's task text.

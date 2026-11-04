@@ -154,6 +154,7 @@ fn append_trace_prompt(agents_dir: &std::path::Path, agent_id: &str, text: &str,
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 agent_id: agent_id.clone(),
                 inference_activation: false,
                 text: text.to_owned(),

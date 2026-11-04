@@ -30,7 +30,7 @@ model-facing payload families:
 
 | Family | Carrier | Opening schema |
 | --- | --- | --- |
-| `user` | Generic user-role text | Fixed `source="ui"`; direct Tau user-channel input |
+| `user` | Generic user-role text | Fixed `source="ui"`, then optional `delayed="true"`; direct Tau user-channel input |
 | `tau_extension_output` | Generic user-role text | `publisher`, `operation_id`; passive configured-extension output |
 | `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
 | `tau_discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
@@ -39,8 +39,8 @@ model-facing payload families:
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Canonical background-preview attributes |
 
-Every new or reframed generic-user family must be added to the registry and use its
-shared metadata and exact-close helper in the same change. Family renderers own
+Each change that adds or reframes a generic-user family must register it and use
+the registry's shared metadata and exact-close helper. Family renderers own
 their typed source selection, validated attributes, normalization, and complete-body
 bounds; the registry owns the stable tag, opening shape, attribute order, exact
 close, visible close, carrier classification, and whole-envelope recognition.
@@ -107,8 +107,8 @@ that part and, when text is available, one adjacent `quoted_message` text part i
 the same `MessageItem`. The quote adds descriptive context, not a second sender
 event or activation. Each part follows the one-outer-family rule; payload-local
 tags cannot produce either part.
-Provider adapters preserve assembled envelope bytes and never
-synthesize, remove, or reinterpret a family. Historical raw/default projections,
+Provider adapters preserve assembled envelope bytes and never synthesize, remove,
+or reinterpret a family. Historical raw/default projections,
 provider replacement windows, and payload-local wrappers retain their existing
 replay behavior until a separately approved migration.
 Historical fieldless `<user>...</user>` replacement bytes remain recognizable
@@ -128,9 +128,10 @@ The harness renders a complete `tau_background_result` envelope from typed
 background-terminal and call correlation before publishing its prompt fact. Its
 ordered attributes authenticate call identity, tool name, logical tool outcome,
 full-versus-summary delivery, canonical rendered-body byte count, retrieval, and
-optional bounded summary metadata. The complete body remains untrusted tool data. The prompt keeps
-internal lifecycle classification but carries no trusted internal span, so provider
-projection preserves the committed generic-user envelope without adding an outer
+optional bounded summary metadata. The complete body remains untrusted tool data.
+The prompt keeps internal lifecycle classification but carries no trusted internal
+span, so provider projection preserves the committed generic-user envelope without
+adding an outer
 `tau_internal`. Replay preserves the committed bytes and never selects this family
 from text spelling. `AgentTree` rebuilds a non-serialized exact-node index only from
 committed submitted or steered prompt facts tagged

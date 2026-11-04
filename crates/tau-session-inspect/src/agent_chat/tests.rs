@@ -67,6 +67,7 @@ fn prompt_with_class(
     message_class: PromptMessageClass,
 ) -> Event {
     Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         agent_id: agent_id.clone(),
         inference_activation: false,
         text: text.to_owned(),

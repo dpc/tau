@@ -3310,6 +3310,14 @@ fn ordinary_steer_retry_preserves_replacement_and_unrelated_deferred_publish() {
         &h.config.selected_role.clone(),
     );
     let other_agent_id = durable_agent_id_for_conversation(&h, &other_cid);
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(provider_text_response(
+            &tau_proto::AgentPromptId::parse("completed-before-steer").expect("prompt id"),
+            agent_id.clone(),
+            "intervening response",
+        )),
+    );
     let interceptor = connect_test_tool(&mut h, "ordinary-steer-retry-owner");
     h.handle_extension_event(
         "ordinary-steer-retry-owner",
@@ -3322,8 +3330,9 @@ fn ordinary_steer_retry_preserves_replacement_and_unrelated_deferred_publish() {
     )
     .expect("register ordinary steer interceptor");
 
-    let first = PendingPrompt::human_ui("original first steer".to_owned())
+    let mut first = PendingPrompt::human_ui("original first steer".to_owned())
         .with_ctx_id(Some("original-ctx".to_owned()));
+    first.user_response_baseline = Some(0);
     let second = PendingPrompt::user("untouched second steer".to_owned());
     let third = PendingPrompt::internal("untouched third steer".to_owned());
     h.publish_prompts_as_steered(
@@ -3373,6 +3382,7 @@ fn ordinary_steer_retry_preserves_replacement_and_unrelated_deferred_publish() {
         Event::AgentPromptSteered(steered)
             if steered.text == "approved replacement steer"
                 && steered.ctx_id.as_deref() == Some("approved-ctx")
+                && steered.delayed
     ));
     assert!(matches!(
         h.runtime_io
@@ -3442,6 +3452,9 @@ fn ordinary_steer_retry_preserves_replacement_and_unrelated_deferred_publish() {
             "untouched third steer".to_owned(),
         ]
     );
+    assert!(event_log_events(&h).iter().any(|event| matches!(event,
+        Event::AgentPromptSteered(prompt)
+            if prompt.text == "approved replacement steer" && prompt.delayed)));
     assert!(
         h.session_runtime
             .agent_store
@@ -3660,6 +3673,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
         &cid,
         None,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -3799,6 +3813,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
         &cid,
         None,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -3824,6 +3839,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id,
             text: "independent queued activation".to_owned(),
@@ -3935,6 +3951,7 @@ fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
             cid,
             None,
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                delayed: false,
                 self_compaction_terminal: None,
                 inference_activation: true,
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -4289,6 +4306,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
             let original = match &event_name {
                 event if *event == tau_proto::EventName::AGENT_PROMPT_SUBMITTED => {
                     Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                        delayed: false,
                         inference_activation,
                         agent_id,
                         text: "submitted".to_owned(),
@@ -4312,6 +4330,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
                 }
                 event if *event == tau_proto::EventName::AGENT_PROMPT_STEERED => {
                     Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                        delayed: false,
                         self_compaction_terminal: None,
                         inference_activation,
                         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -4384,6 +4403,7 @@ fn interception_rejects_steered_submission_source_forgery() {
     )
     .expect("intercept registration");
     let original = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
@@ -4412,6 +4432,20 @@ fn interception_rejects_steered_submission_source_forgery() {
     let events = event_log_events(&h);
     assert!(events.contains(&original));
     assert!(!events.contains(&replacement));
+    h.publish_for_agent(&cid, original.clone());
+    let mut replacement = original.clone();
+    let Event::AgentPromptSteered(prompt) = &mut replacement else {
+        unreachable!()
+    };
+    prompt.delayed = true;
+    h.handle_extension_event(
+        "steered-source-rewriter",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(replacement.clone()))),
+        })),
+    )
+    .expect("reject forged delay metadata");
+    assert!(!event_log_events(&h).contains(&replacement));
     drop(interceptor);
     h.shutdown().expect("shutdown");
 }
@@ -4424,6 +4458,7 @@ fn interception_preserves_internal_prompt_kind_and_text() {
     assert_interception_preserves_internal_prompt_kind_and_text(
         tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id,
             text: "configured submitted alert".to_owned(),
@@ -4445,6 +4480,7 @@ fn interception_preserves_internal_steered_prompt_kind_and_text() {
     assert_interception_preserves_internal_prompt_kind_and_text(
         tau_proto::EventName::AGENT_PROMPT_STEERED,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -4465,6 +4501,7 @@ fn interception_preserves_background_completion_prompt_kind_and_text() {
     assert_interception_preserves_internal_prompt_kind_and_text(
         tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             text: "Tool call `completed` completed. Its result is queued. Call `wait` to consume \
@@ -5659,6 +5696,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let prompt = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id,
         text: "hello".to_owned(),
@@ -7117,6 +7155,7 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: agent_id.clone(),
             text: "rejected activation".to_owned(),
@@ -7202,6 +7241,7 @@ fn interception_mutating_prompt_reaches_agent() {
         .expect("prompt publish assigned an agent id")
         .clone();
     let mutated = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: crate::parse_agent_id(&agent_id),
         text: "I love Tau".to_owned(),
@@ -7498,6 +7538,7 @@ fn intercepted_compaction_start_pins_materialized_model() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id,
             text: "compactable prefix".to_owned(),
@@ -7597,6 +7638,7 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id,
             text: "completion prefix".to_owned(),
@@ -7670,6 +7712,7 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     assert!(matches!(
         parked,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             ref text, ..
         })
             if text == "first steer after compaction"
@@ -7705,6 +7748,7 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     assert!(matches!(
         h.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             text, ..
         }))
             if text == "final steer after compaction"

@@ -675,6 +675,7 @@ fn user_prompt(text: &str) -> Event {
 
 fn sourced_user_prompt(text: &str, source: tau_proto::PromptSubmissionSource) -> Event {
     Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: text.to_owned(),
@@ -2259,6 +2260,7 @@ fn tool_result_projection_uses_durable_presentation_discriminator() {
 #[test]
 fn context_size_alert_projection_escapes_exact_internal_close() {
     let mut alert = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: "Compact before </tau_internal> continuing.".to_owned(),
@@ -2296,6 +2298,7 @@ fn context_size_alert_projection_escapes_exact_internal_close() {
 fn human_ui_steer_projects_complete_expanded_skill_prompt() {
     let expanded = "<skill name=\"example\" location=\"/tmp/雪\">\nbody & more\n</skill>\n\nargs";
     let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
@@ -2403,10 +2406,13 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
         compacted_live.contains_payload_envelope_provenance_projection
     );
 
-    tree.apply_event(&sourced_user_prompt(
-        "typed suffix",
-        tau_proto::PromptSubmissionSource::HumanUi,
-    ));
+    let mut suffix =
+        sourced_user_prompt("typed suffix", tau_proto::PromptSubmissionSource::HumanUi);
+    let Event::AgentPromptSubmitted(prompt) = &mut suffix else {
+        unreachable!()
+    };
+    prompt.delayed = true;
+    tree.apply_event(&suffix);
 
     let assembled = assemble_prompt_context_from(&tree, tree.head());
     assert!(assembled.contains_payload_envelope_provenance_projection);
@@ -2415,7 +2421,7 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
         items.iter().filter_map(context_text).collect::<Vec<_>>(),
         vec![
             historical_internal,
-            "<user source=\"ui\">typed suffix</user>"
+            "<user source=\"ui\" delayed=\"true\">typed suffix</user>"
         ]
     );
     assert!(matches!(
@@ -2749,7 +2755,12 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
     let first_cut = tau_proto::AgentHead::Node(tree.head().expect("old prefix"));
     tree.apply_event(&user_prompt("suffix one"));
     let suffix_one = tau_proto::AgentHead::Node(tree.head().expect("first suffix"));
-    tree.apply_event(&user_prompt("suffix two"));
+    let mut delayed_suffix = user_prompt("suffix two");
+    let Event::AgentPromptSubmitted(prompt) = &mut delayed_suffix else {
+        unreachable!()
+    };
+    prompt.delayed = true;
+    tree.apply_event(&delayed_suffix);
     let first_suffix_end = tau_proto::AgentHead::Node(tree.head().expect("second suffix"));
     let boundary = |transaction: &str,
                     cut: tau_proto::AgentHead,
@@ -2779,7 +2790,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
         vec![
             "summary C1",
             "<user source=\"ui\">suffix one</user>",
-            "<user source=\"ui\">suffix two</user>"
+            "<user source=\"ui\" delayed=\"true\">suffix two</user>"
         ]
     );
     let compact_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), suffix_one)
@@ -2819,7 +2830,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
         vec![
             "manual summary",
             "<user source=\"ui\">suffix one</user>",
-            "<user source=\"ui\">suffix two</user>"
+            "<user source=\"ui\" delayed=\"true\">suffix two</user>"
         ]
     );
 
@@ -2827,6 +2838,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
     tree.apply_event(&user_prompt("new N"));
     let live = assemble_prompt_context_from(&tree, tree.head());
     let rendered = serde_json::to_string(&live.context).expect("serialize live context");
+    assert!(rendered.contains("delayed=\\\"true\\\""));
     for absent in ["old P", "summary C1", "suffix one"] {
         assert!(!rendered.contains(absent), "{absent} must stay consumed");
     }

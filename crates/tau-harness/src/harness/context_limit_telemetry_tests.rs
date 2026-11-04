@@ -7,6 +7,7 @@ use super::context_limit_telemetry::{
 
 fn user_entry(text: &str) -> AgentEntry {
     AgentEntry::UserInput {
+        delayed: false,
         items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::User,
             content: vec![ContentPart::Text {

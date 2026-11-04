@@ -162,12 +162,14 @@ impl Harness {
             .map(|correlation| AgentPublishCompletion::InitialPromptSubmission { correlation });
         let defers_notification = completion.is_some();
         let start_operation_id = prompt.start_operation_id;
+        let user_response_baseline = prompt.user_response_baseline;
         let notification_text = (start_operation_id.is_none()
             && notify_watchers
             && !defers_notification
             && self.has_watchers_for_agent(target_agent_id.as_str()))
         .then(|| self.clone_prompt_text_for_watch_notification(&prompt.text));
         let event = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation,
             agent_id: target_agent_id.clone(),
             text: prompt.text,
@@ -193,19 +195,19 @@ impl Harness {
         } else if let Some(prompt_acceptance) = prompt_acceptance {
             self.publish_event_for_agent_with_prompt_acceptance(
                 agent_id,
-                None,
                 event,
                 completion,
                 prompt_acceptance,
                 defers_notification && notify_watchers,
+                user_response_baseline,
             );
         } else {
-            self.publish_event_for_agent_with_completion(
+            self.publish_prompt_with_response_baseline(
                 agent_id,
-                None,
                 event,
                 completion,
                 defers_notification && notify_watchers,
+                user_response_baseline,
             );
         }
         if !defers_notification && let Some(text) = notification_text {

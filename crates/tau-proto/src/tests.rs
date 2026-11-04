@@ -1734,6 +1734,7 @@ fn representative_events() -> Vec<Event> {
             error: None,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id("engineer_abcd1234"),
             text: "hello".to_owned(),
@@ -1760,6 +1761,7 @@ fn representative_events() -> Vec<Event> {
             message: "no provider models".to_owned(),
         }),
         Event::AgentPromptSteered(AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: false,
             submission_source: PromptSubmissionSource::HarnessInternal,
@@ -3824,6 +3826,7 @@ fn visible_metadata_classifier_covers_default_ignorables_and_noncharacters() {
 #[test]
 fn canonical_inference_activation_defaults_and_round_trips() {
     let active_submitted = AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         text: "hello".to_owned(),
@@ -3893,6 +3896,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
     );
 
     let active_steered = AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: true,
         submission_source: PromptSubmissionSource::HarnessInternal,
@@ -6067,6 +6071,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             reason: SessionStartReason::Initial,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id("worker"),
             text: "hi".to_owned(),
@@ -6155,6 +6160,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     assert_eq!(queued.message_class, PromptMessageClass::User);
 
     let internal = serde_json::to_value(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: PromptSubmissionSource::HarnessInternal,
@@ -6196,6 +6202,7 @@ fn durable_prompts_require_submission_source() {
     );
 
     let submitted = AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("worker"),
         text: "submitted".to_owned(),
@@ -6208,6 +6215,7 @@ fn durable_prompts_require_submission_source() {
         ctx_id: None,
     };
     let steered = AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: true,
         submission_source: PromptSubmissionSource::HumanUi,
@@ -6220,6 +6228,7 @@ fn durable_prompts_require_submission_source() {
     };
     let encoded = serde_json::to_value(&submitted).expect("serialize submitted prompt");
     assert_eq!(encoded["submission_source"], serde_json::json!("human_ui"));
+    assert!(encoded.get("delayed").is_none());
     assert_eq!(
         serde_json::from_value::<AgentPromptSubmitted>(encoded).expect("decode submitted prompt"),
         submitted
@@ -6241,6 +6250,7 @@ fn durable_prompts_require_submission_source() {
 
     let encoded = serde_json::to_value(&steered).expect("serialize steered prompt");
     assert_eq!(encoded["submission_source"], serde_json::json!("human_ui"));
+    assert!(encoded.get("delayed").is_none());
     assert_eq!(
         serde_json::from_value::<AgentPromptSteered>(encoded).expect("decode steered prompt"),
         steered
@@ -6252,6 +6262,7 @@ fn durable_prompts_require_submission_source() {
 #[test]
 fn internal_prompt_kinds_round_trip_on_durable_prompts() {
     let submitted = AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("worker"),
         text: "compact soon".to_owned(),
@@ -6276,6 +6287,7 @@ fn internal_prompt_kinds_round_trip_on_durable_prompts() {
     );
 
     let steered = AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: true,
         submission_source: PromptSubmissionSource::HarnessInternal,

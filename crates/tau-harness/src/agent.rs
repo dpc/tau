@@ -420,6 +420,8 @@ pub(crate) struct PendingPrompt {
     pub(crate) source: PendingPromptSource,
     /// Harness-stamped provenance carried into the durable prompt fact.
     pub(crate) submission_source: tau_proto::PromptSubmissionSource,
+    /// Completed visible-response generation at authenticated UI submission.
+    pub(crate) user_response_baseline: Option<u64>,
     /// Optional caller correlation id carried with this exact prompt.
     pub(crate) ctx_id: Option<String>,
     /// Resolve a non-literal user skill command against the target agent's
@@ -495,6 +497,7 @@ impl PendingPrompt {
             message_class: PromptMessageClass::User,
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+            user_response_baseline: None,
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
@@ -530,6 +533,7 @@ impl PendingPrompt {
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+            user_response_baseline: None,
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
@@ -771,6 +775,7 @@ impl Agent {
             },
             dispatch: AgentDispatchState {
                 provider_switch_warning: Default::default(),
+                visible_response_generation: 0,
                 in_flight_prompt: None,
                 pending_prompts: VecDeque::new(),
                 discovery_fold_pending: false,

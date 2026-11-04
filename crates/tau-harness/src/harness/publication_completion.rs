@@ -1689,6 +1689,7 @@ impl Harness {
                 let internal_kind = prompt.internal_kind();
                 (
                     Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                        delayed: false,
                         agent_id: agent_id.clone(),
                         inference_activation: true,
                         submission_source: prompt.submission_source,
@@ -1809,6 +1810,7 @@ impl Harness {
             true,
             true,
             Some(ConversationHeadSync {
+                user_response_baseline: None,
                 cid: cid.clone(),
                 agent_id: Some(agent_id),
                 session_generation: self.session_runtime.current_session_generation,

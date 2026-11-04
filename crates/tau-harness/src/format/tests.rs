@@ -4,6 +4,7 @@ use super::*;
 
 fn user_entry(text: &str) -> AgentEntry {
     AgentEntry::UserInput {
+        delayed: false,
         items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::User,
             content: vec![ContentPart::Text {

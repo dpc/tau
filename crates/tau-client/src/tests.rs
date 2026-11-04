@@ -1548,6 +1548,7 @@ fn ui_shell_command() -> Event {
 
 fn test_prompt(text: &str) -> AgentPromptSubmitted {
     AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         text: text.to_owned(),

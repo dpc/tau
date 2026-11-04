@@ -57,6 +57,7 @@ impl Harness {
                 agent_id: agent_id.clone(),
             }),
             ConversationHeadSync {
+                user_response_baseline: None,
                 cid,
                 agent_id: Some(agent_id),
                 session_generation: owner.generation,

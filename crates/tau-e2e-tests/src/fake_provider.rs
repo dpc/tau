@@ -4751,7 +4751,15 @@ fn project_fixture_human_ui_user_prompt(text: &str) -> String {
 
 /// Match either raw non-HumanUi text or fixture-authored HumanUi projection.
 fn fixture_user_text_matches(actual: &str, expected: &str) -> bool {
-    actual == expected || actual == project_fixture_human_ui_user_prompt(expected)
+    actual == expected
+        || actual == project_fixture_human_ui_user_prompt(expected)
+        || actual
+            == tau_proto::USER_PAYLOAD_ENVELOPE
+                .render_attributed(
+                    &[("source", "ui".to_owned()), ("delayed", "true".to_owned())],
+                    expected,
+                )
+                .expect("registered delayed HumanUi envelope")
 }
 
 fn cbor_map_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {

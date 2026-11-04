@@ -188,6 +188,9 @@ pub enum AgentEntry {
         /// Typed accepted-prompt provenance, absent for synthetic injections.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         submission_source: Option<tau_proto::PromptSubmissionSource>,
+        /// Accepted completion-relative annotation for direct user prompts.
+        #[serde(default)]
+        delayed: bool,
         /// Whether this node creates checkpoint-governed inference work.
         #[serde(default)]
         inference_activation: bool,
@@ -3648,7 +3651,7 @@ impl AgentTree {
                 );
                 self.record_context_entry(
                     parent,
-                    Self::user_text_input_entry(appended.text.clone(), &[], None, false),
+                    Self::user_text_input_entry(appended.text.clone(), &[], None, false, false),
                     durable_event_seq,
                     false,
                 )
@@ -3659,6 +3662,7 @@ impl AgentTree {
                     prompt.text.clone(),
                     &prompt.trusted_internal_spans,
                     Some(prompt.submission_source.clone()),
+                    prompt.delayed,
                     prompt.inference_activation,
                 ),
                 durable_event_seq,
@@ -3680,6 +3684,7 @@ impl AgentTree {
                         ),
                         &[],
                         None,
+                        false,
                         injected.inference_activation,
                     ),
                     durable_event_seq,
@@ -3692,6 +3697,7 @@ impl AgentTree {
                     steered.text.clone(),
                     &steered.trusted_internal_spans,
                     Some(steered.submission_source.clone()),
+                    steered.delayed,
                     steered.inference_activation,
                 ),
                 durable_event_seq,
@@ -3750,6 +3756,7 @@ impl AgentTree {
         text: String,
         trusted_internal_spans: &[tau_proto::TrustedInternalSpan],
         submission_source: Option<tau_proto::PromptSubmissionSource>,
+        delayed: bool,
         inference_activation: bool,
     ) -> AgentEntry {
         AgentEntry::UserInput {
@@ -3760,6 +3767,7 @@ impl AgentTree {
                 responses_raw_json: None,
             })],
             submission_source,
+            delayed,
             inference_activation,
         }
     }

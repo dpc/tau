@@ -3947,6 +3947,7 @@ fn submitted_prompt_markdown_styles_match_live_and_replay_without_mutating_raw_t
         );
         let event = if replayed {
             Event::AgentPromptSubmitted(AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: agent_id("main"),
                 text: source.clone(),
@@ -4124,6 +4125,7 @@ fn timer_wakeup_prompt_submitted_renders_visible_marker() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
@@ -4157,6 +4159,7 @@ fn timer_wakeup_prompt_steered_renders_visible_marker() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -4225,6 +4228,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         ctx_id: None,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("worker-1"),
         text: "follow up".to_owned(),

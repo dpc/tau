@@ -858,6 +858,7 @@ fn replayed_daily_prompt_advances_reconstructed_schedule() {
     });
     rt.handle_prompt_replay(
         &AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent.clone(),
             text: "Timer `daily` fired: wake".to_owned(),
@@ -907,6 +908,7 @@ fn replayed_timer_prompt_removes_one_shot() {
     .expect("schedule");
     rt.handle_prompt_replay(
         &AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent.clone(),
             text: "Timer `once` fired: wake".to_owned(),
@@ -1027,6 +1029,7 @@ fn replayed_steered_timer_prompt_removes_one_shot() {
     )
     .expect("schedule");
     let steered = AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,

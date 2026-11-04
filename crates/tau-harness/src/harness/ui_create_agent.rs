@@ -248,6 +248,11 @@ impl Harness {
             PendingPrompt::user(text)
         }
         .with_ctx_id(Some(ctx_id.clone()));
+        // A freshly created agent had no completed response when this input
+        // established its target, even if interaction publication was delayed.
+        if prompt.submission_source == tau_proto::PromptSubmissionSource::HumanUi {
+            prompt.user_response_baseline = Some(0);
+        }
         prompt.expand_user_skill_on_dispatch = defer_skill_expansion;
         prompt.initial_prompt_correlation = Some(InitialPromptCorrelation {
             request_id: request_id.clone(),

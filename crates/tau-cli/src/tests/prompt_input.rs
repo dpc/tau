@@ -493,6 +493,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "hello".to_owned(),
@@ -549,6 +550,7 @@ fn extension_prompt_steered_uses_message_marker() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::Extension {
@@ -562,6 +564,7 @@ fn extension_prompt_steered_uses_message_marker() {
         ctx_id: None,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "human internal payload".to_owned(),
@@ -593,6 +596,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
     let harness = tau_proto::PromptSubmissionSource::HarnessInternal;
 
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "extension submitted payload".to_owned(),
@@ -605,6 +609,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
         ctx_id: Some("swarm-command-1".to_owned()),
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: extension,
@@ -616,6 +621,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
         ctx_id: Some("swarm-command-2".to_owned()),
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "harness submitted payload".to_owned(),
@@ -628,6 +634,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
         ctx_id: None,
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: harness,
@@ -679,6 +686,7 @@ fn internal_prompt_toggle_preserves_timer_and_context_alert_special_presentation
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `special` fired: exact once".to_owned(),
@@ -691,6 +699,7 @@ fn internal_prompt_toggle_preserves_timer_and_context_alert_special_presentation
         ctx_id: Some("timer:special:1".to_owned()),
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -732,6 +741,7 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.switch_agent(agent_id("replayed-agent"));
     let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("replayed-agent"),
         text: "replayed submitted internal".to_owned(),
@@ -744,6 +754,7 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
         ctx_id: None,
     });
     let steered = Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -783,6 +794,7 @@ fn unqueued_harness_prompt_steered_uses_toggle_controlled_notice() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -920,6 +932,7 @@ fn submitted_initial_prompt_failure_preserves_newer_queue() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("main"),
         text: "initial A".into(),
@@ -1008,6 +1021,7 @@ fn queued_prompt_elides_at_layout_without_changing_authoritative_text() {
     assert!(!queued.contains("middle line retained"));
 
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
@@ -1379,6 +1393,7 @@ fn accepted_prompt_submission_starts_main_turn_before_provider_activity() {
     assert!(!vt.screen_contains(80, "◇ …"));
 
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("local-agent"),
         text: "warm up locally".to_owned(),
@@ -1427,6 +1442,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     };
     renderer.handle(&Event::AgentPromptSubmitted(
         tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id("worker-1"),
             text: "side task".to_owned(),
@@ -2220,6 +2236,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     let redraw_passes = vt.frame_generation();
 
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
@@ -2267,6 +2284,7 @@ fn extension_steering_does_not_promote_matching_queued_user_prompt() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::Extension {
@@ -2312,6 +2330,7 @@ fn nonfront_queued_match_remains_a_message_without_consuming_the_front_prompt() 
             }));
         }
         renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: false,
             submission_source,
@@ -2347,6 +2366,7 @@ fn submitted_human_prompt_promotes_matching_front_queue_before_start() {
     let redraw_wakes = handle.redraw_request_count();
     let redraw_passes = vt.frame_generation();
     renderer.handle_agent_prompt_submitted_for_test(&AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("main"),
         text: text.to_owned(),
@@ -2415,6 +2435,7 @@ fn typed_background_completion_prompts_are_always_hidden() {
         cli_test_theme(),
     );
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("main"),
         text: "Tool call `idle` completed. Its result is queued. Call `wait` to consume it when \
@@ -2432,6 +2453,7 @@ fn typed_background_completion_prompts_are_always_hidden() {
     renderer.apply_setting("show-internal-prompts", "off");
     renderer.apply_setting("show-internal-prompts", "on");
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -2464,6 +2486,7 @@ fn typed_background_completion_prompts_are_always_hidden() {
     cold.apply_setting("show-internal-prompts", "on");
     cold.handle_recorded_at(
         &Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: agent_id("main"),
             text:
@@ -2498,6 +2521,7 @@ fn untyped_internal_prompt_matching_completion_prose_remains_visible() {
     renderer.apply_setting("show-internal-prompts", "on");
 
     let mut prompt = AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,

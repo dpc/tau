@@ -1723,6 +1723,7 @@ fn handle_delivery(
 /// Project a steered prompt into the submitted shape consumed by timer replay.
 fn submitted_prompt_from_steered(prompt: &tau_proto::AgentPromptSteered) -> AgentPromptSubmitted {
     AgentPromptSubmitted {
+        delayed: prompt.delayed,
         inference_activation: false,
         agent_id: prompt.agent_id.clone(),
         text: prompt.text.clone(),

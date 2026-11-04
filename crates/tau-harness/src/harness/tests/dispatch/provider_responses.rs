@@ -2569,6 +2569,7 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
         append_seed_agent_event(
             &mut store,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: agent_id.clone(),
                 text: "H".to_owned(),

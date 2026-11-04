@@ -814,7 +814,35 @@ impl Harness {
         completion: Option<AgentPublishCompletion>,
         notify_watchers: bool,
     ) {
-        self.publish_event_for_agent_inner(cid, source, event, completion, notify_watchers, None);
+        self.publish_event_for_agent_inner(
+            cid,
+            source,
+            event,
+            completion,
+            notify_watchers,
+            None,
+            None,
+        );
+    }
+
+    /// Publish direct prompt provenance with its original response baseline.
+    pub(super) fn publish_prompt_with_response_baseline(
+        &mut self,
+        cid: &AgentId,
+        event: Event,
+        completion: Option<AgentPublishCompletion>,
+        notify_watchers: bool,
+        baseline: Option<u64>,
+    ) {
+        self.publish_event_for_agent_inner(
+            cid,
+            None,
+            event,
+            completion,
+            notify_watchers,
+            None,
+            baseline,
+        );
     }
 
     /// Publish the exact initial startup prompt with its one-event outcome
@@ -829,6 +857,7 @@ impl Harness {
         let persist = event.defaults_to_persist();
         let agent_id = self.agent_id_for_event(&event);
         let sync = Some(ConversationHeadSync {
+            user_response_baseline: None,
             cid: cid.clone(),
             agent_id,
             session_generation: self.session_runtime.current_session_generation,
@@ -844,22 +873,24 @@ impl Harness {
     pub(super) fn publish_event_for_agent_with_prompt_acceptance(
         &mut self,
         cid: &AgentId,
-        source: Option<&tau_proto::ConnectionId>,
         event: Event,
         completion: Option<AgentPublishCompletion>,
         prompt_acceptance: PromptAcceptanceTiming,
         notify_watchers: bool,
+        user_response_baseline: Option<u64>,
     ) {
         self.publish_event_for_agent_inner(
             cid,
-            source,
+            None,
             event,
             completion,
             notify_watchers,
             Some(prompt_acceptance),
+            user_response_baseline,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn publish_event_for_agent_inner(
         &mut self,
         cid: &AgentId,
@@ -868,6 +899,7 @@ impl Harness {
         completion: Option<AgentPublishCompletion>,
         notify_watchers: bool,
         prompt_acceptance: Option<PromptAcceptanceTiming>,
+        user_response_baseline: Option<u64>,
     ) {
         if let Event::ProviderResponseFinished(finished) = &event
             && (matches!(
@@ -994,6 +1026,7 @@ impl Harness {
             })
             .unwrap_or_default();
         let sync = Some(ConversationHeadSync {
+            user_response_baseline,
             cid: cid.clone(),
             agent_id,
             session_generation: self.session_runtime.current_session_generation,
@@ -2232,6 +2265,7 @@ impl Harness {
             return;
         }
         let mut event = event;
+        self.stamp_delayed_user_prompt(&mut event, sync_head_for.as_ref());
         self.arbitrate_prompt_terminal_cancellation(&mut event, &mut sync_head_for);
         let watch_retirement = sync_head_for
             .as_ref()
@@ -3021,6 +3055,7 @@ impl Harness {
             timing.finish(PromptAcceptanceTerminal::Accepted);
         }
         let post_commit_started = Instant::now();
+        self.observe_completed_visible_response(&event);
         // Observe commit order before continuations can publish nested facts.
         // Otherwise a tool response could see its own message receipt and be
         // mistaken for the later sender terminal by the crash-cut fixture.
@@ -3165,6 +3200,7 @@ impl Harness {
                 false,
                 true,
                 Some(ConversationHeadSync {
+                    user_response_baseline: None,
                     cid: sync.cid.clone(),
                     agent_id: sync.agent_id.clone(),
                     session_generation: sync.session_generation,

@@ -928,6 +928,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
         .cloned()
         .expect("ephemeral route");
     let sync = path_crate_harness::interception::ConversationHeadSync {
+        user_response_baseline: None,
         cid,
         agent_id: Some(agent_id),
         session_generation: h.session_runtime.current_session_generation,

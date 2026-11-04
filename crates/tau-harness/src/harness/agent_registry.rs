@@ -1107,6 +1107,7 @@ impl Harness {
                 true,
                 true,
                 Some(ConversationHeadSync {
+                    user_response_baseline: None,
                     cid: cid.clone(),
                     agent_id: Some(agent_id_proto.clone()),
                     session_generation: self.session_runtime.current_session_generation,
@@ -2251,6 +2252,7 @@ impl Harness {
             true,
             true,
             Some(ConversationHeadSync {
+                user_response_baseline: None,
                 cid: cid.clone(),
                 agent_id: Some(agent_id_proto.clone()),
                 session_generation: self.session_runtime.current_session_generation,
@@ -2384,6 +2386,7 @@ impl Harness {
             true,
             true,
             Some(ConversationHeadSync {
+                user_response_baseline: None,
                 cid: cid.clone(),
                 agent_id: Some(agent_id_proto.clone()),
                 session_generation: self.session_runtime.current_session_generation,
@@ -2522,6 +2525,7 @@ impl Harness {
                 true,
                 true,
                 Some(ConversationHeadSync {
+                    user_response_baseline: None,
                     cid: cid.clone(),
                     agent_id: Some(agent_id.clone()),
                     session_generation: self.session_runtime.current_session_generation,
@@ -2656,6 +2660,7 @@ impl Harness {
                     true,
                     false,
                     Some(ConversationHeadSync {
+                        user_response_baseline: None,
                         cid: cid.clone(),
                         agent_id: Some(agent_id.clone()),
                         session_generation: self.session_runtime.current_session_generation,

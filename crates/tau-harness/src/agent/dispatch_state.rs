@@ -10,6 +10,9 @@ use crate::prompt::provider_switch_warning::ProviderSwitchWarning;
 /// Queued work and provider-prompt dispatch bookkeeping for one agent.
 #[derive(Debug)]
 pub(crate) struct AgentDispatchState {
+    /// Runtime-only count of completed responses containing visible assistant
+    /// text.
+    pub(crate) visible_response_generation: u64,
     /// Process-local omission warning state, reset when the agent is loaded.
     pub(crate) provider_switch_warning: ProviderSwitchWarning,
     /// Agent prompt id of the prompt currently in flight for this agent, or

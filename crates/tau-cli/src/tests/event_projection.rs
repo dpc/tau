@@ -157,6 +157,7 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
         tau_proto::TAU_INTERNAL_CLOSE,
     );
     let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent.clone(),
         text: "Your `status` is set to `working` on \"Fix Slack mandatory terminal delivery\". Set it to `done`, `waiting`, or `blocked` to finish or call `wait` when waiting for external events.".to_owned(),
@@ -169,6 +170,7 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
         ctx_id: None,
     });
     let steered = Event::AgentPromptSteered(AgentPromptSteered {
+        delayed: false,
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -317,6 +319,7 @@ fn rewritten_submitted_initial_failure_preserves_newer_queue() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        delayed: false,
         inference_activation: true,
         agent_id: agent_id("main"),
         text: "expanded skill body".into(),
@@ -553,6 +556,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         cli_test_theme(),
     );
     let prompt = AgentPromptSubmitted {
+        delayed: false,
         inference_activation: false,
         agent_id: agent_id("worker-1"),
         text: "side task".to_owned(),

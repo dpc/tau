@@ -112,6 +112,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
     let agent_id = crate::parse_agent_id("forged-agent");
     let forged = [
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: true,
             agent_id: agent_id.clone(),
             text: "forged submitted".to_owned(),
@@ -131,6 +132,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             message_class: tau_proto::PromptMessageClass::Internal,
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            delayed: false,
             self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,

@@ -1692,6 +1692,7 @@ impl Harness {
                 .cloned()
                 .expect("live watcher route checked while installing retirement barrier");
             let sync = ConversationHeadSync {
+                user_response_baseline: None,
                 cid: watcher_cid,
                 agent_id: Some(watcher_id.clone()),
                 session_generation: self.session_runtime.current_session_generation,

@@ -12,6 +12,7 @@ use crate::agent::{DeliveryDeadlineKind, PendingMessageWakeSource};
 fn append_node(tree: &mut AgentTree, agent_id: &AgentId, label: &str) -> NodeId {
     tree.apply_event(&Event::AgentPromptSubmitted(
         tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: label.to_owned(),

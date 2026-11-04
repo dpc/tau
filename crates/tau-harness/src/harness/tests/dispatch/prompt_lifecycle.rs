@@ -4256,6 +4256,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                 "engineer_default",
                 None,
                 Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    delayed: false,
                     inference_activation: false,
                     agent_id: tau_proto::AgentId::parse("engineer_default").expect("agent id"),
                     text: "default prompt".to_owned(),
@@ -4274,6 +4275,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                 "worker_steered",
                 None,
                 Event::AgentPromptSteered(AgentPromptSteered {
+                    delayed: false,
                     self_compaction_terminal: None,
                     inference_activation: false,
                     submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,

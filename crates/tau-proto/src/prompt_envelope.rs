@@ -134,7 +134,7 @@ impl fmt::Display for PayloadEnvelopeRenderError {
 pub const USER_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
     name: "user",
     opening: PayloadEnvelopeOpening::Attributed("<user "),
-    ordered_attributes: &["source"],
+    ordered_attributes: &["source", "delayed"],
     exact_close: "</user>",
     visible_close: "&lt;/user&gt;",
     carrier: PayloadEnvelopeCarrier::GenericUserText,

@@ -53,6 +53,7 @@ fn missing_provider_default_keeps_automatic_compaction_boundaryless_but_admits_m
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "retained context".to_owned(),

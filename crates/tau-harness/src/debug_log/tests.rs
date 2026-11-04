@@ -794,6 +794,7 @@ fn submitted_prompt_debug_projection_borrows_and_matches_legacy_json() {
 #[test]
 fn published_binary_free_events_borrow_and_match_legacy_json() {
     let submitted = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        delayed: false,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         inference_activation: true,
         text: format!("prefix-{}-suffix", "submitted-prompt-body-".repeat(1_000)),

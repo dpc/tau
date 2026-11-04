@@ -458,6 +458,7 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: text.to_owned(),
@@ -508,6 +509,7 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             text: "usage prompt".to_owned(),
@@ -707,6 +709,7 @@ fn seed_background_placeholder_for_agent(
             agent_id,
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                delayed: false,
                 inference_activation: false,
                 agent_id: parsed_agent_id.clone(),
                 text: format!("run {tool_name}"),
@@ -1464,6 +1467,7 @@ fn seed_reactive_compaction_prefix(h: &mut Harness, cid: &AgentId) {
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id,
             text: "stable reactive prefix".to_owned(),
@@ -1680,6 +1684,7 @@ fn seed_historical_open_prefix_failure(
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "historical prefix".to_owned(),
@@ -2426,6 +2431,7 @@ fn start_background_tool_and_finish_placeholder_turn(
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            delayed: false,
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: format!("run {tool_name}"),
@@ -2894,6 +2900,7 @@ mod compaction_threshold;
 mod compaction_turn_start;
 mod compaction_unusable_summary;
 mod configuration;
+mod delayed_user_prompt;
 mod extension_routing;
 mod internal_tool_dispatch;
 mod loop_guard;

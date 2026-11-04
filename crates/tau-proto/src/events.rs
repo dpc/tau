@@ -4566,6 +4566,10 @@ pub struct TrustedInternalSpan {
 /// [`UiPromptSubmitted`] request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptSubmitted {
+    /// Harness-owned decision that a visible response completed after UI
+    /// submission.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub delayed: bool,
     /// Agent transcript receiving the prompt.
     pub agent_id: AgentId,
     /// Harness-owned immutable activation marker. True creates
@@ -5264,6 +5268,10 @@ pub struct AgentCompacted {
 /// internal deliveries may additionally carry immutable control correlation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptSteered {
+    /// Harness-owned decision that a visible response completed after UI
+    /// submission.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub delayed: bool,
     /// Agent whose in-flight turn received the prompt.
     pub agent_id: AgentId,
     /// Harness-owned immutable activation marker. True creates

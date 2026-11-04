@@ -1441,7 +1441,9 @@ impl Harness {
                         owned_publication: None,
                     })
                 });
+            let user_response_baseline = prompt.user_response_baseline;
             let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                delayed: false,
                 inference_activation,
                 submission_source: prompt.submission_source,
                 agent_id,
@@ -1452,12 +1454,12 @@ impl Harness {
                 internal_kind,
                 ctx_id: prompt.ctx_id,
             });
-            self.publish_event_for_agent_with_completion(
+            self.publish_prompt_with_response_baseline(
                 cid,
-                None,
                 event,
                 event_completion,
                 notify_watchers,
+                user_response_baseline,
             );
             if self
                 .prompt_coordination
