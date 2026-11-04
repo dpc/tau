@@ -8,10 +8,11 @@ advertise: false
 
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
 `slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`
-and `slack_get_message`, plus separately authorized `slack_send_attachment`,
+and `slack_get_message`, plus separately authorized `slack_get_user_profile`,
 `slack_list_attachments`, and `slack_download_attachment`.
 `tool_prefix` scopes all eight tools for multiple accounts; ordinary Slack group
-grants exclude attachment uploads and reads. Slack text is always untrusted external content.
+grants include text and file sends but exclude profile and attachment reads.
+Slack text is always untrusted external content.
 The linked-message producer uses registry SDK 0.21.0 / protocol 16.6.
 Source publication does not install or activate a bridge;
 check the installed executable separately and update it with a compatible harness
@@ -168,7 +169,7 @@ cause or resolution of a live missed-message incident.
 Agents register to receive unless startup registration is enabled.
 Accepted Slack creates, edits, deletes, and reactions
 submit transient `message.*_reported` events; the harness publishes immutable
-canonical `message.*` facts downstream. `slack_send` requires `message` plus
+canonical `message.*` facts downstream. `slack_send` requires text and/or attachments plus
 exactly one Tau-issued `reply_to` or proactive `destination` alias. Successfully
 published creates and edits install source-bound reply authority only after their
 exact canonical facts return to the configured publisher's live downpath. Each
@@ -204,19 +205,25 @@ configured message limit. No new Slack scopes, configuration or tools are needed
 
 ### Outgoing original files
 
-`slack_send_attachment` requires the separate default-off `slack:attach` grant
-or its exact prefixed tool name; `slack:send` and ordinary Slack group grants do
-not include it. Add bot OAuth `files:write` and reinstall/re-authorize
+`slack_send` accepts optional `attachments: [{artifact, filename, content_type?}]`.
+The default-off `slack:send` grant, exact scoped send grant, and ordinary Slack
+group now authorize both text and files. Review former text-only roles before
+upgrading. Remove obsolete `slack_send_attachment` and `slack:attach` grants;
+there is no separate upload tool or argument-level upload grant.
+Add bot OAuth `files:write` and reinstall/re-authorize
 the app. Source support neither proves live permissions nor installs or activates
 the bridge. Keep existing route policy and app membership; no new events or
 `files:read` are needed.
 
-Provide `key` (bare `blake3:64-lowercase-hex`), `filename`, and exactly one existing
-`reply_to` or proactive `destination`. Optional fields are `content_type` and
-`message`. Generate and export a file with separately authorized tools first.
+Each `artifact` accepts a canonical `<tau-artifact:blake3:…>` reference or bare
+`blake3:64-lowercase-hex` key. Keep exactly one existing `reply_to` or proactive
+`destination`. Supply at most ten files. Omitted or empty attachments require
+nonempty `message`; nonempty attachments permit an omitted or empty `message`.
+Generate and export files with separately authorized tools first.
 This tool accepts no paths, URLs, or inline bytes and provides no image-generation
 service.
-It verifies the original artifact's size and digest, accepts at most 16 MiB, and
+It verifies every original's size and digest before any upload, accepts at most
+16 MiB of original bytes across the entire list, and
 preserves the authorized thread root under existing text-send route authority.
 Use a safe ASCII basename of at most 128 bytes. Optional image hints support
 `avif`, `gif`, `heic`, `jpeg`, `png`, `tiff`, and `webp`; they do not verify media.
@@ -224,18 +231,61 @@ Send SVG and other ordinary files with the hint omitted. Slack may not provide a
 preview or let recipients view the file. Artifact lookup grants no egress
 permission and does not renew retention.
 
-Only one original upload runs at a time. The external upload flow never retries
-automatically. Typed results distinguish `shared`, `not_shared`, and
+One binary-transfer permit covers the group, inbound transfers, and avatar imports.
+The bridge stages files privately, then shares the group in one completion with
+one frozen comment, including any authorized human-only source mention; it sends
+no separate text post. The external upload flow never retries automatically.
+Typed results distinguish `shared`, `not_shared`, and
 `share_unknown`, with closed `stage`/`reason` fields and `authority_retired`.
+Results include group and per-item status plus `text_status` (`not_requested`
+without a comment). Partial, malformed, or mismatched completion remains
+`share_unknown` for every file, not guessed partial success or atomic rollback.
 Failure may leave private staged data on Slack; uncertain completion may already
-have shared the file. Do not retry automatically. Same-call replay returns the
-retained outcome without another upload, but new call IDs or restart can
-duplicate uncertain effects.
+have shared some or all files and the comment. Do not retry automatically.
+Same-call replay returns the retained outcome without another upload, but new
+call IDs or restart can duplicate uncertain effects.
 
 Even a successful share returns no `message_ref`: Slack does not guarantee a
 native message timestamp. Never invent a sent-message fact, locator, edit owner,
 or reaction authority from an attachment result. Uploading performs no live
 configuration, credential, or installation change.
+
+### User profiles and avatar originals
+
+`slack_get_user_profile {"user_id":"U123456"}` is default-off, tagged
+`slack:profiles:read`, and outside the ordinary group. It requires current
+registration. Native U/W account IDs and B workspace bot IDs work independently
+of mapping retention; A application IDs do not identify installed accounts.
+Current same-agent retained `slack-sender:…` references also work, through live
+canonical reply ownership or bounded historical/profile mappings. Mention-only
+references are not guaranteed to resolve; restart or eviction can invalidate them.
+Use a known native ID or separately authorized exact-message read to refresh.
+
+Strict mode permits allowlisted canonical U/W (or unmapped B) principals and
+exact bridge self; lax mode permits token-visible directory targets. Lookup
+grants no sender admission, history, reply, reaction, or file-send authority.
+Existing `users:read` covers account, bot and presence lookup. Optional email
+lookup requires an existing `users:read.email` grant; do not add it implicitly.
+
+Results contain opaque identity and bounded untrusted names, title, pronouns,
+timezone/offset, status, account flags and bot metadata when supplied.
+`account_profile` distinguishes available, unavailable and not applicable for
+B-only integrations. Optional failures preserve valid base metadata.
+Presence is an `active`/`away` snapshot or `unavailable`, never inferred offline;
+`always_active` is separate. No last-seen, DND/snooze, custom-field or UI parity
+is promised. Raw native IDs, avatar URLs and raw API errors are omitted.
+
+The tool automatically imports unchanged original avatar bytes (largest supplied
+rendition if no original). `avatar.status="available"` returns canonical Artifact
+reference, bare key, size and unverified MIME hint; other states are
+`not_provided`, `unsupported_origin`, or `unavailable`. Only narrow credential-free
+HTTPS Slack avatar and official Gravatar origins are supported, without redirects.
+Custom CDNs or default-avatar redirects may cause an optional avatar import to
+fail. The limit is 4 MiB, with a ten-second transfer deadline;
+PNG/JPEG/GIF/WebP/AVIF MIME hints do not
+validate image contents. No `files:read` or `files:write` is needed for avatars.
+Imports share binary-transfer admission; cancellation may leave committed bytes.
+Artifacts outlive transcripts and prove equality, not safety or trust.
 
 ### Incoming original files
 
@@ -330,15 +380,16 @@ If every native owner is pinned, a new canonical create installs no local
 authority; it still confirms its report and releases its admission slot.
 
 Replies and proactive sends use the agent-supplied message unchanged. Message
-limits, retry budget, Tau-issued reply authority, routing, threads,
+limits, the text-only retry budget, Tau-issued reply authority, routing, threads,
 authorization, and configuration freeze remain independent of its contents.
 Agent-authored text may use ordinary mrkdwn but raw `<@`, `<!`, and `<#` Slack
 native controls are rejected. Bridge help/control/error output is escaped,
 bounded, and sent with mrkdwn/link expansion disabled.
 For source replies only, optional `mention_source_user: true` prepends a mention
 of the exact verified human already bound to `reply_to`; it defaults false,
-accepts no identity argument, is invalid with `destination`, and is frozen into
-the exact body reused by the sole retry.
+accepts no identity argument, and is invalid with `destination`. The bridge freezes
+it into the exact body reused by the sole text-only retry, or into the grouped
+attachment comment described above.
 
 `slack_conversations` is disabled by default and separately authorizable through
 its exact prefixed name or `slack:discover` tag. It returns all static routes,
@@ -375,8 +426,8 @@ Catch-up restores only current-session admission. It does not reconstruct
 process-local message, reply, edit, reaction, registration, selection, or
 deduplication authority.
 
-`slack_send` reserves each accepted `ToolCallId` in a non-evicting 1,024-entry
-process/session ledger and moves authentication, initial post HTTP, and retry
+For text-only sends, `slack_send` reserves each accepted `ToolCallId` in a
+non-evicting 1,024-entry process/session ledger and moves authentication, initial post HTTP, and retry
 waiting off the serialized protocol reader. Without installation evidence, it
 retains the original call in separate bounded preparation until `auth.test`
 finishes; no registration or caller retry is needed. Same-call replay coalesces,
@@ -407,7 +458,9 @@ categories; raw bodies, Slack error text/headers, native ids, mentions, tokens,
 and message content never appear in model errors, notices, or logs.
 Each HTTP attempt has a 30-second timeout and each response is capped at
 64 KiB. The post retry must begin within 60 seconds of authenticated preparation;
-cold authentication does not consume that existing retry horizon.
+cold authentication does not consume that existing retry horizon. Sends with
+attachments use the grouped flow above, with no automatic retry, `message_ref`,
+or sent-message fact.
 
 Supported events reserve one of 64 process-local queued/in-flight admission slots
 before ACK. Slow live-human verification and bridge-local replies run on one serial
@@ -489,8 +542,8 @@ message event or both reaction events plus `reactions:read`.
 Grant `slack_react` or `slack:react` separately (it is disabled by default). It
 accepts `{message_ref, emoji, action: add|remove}` only for exact Tau-issued
 refs from canonically confirmed incoming create/edit facts or successful
-`slack_send`. Refs use the opaque `slack-message:<digest>` form, but it accepts
-no channel IDs or timestamps as separate route selectors, aliases, Unicode
+text-only `slack_send`. Refs use the opaque `slack-message:<digest>` form, but the
+tool accepts no channel IDs or timestamps as separate route selectors, aliases, Unicode
 emoji, list, toggle, or discovery.
 Removal is limited to same-agent reactions unambiguously added in the current
 runtime. Add `reactions:write`, reinstall the app, and keep the bot a member of
@@ -507,7 +560,7 @@ The CLI renders inbound reaction action, the bounded configured alias/display
 when available (otherwise the opaque actor reference), and the exact
 custom/skin-tone name; it performs no Unicode emoji lookup.
 
-Successful `slack_send` results use
+Successful text-only `slack_send` results use
 `{"status":"sent","message_ref":"<message ID>","delivery_copies":"one"|"one_or_two_possible"}`
 (replacing the former
 plain-text success). The ref remains inert after the local sent-report/result

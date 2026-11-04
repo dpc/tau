@@ -163,28 +163,32 @@ For one fixed outbound DM with no Zulip ingress, set `send_only: true`, omit all
 
 In ordinary mode, the disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the text tool group. `zulip_register {}` means “make the authenticated caller this instance's receiving agent.” The legacy `{"enabled":true}` spelling remains accepted, while `{"enabled":false}` is rejected rather than pausing reception. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured destinations; `zulip_send` accepts `topic` only for a discovered stream name explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. A proactive-DM alias sends only to its one configured recipient; callers cannot supply user IDs. Native stream, participant, message, queue, and credential values never become model authority.
 
-The approved attachment-capable extension revision adds
-`zulip_send_attachment`. An `std-zulip` instance exposes it only when its
-installed `tau-ext-zulip` implements that revision's attachment contract. An
-ordinary-mode role can share one existing shared Artifact file or image only
-when it explicitly grants that exact scoped tool. `zulip_send_attachment` is
-disabled by default, tagged `zulip:attach`, and has no tool group, so text-send
-permission does not authorize uploads. The designated receiver can provide a
-bare shared `blake3:<64 lowercase hex>` Artifact `key`, a safe ASCII basename
-`filename`, optional Markdown `message` caption, and exactly one existing
-`destination` or `reply_to`. Filenames are 1–128 bytes, cannot start with `.`,
-and contain only letters, digits, `.`, `_`, and `-`. `topic` follows the same
-explicit agent-chosen-topic authority as text sends.
+### Unified sends and original files
 
-Pass the bare key string in `key`, not the surrounding
-`<tau-artifact:blake3:...>` reference wrapper returned by export. For example,
-after exporting a PNG, substitute its actual digest and an authorized destination:
+Ordinary `zulip_send` accepts text, files or both through optional
+`attachments: [{artifact, filename, content_type?}]`. The ordinary `zulip:send`,
+exact scoped send grant, and Zulip group now authorize both text and uploads.
+Review former text-only roles before upgrading. Remove obsolete
+`zulip_send_attachment` and `zulip:attach` grants; there is no separate upload
+tool or argument-level permission. Tools remain default-off.
+
+The designated receiver supplies at most ten attachments and exactly one existing
+`destination` or `reply_to`. Each `artifact` accepts a canonical Artifact autolink
+or bare `blake3:` key, never a path, URL, inline bytes, `key` or `artifact_key`
+field. Filenames are 1–128-byte ASCII basenames containing only letters, digits,
+`.`, `_`, and `-`, without a leading dot. Unknown and duplicate fields fail closed.
+`topic` retains existing explicit agent-chosen-topic authority.
+Omitted or empty attachments require nonempty `message`; nonempty attachments allow
+an omitted or empty `message`. After exporting a PNG, substitute its actual digest
+and an authorized destination in this example:
 
 ```json
 {
-  "key": "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "filename": "chart.png",
-  "content_type": "image/png",
+  "attachments": [{
+    "artifact": "<tau-artifact:blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef>",
+    "filename": "chart.png",
+    "content_type": "image/png"
+  }],
   "destination": "configured-alias",
   "message": "Generated chart"
 }
@@ -193,45 +197,43 @@ after exporting a PNG, substitute its actual digest and an authorized destinatio
 The digest and destination above are illustrative, not usable authority.
 Do not pass a local path or substitute a native Zulip destination ID.
 
-That revision also accepts optional `content_type`. When supplied, it must be
+Optional `content_type` must be
 exactly one of `image/avif`, `image/gif`, `image/heic`, `image/jpeg`,
 `image/png`, `image/tiff`, or `image/webp`, and becomes the multipart file-part
 `Content-Type`. When it is omitted, the file part remains
 `application/octet-stream`. It is an unverified caller declaration: the
-extension neither infers it from the filename, Artifact metadata, or artifact
-bytes, nor validates the bytes against it. A non-string or unsupported value
+extension does not infer it from the filename, Artifact metadata, or artifact
+bytes, or validate the bytes against it. A non-string or unsupported value
 fails before Artifact RPC or provider effects. Use `image/png` for a generated
 PNG. The outbound Markdown remains the same `[filename](/user_uploads/...)`
 link. A supported image MIME can let Zulip, its server, or clients process a
 preview, but does not force inline display.
 
-The tool verifies at most 16 MiB of original binary bytes through Artifact
-RPC, uploads once, then sends to the frozen route. It accepts files as well as
-images; Zulip selects previews and can impose a lower file-size limit. It never
+The tool validates all metadata first, then verifies and uploads originals
+sequentially, retaining only one original at a time. Each file is at most 16 MiB,
+not a 16 MiB aggregate group limit. The configured message limit can admit fewer
+files because the tool reserves space for every maximum-size upload link before effects.
+One final Markdown message contains all links on the frozen route.
+The tool accepts files as well as images; Zulip selects previews and can impose
+a lower file-size limit. The tool never
 accepts local paths, raw bytes, remote URLs, inbound downloads, public temporary
 links, or harness-store access. The sent fact preserves the exact outbound
 Markdown, including an ordinary authenticated relative upload link as inert
 content, never as recipient or reply authority.
 
-Send attachments sequentially: wait for each call to finish before starting
-the next; keep only one attachment send in flight. Artifact reads have one 60-second total
-deadline, while provider operations retain 30-second HTTP deadlines. Sharing
-does not renew Artifact retention: existing originals persist independently
+One send, import or profile transfer holds shared transfer admission at a time.
+Each original has a 60-second Artifact deadline; provider operations retain
+30-second HTTP deadlines. Sharing does not renew Artifact retention:
+existing originals persist independently
 of ephemeral transcripts and can become unavailable. Upload and send are
 separate effects, so failure or cancellation can leave an orphan upload or an
-uncertain sent message. Do not retry an uncertain send automatically; inspect
-the conversation first. Send-only mode remains text-only.
-
-The external corrective-examples change `e2e1ce2d` is published;
-publication does not update the installed extension. In that revision,
-`ToolSpec.examples` supplies corrected send/list/download calls with
-pre-dispatch schema-validation errors. Separately, the attachment-send runtime
-error for an invalid Artifact key includes a concrete corrected call directly.
-That invalid-key rejection happens before Artifact RPC, upload, or send: correct
-the key spelling and call again. This local rejection is not an uncertain remote
-failure. For remote failures or cancellation, retain the inspect-before-retry
-rule above; examples do not make upload and send atomic or authorize automatic
-retries.
+uncertain sent message. Transfer errors report confirmed-upload count and whether
+the current upload may exist; no message was sent. Final-send failure may have an
+unknown message outcome after all uploads. Cancellation, retirement or local
+publication failure can leave remote effects; never claim rollback or retry
+automatically. Inspect the conversation first. Success retains `status: "sent"`,
+`message_ref`, and `delivery_copies: "one"` with the exact outgoing Markdown.
+Send-only mode stays text-only and rejects nonempty attachment lists.
 
 A separately attachment-read-capable extension revision adds
 `zulip_list_attachments` and `zulip_download_attachment` in ordinary
@@ -251,7 +253,7 @@ rechecks listener registration, source ownership, and selected attachment
 around remote I/O before importing the exact bytes into Tau's shared Artifact
 namespace. Its result includes the untrusted name, verified size, and canonical
 `blake3:<64 lowercase hex>` Artifact key. That key is directly compatible with
-`zulip_send_attachment`; the core-shell `import` tool can also materialize it
+`zulip_send` attachments; the core-shell `import` tool can also materialize it
 for filesystem reading or other local work. It grants byte lookup, not Zulip
 reply, recipient, sender, or route authority. Neither read tool scans message
 history. Accepted edits replace the selection; moves, access loss, deletion,
@@ -287,6 +289,43 @@ Quoted attribution and links remain unverified external content and grant no
 sender, admission, route, or reply authority. The bridge does not extract or fetch
 a native parent from quote Markdown. `zulip_send(reply_to)` selects the live owned
 source topic or DM participants, not a native per-message reply target.
+
+### User profiles and automatic avatars
+
+`zulip_get_user_profile {"user_id":"123"}` is default-off, tagged
+`zulip:profiles:read`, outside the ordinary group and absent in send-only mode.
+It requires the current receiver and queue identity. Canonical nonzero decimal
+native u64 IDs permit lookup of API-visible realm users or bots independently of
+ingress sender tiers. Known opaque `zulip-sender:…` references work only for
+configured sender tiers or self; unknown opaque IDs cannot trigger directory
+search. Results expose only opaque identity and bounded untrusted metadata.
+Lookup grants no admission, message facts, source ownership or route authority.
+
+Profiles include available name, timezone identifier, join date, account state,
+bot type, role and supported custom fields (up to 16 bounded fields, without
+rendered HTML or user-reference values). Status distinguishes available, none,
+unsupported and unavailable. Bots/inactive accounts have unsupported
+status/presence. Optional failures preserve useful base profile data. Email,
+owner/native-reference fields, raw provider URLs/errors and arbitrary response
+objects are omitted.
+
+Presence exposes provider-reported active/idle/offline and timestamps when
+available, not inferred current state. Account activation is not online
+availability. Timestamps may be stale or use account join date as a compatibility
+fallback; never describe them as verified last-seen times. Missing or inaccessible
+data is unavailable, not offline.
+
+The tool automatically imports eligible avatars unchanged into Artifact storage.
+`avatar.state="imported"` returns canonical reference, verified size and MIME
+hint. Missing avatars are `none`; rejected custom CDN origins are `blocked_origin`,
+not absence. Other states distinguish `unsupported_url`, `unavailable`,
+`too_large`, and `unsupported_media_type`. Only narrow configured-origin
+`/user_avatars/` and `/static/` paths or the official HTTPS Gravatar hash path are
+supported, without credentials or redirects. The limit is 2 MiB; PNG/JPEG/GIF/WebP
+MIME/signature checks do not decode images or prove safety. Transfers share
+attachment admission. Cancellation may leave committed artifacts, which persist
+independently of transcripts. Source availability neither changes configuration
+nor activates a live bridge.
 
 ### Linked messages
 
@@ -355,7 +394,7 @@ Receiver targeting is separate from outbound tool restrictions. Harness
 names, not roles, tags, groups, aliases, or dotted instance names. Normal tool
 grants remain necessary. For a prefixed instance, use its actual
 `<tool_prefix>_<local_tool_name>` inventory. The unprefixed locals are
-`zulip_register`, `zulip_conversations`, `zulip_send`, `zulip_send_attachment`,
+`zulip_register`, `zulip_conversations`, `zulip_send`, `zulip_get_user_profile`,
 `zulip_list_attachments`, `zulip_download_attachment`, `zulip_react`, and
 `zulip_get_message`. Audit the complete eight-tool inventory and explicit main-only
 tool/veto policy before a source bump or read grant; the new read tool is outside the

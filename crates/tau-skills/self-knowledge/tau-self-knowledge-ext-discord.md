@@ -56,14 +56,82 @@ harness startup; see `tau-self-knowledge-secrets`. Never put values in config,
 docs, or shell history. The `.yaml` secret files contain raw UTF-8 text, not YAML
 mappings. Use a bot token and a separate stable identity key.
 
-Receiver eligibility is not send-tool authorization. For coordinator-only text
+Receiver eligibility is not send-tool authorization. For coordinator-only send
 tools, deny `discord:*` tags globally, then enable only the final names
 `maintainer_discord_register`, `maintainer_discord_conversations`, and
 `maintainer_discord_send` on the existing coordinator role when the outer
 instance has `tool_prefix: maintainer`. Audit inherited and other explicit
 enables, which can restore tools after tag denial. The instance name does not
-prefix tools. Do not enable the whole group: it includes reactions. Ordinary
-text needs no attachment or Artifact egress grant.
+prefix tools. Do not enable the whole group: it includes reactions.
+Send grants now authorize both text and file egress in ordinary receive mode.
+Review former text-only roles before upgrading; no argument-level upload grant
+exists. Inbound attachment reads and profile reads remain independent.
+
+## Unified sends and original files
+
+Ordinary `discord_send` accepts optional
+`attachments: [{artifact, filename, content_type?}]`, with at most ten entries.
+Each `artifact` is a canonical `<tau-artifact:blake3:…>` reference or bare
+`blake3:` key, never a path, URL or inline bytes. Omitted or empty attachments
+require nonempty `message`; nonempty attachments allow an omitted or empty
+`message`. Keep exactly one existing `reply_to` or configured `destination`; optional
+thread creation retains its existing grants and validation.
+
+Use 1–128-byte ASCII basenames containing letters, digits, `.`, `_`, `-`, without
+a leading dot. Optional MIME hints support image/avif, image/gif, image/heic,
+image/jpeg, image/png, image/tiff and image/webp; omission uses
+application/octet-stream. Hints do not convert or validate bytes.
+The bridge verifies every original's digest and size and closes all originals
+before provider effects. The limit is 16 MiB across all originals, not per file; sequential Artifact
+reads share a 60-second deadline. One reservation covers provider completion.
+
+The default-off `discord:send`, exact scoped send grant, and core group authorize
+text and files. Remove obsolete `discord_send_attachment` and `discord:attach`
+grants; no upload alias remains. Strict send-only mode stays text-only: its
+schema requires `message` and `destination` and rejects even `attachments: []`.
+Files need ordinary receive mode, current registration and authorized routes.
+This source change does not switch a deployment's mode.
+
+One native multipart message contains the entire group. Incomplete or mismatched
+receipts leave the outcome uncertain; they do not establish per-file success or rollback. Thread creation can
+leave a child even when the message fails. Never automatically retry uncertain
+writes. Inbound `discord_list_attachments` and `discord_download_attachment`
+remain separately tagged `discord:attachments`, requiring current same-agent
+canonical incoming references; importing an original grants no send authority.
+
+## User profiles and automatic avatars
+
+`discord_get_user_profile {"user_id":"123456789"}` is default-off, tagged
+`discord:profiles:read`, outside the core group, and absent in strict send-only
+mode. It requires the current registered receiver and live transport. Canonical
+nonzero decimal native user snowflakes work, including bots. Application IDs
+are not a substitute for bot user IDs. This grant permits global public user
+lookup, including targets outside sender tiers, without admitting them or
+granting message access.
+
+Opaque delivered `sender.stable_id` resolves only while a matching acknowledged,
+non-deleted incoming source remains owned by this receiver under an available
+route. There is no mention-only/general reverse index or restart persistence.
+Returned native `user_id` permits later lookup without source retention.
+
+Results contain native and opaque identity plus bounded untrusted public user
+metadata: names, bot/system flags, public flags, avatar/banner hashes, accent
+color and optional primary-guild/avatar-decoration data. Private OAuth account
+fields, guild membership, nicknames, roles and guild avatars are outside the lookup.
+Timezone and last-seen are unavailable (`not_exposed_by_discord`); presence is
+unavailable (`not_collected`), never inferred offline. No privileged presence
+intent or application-metadata lookup is introduced.
+
+The tool automatically imports a static custom PNG requested at 256px or the
+documented default avatar, not banners or decorations. It uses only constructed
+Discord CDN paths, without credentials, redirects or caller-supplied URLs.
+The limit is 1 MiB with PNG MIME/signature checks, not image decoding or safety
+validation. `avatar.status="imported"` returns canonical Artifact reference, bare
+key, size, filename and MIME type. Optional image/import failures preserve
+metadata with `avatar.status="unavailable"` and `artifact_may_exist`; base lookup
+failure is a tool error. Profile imports share the binary-transfer reservation.
+Cancellation or receiver/session retirement suppresses stale results but may
+leave committed artifacts. Reads create no canonical facts or source-write rights.
 
 ## Startup versus live delivery
 
