@@ -2966,7 +2966,7 @@ fn provisional_astra_catalog_uses_conservative_fallback() {
                     .id
                     .model
                     .as_str(),
-                "gpt-6-sol"
+                "gpt-6.1-sol"
             );
             assert_eq!(model.context_window.get(), 272_000);
             assert_eq!(
@@ -3003,6 +3003,35 @@ fn provisional_astra_catalog_uses_conservative_fallback() {
             assert!(!config.supports_phase);
             assert!(!config.supports_verbosity);
             assert!(!config.supports_compaction);
+        }
+    }
+}
+
+/// Implicit defaults prefer only Sol 6.1 across namespaces and modes, while
+/// explicit older-Sol selections remain available and retain their exact model.
+#[test]
+fn sol_default_promotion_preserves_explicit_older_model() {
+    for provider in ["chatgpt", "work-chatgpt"] {
+        for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+            let models = models_for_provider_mode(&ProviderName::new(provider), mode);
+            let preferred = models
+                .iter()
+                .find(|model| model.id.model.as_str() == "gpt-6.1-sol")
+                .expect("Sol 6.1 remains published");
+            assert_eq!(preferred.default_affinity, 900);
+            for model in &models {
+                assert_eq!(model.id.provider.as_str(), provider);
+                if model.id != preferred.id {
+                    assert!(model.default_affinity < preferred.default_affinity);
+                }
+            }
+            let older = models
+                .iter()
+                .find(|model| model.id.model.as_str() == "gpt-6-sol")
+                .expect("older Sol remains published");
+            assert_eq!(older.default_affinity, 850);
+            let config = config_for_model_mode(&older.id.model, "token".into(), None, mode);
+            assert_eq!(config.model_id, "gpt-6-sol");
         }
     }
 }
@@ -3073,7 +3102,7 @@ fn publishes_chatgpt_model_metadata() {
             .id
             .model
             .as_str(),
-        "gpt-6-sol"
+        "gpt-6.1-sol"
     );
     for model_id in ["gpt-6-sol", "gpt-6-luna"] {
         let model = models

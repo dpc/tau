@@ -2031,9 +2031,9 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
 
 fn default_affinity_for_model(model: &str) -> i32 {
     match model {
-        "gpt-6-sol" => 900,
-        // Adding a model must not silently change the default selection.
-        "gpt-6.1-sol" => 850,
+        "gpt-6-sol" => 850,
+        // Prefer Sol 6.1 for implicit selection; keep older Sol selectable.
+        "gpt-6.1-sol" => 900,
         "gpt-6.1-terra" => 825,
         "gpt-6-luna" => 800,
         "gpt-5.6-sol" => 700,
