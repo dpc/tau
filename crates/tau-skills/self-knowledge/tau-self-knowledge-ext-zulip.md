@@ -17,19 +17,18 @@ email/API-key HTTP Basic authentication, `POST /api/v1/register`, and long-poll
 revision used Tau protocol 9 and registry SDK 0.7.0, with the receiver-admission
 fix first published in Tau commit
 `30c8b43410a84294f31f74451f9f7f09a94df473`. That historical requirement is not a
-compatibility guarantee for newer harnesses. The published mention producer uses
-registry SDK 0.19.0 / protocol 16.4; the separately reviewed canonical-main
-receiver adoption uses registry SDK 0.20.0 / protocol 16.5.
+compatibility guarantee for newer harnesses. The linked-message producer uses
+registry SDK 0.21.0 / protocol 16.6, including canonical-main receiver support.
 Source readiness does not establish the installed bridge's version or activation.
 Rebuild it with the compatible harness and configured peers before activation,
 which requires separate authorization. Older-protocol binaries are rejected before
-configuration or receiver registration; changing Zulip routes or registration settings does not
-repair a wire-version mismatch. Zulip remains an original-byte attachment bridge,
+configuration or receiver registration; changing Zulip routes or registration
+settings does not repair a wire-version mismatch. Zulip remains an original-byte attachment bridge,
 not a prepared-image producer or model provider: attachment downloads return
 original Artifact keys, and observed typed image references do not grant fetch,
-send, or route authority. This SDK migration does not add Zulip
-capabilities or change its snake_case keys, secret bindings, or catch-up checkpoint
-format, grants, routes, or artifact enumeration authority.
+send, or route authority. Linked-message reads require a separate grant; this
+does not change existing routes, secret bindings, catch-up checkpoints, or
+artifact enumeration authority.
 
 Old readers cannot decode journal records containing the new
 `MessagePhase::PartialAnswer` or `ProviderStopReason::Continue` variants.
@@ -289,6 +288,37 @@ sender, admission, route, or reply authority. The bridge does not extract or fet
 a native parent from quote Markdown. `zulip_send(reply_to)` selects the live owned
 source topic or DM participants, not a native per-message reply target.
 
+### Linked messages
+
+Enable `zulip_get_message` (`zulip:messages:read`) separately, then use
+`{"message_id":"<message_ref or linked ID>"}` to recover current permitted content.
+It is the eighth ordinary-mode tool, outside the text group, and absent in
+send-only mode. It requires the current designated receiver and checks current
+receive routes, author tiers, and admission of every DM participant. The
+authenticated bot's messages are readable. `mentions_only` controls live delivery
+and activation, not explicit historical reads.
+
+Results contain `message_id`, descriptive `author`, untrusted `text`,
+`content_trust: "external"`, and optional `previous_id`. Follow only the IDs you need;
+there is no search or history-list interface. `previous_id` means the immediate
+provider predecessor in the exact same topic or DM, not the last delivered
+message. The bridge omits denied or unproven predecessors rather than substituting
+an earlier message. Zulip provides no reliable native branch-root or reply evidence:
+`root_id` and `reply_to_id` remain absent. Editable quotes and oldest-visible
+history establish neither.
+
+With `ingress_rate_limit`, delivered facts omit previous links to avoid delaying
+rate accounting; retrieve the delivered message by its own ID for on-demand links.
+Edits do not inherit links. New versioned opaque IDs survive restart, compaction, and owner-cache
+eviction while the managed identity key is unchanged; rotation invalidates them.
+Legacy hash-only IDs are not reversible and cannot be recovered.
+
+IDs are not capabilities. Each read checks current policy and returns current
+provider content, not an archive. Reads may fail after deletion, access loss, or
+policy changes; failure alone does not prove deletion. Reads create no delivered
+facts, activate no agent, and grant no reply, reaction, send, or attachment
+authority. Existing live-owner requirements still govern writes.
+
 Configure receive selection per ordinary-mode extension instance:
 
 ```yaml
@@ -326,7 +356,10 @@ names, not roles, tags, groups, aliases, or dotted instance names. Normal tool
 grants remain necessary. For a prefixed instance, use its actual
 `<tool_prefix>_<local_tool_name>` inventory. The unprefixed locals are
 `zulip_register`, `zulip_conversations`, `zulip_send`, `zulip_send_attachment`,
-`zulip_list_attachments`, `zulip_download_attachment`, and `zulip_react`.
+`zulip_list_attachments`, `zulip_download_attachment`, `zulip_react`, and
+`zulip_get_message`. Audit the complete eight-tool inventory and explicit main-only
+tool/veto policy before a source bump or read grant; the new read tool is outside the
+text group and needs its own authorization.
 Same-role children and ordinary parentless agents do not inherit canonical-main
 authority. Nix owns the dedicated profile, credentials, participant and route
 restrictions, and outbound policy; this feature alone does not restrict DMs to

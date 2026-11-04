@@ -20,6 +20,37 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Published SDK 0.21.0
+
+Protocol **16.6** adds optional typed message links and linked-message retrieval
+metadata. A message's own ID, branch/thread `root_id`, immediate same-conversation
+`previous_id`, and separate native `reply_to_id` let agents recover specific context
+without a search or history-list interface. Bridges supply each link only with
+reliable evidence; links are descriptive, not read or write capabilities.
+Bridge-owned retrieval tools check current bridge policy and return untrusted
+current content rather than an archive.
+Proto/client versions are **0.21.0**, with client pinning proto `=0.21.0`; the leaf
+packages remain 0.1.0. See the linked-message retrieval contract in
+`specs/SPEC-external-message-reports-and-facts.md`.
+
+Proto and client 0.21.0 were published in dependency order from
+`fdba964291e17e16a25aec68ef85b949c9d5a2a0`. The verified official sparse-index
+records are unyanked, and downloaded registry archives identify that exact source
+in Cargo VCS metadata:
+
+| Package | SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `2c532c8b5b1fe51bcdef03aadc8da00a1de9c79bcf7bf7487c9000c5dac024ac` |
+| `dpc-tau-client` | `93afd8b82773d9989bac57504e9b9d9397035661d4d89ecf99299e9842cd1433` |
+
+The source passed merge-queue run 18. GitHub and Radicle master identified the
+published source at verification; both `dpc-tau-proto-v0.21.0` and
+`dpc-tau-client-v0.21.0` tags identify it exactly. The registry-only SDK consumer
+passed all 14 tests on Rust 1.91 without local dependency patches. Application tag
+`v0.3.0` remains unchanged at `3eae7dc621b3f2d2f953a182b85cde03c0037fbb`.
+Package publication does not deploy or activate any bridge, change live grants,
+or restart services.
+
 ### Published SDK 0.20.0
 
 Protocol **16.5** adds `BridgeReceiverTarget::{Ordinary, CanonicalMain}`.

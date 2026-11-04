@@ -11,8 +11,8 @@ project owns the exact credential, route, and transport schema. Consult its
 `docs/setup.md` for private maintainer guild-channel setup, `SECURITY.md` for
 trust boundaries, and `docs/design.md` and `docs/runtime.md` for the full contract
 and limits. Do not infer compatibility from the Cargo package version:
-the published mention producer uses registry
-`dpc-tau-client`/`dpc-tau-proto` SDK 0.19.0 / protocol 16.4. Update the installed
+the linked-message producer uses registry `dpc-tau-client`/`dpc-tau-proto`
+SDK 0.21.0 / protocol 16.6. Update the installed
 extension together with a compatible harness before activation, which requires
 separate authorization.
 Historical SDK 0.7.0 / protocol 9.0 and SDK 0.10.0 / protocol 10.2
@@ -120,6 +120,43 @@ to preserve the unchanged outer body within its limits. Installing this skill
 does not deploy or activate the separately maintained producer.
 Older producers may still append textual context; the renderer does not parse
 those suffixes into typed quotes.
+
+## Linked messages
+
+Enable receive-mode `discord_get_message` (`discord:read`, default off), then use
+`{"message_id":"<message_ref or linked ID>"}` to recover current permitted content.
+It is outside the core tool group and absent in send-only mode. Its sole argument
+is a string of at most 180 characters. Results contain `message_id`, descriptive
+`author`, untrusted `text`, and optional `root_id`, `previous_id`, and `reply_to_id`.
+Follow only the links you need; there is no search or history-list interface.
+
+`root_id` identifies a proven thread/branch starter, not an ordinary reply parent.
+Forum/media child starters can establish it; a public parent also needs independent
+receive permission and admission. Private or unproven roots are omitted.
+`reply_to_id` separately identifies an ordinary same-channel native reply.
+`previous_id` is the immediate predecessor in the same thread or 1:1 DM, proven
+by one `before=id&limit=1` probe, never a guild-channel neighbor or an earlier
+message substituted for a denied author. Missing links mean unknown.
+
+Live delivery supplies proven forum-root/reply links without new reads; retrieve
+the message by its own ID for other available links. Sent facts carry known
+root/reply links.
+Edits do not inherit links, and reads never refresh frozen quote snapshots.
+
+Native-coordinate `discord-message:v1:` IDs encode guild, channel, message, and
+peer as hex (absent guild/peer is zero). They are not secrets or capabilities.
+Delivery references add an epoch-hash suffix for ACK uniqueness; `discord_get_message`
+accepts that suffix but returns the stable bare locator. These IDs survive restart,
+reconnect, and cache eviction with registration and fresh route, participant, and provider
+checks. Legacy hashes require retained acknowledged same-agent ownership and
+stop resolving after eviction or restart.
+
+Only the current registered receiver can read. Creation-only eligibility or
+proactive-DM permission is insufficient. `mentions_only` controls live activation,
+not explicit historical reads; Discord's `MESSAGE_CONTENT` rules remain unchanged.
+Reads create no delivered facts, activate no agent, and grant no write, reaction,
+or attachment authority. Current content may change or disappear; a failed read
+does not prove deletion. This path has mock coverage, not live Discord validation.
 
 ## Receiver designation
 
