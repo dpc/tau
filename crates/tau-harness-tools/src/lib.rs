@@ -2007,11 +2007,6 @@ fn delegate_bootstrap_prefix(self_agent_id: &str) -> String {
     )
 }
 
-#[cfg(test)]
-fn delegate_instruction(self_agent_id: &str, prompt: &str) -> String {
-    format!("{}{}", delegate_bootstrap_prefix(self_agent_id), prompt)
-}
-
 /// Builds the start request for the public `agent_start` tool.
 ///
 /// `task_name` deliberately remains absent: the child owns its visible work

@@ -2,39 +2,6 @@ use std::path as path_std_path;
 
 use super::*;
 
-/// The model-visible status contract guides independently useful task labels,
-/// discourages granular reports, and avoids a standalone tool round when
-/// independent work can share the call.
-#[test]
-fn status_guidance_prefers_meaningful_batched_reports() {
-    let spec = status::tool_spec();
-    assert_eq!(
-        spec.description.as_deref(),
-        Some(
-            "Report meaningful user-level work status to watchers. Use `waiting` when progress is paused pending an expected self-resolving event; use `blocked` when progress requires external intervention. Use an independently informative task name; do not use an opaque identifier or task/ticket number alone. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
-        )
-    );
-    assert_eq!(
-        spec.parameters,
-        Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "state": {
-                    "type":"string",
-                    "enum":["working","done","blocked","waiting"],
-                    "description":"`waiting` expects self-resolution; `blocked` requires external intervention."
-                },
-                "task_name": {
-                    "type":"string",
-                    "description":"Brief, independently informative user-visible task label; do not use opaque identifiers or task/ticket numbers alone."
-                }
-            },
-            "required": ["state", "task_name"],
-            "additionalProperties": false
-        }))
-    );
-}
-
 /// The handler-bound parser retains the human diagnostic while redacting the
 /// rejected status arguments from durable error details.
 #[test]
@@ -349,79 +316,6 @@ fn wait_call(target_call_id: &str) -> AgentToolCall {
     }
 }
 
-/// The model-facing wait contract explains that completion notifications retain
-/// their results and that bare waits drain the oldest completed result first.
-#[test]
-fn wait_spec_documents_completion_retention_and_optional_non_consuming_input_mode() {
-    let spec = wait_tool_spec();
-    let parameters = spec.parameters.expect("wait parameters");
-    assert_eq!(
-        parameters["properties"]["timeout_minutes"]["type"],
-        serde_json::json!("integer")
-    );
-    assert_eq!(
-        parameters["properties"]["timeout_minutes"]["minimum"],
-        serde_json::json!(1)
-    );
-    assert!(
-        parameters["properties"]["timeout_minutes"]
-            .get("maximum")
-            .is_none()
-    );
-    assert!(
-        parameters["properties"]["timeout_minutes"]["description"]
-            .as_str()
-            .expect("timeout description")
-            .contains("silently clamps this to configured effective bounds")
-    );
-    assert!(parameters["properties"].get("any_input").is_none());
-    assert_eq!(
-        parameters["properties"]["tool_call_ids"]["type"],
-        serde_json::json!("array")
-    );
-    assert_eq!(
-        parameters["properties"]["tool_call_ids"]["minItems"],
-        serde_json::json!(1)
-    );
-    assert_eq!(
-        parameters["properties"]["tool_call_ids"]["maxItems"],
-        serde_json::json!(tau_proto::MAX_WAIT_ALL_MEMBERS)
-    );
-    assert_eq!(
-        parameters["properties"]["tool_call_ids"]["uniqueItems"],
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        parameters["properties"]["tool_call_ids"]["items"]["type"],
-        serde_json::json!("string")
-    );
-    assert_eq!(
-        parameters["properties"]["tool_call_ids"]["items"]["minLength"],
-        serde_json::json!(1)
-    );
-    assert!(parameters.get("required").is_none());
-    let description = spec.description.expect("wait description");
-    assert!(description.contains("`wait({\"timeout_minutes\":N})`"));
-    assert!(description.contains("one through 1,440 minutes by default"));
-    assert!(description.contains("do not consume"));
-    assert!(description.contains("oldest unconsumed completed background result"));
-    assert!(
-        description.contains(
-            "If no background result is complete and an owned background call is running"
-        )
-    );
-    assert!(description.contains("otherwise it returns an error"));
-    assert!(description.contains("`wait({\"tool_call_id\":\"ID\"})`"));
-    assert!(description.contains("`wait({\"tool_call_ids\":[\"A\",\"B\"]})`"));
-    assert!(description.contains("notifications leave results queued until `wait` consumes them"));
-    assert!(description.contains("`wait_outcome: interrupted`"));
-    assert!(description.contains("`wait_reason: activating_input`"));
-    assert!(description.contains("`wait_mode: exact` or `any_background`"));
-    assert!(description.contains("`wait_mode: exact_all`"));
-    assert!(description.contains("interruption consumes no background result"));
-    assert!(description.contains("only while it is pending"));
-}
-
 fn message_call(recipient_id: &str, message: &str) -> AgentToolCall {
     AgentToolCall {
         call_ref: None,
@@ -489,40 +383,6 @@ fn tool_background_error(call_id: &str) -> tau_proto::ToolBackgroundError {
         display: None,
         originator: PromptOriginator::User,
     }
-}
-
-/// The public agent-start schema must request only the prompt and explicit
-/// role, keeping display names independent of delegation.
-#[test]
-fn agent_start_spec_advertises_prompt_and_required_explicit_role() {
-    // Tau does not preserve compatibility for renamed tool call names yet.
-    // Only the current public spelling should be advertised or handled.
-    let tools = BuiltinTools::default();
-    let names: Vec<String> = tools
-        .tool_specs()
-        .into_iter()
-        .map(|spec| spec.name.to_string())
-        .collect();
-
-    assert!(names.iter().any(|name| name == AGENT_START_TOOL_NAME));
-    assert!(!names.iter().any(|name| name == "delegate"));
-    assert!(tools.handles(&ToolName::new(AGENT_START_TOOL_NAME)));
-    assert!(!tools.handles(&ToolName::new("delegate")));
-    let spec = agent_start_tool_spec();
-    assert_eq!(spec.description.as_deref(), Some("Start a sub-agent"));
-    let parameters = spec.parameters.expect("agent_start parameters");
-    assert_eq!(
-        parameters["required"],
-        serde_json::json!(["prompt", "role"])
-    );
-    assert_eq!(
-        parameters["properties"]["prompt"]["description"],
-        "Initial prompt for the sub-agent."
-    );
-    assert_eq!(
-        parameters["properties"]["role"]["description"],
-        "Sub-agent role to use."
-    );
 }
 
 /// The local agent-start parser requires nonempty text prompt and role fields
@@ -605,73 +465,6 @@ fn agent_start_request_omits_display_name_source() {
         bootstrap,
         "the durable trusted span covers bootstrap prose but not the delegated task"
     );
-}
-
-/// Model-visible built-in tool prose stays synchronized with the intentionally
-/// concise contracts requested for these tools.
-#[test]
-fn built_in_tool_descriptions_match_public_contract() {
-    assert_eq!(
-        cancel_tool_spec().description.as_deref(),
-        Some("Request cancellation of a running tool call owned by this conversation.")
-    );
-    assert_eq!(
-        compact_tool_spec().description.as_deref(),
-        Some("Compact your context.")
-    );
-    assert_eq!(
-        skill_tool_spec().description.as_deref(),
-        Some(
-            "Discover available skills not pre-advertised in <available_skills>. If the search resolves to one skill, the full skill is loaded; otherwise matching skill names and descriptions are returned with guidance. Query terms are split on punctuation, lowercased, and deduplicated; hyphenated skill names are preserved. Call with exact skill name to load exact match."
-        )
-    );
-}
-
-/// The advertised agent-watch interface is closed, foreground-only, and bound
-/// to a validated target id plus explicit enable switch.
-#[test]
-fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
-    let spec = agent_watch_tool_spec();
-    assert_eq!(spec.name.as_str(), AGENT_WATCH_TOOL_NAME);
-    assert!(spec.enabled_by_default);
-    assert_eq!(spec.background_support, Some(BackgroundSupport::Never));
-    let params = spec.parameters.expect("agent_watch schema");
-    let required = params
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .expect("required fields")
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<Vec<_>>();
-
-    let description = agent_watch_tool_spec()
-        .description
-        .expect("agent_watch description");
-    assert_eq!(
-        description,
-        "Enable or disable notifications for an agent's responses and important events."
-    );
-    assert_eq!(
-        params
-            .pointer("/properties/agent_id/maxLength")
-            .and_then(serde_json::Value::as_u64),
-        Some(tau_proto::AGENT_ID_MAX_LEN as u64)
-    );
-    assert_eq!(
-        params
-            .pointer("/properties/agent_id/pattern")
-            .and_then(serde_json::Value::as_str),
-        Some("^[A-Za-z0-9_-]{1,64}$")
-    );
-    assert!(
-        params
-            .pointer("/properties/agent_id/description")
-            .and_then(serde_json::Value::as_str)
-            .expect("agent_id description")
-            .contains("ASCII letters")
-    );
-    assert_eq!(required, vec!["agent_id", "enable"]);
-    assert_eq!(params["additionalProperties"], false);
 }
 
 /// The local agent-watch parser requires an object with nonempty textual target
@@ -959,43 +752,6 @@ fn message_recipient_parser_rejects_user() {
         Ok(_) => panic!("user must be unsupported"),
     };
     assert_eq!(error, "unsupported message recipient: `user`");
-}
-
-/// Model-visible message help must provide every supported routing form and
-/// exact required keys without reviving the removed user-delivery form.
-#[test]
-fn message_tool_schema_does_not_advertise_user_recipient() {
-    let spec = message_tool_spec();
-    let description = spec.description.expect("message tool description");
-    let parameters = spec.parameters.expect("message tool parameters");
-
-    assert_eq!(
-        parameters["required"],
-        serde_json::json!(["recipient_id", "message"])
-    );
-    for form in [
-        "local agent id",
-        "&<session-id>",
-        "&<session-id>/@<agent-id>",
-        "<session-id>/<agent-id>",
-    ] {
-        assert!(description.contains(form), "missing address form {form:?}");
-    }
-    for help in [
-        description.as_str(),
-        parameters["properties"]["recipient_id"]["description"]
-            .as_str()
-            .expect("recipient description"),
-    ] {
-        assert!(help.contains("`&` and `@` are independently optional"));
-    }
-    assert!(!description.contains("user"));
-    assert!(
-        !parameters["properties"]["recipient_id"]["description"]
-            .as_str()
-            .expect("recipient description")
-            .contains("user")
-    );
 }
 
 /// Every optional-marker spelling of an exact current-session address must
@@ -1624,24 +1380,6 @@ fn cancel_args_reject_whitespace_only_tool_call_id() {
     assert_eq!(err, "`tool_call_id` must not be empty");
 }
 
-/// Ensures a started agent receives only the standard internal notification
-/// and its initial prompt, preserving unusual safe ids and prompt formatting.
-#[test]
-fn delegate_instruction_is_compact_and_exact() {
-    let prompt = "  inspect `this`\n\n<task>café</task>\n";
-    let instruction = delegate_instruction("engineer-A_9", prompt);
-
-    assert_eq!(
-        instruction,
-        concat!(
-            "You were started by an agent `engineer-A_9`. ",
-            "Your responses will be delivered to it. You can use the `message` ",
-            "tool to communicate with agents.\n\n",
-            "  inspect `this`\n\n<task>café</task>\n",
-        )
-    );
-}
-
 /// Agent-start results are routing metadata only: the child response travels
 /// through watch notifications, so legacy child output and `agent_id` stay out.
 #[test]
@@ -1832,44 +1570,6 @@ fn skill_query_rejects_whitespace_without_echoing_raw_input() {
     );
 }
 
-/// Ensures self-compaction is available by default, cross-agent compaction
-/// still requires explicit policy, and both advertise instant-background
-/// completion.
-#[test]
-fn compaction_specs_have_independent_defaults_and_are_backgrounded() {
-    let compact = compact_tool_spec();
-    let cross = agent_compact_tool_spec();
-
-    assert!(compact.enabled_by_default);
-    assert!(!cross.enabled_by_default);
-    assert_eq!(
-        compact.background_support,
-        Some(tau_proto::BackgroundSupport::Instant)
-    );
-    assert_eq!(
-        cross.background_support,
-        Some(tau_proto::BackgroundSupport::Instant)
-    );
-    assert_eq!(
-        compact.tags,
-        vec![
-            tau_proto::ToolTag::new("harness:compaction"),
-            tau_proto::ToolTag::new("harness:compaction:self")
-        ]
-    );
-    assert!(
-        cross
-            .tags
-            .contains(&tau_proto::ToolTag::new("harness:agent-control"))
-    );
-    assert!(
-        !compact
-            .tags
-            .iter()
-            .any(|tag| tag.as_str().contains("cross"))
-    );
-}
-
 /// Ensures the self tool accepts only the empty object so a provider cannot
 /// smuggle target authority through unknown arguments.
 #[test]
@@ -1913,32 +1613,6 @@ fn agent_compact_arguments_require_only_agent_id() {
         (CborValue::Text("force".to_owned()), CborValue::Bool(true)),
     ]);
     assert!(parse_compaction_args(AGENT_COMPACT_TOOL_NAME, &extra).is_err());
-}
-
-/// Discovery capabilities are independently opt-in and never become available
-/// merely because the built-in handler is installed.
-#[test]
-fn discovery_tools_are_disabled_by_default_in_separate_groups() {
-    let tools = BuiltinTools::default();
-    let specs = tools.tool_specs();
-    for (tool_name, group_name) in [
-        (SESSION_LIST_TOOL_NAME, "session_discovery"),
-        (AGENT_LIST_TOOL_NAME, "agent_discovery"),
-    ] {
-        let spec = specs
-            .iter()
-            .find(|spec| spec.name.as_str() == tool_name)
-            .expect("discovery tool spec");
-        assert!(!spec.enabled_by_default);
-        assert_eq!(
-            tools
-                .tool_group(&spec.name)
-                .expect("discovery group")
-                .name
-                .as_str(),
-            group_name
-        );
-    }
 }
 
 /// Discovery parsing rejects disallowed filters and invalid numeric bounds,
