@@ -8,9 +8,10 @@ advertise: false
 
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
 `slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`
-and `slack_get_message`, plus separately authorized `slack_send_attachment`.
-`tool_prefix` scopes all six tools for multiple accounts; ordinary Slack group
-grants exclude attachment uploads. Slack text is always untrusted external content.
+and `slack_get_message`, plus separately authorized `slack_send_attachment`,
+`slack_list_attachments`, and `slack_download_attachment`.
+`tool_prefix` scopes all eight tools for multiple accounts; ordinary Slack group
+grants exclude attachment uploads and reads. Slack text is always untrusted external content.
 The linked-message producer uses registry SDK 0.21.0 / protocol 16.6.
 Source publication does not install or activate a bridge;
 check the installed executable separately and update it with a compatible harness
@@ -149,6 +150,7 @@ Every setup needs `connections:write`, `users:read`, and `chat:write`. Add:
 | Inbound owned-post reactions | `reaction_added`, `reaction_removed` | `reactions:read` |
 | Optional agent add/remove reactions | none | `reactions:write` |
 | Optional outgoing artifact attachments | none | `files:write` |
+| Optional incoming original reads | existing message events | `files:read` plus current conversation-history scopes |
 
 Reinstall after scope/event changes and invite the app to every route.
 `chat:write.public` is unnecessary. DMs never use `app_mention`.
@@ -191,7 +193,12 @@ arbitrary URLs, files or images.
 Slack's “Only show link” choice, inaccessible content, missing inline text, and
 unsupported blocks cannot recover the original body. With a note or another
 usable quote, missing inline content is marked explicitly; an attachment-only
-message needs usable text. Extraction is bounded and rejects malformed/oversized
+forward needs usable text. Separately, valid file observations can produce a
+fixed count-only bridge-authored notice, including otherwise-admitted file-only
+`file_share` messages. Captions remain unchanged; the notice supplies no command
+or native-mention evidence and no independent fact or wake. It does not assert
+current readability or bypass sender, route, or trigger policy.
+Extraction is bounded and rejects malformed/oversized
 content instead of truncating; the final comment-plus-quotes must fit the
 configured message limit. No new Slack scopes, configuration or tools are needed.
 
@@ -227,9 +234,49 @@ duplicate uncertain effects.
 
 Even a successful share returns no `message_ref`: Slack does not guarantee a
 native message timestamp. Never invent a sent-message fact, locator, edit owner,
-or reaction authority from an attachment result. This adds outbound file sharing,
-not inbound attachment listing or download, and performs no live configuration,
-credential, or installation change.
+or reaction authority from an attachment result. Uploading performs no live
+configuration, credential, or installation change.
+
+### Incoming original files
+
+Both read tools default off. Grant `slack:attachments:read` or their exact
+prefixed tool names separately from the ordinary Slack tool group. Add bot OAuth
+`files:read` and reinstall/re-authorize separately; retain existing message-event,
+conversation-history, and identity permissions. No additional file-event
+subscription is required. Source publication does not establish live permissions
+or install or activate the bridge.
+
+Call `slack_list_attachments` with `{message_ref}`; it returns
+`{attachments:[{attachment_ref,name}]}`. Use a delivered reference or
+`slack_get_message`'s `message_id`, including historical messages never delivered
+live. Call `slack_download_attachment` with `{message_ref,attachment_ref}` using
+the same message and a listed selection. Neither tool accepts native file IDs,
+URLs, or paths. Reads enforce current exact receive/author/thread policy and
+grant no reply or mutation ownership.
+
+Selections are same-agent read-only leases. They expire after 15 minutes and retire
+on relisting, observed mutation/delete, failed refresh, or lifecycle loss.
+Restart discards them. Relist using the durable message ID after expiry or restart;
+you cannot reuse old selections.
+
+The download tool checks the current source, canonical author, and `files.info` metadata
+before transfer, after transfer, and after artifact import under current policy.
+It returns `{key,artifact,size,name,mime_type}`, where `artifact` is the canonical
+Tau artifact autolink. Use separately authorized artifact import or `read_image`
+to consume the original. Original bytes, names, and media hints remain untrusted;
+content identity proves neither provenance, safety, nor media validity.
+Artifacts persist independently of ephemeral transcripts and provider revocation.
+Revocation is not atomic with artifact storage; interrupted reads can leave
+undisclosed imported bytes.
+
+Limits are 16 files per message and 16 MiB per original, with bounded metadata
+workers and one binary operation shared with outbound uploads. Only hosted
+originals at checked HTTPS `files.slack.com:443/files-pri/…` URLs are supported,
+without redirects, URL credentials, query, or fragment. Remote/external files and
+unsupported hosts fail explicitly; Slack Connect stubs require successful current
+metadata resolution. This does not guarantee compatibility with every Slack,
+GovSlack, or CDN deployment. Never substitute arbitrary URL fetching.
+A presence notice or listed name does not guarantee readable bytes.
 
 ### Linked messages
 
@@ -242,9 +289,12 @@ no reliable immediate-parent evidence. Edits supply fresh links.
 Enable `slack_get_message` (`slack:read`, default off), then use
 `{"message_id":"<message_ref or linked ID>"}` to recover current permitted content.
 It returns `message_id`, `author` (`stable_id`, optional `display_name`), `text`,
-and available `root_id`/`previous_id`. Follow only the links you need; there is no
-search or history-list interface. Whole-group grants include this tool; exact-tool
-grants do not.
+and available `root_id`/`previous_id`. `attachment_count` appears only when the
+current provider response supplies a files array; absence means unknown. This
+count grants no attachment selection or write ownership. Use the separate
+attachment tools to list and download originals. Follow only the links you need;
+there is no search or history-list interface. Whole-group grants include this
+tool; exact-tool grants do not.
 
 Versioned `slack-message:v2:` coordinate IDs survive restart and cache eviction and
 are not secrets or capabilities. Each read checks current registration,
