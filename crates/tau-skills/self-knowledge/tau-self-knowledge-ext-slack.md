@@ -20,6 +20,39 @@ For Tau protocol 16.0, historical registry builds pinned `dpc-tau-client` and
 `dpc-tau-proto` to 0.16.0. That pairing does not describe the current mention
 producer.
 
+## Startup registration
+
+To receive without an LLM registration call, add these settings to the existing
+instance configuration. Keep its secrets, allowlist, and conversation policy:
+
+```yaml
+register_on_start: true
+target: canonical_main
+```
+
+Automatic registration defaults off. The default target is ordinary, with no
+role constraint. Optional `role` restricts eligibility by immutable creation role.
+Startup selects an existing eligible agent only. Fully admitted plain input can
+request lazy creation; canonical-main creation needs no explicit role or bootstrap
+prompt. Canonical targeting requires advertised protocol 16.5 or newer within
+16.x, never falls back to an ordinary agent, and cannot replace an unavailable
+bound main.
+
+Automatic mode starts the Socket Mode worker without a tool call and freezes
+configuration at launch. Manual registration in this mode validates the exact
+caller against the same target and role constraints. The bridge rejects unregister
+without changing registration; disable automatic mode in configuration and restart
+instead. Default-off manual registration, multi-agent selection, and unregister
+behavior remain unchanged.
+
+Slack uses shared Select/Ensure resolution, not the persisted sticky-designation
+lifecycle used by Discord, GitHub, and Zulip. Registrations and manual selections
+remain process-local. After restart, canonical targeting resolves the harness-owned
+main again; ordinary selection may change. Selection grants no outbound permission
+and transfers no existing source authority. First admitted input keeps its bounded
+FIFO slot during event-driven readiness retries for at most 30 seconds; rejection
+or timeout publishes no message.
+
 For development, `just policy` keeps intended package-root files root-anchored
 and rejects Cargo package membership beneath `.direnv`.
 
@@ -107,7 +140,8 @@ Supported wrappers require matching `context_team_id` or one unambiguous
 matching authorization; missing/mixed/mismatched evidence is dropped before
 identity lookup. Slack Connect actor home team is not installation authority.
 
-Agents register to receive. Accepted Slack creates, edits, deletes, and reactions
+Agents register to receive unless startup registration is enabled.
+Accepted Slack creates, edits, deletes, and reactions
 submit transient `message.*_reported` events; the harness publishes immutable
 canonical `message.*` facts downstream. `slack_send` requires `message` plus
 exactly one Tau-issued `reply_to` or proactive `destination` alias. Successfully
@@ -207,9 +241,11 @@ Every role granted one instance's send tool can use all its proactive aliases.
 Untrusted receive content can influence such a role, so keep destination sets and
 roles minimal; use separate roles or prefixed extension instances for isolation.
 
-Configuration freezes after successful Socket Mode preflight or immediately
-before an authorized post or reaction API attempt; restart Tau to change it. Failed preflight and denied
-sends remain reconfigurable. A bounded process-local native-id cache replays exact
+Configuration freezes at automatic Socket Mode launch, after successful manual
+Socket Mode preflight, or immediately before an authorized post or reaction API
+attempt; restart Tau to change it. Failed manual preflight and denied sends leave
+configuration reconfigurable only if it has not already frozen.
+A bounded process-local native-id cache replays exact
 pending reports and drops repeats after canonical confirmation; cache eviction or
 restart may duplicate delivery. Recording precedes identity and report
 construction, so an earlier failure remains suppressed until eviction/restart.

@@ -32,8 +32,8 @@ extension-owned `config` uses:
 ```yaml
 bot_token_secret: discord_bot_token
 identity_key_secret: discord_identity_key
-role: coordinator
 register_on_start: true
+target: canonical_main
 message_content: false
 allowed_user_ids: [HUMAN_MAINTAINER_ID]
 conversations:
@@ -165,18 +165,29 @@ the receiving agent.” It has no arbitrary agent-ID argument. The tool takes em
 arguments; `{"enabled":false}` and direct `discord_unregister` invocations are
 rejected rather than creating a pause control. A configured `role` restricts
 eligible callers by immutable creation role.
+Optional `target: canonical_main` also restricts registration to the harness-owned
+main. The default target is ordinary. Canonical targeting requires advertised
+protocol 16.5 or newer within 16.x; unsupported revisions fail before Ready or
+provider access.
 
 ```yaml
-register_on_start: true # register extension automatically
-role: coordinator # role to deliver to; optional, constrains registration and automatic delivery
+register_on_start: true
+target: canonical_main
+# role is optional; when supplied, it constrains immutable creation role.
 ```
 
-`register_on_start` defaults to `false`. A saved eligible manual designation still
-resumes after restart, but Tau neither first-selects nor creates a receiver. With
-`true`, the bridge keeps an eligible saved receiver or selects the oldest eligible
-existing agent. Lazy creation requires admitted external input and an explicit
-`role`; without a role, automatic selection is existing-only. Busy receivers remain
-sticky, and same-agent registration is a no-op.
+`register_on_start` defaults to `false`. With this default, the bridge restores a
+saved eligible manual designation after restart, but Tau does not select a first
+receiver or create one. With `true`, the bridge starts receive processing without
+an LLM registration call.
+For the ordinary target, it keeps an eligible saved receiver or selects the oldest
+eligible existing agent; lazy creation requires admitted external input and an
+explicit `role`. Canonical targeting selects only the committed main at startup.
+Admitted input may lazily create a missing main without an explicit role or
+bootstrap prompt. It never falls back to an ordinary agent or replaces an
+unavailable bound main. The target constraint applies to saved restoration,
+automatic resolution, manual registration, and legacy migration evidence.
+Busy receivers remain sticky, and same-agent registration is a no-op.
 
 The bridge stores a versioned receive designation in session ExtensionData under
 `receive-designation.json`; it is not an operator filesystem path. Ephemeral
