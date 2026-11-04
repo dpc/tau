@@ -57,7 +57,7 @@ or timeout publishes no message.
 For development, `just policy` keeps intended package-root files root-anchored
 and rejects Cargo package membership beneath `.direnv`.
 
-Configuration requires app/bot token secrets, nonempty exact U/W
+Configuration requires app/bot token secrets, nonempty exact U/W/B
 `allowed_user_ids`, and an active `conversations` and/or
 `dynamic_direct_messages` policy. Each `conversations` item binds a stable alias
 to an exact C/G/D conversation, explicit `channel`/`mpim`/`dm` kind, optional
@@ -99,9 +99,9 @@ Mention evidence describes references, not invitations to answer. Admission,
 delivery, activation, and an available reply selector do not mean the message
 addresses this agent. `is_self` compares with the bridge account, not a particular
 Tau agent. Missing evidence or a missing boolean means unknown; a partial people
-list never proves absence. Optional name lookup accepts bots without admitting
-bot senders, requires no new Slack scope, and stops on failure without dropping
-the message. At most eight optional lookup requests share a two-second budget
+list never proves absence. Optional name lookup accepts bots without changing
+sender admission. It requires no new Slack scope and stops on failure without
+dropping the message. At most eight optional lookup requests share a two-second budget
 per report. Older harnesses may ignore this metadata.
 The people list contains at most 32 unique native personal targets, including
 bots and unadmitted users, with no redundant per-person platform field.
@@ -115,9 +115,24 @@ Dynamic DMs are opt-in, bounded to 64 exact D-to-allowlisted-U/W links,
 receive-and-source-reply only, multi-link, and runtime-only. Static receive DM policy wins over
 dynamic discovery; proactive-only static DM policy does not block it.
 
-`strict` admits allowlisted Slack-verified humans. `lax` also admits verified
-humans on static routes, but not DM linking or control. `mentions_only` means
-Slack `app_mention` delivery. Outside DMs, commands
+`strict` admits Slack-verified senders whose exact IDs appear in the allowlist.
+`lax` also admits verified senders on static routes, but not DM linking or control.
+Other bots/apps, including
+verified B-only integrations, enter live ingress only on static `all_messages`
+routes. Use the canonical U/W in `allowed_user_ids` when `bots.info` supplies a
+verified mapping; otherwise use the exact B. B-only identities have a separate
+installation-scoped opaque sender reference. Application IDs (A), names, and
+installers never authorize senders. `sender_aliases` remains U/W-only.
+
+Bot text has ordinary untrusted prompt authority and, after canonical
+confirmation, source-bound reply authority. It never grants human-only commands,
+dynamic linking, inbound reactions, or `mention_source_user`. The bridge preserves
+verified actor kind through edits and reply ownership checks and excludes system
+subtypes.
+The bridge excludes its exact authenticated U/W and B identities, not every bot
+using the same application. Independent bots can still form reply loops.
+
+`mentions_only` means Slack `app_mention` delivery. Outside DMs, commands
 require a leading authenticated bot mention; duplicate `message` and
 `app_mention` wrappers normalize identically. Parent routes include all threads;
 receive-enabled fixed-thread routes isolate selection and normalize the root create.
@@ -137,10 +152,16 @@ Every setup needs `connections:write`, `users:read`, and `chat:write`. Add:
 
 Reinstall after scope/event changes and invite the app to every route.
 `chat:write.public` is unnecessary. DMs never use `app_mention`.
-`auth.test` must return both bot U/W and installing T workspace identity.
+`auth.test` must return the bot U/W and B identities and the installing T workspace
+identity.
 Supported wrappers require matching `context_team_id` or one unambiguous
 matching authorization; missing/mixed/mismatched evidence is dropped before
 identity lookup. Slack Connect actor home team is not installation authority.
+The existing `users:read` scope supports sender directory verification; there is
+no distinct `bot_message` event subscription. Delivery still requires the
+existing events, scopes, and conversation membership. A receive setting cannot
+recover events Slack did not deliver. Source support alone does not establish the
+cause or resolution of a live missed-message incident.
 
 Agents register to receive unless startup registration is enabled.
 Accepted Slack creates, edits, deletes, and reactions
@@ -233,6 +254,11 @@ routes do not grant reads. `mentions_only` controls live triggers, not explicit
 historical reads. Legacy and extreme-coordinate fallback hashes require retained
 local targets; old `slack-thread-root:` digests and timestampless ingress are not
 retrievable.
+
+Static historical reads apply current canonical sender verification and admission,
+including verified bots even on `mentions_only` routes; the live `all_messages`
+trigger does not constrain these reads. Dynamic reads remain human
+participant-bound. Reads never create reply or other write authority.
 
 Reads need the route's history scope and `users:read`; mention-only setups may
 need a scope change and app reinstall. A complete ordered thread window covering
