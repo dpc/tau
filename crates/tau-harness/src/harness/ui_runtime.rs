@@ -43,6 +43,8 @@ pub(crate) struct UiRuntimeState {
     pub(super) explicit_navigation_epoch: u64,
     /// Harness-authorized bootstrap request ids awaiting ordinary UI admission.
     pub(super) pending_bootstrap_creates: HashMap<String, String>,
+    /// Private bootstrap waiting for canonical main membership to commit.
+    pub(super) pending_main_bootstrap: Option<super::ui_create_agent::PendingMainBootstrap>,
     /// Explicit cause of termination, from a command or an admitted UI request.
     pub(crate) shutdown_cause: Option<crate::event::ShutdownCause>,
     /// Action invocations awaiting their exact provider and requester route.

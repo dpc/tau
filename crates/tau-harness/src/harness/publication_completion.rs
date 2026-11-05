@@ -854,6 +854,12 @@ impl Harness {
             return;
         }
         if let AgentPublishCompletion::InitialPromptSubmission { mut correlation } = completion {
+            // Existing-main bootstrap can wait behind another turn or be folded
+            // into a tool continuation. Only its committed prompt may label
+            // the next materialization with this correlation.
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+                agent.dispatch.next_ctx_id = Some(correlation.ctx_id.clone());
+            }
             correlation.activation_through = Some(through);
             self.prompt_coordination
                 .prompt_runtime

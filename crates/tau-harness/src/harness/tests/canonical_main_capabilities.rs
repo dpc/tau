@@ -117,9 +117,9 @@ fn assert_tool_access(h: &mut Harness, spec: &ToolSpec, id: &AgentId, allowed: b
     );
 }
 
-/// Same-role workers, tool children, serve bootstrap and pending candidates
-/// cannot inherit main capabilities; retained main alone keeps access after
-/// cold replay.
+/// Same-role workers, tool children, legacy ordinary bootstrap and pending
+/// candidates cannot inherit main capabilities; retained main alone keeps
+/// access after cold replay.
 #[test]
 fn canonical_main_tools_reject_other_identities_and_survive_cold_replay() {
     let td = TempDir::new().expect("tempdir");
@@ -173,27 +173,19 @@ fn canonical_main_tools_reject_other_identities_and_survive_cold_replay() {
         h.start_agent_request_inner(pending, false, None, false, None)
             .expect("start");
 
-        let _ui = connect_test_client(&mut h, "bootstrap-ui", tau_proto::ClientKind::Ui);
-        h.register_bootstrap_create("bootstrap".to_owned(), "bot-bootstrap".to_owned());
-        h.handle_ui_create_agent_from(
-            &crate::test_connection_id("bootstrap-ui"),
-            tau_proto::UiCreateAgent {
-                request_id: "bootstrap".to_owned(),
-                session_id: h.session_runtime.current_session_id.clone(),
-                role: "engineer".to_owned(),
-                model_override: None,
-                effort_override: None,
-                metadata: Vec::new(),
-                initial_prompt: None,
-                literal: true,
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                ctx_id: None,
-                parent_agent: None,
-                ephemeral: false,
-            },
+        h.try_create_durable_user_agent_with_parent(
+            h.session_runtime.current_session_id.clone(),
+            "engineer",
+            None,
+            vec![tau_proto::AgentInitialMetadata {
+                key: tau_proto::AgentMetadataKey::new(
+                    crate::harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY,
+                ),
+                value: CborValue::Text("bot-bootstrap".to_owned()),
+                inheritable: false,
+            }],
         )
-        .expect("bootstrap");
+        .expect("seed legacy ordinary bootstrap history");
         let bootstrap = h
             .bootstrap_agent_for_id("bot-bootstrap")
             .expect("scan")

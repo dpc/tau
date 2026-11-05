@@ -62,12 +62,18 @@ the same daemon cannot complete the one-shot invocation.
 
 `tau serve` bootstrap uses the same authenticated local UI request and waits
 only for its correlated `Created` with `Queued`. Before that request, the harness
-registers its private correlation and only that internal registration authorizes
-injection of the reserved non-inheritable bootstrap-id metadata into sequence-zero
-`AgentStarted`; raw public initial metadata cannot claim the key. Presence of an
-exact loaded marker suppresses source reading and submission after restart.
-Marker ambiguity fails closed. No create result or later provider output is
-persisted as bootstrap control state.
+registers its private correlation. Only that internal registration authorizes
+bootstrap admission. Ordinary public create requests still create ordinary agents.
+Bootstrap resolves canonical main when available under
+[SPEC-session-main-agent](SPEC-session-main-agent.md); without main it retains
+the sequence-zero `AgentStarted` bootstrap marker. Canonical-main admission uses
+a separate non-inheritable metadata fact keyed by generation, including when
+main already exists. Only its committed live publication releases the independent
+interaction and prompt admission; replay never reconstructs that continuation.
+Public metadata requests cannot set or unset either reserved marker namespace.
+The harness skips source reading and submission after restart when it finds an
+exact loaded marker. Marker ambiguity fails closed. The harness persists neither
+create results nor later provider output as bootstrap control state.
 
 The exact accepted bootstrap prompt occurrence retains its ordinary live and
 durable semantic facts, but the debug `events.jsonl` projection removes its text

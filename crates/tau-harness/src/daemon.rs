@@ -1642,7 +1642,7 @@ fn spawn_bootstrap_client(
         rand::random::<u64>()
     );
     let session_id = harness.session_runtime.current_session_id.clone();
-    let role = harness.config.selected_role.clone();
+    let role = harness.bootstrap_role()?;
     let bootstrap_id = options.id.as_str().to_owned();
     let prompt_file = options.prompt_file.to_path_buf();
     harness.register_bootstrap_create(request_id.clone(), options.id.as_str().to_owned());

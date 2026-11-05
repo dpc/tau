@@ -135,10 +135,13 @@ delivery, including in mainless sessions. Required review fails closed without
 an available main. Remove obsolete `agents.default_role`, `inter_session.receiver`,
 and role `main` keys; they fail validation.
 
-Startup, serve bootstrap, and previews default to the effective main role, or
+Ordinary startup and previews default to the effective main role, or
 ordered role fallback without main. `TAU_STARTUP_ROLE` overrides it; CLI `--role`
 wins over the environment. Role selection does not bind main identity, change
 saved roles, rerun bootstrap IDs, or change external bridge receiver policies.
+Serve bootstrap instead targets canonical main when bound or configured and
+rejects a conflicting startup role. Mainless bootstrap retains ordinary role
+selection; Tau never promotes or migrates old ordinary bootstrap agents.
 
 `tool_policy.rules` is harness-owned declarative tool-surface policy. Rules are
 keyed so a user can disable built-ins such as `builtin.chatgpt-shell` with

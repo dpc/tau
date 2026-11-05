@@ -33,6 +33,15 @@ pub(super) enum UiInteractionAdmission {
     Prompt(Box<PendingPrompt>),
     /// Initial input whose failure must retain the create-request correlation.
     Created(CreatedInitialPrompt),
+    /// Canonical-main bootstrap first commits its restart-suppression fact,
+    /// then independently records the visible interaction and admits the
+    /// prompt.
+    Bootstrap {
+        /// Exact validated serve generation.
+        bootstrap_id: String,
+        /// Literal prompt retained only by this live publication owner.
+        admission: CreatedInitialPrompt,
+    },
 }
 
 impl Harness {
@@ -44,6 +53,23 @@ impl Harness {
         agent_id: AgentId,
         admission: UiInteractionAdmission,
     ) {
+        let event = match &admission {
+            UiInteractionAdmission::Bootstrap { bootstrap_id, .. } => {
+                Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                    agent_id: agent_id.clone(),
+                    key: tau_proto::AgentMetadataKey::new(format!(
+                        "{}{bootstrap_id}",
+                        super::ui_create_agent::BOOTSTRAP_ADMISSION_PREFIX,
+                    )),
+                    value: tau_proto::CborValue::Bool(true),
+                    inheritable: false,
+                    mutation_id: None,
+                })
+            }
+            _ => Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+                agent_id: agent_id.clone(),
+            }),
+        };
         let owner = PendingUiInteraction {
             client_id: client_id.clone(),
             cid: cid.clone(),
@@ -53,9 +79,7 @@ impl Harness {
             admission,
         };
         self.enqueue_publish_with_ui_interaction(
-            Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
-                agent_id: agent_id.clone(),
-            }),
+            event,
             ConversationHeadSync {
                 user_response_baseline: None,
                 cid,
@@ -76,8 +100,19 @@ impl Harness {
         owner: &PendingUiInteraction,
         event: &Event,
     ) -> bool {
-        matches!(event, Event::AgentUserInteractionRecorded(interaction)
-            if interaction.agent_id == owner.agent_id)
+        let exact_event = match &owner.admission {
+            UiInteractionAdmission::Bootstrap { bootstrap_id, .. } => {
+                matches!(event, Event::AgentMetadataSet(set)
+                    if set.agent_id == owner.agent_id
+                        && set.key.as_str() == format!("{}{bootstrap_id}",
+                            super::ui_create_agent::BOOTSTRAP_ADMISSION_PREFIX)
+                        && set.value == tau_proto::CborValue::Bool(true)
+                        && !set.inheritable && set.mutation_id.is_none())
+            }
+            _ => matches!(event, Event::AgentUserInteractionRecorded(interaction)
+                if interaction.agent_id == owner.agent_id),
+        };
+        exact_event
             && owner.generation == self.session_runtime.current_session_generation
             && !self.ui_runtime.shutdown_requested
             && !self
@@ -119,7 +154,8 @@ impl Harness {
             UiInteractionAdmission::Prompt(_) => {
                 self.send_ui_error_response(&owner.client_id, reason);
             }
-            UiInteractionAdmission::Created(admission) => {
+            UiInteractionAdmission::Created(admission)
+            | UiInteractionAdmission::Bootstrap { admission, .. } => {
                 self.send_ui_create_agent_rejection(
                     &owner.client_id,
                     admission.request_id,
@@ -134,6 +170,18 @@ impl Harness {
 
     /// Advance acceptance ordering and release the separate prompt lifecycle.
     pub(super) fn commit_ui_interaction(&mut self, owner: PendingUiInteraction) {
+        if let UiInteractionAdmission::Bootstrap { admission, .. } = owner.admission {
+            // The committed marker suppresses restart even if the process stops
+            // before the separate interaction or prompt transition. Replay must
+            // never reconstruct this runtime-only continuation.
+            self.enqueue_ui_interaction(
+                &owner.client_id,
+                owner.cid,
+                owner.agent_id,
+                UiInteractionAdmission::Created(admission),
+            );
+            return;
+        }
         self.session_runtime.user_interaction_order.insert(
             owner.agent_id.to_string(),
             self.session_runtime.next_user_interaction_order,
@@ -180,6 +228,7 @@ impl Harness {
             UiInteractionAdmission::Created(admission) => {
                 self.admit_created_initial_prompt(&owner.client_id, &owner.cid, admission);
             }
+            UiInteractionAdmission::Bootstrap { .. } => unreachable!("handled above"),
         }
     }
 }

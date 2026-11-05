@@ -149,6 +149,7 @@ impl Harness {
             _ => branch_originator,
         };
         if prompt.ctx_id.is_some()
+            && prompt.initial_prompt_correlation.is_none()
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id)
         {
             agent.dispatch.next_ctx_id = prompt.ctx_id.clone();

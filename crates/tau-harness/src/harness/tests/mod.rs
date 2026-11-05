@@ -2846,6 +2846,7 @@ mod interception;
 mod lifecycle;
 mod live_egress_lag;
 mod main_agent;
+mod main_bootstrap;
 mod main_startup;
 mod mode;
 mod model;

@@ -2548,10 +2548,9 @@ fn assert_created_session_server_handles_stock_attach_signal_and_strict_resume(s
 }
 
 /// Managed create-or-existing serve admits one bootstrap generation on first
-/// creation, resumes it without touching a missing source, and creates a new
-/// agent only when the operator supplies a different bootstrap id. The actual
-/// role-less serve path must choose main over the earlier engineer group, while
-/// an explicit CLI role still wins over main and environment selection.
+/// creation, resumes it without touching a missing source, and admits a new
+/// ordinary generation in a mainless session. Explicit role selection remains
+/// supported without main; canonical routing has provider-backed coverage.
 #[test]
 fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
     fn wait_for_agents(environment: &TestEnvironment, session_id: &str, count: usize) -> String {
@@ -2604,10 +2603,10 @@ agents:
   role_groups:
     coordination:
       roles:
-        coordinator: { main_priority: 10, order: 0 }
+        coordinator: { order: 0 }
 "#,
     )
-    .expect("configure main after built-in engineer group");
+    .expect("configure ordinary bootstrap role");
     let session_id = "serve-bootstrap";
     let source = environment.temp.path().join("bootstrap.prompt");
     let secret = "bootstrap-secret-27e8bca041";
@@ -2617,6 +2616,8 @@ agents:
     let first = environment
         .command()
         .args([
+            "--role",
+            "coordinator",
             "serve",
             "--session",
             session_id,
@@ -2635,6 +2636,7 @@ agents:
     let first_socket = environment.socket_for_claim(&first_metadata);
     let first_rows = wait_for_agents(&environment, session_id, 1);
     assert!(first_rows.contains("coordinator"), "{first_rows}");
+    let agent_id = first_rows.split('\t').next().expect("bootstrap agent id");
     let first_output = stop_server(&environment, first, &first_metadata, &first_socket);
     assert!(!String::from_utf8_lossy(&first_output.stdout).contains(secret));
     assert!(!String::from_utf8_lossy(&first_output.stderr).contains(secret));
@@ -2647,7 +2649,6 @@ agents:
         debug_jsonl.contains("\"event_name\":\"agent.prompt_queued\""),
         "test must force the sensitive queued projection"
     );
-    let agent_id = first_rows.split('\t').next().expect("bootstrap agent id");
     let trace = environment
         .command()
         .args(["agent", "trace", agent_id, "--format", "tau-jsonl"])
@@ -2661,7 +2662,7 @@ agents:
     let trace = String::from_utf8(trace.stdout).expect("UTF-8 agent trace");
     assert!(
         trace.contains("\"value\":\"coordinator\""),
-        "main role was not durable: {trace}"
+        "explicit role was not durable: {trace}"
     );
     assert!(
         trace.contains("tau.bootstrap_prompt") && trace.contains("assistant-v1"),

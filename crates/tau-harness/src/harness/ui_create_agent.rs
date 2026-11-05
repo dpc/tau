@@ -13,19 +13,33 @@ use crate::harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY;
 
 const CREATE_AGENT_DIAGNOSTIC_MAX_CHARS: usize = 512;
 
+/// Reserved per-generation admission facts for bootstrap on an existing main.
+pub(super) const BOOTSTRAP_ADMISSION_PREFIX: &str = "tau.bootstrap_prompt.";
+
+/// Bootstrap input waiting for the canonical candidate's membership
+/// publication.
+pub(super) struct PendingMainBootstrap {
+    /// Authenticated private bootstrap client.
+    pub(super) client_id: tau_proto::ConnectionId,
+    /// Validated literal input and its response correlation.
+    pub(super) request: tau_proto::UiCreateAgent,
+    /// Durable restart-suppression generation.
+    pub(super) bootstrap_id: String,
+}
+
 /// Admission data resolved before a create request mutates agent state.
 struct ValidatedCreateAdmission {
     /// Loaded runtime parent, when the request names one.
     parent_cid: Option<AgentId>,
 }
 
-/// Initial-prompt data retained after the new agent commits.
+/// Initial-prompt data retained after target creation or bootstrap resolution.
 pub(super) struct CreatedInitialPrompt {
     /// Create request correlation returned to the requester.
     pub(super) request_id: String,
     /// Session that owns the created agent.
     pub(super) session_id: tau_proto::SessionId,
-    /// Durable identity returned by successful creation.
+    /// Durable target identity returned by successful admission.
     pub(super) agent_id: tau_proto::AgentId,
     /// Exact initial-prompt correlation.
     ctx_id: String,
@@ -39,16 +53,69 @@ pub(super) struct CreatedInitialPrompt {
     defer_skill_expansion: bool,
     /// Whether this exact prompt came from private serve bootstrap.
     bootstrap_prompt: bool,
+    /// Completed-response count when this input selected its target.
+    user_response_baseline: u64,
 }
 
 impl Harness {
-    /// Find a sequence-zero bootstrap marker in the loaded durable agent set.
+    /// Select canonical main's actual role, rejecting a conflicting startup
+    /// role. An already-admitted generation is checked before this policy
+    /// on restart.
+    pub(crate) fn bootstrap_role(&self) -> Result<String, HarnessError> {
+        let main_role = self
+            .main_agent_id()
+            .and_then(|id| {
+                self.session_runtime
+                    .agent_store
+                    .loaded_agent_creation_record(id)
+                    .and_then(|record| match &record.event {
+                        Event::AgentStarted(started) => Some(started.role.as_str()),
+                        _ => None,
+                    })
+            })
+            .or_else(|| self.config.accepted_harness_settings.main_role());
+        if let Some(role) = main_role {
+            if self
+                .config
+                .accepted_harness_settings
+                .startup_role
+                .as_deref()
+                .is_some_and(|requested| requested != role)
+            {
+                return Err(HarnessError::Participant(format!(
+                    "bootstrap startup role conflicts with canonical main role `{role}`"
+                )));
+            }
+            return Ok(role.to_owned());
+        }
+        Ok(self.config.selected_role.clone())
+    }
+
+    /// Find legacy creation markers and canonical-main admission facts.
     pub(crate) fn bootstrap_agent_for_id(
         &self,
         bootstrap_id: &str,
     ) -> Result<Option<tau_proto::AgentId>, HarnessError> {
         let mut found = None;
         for agent_id in &self.agent_runtime.agent_registry.session_loaded {
+            let admission = self
+                .session_runtime
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(|tree| {
+                    tree.metadata()
+                        .get(&tau_proto::AgentMetadataKey::new(format!(
+                            "{BOOTSTRAP_ADMISSION_PREFIX}{bootstrap_id}"
+                        )))
+                });
+            if admission.is_some_and(|entry| {
+                entry.value != tau_proto::CborValue::Bool(true) || entry.inheritable
+            }) {
+                return Err(HarnessError::Participant(
+                    "durable bootstrap admission marker is invalid".to_owned(),
+                ));
+            }
+            let admitted = admission.is_some();
             let Some(first) = self
                 .session_runtime
                 .agent_store
@@ -89,7 +156,9 @@ impl Harness {
                 })?;
                 marker = Some(value.as_str());
             }
-            if marker == Some(bootstrap_id) && found.replace(started.agent_id.clone()).is_some() {
+            if (admitted || marker == Some(bootstrap_id))
+                && found.replace(started.agent_id.clone()).is_some()
+            {
                 return Err(HarnessError::Participant(
                     "multiple durable agents claim the bootstrap id".to_owned(),
                 ));
@@ -118,6 +187,75 @@ impl Harness {
         else {
             return Ok(true);
         };
+        if let Some(id) = self.ui_runtime.pending_bootstrap_creates.get(&request_id)
+            && let Some(agent_id) = self.bootstrap_agent_for_id(id)?
+        {
+            self.ui_runtime
+                .pending_bootstrap_creates
+                .remove(&request_id);
+            self.send_ui_create_agent_created(
+                client_id,
+                request_id,
+                session_id,
+                agent_id,
+                tau_proto::UiCreateAgentInitialPrompt::Queued,
+            );
+            return Ok(true);
+        }
+        if self
+            .ui_runtime
+            .pending_bootstrap_creates
+            .contains_key(&request_id)
+            && (self.main_agent_id().is_some()
+                || self.config.accepted_harness_settings.main_role().is_some())
+        {
+            if req.initial_prompt.is_none() {
+                self.ui_runtime
+                    .pending_bootstrap_creates
+                    .remove(&request_id);
+                self.send_ui_create_agent_rejection(
+                    client_id,
+                    request_id,
+                    session_id,
+                    tau_proto::UiCreateAgentRejection::CreationFailed,
+                    "private bootstrap request requires an initial prompt".to_owned(),
+                    None,
+                );
+                return Ok(true);
+            }
+            let role = self.bootstrap_role()?;
+            if req.role != role {
+                return Err(HarnessError::Participant(
+                    "bootstrap request role conflicts with canonical main".to_owned(),
+                ));
+            }
+            let bootstrap_id = self
+                .ui_runtime
+                .pending_bootstrap_creates
+                .remove(&request_id)
+                .expect("registered bootstrap");
+            // Install the owner before ensure: membership may publish inline.
+            self.ui_runtime.pending_main_bootstrap = Some(PendingMainBootstrap {
+                client_id: client_id.clone(),
+                request: req,
+                bootstrap_id,
+            });
+            if let Err(error) = self.ensure_main_agent() {
+                if let Some(pending) = self.ui_runtime.pending_main_bootstrap.take() {
+                    self.send_ui_create_agent_rejection(
+                        &pending.client_id,
+                        pending.request.request_id,
+                        pending.request.session_id,
+                        tau_proto::UiCreateAgentRejection::CreationFailed,
+                        error,
+                        None,
+                    );
+                }
+            } else {
+                self.fulfill_main_bootstrap();
+            }
+            return Ok(true);
+        }
         let is_user_initial_prompt = req.initial_prompt.is_some()
             && req.originator.is_user()
             && !req.message_class.is_internal();
@@ -193,6 +331,7 @@ impl Harness {
                 originator: req.originator,
                 defer_skill_expansion: defer_initial_skill_expansion,
                 bootstrap_prompt,
+                user_response_baseline: 0,
             };
             if is_user_initial_prompt {
                 self.enqueue_ui_interaction(
@@ -216,6 +355,51 @@ impl Harness {
         Ok(true)
     }
 
+    /// Advance bootstrap only after canonical membership, including delayed
+    /// loads.
+    pub(super) fn fulfill_main_bootstrap(&mut self) {
+        let Some(agent_id) = self.main_agent_id().cloned() else {
+            return;
+        };
+        let Some(cid) = self
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .get(&agent_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(pending) = self.ui_runtime.pending_main_bootstrap.take() else {
+            return;
+        };
+        let req = pending.request;
+        let baseline = self.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .visible_response_generation;
+        let admission = CreatedInitialPrompt {
+            request_id: req.request_id,
+            session_id: req.session_id,
+            agent_id: agent_id.clone(),
+            ctx_id: req.ctx_id.expect("validated bootstrap correlation"),
+            text: req.initial_prompt.expect("bootstrap initial prompt"),
+            message_class: req.message_class,
+            originator: req.originator,
+            defer_skill_expansion: false,
+            bootstrap_prompt: true,
+            user_response_baseline: baseline,
+        };
+        self.enqueue_ui_interaction(
+            &pending.client_id,
+            cid,
+            agent_id,
+            UiInteractionAdmission::Bootstrap {
+                bootstrap_id: pending.bootstrap_id,
+                admission,
+            },
+        );
+    }
+
     /// Admit and dispatch the initial prompt after its agent commits.
     pub(super) fn admit_created_initial_prompt(
         &mut self,
@@ -233,10 +417,8 @@ impl Harness {
             originator,
             defer_skill_expansion,
             bootstrap_prompt,
+            user_response_baseline,
         } = admission;
-        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.dispatch.next_ctx_id = Some(ctx_id.clone());
-        }
         if !message_class.is_internal() {
             self.preempt_blocking_ext_side_agents(&session_id);
         }
@@ -248,10 +430,10 @@ impl Harness {
             PendingPrompt::user(text)
         }
         .with_ctx_id(Some(ctx_id.clone()));
-        // A freshly created agent had no completed response when this input
-        // established its target, even if interaction publication was delayed.
+        // Preserve the response baseline captured when this input chose its
+        // target; bootstrap can now address an already-active main.
         if prompt.submission_source == tau_proto::PromptSubmissionSource::HumanUi {
-            prompt.user_response_baseline = Some(0);
+            prompt.user_response_baseline = Some(user_response_baseline);
         }
         prompt.expand_user_skill_on_dispatch = defer_skill_expansion;
         prompt.initial_prompt_correlation = Some(InitialPromptCorrelation {

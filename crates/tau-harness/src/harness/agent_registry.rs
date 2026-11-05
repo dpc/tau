@@ -519,7 +519,10 @@ impl Harness {
             path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY
                 | super::bridge_receiver::BRIDGE_RECEIVER_AGENT_METADATA_KEY
                 | path_crate_harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY
-        ) {
+        ) || key
+            .as_str()
+            .starts_with(super::ui_create_agent::BOOTSTRAP_ADMISSION_PREFIX)
+        {
             return Err("agent metadata key is reserved for harness lifecycle state".to_owned());
         }
         if key.as_str().is_empty() {

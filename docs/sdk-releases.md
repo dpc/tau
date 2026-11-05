@@ -144,9 +144,12 @@ receiving the tool.
 Receiver targeting and outbound tool restriction are separate controls; apply
 both to a main-only bridge. Manage dedicated Zulip credentials, permitted DM
 participants, routes, and prompt fragments in the deployment and bridge.
-Existing serve bootstrap creates an ordinary agent, not main. To start main
-using existing CLI support, start a fixed session without bootstrap prompt/id,
-then submit once with `tau message '&SESSION' < recovery.txt` after readiness.
+Serve bootstrap now targets canonical main when configured and rejects a
+conflicting startup role. Tau skips previously admitted IDs and does not promote
+or migrate old ordinary bootstrap agents. Bootstrap admission is at most once;
+it does not guarantee model completion. You can also start a fixed session
+without bootstrap prompt/id, then submit once with
+`tau message '&SESSION' < recovery.txt` after readiness.
 Use `tau serve --session SESSION --create` only for an absent session; use
 `--existing` or the explicit `--create-or-existing` policy for restart.
 Do not retry a message without checking delivery if you lost its acknowledgement.

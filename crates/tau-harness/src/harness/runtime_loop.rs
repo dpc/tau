@@ -608,6 +608,7 @@ impl Harness {
             || !self.ui_runtime.pending_action_invocations.is_empty()
             || !self.ui_runtime.pending_retry_prompts.is_empty()
             || !self.ui_runtime.pending_bootstrap_creates.is_empty()
+            || self.ui_runtime.pending_main_bootstrap.is_some()
             || self
                 .extensions
                 .activity_leases

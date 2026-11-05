@@ -60,11 +60,15 @@ the current session prefix resolves locally.
 ## Service bootstrap and upgrades
 
 Pair `--bootstrap-prompt-file PATH` with `--bootstrap-id ID` on `tau serve`.
-After readiness, Tau creates a durable parentless user agent, submits the exact
+After readiness, Tau resolves canonical main when configured, submits the exact
 UTF-8 file as literal prompt text, and keeps serving without waiting for output.
-`PATH=-` reads stdin to EOF once. The same durable bootstrap ID skips on restart
-before reading the source: this guarantees at-most-once creation, not successful
-model completion. A new ID requests another generation; inspect ambiguous
+A conflicting startup role fails; without main, bootstrap creates an ordinary
+durable parentless user agent.
+`PATH=-` reads stdin to EOF once. Tau skips the same durable bootstrap ID on
+restart before reading the source. This guarantees at-most-once admission, not
+successful model completion. Tau does not promote or migrate old ordinary
+bootstrap agents.
+A new ID requests another generation on the same main; inspect ambiguous
 failures before choosing one. Keep sensitive prompts out of world-readable
 paths and the Nix store.
 

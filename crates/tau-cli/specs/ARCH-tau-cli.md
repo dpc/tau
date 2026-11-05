@@ -97,12 +97,16 @@ stderr remains unredacted. This externally meaningful extension-interface
 choice was approved under
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
-The paired `--bootstrap-prompt-file PATH --bootstrap-id ID` serve options add one
-post-readiness, at-most-once initial prompt without changing serve ownership.
-The source is read exactly once (`-` means stdin through EOF), submitted
-literally through the ordinary authenticated local UI create path, and never
-printed. Admission ends at correlated `Created` plus `Queued`; the bootstrap UI
-disconnects while the foreground service remains available.
+The paired `--bootstrap-prompt-file PATH --bootstrap-id ID` serve options admit
+one initial prompt at most once after readiness, without changing serve ownership.
+Tau reads the source once (`-` means stdin through EOF) and submits it as literal
+text through a private bootstrap correlation on the authenticated local UI create
+path. Tau never prints the source. Admission ends at correlated `Created` plus
+`Queued`; the bootstrap UI disconnects while the foreground service remains
+available.
+Bootstrap uses canonical main when configured, rejects a conflicting startup
+role, and otherwise retains ordinary creation. Tau skips already-admitted IDs
+without migrating old ordinary agents.
 
 Interactive UI exit is governed by a daemon-lifetime policy. An immediate-UI
 launch enables automatic shutdown after its last UI leaves. `:quit`/`:q` uses

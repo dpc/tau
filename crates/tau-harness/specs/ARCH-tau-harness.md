@@ -57,14 +57,19 @@ not include extension stderr draining or any other application-level I/O.
 
 A fixed-session serve bootstrap begins only after extension/session readiness,
 runtime discovery metadata publication, and listener forwarding. The harness
-checks loaded agents' exact sequence-zero `AgentStarted` facts before reading the
-source. An unseen id is registered as harness-owned runtime authority, then an
-internal worker attaches through the ordinary authenticated socket UI and sends
-`UiCreateAgent`; admission injects a reserved, non-inheritable text marker and
-otherwise follows normal durable parentless user-agent creation. `Created` plus
-`Queued` releases the worker without waiting for output. Once the marker commits,
-restart skips that id even after an indeterminate failure, preserving at-most-once
-rather than exactly-once semantics.
+checks loaded agents' legacy sequence-zero markers and canonical-main bootstrap
+admission metadata before reading the source. The harness registers an unseen ID
+as runtime authority, then an internal worker attaches through the
+authenticated socket UI and sends `UiCreateAgent`. Only that private correlation
+selects the canonical main resolver; ordinary public creation remains ordinary.
+Mainless bootstrap retains its sequence-zero marker. Canonical-main bootstrap
+waits for main membership, publishes reserved non-inheritable per-generation
+admission metadata, then separately publishes the visible interaction and admits
+the prompt. The publication owner retains the prompt only in live memory.
+The worker exits after `Created` plus `Queued`, without waiting for output. Once
+the marker commits, the harness skips that ID on restart, even after an
+indeterminate failure. This provides at-most-once admission, not exactly-once
+model execution.
 
 One Harness-owned `SemanticPersistenceOwner` prepares every durable agent,
 ordinary-session, and restore stream for the daemon's immutable session. Startup

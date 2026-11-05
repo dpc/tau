@@ -367,12 +367,25 @@ fn registered_bootstrap_create_installs_exact_restart_marker() {
     let mut resumed =
         echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
             .expect("resume harness");
+    configure_main_role(&mut resumed, "engineer");
+    assert!(
+        resumed.main_agent_id().is_none(),
+        "legacy bootstrap is not promoted"
+    );
     assert_eq!(
         resumed
             .bootstrap_agent_for_id("telegram-v1")
             .expect("cold marker scan"),
-        Some(agent_id),
+        Some(agent_id.clone()),
         "cold replay must preserve the same marker owner"
+    );
+    let main = resumed
+        .ensure_main_agent()
+        .expect("ensure main")
+        .expect("main");
+    assert_ne!(
+        main, agent_id,
+        "ordinary bootstrap history is never migrated"
     );
     resumed.shutdown().expect("shutdown resumed harness");
 }

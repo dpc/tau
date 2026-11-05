@@ -22,9 +22,9 @@ identity. Runtime unavailability of the winning role fails explicitly without
 falling back to another priority. Priorities select a role only for an unbound
 session; they do not change an existing canonical binding.
 
-The harness creates main on UI or peer demand through prompt-free ordinary
-agent construction. Creating a session or designating a role must not
-start inference. Creation and session binding are separate durable facts; a crash
+The harness creates main on UI, peer, or explicit serve-bootstrap demand through
+prompt-free ordinary agent construction. Creating a session or designating a role
+must not start inference. Creation and session binding are separate durable facts; a crash
 may leave an unused unbound agent, but the harness must never infer main identity
 from that agent's existence. Concurrent live requests share the pending candidate.
 
@@ -55,10 +55,23 @@ The replay boundary includes canonical main identity, independently of which
 agents are eligible for selection.
 
 An explicit startup role starts ordinary work separately. Without one, the harness
-selects the effective main role for ordinary startup, serve bootstrap, and developer
-previews. Mainless configurations retain ordered role fallback. Selecting this
-role does not bind canonical main identity: bootstrap agents remain ordinary
-agents. The harness leaves existing bootstrap IDs and session-main bindings unchanged.
+selects the effective main role for ordinary startup and developer previews.
+Mainless configurations retain ordered role fallback.
+
+Serve bootstrap targets canonical main when one is bound or configured, sharing
+the same lazy resolver as UI and peer demand. A conflicting explicit startup role
+fails rather than creating an ordinary sibling. Without main, bootstrap retains
+ordinary creation. The harness skips previously admitted bootstrap IDs before
+reading the source or validating the role; it never promotes or migrates existing
+ordinary bootstrap agents. The user explicitly approved this routing and
+deduplication contract for ticketwfcs, replacing the former ordinary-bootstrap
+contract.
+
+Canonical-main bootstrap commits a non-inheritable, harness-reserved admission
+marker before the separate visible interaction and prompt transitions. An
+admitted ID never runs again on restart, even after a stop between marker and prompt.
+This is at-most-once admission, not guaranteed or exactly-once model execution.
+Creation without an admission marker does not suppress a later bootstrap attempt.
 `agents.default_role` and the former
 `inter_session.receiver` selection keys are not accepted.
 

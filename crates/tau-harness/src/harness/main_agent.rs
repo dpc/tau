@@ -175,6 +175,7 @@ impl Harness {
     /// Continues only the subscriptions whose initial main demand awaited this
     /// ordinary membership commit. Focus remains attachment-local.
     pub(super) fn complete_ui_main_demands(&mut self) {
+        self.fulfill_main_bootstrap();
         if self.ui_runtime.main_demand_processing {
             return;
         }
@@ -196,6 +197,16 @@ impl Harness {
     /// Releases failed initial selections explicitly instead of leaving an
     /// attached UI waiting forever for a rejected membership publication.
     pub(super) fn fail_ui_main_demands(&mut self, error: &str) {
+        if let Some(pending) = self.ui_runtime.pending_main_bootstrap.take() {
+            self.send_ui_create_agent_rejection(
+                &pending.client_id,
+                pending.request.request_id,
+                pending.request.session_id,
+                tau_proto::UiCreateAgentRejection::CreationFailed,
+                error.to_owned(),
+                None,
+            );
+        }
         for client in std::mem::take(&mut self.ui_runtime.main_demand_clients) {
             self.send_direct_harness_notice(
                 &client,
