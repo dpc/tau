@@ -127,6 +127,14 @@ or proactive `destination` alias. Source replies require canonical ownership;
 deletes revoke it. Proactive sends need no registration but require live
 extension/session authority and tool permission.
 
+Saved versioned locators preserve read coordinates, not process-local reply
+authority. Neither `reply_to is unknown or stale` nor the newer diagnostic
+`reply_to has no retained local reply authority` proves that a TTL expired or
+that the Slack message or thread is deleted or inaccessible. The extension has
+not checked Slack availability. Copying a locator or reading its message does
+not restore reply authority. Do not automatically replace a rejected threaded
+reply with a top-level post; obtain separate authorization for any alternative send.
+
 `slack_conversations` is default-off through its exact prefixed name or
 `slack:discover`. It returns sorted pages of static aliases, kinds, scope,
 description and receive/proactive policy, including receive-only routes.
