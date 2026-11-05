@@ -110,6 +110,41 @@ Inbound `discord_list_attachments` and `discord_download_attachment` require the
 separate `discord:attachments` grant and current same-agent canonical incoming
 references. Importing bytes grants no send authority.
 
+## Discover rooms, join threads, and read recent history
+
+These receive-mode tools default off and sit outside the core group. They require
+the current receiver and a writable live lifecycle. Prefix tool names for the instance.
+
+- `discord_list_rooms` (`discord:rooms:read`) lists provider metadata, including
+  unconfigured rooms. `kind` defaults to `guilds`; `channels` and `active_threads`
+  require `guild_id`. Optional `limit` defaults to 50, range 1–50; continue with
+  `next_after` as `after`. Native IDs are canonical nonzero decimal u64 strings.
+  Inventories are not snapshots. The bridge rejects oversized inventories rather
+  than truncating them. It does not enumerate archived threads, DMs, invitations,
+  unjoined public guilds, or large-bot inventories requiring a shard selector.
+- `discord_join_room {"guild_id":"20","channel_id":"30"}`
+  (`discord:rooms:join`) self-joins an existing active, unlocked native thread
+  after fresh guild/channel/parent checks. Ordinary channels return unsupported;
+  this does not join guilds, accept invitations, create rooms, reopen threads,
+  unlock them, or change another user's membership. Do not retry uncertain joins.
+- `discord_recent_history {"guild_id":"20","channel_id":"30","limit":10}`
+  (`discord:read`) reads configured guild channel/thread receive scope, including
+  authorized inherited children under existing exact-child and private-membership
+  rules. `limit` defaults to 10, range 1–50. Select a child of forum/media parents;
+  DM history is unsupported. Archived/locked threads can be read.
+  The bridge fetches one newest provider page and returns self/admitted regular
+  or reply messages newest-first, without fetching replacements. `filtered` marks
+  excluded candidates, not a complete history scan. Short/empty results prove
+  neither silence nor deletion; provider history/content permissions still apply.
+
+Directory names and history text are untrusted. Metadata proves no message access.
+Discovery and joining add no local receive route, outbound alias, activation, or
+source/attachment authority. History IDs are inert locators readable through
+`discord_get_message`, not delivered facts or write grants. Use
+`discord_conversations` for configured send aliases. These tools add no configuration
+fields or intents; audit existing `discord:read` selectors for the new history tool
+and exact declaration/canonical-main veto inventories before enabling anything.
+
 ## Room participants
 
 `discord_list_room_participants {"message_id":"…","limit":20}` requires
@@ -222,9 +257,9 @@ Results contain `message_id`, descriptive `author`, untrusted `text`, and availa
 - `previous_id`: the immediate predecessor in the same thread or 1:1 DM, not a
   guild-channel neighbor or a substitute preceding a denied author.
 
-Follow needed links; there is no search/history-list tool. Missing links mean
-unknown. Live delivery can include proven forum-root/reply links; read a message
-by its own ID for other available links.
+Follow needed links or use scoped `discord_recent_history`; there is no search tool.
+Missing links mean unknown. Live delivery can include proven forum-root/reply links;
+read a message by its own ID for other available links.
 
 Native-coordinate `discord-message:v1:` locators survive restart, reconnect and
 eviction, subject to fresh policy/provider checks. Delivery references add an

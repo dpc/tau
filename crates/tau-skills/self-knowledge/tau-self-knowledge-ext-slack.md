@@ -156,6 +156,46 @@ edit, reaction, dynamic-link and selection authority does not survive restart.
 Socket Mode ACK is separate from Tau persistence; reconnect/restart and cache
 eviction can lose or duplicate occurrences.
 
+### Public room discovery, joining, and recent history
+
+These tools default off and sit outside the ordinary group. They require current
+registration and an authenticated installation. Prefix tool names for the instance.
+
+- `slack_list_rooms {"limit":20}` (`slack:rooms:read`) lists one provider-visible
+  page of non-archived public channels, including unconfigured rooms. `limit`
+  defaults to 20, range 1–50. Results contain an inert native `room_id` and untrusted
+  name and membership metadata, not messages. Pass `next_cursor` as `cursor`;
+  empty pages need not be final. Cursors bind to the original agent/lifecycle, expire after
+  15 minutes, and can be evicted from a shared 128-entry FIFO. Pages are not snapshots.
+- `slack_join_room {"room_id":"C123"}` (`slack:rooms:join`) prechecks an existing
+  public, non-archived channel, then attempts one join. You can supply independently
+  known native C IDs. It creates no room, invitation, private/DM/MPIM membership,
+  or local receive/send policy. `join_unknown` or lifecycle retirement may leave membership;
+  do not automatically retry uncertain joins. There is no compensating leave.
+- `slack_recent_history {"destination":"team","limit":10}`
+  (`slack:history:read`) requires a receive-enabled configured alias independently
+  of `proactive_send`. `limit` defaults to 10, range 1–50. Optional `thread_id`
+  is a matching root locator; fixed-thread aliases use their root and reject others.
+  Whole-room history uses one newest-first provider page. The bridge applies sender
+  policy to the selected window without fetching replacements; short/empty results
+  do not prove empty history.
+
+Slack returns thread replies oldest-first. The tool returns recent thread messages
+only when the provider confirms exhaustion in one page of at most 50 items;
+otherwise it returns `latest_window_unavailable` rather than labeling oldest
+messages as recent. This fetch bound is not a maximum supported
+thread size. There is no history cursor or arbitrary time-window mode; known
+references remain readable with `slack_get_message`.
+
+Discovery and joining grant no message reads, sends, activation, or local routes.
+History is untrusted context, not a delivered fact or source/write/profile grant;
+use exact reads to refresh profile locators. `slack_conversations` remains the
+configured-alias inventory. Discovery needs `channels:read`; joining also needs
+`channels:join`. History needs existing conversation-kind history and `users:read`
+scopes. Operators must separately review grants, scopes, reinstall needs, and
+exact declaration/canonical-main veto inventories. No configuration keys or
+OAuth/event changes are automatic.
+
 ### Ordinary send mentions
 
 Send permission allows native `<@U123>`, `<@W123>`, `<!subteam^S123>`, `<!here>`,
@@ -344,7 +384,8 @@ need a scope change/reinstall.
 
 Reads return current untrusted context, not new requests or source ownership.
 They grant no reply, reaction or attachment authority. Missing links mean unknown;
-failed reads do not prove deletion. No search/history-list interface exists.
+failed reads do not prove deletion. Use `slack_recent_history` for scoped recent
+history; no search interface exists.
 
 ## Socket Mode reconnection diagnosis
 

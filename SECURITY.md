@@ -1215,9 +1215,13 @@ and role authority, and permits removal only of same-agent runtime-owned
 reactions. It adds `reactions:write` without reaction listing; reactions are
 externally visible and can trigger notifications or workflows.
 
-The separately authorized Slack discovery tool reveals all static model-facing
+The separately authorized `slack_conversations` tool reveals all static model-facing
 aliases and configured policy, including receive-only routes, but excludes native
 routes, dynamic links, identities, runtime state, and Slack-fetched metadata.
+Separate default-off room tools return provider-visible public-channel metadata
+and self-join existing public channels without changing local receive/send policy.
+Scoped recent history requires configured receive authority independently of
+outbound permission and creates no delivered facts or source/write authority.
 `security_mode: lax` materially widens prompt-injection exposure on static
 routes and must not be treated as control authority. Slack, workspace
 administrators, Slack Connect participants, and conversation members may read
@@ -1231,6 +1235,15 @@ name only the verified human bound to retained same-agent metadata and is frozen
 with the bounded retry body. That metadata is not required for a plain reply.
 The separately maintained `tau-ext-slack` project owns its Slack-specific
 review triggers, failure/replay invariants, operational guidance, and tests.
+
+The separately maintained Discord bridge provides separate default-off tools for
+provider guild/channel/active-thread metadata, native self-thread joining, and
+configured guild channel/thread history reads. Directory metadata can include
+unconfigured rooms and proves no message access. Joining supports only active, unlocked
+threads, not ordinary channels, guild installation, invitations, or creation.
+Discovery and membership add no local receive/send grants. History reads check
+configured scope and author admission and create no delivered/source authority.
+The standalone project owns provider-specific limits and security documentation.
 
 The disabled-by-default `std-telegram` bridge is the separately installed
 `tau-ext-telegram` executable, supervised through the same trusted same-user
@@ -1250,10 +1263,17 @@ stdio extension route. It uses bot HTTP Basic authentication and native
 event-queue long polling. Exact numeric sender allowlists and configured DM or
 stream/topic policies gate ingress; separately configured proactive-DM aliases
 fix outbound recipient authority. Queue identifiers remain extension-local.
-Model tools accept configured aliases or bounded Tau-issued references; v2
+Message tools accept configured routes or bounded Tau-issued references; v2
 message locators are inert native addresses, not send authority. Replies use
 current configured outbound grants without live source ownership. Reaction,
 mutation, and attachment-read source requirements remain distinct.
+Separate default-off tools list provider-visible channel metadata, list topics
+and read recent history under configured receive scope, and subscribe the bot
+to an existing named channel without changing local receive/send policy.
+The name-only subscription API can create a channel if a rename or deletion races
+the existence check; the user accepted this residual risk. There is no intentional
+creation option or atomic existing-only guarantee. Metadata and read results remain
+untrusted context, not activation, delivered facts, or source/write authority.
 Opt-in send-only mode declares only the send tool for one fixed proactive-DM
 alias and rejects every inbound route, allowlist, queue, reply, reaction, and
 catch-up surface. With the default

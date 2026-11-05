@@ -97,6 +97,43 @@ Handoffs do not transfer reported input, ACK/checkpoint ownership, old source,
 attachment or reaction authority. They do not grant outbound tools. Reply
 addresses remain inert; ordinary sends check current outbound grants.
 
+### Discover channels, subscribe, and read recent history
+
+These ordinary-mode tools require the current registered receiver and live queue.
+They default off and sit outside the text group. Prefix tool names for the instance.
+
+- `zulip_list_channels {"limit":10,"offset":0}` (`zulip:channels:read`)
+  lists provider-visible public/subscribed channel names and descriptions,
+  including unconfigured channels, sorted by name before paging.
+- `zulip_list_topics {"channel":"ops","limit":10,"offset":0}`
+  (`zulip:messages:read`) requires configured whole-channel receive scope.
+  Topics appear in provider recency order, including canonical empty topics.
+  Zulip topics are native threads, not message-parent relations.
+- `zulip_get_history {"channel":"ops","topic":"deploy","limit":10}`
+  (`zulip:messages:read`) requires configured whole-channel or exact-topic receive
+  scope. Omit `topic` only for whole-channel scope; `"topic":""` selects general
+  chat, not the whole channel. The bridge returns the newest candidates in
+  chronological order, with opaque IDs and external Markdown. It applies current
+  author admission without fetching replacements. Read returned IDs with
+  `zulip_get_message`.
+- `zulip_join_channel {"channel":"public-channel"}` (`zulip:channels:join`)
+  checks channel existence, then subscribes only the authenticated bot, including
+  outside local configuration. Zulip's name-only API can create a channel if a
+  rename/deletion races that check. The user accepted this residual risk; there
+  is no intentional creation option or atomic existing-only guarantee. Do not
+  automatically retry failed or uncertain subscriptions. Joining does not follow topics.
+
+All limits default to 10, range 1–50. Metadata pages accept `offset` 0–131072
+and return a next offset or null; pages are not snapshots. Large provider
+inventories can fail the response cap before local paging.
+Metadata and message text are untrusted. Discovery, membership, and history reads
+grant no receive/send policy, sender admission, activation, delivered facts, source
+ownership, attachment, reaction, or mutation authority. These tools are absent in
+send-only mode. `zulip_conversations` remains the configured send inventory.
+These tools add no configuration fields. Audit broad `zulip:messages:read` policies,
+which can match the new topic/history tools, and exact declaration/canonical-main
+veto inventories before enabling anything.
+
 ### Ordinary send mentions
 
 Send permission allows inline Markdown mentions such as `@**|123**`, including
@@ -317,7 +354,8 @@ Results contain `message_id`, descriptive `author`, untrusted `text`,
 `content_trust: "external"`, and optional `previous_id`. The latter is the immediate
 provider predecessor in the same topic/DM; denied or unproven predecessors are
 omitted, not replaced. Zulip supplies no reliable native root/reply evidence, so
-`root_id` and `reply_to_id` are absent. There is no search/history-list tool.
+`root_id` and `reply_to_id` are absent. Use `zulip_get_history` for scoped recent
+channel/topic history; there is no search tool.
 
 Rate-limited delivery omits previous links; read the message by its own ID for
 on-demand links. Versioned opaque IDs survive restart/compaction/eviction while
