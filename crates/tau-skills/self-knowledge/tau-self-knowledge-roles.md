@@ -48,3 +48,9 @@ as role configuration. Edit `harness.yaml` for changes that must survive a
 restart. Call `self_info({})` for authoritative current agent/session IDs,
 model, effective effort, status, and available usage estimates rather than
 inferring identity from a role name or a preview.
+
+`self_info` also returns a snapshot of `Ready` extensions with their configured
+names, instance IDs, `restart_attempt` values, and self-reported package releases
+and optional build revisions. Missing metadata appears as `unknown`. The snapshot
+omits disconnected or replaced instances. Use it for diagnostics, not build
+attestation.
