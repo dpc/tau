@@ -67,7 +67,11 @@ For Git-free Nix or release builds, packagers can fill the shared executable's
 40-byte `__TAU_BUILD_GIT_REVISION_PLACEHOLDER____` and 17-byte
 `__TAU_BUILD_DIRTY` slots after linking, using the package's own source SHA and
 `clean____________` or `modified_________`. Preserve widths and verify replacement
-counts. Stamped metadata takes precedence, so never stamp separately sourced
+counts. On macOS, stamping invalidates the executable's code signature. Re-sign
+the executable after all stamping and fixups, then verify that it launches on
+the target platform. Tau's Nix packages use the pinned
+`darwin.signingUtils` helper, which signs a fresh copy and replaces the inode.
+Stamped metadata takes precedence, so never stamp separately sourced
 extension executables with Tau core's hash. Runtime identity reads only embedded
 metadata, never environment variables, files, or subprocess output.
 

@@ -285,6 +285,14 @@
                 fi
               ''}
             '';
+
+            postFixup = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              # Both metadata replacement and standard fixups must precede
+              # signing. signingUtils replaces the inode to avoid cached seals.
+              source ${pkgs.darwin.signingUtils}
+              sign "$out/bin/tau"
+              "$out/bin/tau" --version
+            '';
           };
 
         multiBuild = (flakeboxLib.craneMultiBuild { }) (

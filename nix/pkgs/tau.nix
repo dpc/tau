@@ -3,6 +3,8 @@
   rustPlatform,
   bbe,
   testers,
+  stdenv,
+  darwin,
   buildRevision ? null,
   buildDate ? null,
   buildDirty ? null,
@@ -85,6 +87,14 @@ rustPlatform.buildRustPackage (finalAttrs: {
         echo "error: Tau dirty-state placeholder remains after patching" >&2
         exit 1
       fi
+    ''}
+
+    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # Stamping invalidates the linker/fixup signature. Sign the final bytes
+      # through a fresh inode, including the bundled extension entry points.
+      source ${darwin.signingUtils}
+      sign "$out/bin/tau"
+      "$out/bin/tau" --version
     ''}
   '';
 
