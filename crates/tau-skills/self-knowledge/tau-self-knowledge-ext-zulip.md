@@ -225,18 +225,31 @@ mean online. Missing data means unavailable, not offline.
 Eligible avatars import unchanged, up to 2 MiB. `avatar.state="imported"` returns
 reference, size and MIME hint; other states include `none`, `blocked_origin`,
 `unsupported_url`, `unavailable`, `too_large`, `unsupported_media_type`.
-Supported origins are narrow configured `/user_avatars/` and `/static/` paths
-or official HTTPS Gravatar, without credentials/redirects. Image checks do not
-prove safety. Cancellation can leave stored artifacts.
+Server-trusted builds accept the exact avatar destination from the configured
+server's authenticated selected-profile response. External destinations must use
+HTTPS on the default port (443); storage/CDN hosts, custom percent-encoded paths
+and signed queries need no per-host configuration. Configured-origin
+`/user_avatars/` and `/static/` paths retain their existing restrictions.
+The tool accepts neither caller-supplied URLs nor user-message links.
 
-On supporting builds, `avatar.state="blocked_origin"` includes
+By configuring a server, you trust it to select that one avatar destination, without
+granting message, route, sender or activation authority. The bridge maintains no
+learned host allowlist and does not filter DNS or private IP addresses: a compromised
+server can select a private-address HTTPS destination. The bridge sends avatar
+requests without credentials, verifies TLS and refuses redirects. It retains the
+URL, time, byte, MIME/signature, concurrency, cancellation, lifecycle and verified
+Artifact import limits, and checks storage availability before downloading.
+Profile metadata and image bytes remain untrusted. Image checks do
+not prove safety. Cancellation can leave stored artifacts.
+
+On server-trusted builds, `avatar.state="blocked_origin"` includes
 `failure_source="local_url_policy"` and a fixed `reason`:
-`external_scheme_not_https`, `external_host_not_allowed`, or
-`external_nondefault_port`. This reports the extension's local URL-policy rejection,
-not a refusal from Zulip. The extension attempts neither an avatar
-download nor an Artifact import. The reason identifies the first failed origin
-check, before path/query checks run. A configured hostname with a wrong port can
-fail the external-host check.
+`external_scheme_not_https` or `external_nondefault_port`. This reports the
+extension's local URL-policy rejection, not a refusal from Zulip. The extension
+attempts neither an avatar download nor an Artifact import. An external CDN
+hostname alone no longer causes rejection. Older builds could return
+`external_host_not_allowed`; that also identified local policy, not a provider
+rejection.
 
 Structured warnings use `operation=profile_avatar`, `stage=local_url_policy`,
 `category=blocked_origin`, and the same fixed reason. Safe relation fields are
@@ -245,7 +258,8 @@ Structured warnings use `operation=profile_avatar`, `stage=local_url_policy`,
 `configured_effective_port=matches|differs`; port comparisons include parsed
 defaults. These fields distinguish origin mismatches without exposing hostnames,
 URLs or native IDs. Use the returned reason and safe warning fields to diagnose
-a rejection; do not request raw avatar URLs or loosen policy automatically.
+a rejection; results and traces omit private avatar URL components. Do not request
+raw avatar URLs or loosen policy automatically.
 An older `blocked_origin` result alone does not identify the specific mismatch
 or establish that a later build fixes the reported avatar incident.
 
