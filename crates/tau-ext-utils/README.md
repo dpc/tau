@@ -90,13 +90,21 @@ configuration is loaded.
 
 `papercut_list` shows only active report count, timestamps, agent IDs, and
 session IDs. `papercut_read` shows complete active reports in the same Markdown
-format as `tau dev papercut list --markdown`. `papercut_archive` validates
-and preserves the whole active file in a numbered private archive, like
-`tau dev papercut clear`; it does not delete reports. All three take no
-arguments. Each call reads a fresh snapshot, so listing or reading does not
-reserve the reports for a later archive. Archive fails rather than moving a
-file that changed after validation. They use the authenticated extension
-instance's User-scope storage and still obey global and role tool policy.
+format as `tau dev papercut list --markdown`, preceded by an opaque `generation`.
+`papercut_archive` requires `{"expected_generation":"<generation from read>"}`.
+It validates and preserves the whole active file in a numbered private archive,
+like `tau dev papercut clear`; it does not delete reports. List and read take no
+arguments. Reading does not reserve reports: archive fails if the active bytes
+have changed since that complete read, including during archival validation.
+Read again before retrying a stale archive. Archive rejects missing or invalid
+generations without archiving. An oversized or invalid read returns an error
+without partial reports or a generation; the tool never truncates report bodies
+to permit archival.
+The generation identifies the returned bytes; it does not prove semantic review.
+Reading an absent history returns an empty-snapshot generation. Archiving that
+snapshot is a no-op if the history is still absent; an existing empty file retains ordinary
+archival behavior. These tools use the authenticated extension instance's
+User-scope storage and still obey global and role tool policy.
 When the harness is older than protocol 10.1 or does not advertise its
 revision, all three tools return an explicit unsupported error without
 sending a history request or interrupting other utility tools.

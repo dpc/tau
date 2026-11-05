@@ -39,13 +39,17 @@ ordinary reporter-group grants from authorizing history; exact role grants or an
 explicit history-group grant are required. All use the
 reporter's authenticated User-scope instance and the same locked active file
 as the operator CLI. The two readers each take a separate snapshot; neither
-reserves records for archive. Archive validates the shared v1 record contract
-before requesting conditional archival. The harness verifies that the
-complete file generation still matches while holding the reporter's append
-lock, then no-replace renames to the first unused numbered archive and syncs
-the directory. A concurrent change fails instead of archiving a new,
-unvalidated report. Archives are private and never enumerated or deleted by
-these tools.
+reserves records for archive. Only a complete, validated read returns its opaque
+generation; oversized results fail without returning partial reports or a
+generation. Archive requires the caller to supply it as `expected_generation`,
+checks it against the current snapshot, and validates the shared v1 record contract
+before requesting conditional archival with the same generation. The generation
+identifies the returned snapshot; it does not prove semantic review. The harness
+verifies that the complete file generation still matches while holding the
+reporter's append lock, then renames the file to the first unused numbered
+archive without replacing an existing file and syncs the directory. If the file
+changes concurrently, archival fails rather than including a new, unseen report.
+These tools neither enumerate nor delete the private archives.
 
 The dedicated inspection bootstrap runs before timer state, timezone discovery
 or extension-data clients exist. It shares the ordinary configured tool

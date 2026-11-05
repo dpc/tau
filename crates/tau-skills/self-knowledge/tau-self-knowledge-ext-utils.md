@@ -45,7 +45,10 @@ separately opt-in: set
 `extensions.std-utils.config.papercut_history.enable: true` **and** grant
 `papercut_list`, `papercut_read`, and/or `papercut_archive` explicitly to
 the intended role. Enabling ordinary `papercut` does not grant history.
-List shows metadata, read returns full reports, and archive preserves the
-whole active file. Keep this grant narrow; the tools inspect shared
+List shows metadata only. A successful complete read returns full reports and
+an opaque `generation`; archive requires that value as `expected_generation`
+and preserves the whole active file only if its bytes still match. Changed
+history requires another read. The generation identifies bytes; it does not prove
+semantic review. Keep this grant narrow; the tools inspect shared
 per-instance records, not just the calling agent's reports. See
 `crates/tau-ext-utils/README.md` for config examples and storage limits.

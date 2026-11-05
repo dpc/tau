@@ -1117,7 +1117,12 @@ impl TimerRuntime {
     }
 
     /// Run one active-only history operation with truthful storage failures.
-    fn run_papercut_history(&self, action: PapercutHistoryAction) -> Result<String, String> {
+    fn run_papercut_history(
+        &self,
+        action: PapercutHistoryAction,
+        arguments: &CborValue,
+    ) -> Result<String, String> {
+        let expected_generation = papercut_history_generation(action, arguments)?;
         if !self.session_active {
             return Err("no active session is available".to_owned());
         }
@@ -1129,6 +1134,13 @@ impl TimerRuntime {
             .as_ref()
             .ok_or_else(|| "papercut history storage is unavailable".to_owned())?;
         let contents = storage.read()?;
+        let generation = blake3::hash(contents.as_deref().unwrap_or_default()).to_hex();
+        if expected_generation.is_some_and(|expected| expected != generation.as_str()) {
+            return Err(
+                "papercut records changed since the complete read; read again before archiving"
+                    .to_owned(),
+            );
+        }
         let records = papercut_history::parse_records(contents.as_deref().unwrap_or_default())?;
         match action {
             PapercutHistoryAction::List => {
@@ -1143,12 +1155,17 @@ impl TimerRuntime {
                 }
                 Ok(output)
             }
-            PapercutHistoryAction::Read => papercut_history::format_markdown(&records),
+            PapercutHistoryAction::Read => {
+                let markdown = papercut_history::format_markdown(&records)?;
+                Ok(format!("generation: {generation}\n\n{markdown}"))
+            }
             PapercutHistoryAction::Archive => {
-                let Some(contents) = contents else {
+                let Some(_) = contents else {
                     return Ok("archived 0 papercut report(s); no archive created".to_owned());
                 };
-                let archive = storage.archive(blake3::hash(&contents).to_hex().as_ref())?;
+                let archive = storage.archive(
+                    expected_generation.expect("archive arguments require a generation"),
+                )?;
                 Ok(format!(
                     "archived {} papercut report(s) at {archive}",
                     records.len()
@@ -1530,11 +1547,11 @@ fn tool_registrations(
             ),
             papercut_history_registration(
                 PAPERCUT_READ_TOOL_NAME,
-                "Read all active papercut reports as copyable Markdown, including their full bodies.",
+                "Read all active papercut reports as copyable Markdown, including their full bodies and an opaque generation for archival.",
             ),
             papercut_history_registration(
                 PAPERCUT_ARCHIVE_TOOL_NAME,
-                "Archive the complete validated active papercut file; never delete preserved reports. New reports remain active.",
+                "Archive the complete active papercut file only if it matches expected_generation from a successful complete papercut_read. Never delete preserved reports; changed history requires another read.",
             ),
         ]);
     }
@@ -1553,11 +1570,26 @@ fn papercut_history_registration(
             model_visible_name: None,
             description: Some(description.to_owned()),
             tool_type: ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })),
+            parameters: Some(if name == PAPERCUT_ARCHIVE_TOOL_NAME {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "expected_generation": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "Opaque generation returned by the complete papercut_read being archived."
+                        }
+                    },
+                    "required": ["expected_generation"],
+                    "additionalProperties": false
+                })
+            } else {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })
+            }),
             format: None,
             tags: vec![],
             enabled_by_default: false,
@@ -1795,11 +1827,38 @@ fn report_papercut_history_tool(
     invoke: &ToolStarted,
     action: PapercutHistoryAction,
 ) -> ClientResult<()> {
-    let result = match &invoke.arguments {
-        CborValue::Map(arguments) if arguments.is_empty() => state.run_papercut_history(action),
-        _ => Err("papercut history tools accept no arguments".to_owned()),
-    };
+    let result = state.run_papercut_history(action, &invoke.arguments);
     handle.report_tool_terminal(papercut_history_terminal(invoke, result))
+}
+
+/// Require the caller's read generation before issuing any archive storage RPC.
+fn papercut_history_generation(
+    action: PapercutHistoryAction,
+    arguments: &CborValue,
+) -> Result<Option<&str>, String> {
+    let CborValue::Map(arguments) = arguments else {
+        return Err("papercut history arguments must be an object".to_owned());
+    };
+    if !matches!(action, PapercutHistoryAction::Archive) {
+        return if arguments.is_empty() {
+            Ok(None)
+        } else {
+            Err("papercut list and read accept no arguments".to_owned())
+        };
+    }
+    if let [(CborValue::Text(key), CborValue::Text(generation))] = arguments.as_slice()
+        && key == "expected_generation"
+        && generation.len() == 64
+        && generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Ok(Some(generation));
+    }
+    Err(
+        "papercut archive requires only expected_generation from a complete papercut_read"
+            .to_owned(),
+    )
 }
 
 /// Select a bounded terminal before sending anything through the writer.

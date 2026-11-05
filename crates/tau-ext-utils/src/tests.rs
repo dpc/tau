@@ -2528,6 +2528,195 @@ impl PapercutHistoryStorage for FakePapercutHistory {
     }
 }
 
+/// Build the sole archive argument without giving metadata reads any receipt.
+fn archive_generation_arguments(generation: &str) -> CborValue {
+    cbor_map(vec![(
+        "expected_generation",
+        CborValue::Text(generation.to_owned()),
+    )])
+}
+
+/// Extract the opaque receipt from the complete read's result header.
+fn archive_read_arguments(read: &str) -> CborValue {
+    archive_generation_arguments(
+        read.lines()
+            .next()
+            .unwrap()
+            .strip_prefix("generation: ")
+            .unwrap(),
+    )
+}
+
+/// A report appended after the returned read must survive a stale archive;
+/// a new complete read then permits archival of exactly the updated snapshot.
+#[test]
+fn papercut_history_archive_binds_returned_read() {
+    let mut rt = runtime();
+    rt.session_active = true;
+    rt.papercut_history_supported = true;
+    let line = b"{\"schema\":1,\"agent_id\":\"agent-one\",\"session_id\":\"session-one\",\"timestamp_us\":1000000,\"report\":\"report\"}\n";
+    let active = Rc::new(RefCell::new(Some(line.to_vec())));
+    let requests = Rc::new(RefCell::new(0));
+    rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
+        active: Rc::clone(&active),
+        requests: Rc::clone(&requests),
+    }));
+    let read = rt
+        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+        .unwrap();
+    let args = archive_read_arguments(&read);
+    active
+        .borrow_mut()
+        .as_mut()
+        .unwrap()
+        .extend_from_slice(line);
+    assert!(
+        rt.run_papercut_history(PapercutHistoryAction::Archive, &args)
+            .unwrap_err()
+            .contains("changed since")
+    );
+    assert_eq!(
+        *requests.borrow(),
+        2,
+        "stale input must not issue archive RPC"
+    );
+    assert_eq!(active.borrow().as_ref().unwrap(), &line.repeat(2));
+    let read = rt
+        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+        .unwrap();
+    rt.run_papercut_history(
+        PapercutHistoryAction::Archive,
+        &archive_read_arguments(&read),
+    )
+    .unwrap();
+    assert!(active.borrow().is_none());
+}
+
+/// The caller's generation must also reach the harness CAS unchanged when a
+/// writer races between the extension's validation read and its archive RPC.
+#[test]
+fn papercut_history_archive_preserves_cas_after_validation() {
+    /// Inject one append immediately before the fixture's conditional archive.
+    struct RacingHistory {
+        /// Ordinary snapshot and compare-and-swap behavior.
+        inner: FakePapercutHistory,
+        /// Complete report appended at the mutation boundary.
+        appended: Vec<u8>,
+    }
+    impl PapercutHistoryStorage for RacingHistory {
+        fn read(&self) -> Result<Option<Vec<u8>>, String> {
+            self.inner.read()
+        }
+        fn archive(&self, expected_generation: &str) -> Result<String, String> {
+            self.inner
+                .active
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .extend_from_slice(&self.appended);
+            self.inner.archive(expected_generation)
+        }
+    }
+    let mut rt = runtime();
+    rt.session_active = true;
+    rt.papercut_history_supported = true;
+    let line = b"{\"schema\":1,\"agent_id\":\"agent-one\",\"session_id\":\"session-one\",\"timestamp_us\":1000000,\"report\":\"report\"}\n";
+    let active = Rc::new(RefCell::new(Some(line.to_vec())));
+    rt.papercut_history_storage = Some(Box::new(RacingHistory {
+        inner: FakePapercutHistory {
+            active: Rc::clone(&active),
+            requests: Rc::new(RefCell::new(0)),
+        },
+        appended: line.to_vec(),
+    }));
+    let read = rt
+        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+        .unwrap();
+    assert!(
+        rt.run_papercut_history(
+            PapercutHistoryAction::Archive,
+            &archive_read_arguments(&read)
+        )
+        .unwrap_err()
+        .contains("changed since")
+    );
+    assert_eq!(active.borrow().as_ref().unwrap(), &line.repeat(2));
+}
+
+/// Missing, malformed, duplicate and extra archive arguments fail before any
+/// storage access, and readers cannot accept archive arguments.
+#[test]
+fn papercut_history_rejects_invalid_archive_arguments() {
+    let mut rt = runtime();
+    rt.session_active = true;
+    rt.papercut_history_supported = true;
+    let requests = Rc::new(RefCell::new(0));
+    rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
+        active: Rc::new(RefCell::new(None)),
+        requests: Rc::clone(&requests),
+    }));
+    let generation = blake3::hash(b"").to_hex().to_string();
+    for args in [
+        CborValue::Null,
+        cbor_map(vec![]),
+        archive_generation_arguments(""),
+        archive_generation_arguments(&"a".repeat(63)),
+        archive_generation_arguments(&"a".repeat(65)),
+        archive_generation_arguments(&"G".repeat(64)),
+        cbor_map(vec![("expected_generation", CborValue::Integer(1.into()))]),
+        cbor_map(vec![("generation", CborValue::Text(generation.clone()))]),
+        cbor_map(vec![
+            ("expected_generation", CborValue::Text(generation.clone())),
+            ("extra", CborValue::Null),
+        ]),
+        cbor_map(vec![
+            ("expected_generation", CborValue::Text(generation.clone())),
+            ("expected_generation", CborValue::Text(generation.clone())),
+        ]),
+    ] {
+        assert!(
+            rt.run_papercut_history(PapercutHistoryAction::Archive, &args)
+                .is_err()
+        );
+    }
+    for action in [PapercutHistoryAction::List, PapercutHistoryAction::Read] {
+        assert!(
+            rt.run_papercut_history(action, &archive_generation_arguments(&generation))
+                .is_err()
+        );
+    }
+    assert_eq!(*requests.borrow(), 0);
+}
+
+/// Absent and existing empty histories both return complete empty receipts;
+/// absence stays a no-op, while an existing empty file retains normal archival.
+#[test]
+fn papercut_history_empty_read_and_archive() {
+    for contents in [None, Some(Vec::new())] {
+        let existed = contents.is_some();
+        let mut rt = runtime();
+        rt.session_active = true;
+        rt.papercut_history_supported = true;
+        let requests = Rc::new(RefCell::new(0));
+        rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
+            active: Rc::new(RefCell::new(contents)),
+            requests: Rc::clone(&requests),
+        }));
+        let read = rt
+            .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+            .unwrap();
+        assert!(read.contains("No papercut reports."));
+        let result = rt
+            .run_papercut_history(
+                PapercutHistoryAction::Archive,
+                &archive_read_arguments(&read),
+            )
+            .unwrap();
+        assert!(result.starts_with("archived 0 papercut report(s)"));
+        assert_eq!(*requests.borrow(), if existed { 3 } else { 2 });
+    }
+}
+
 /// List omits report bodies; read includes them, and archive preserves the
 /// validated whole snapshot while removing it from active history.
 #[test]
@@ -2543,7 +2732,7 @@ fn papercut_history_tools_separate_metadata_full_read_and_archive() {
         requests: Rc::new(RefCell::new(0)),
     }));
     let list = rt
-        .run_papercut_history(PapercutHistoryAction::List)
+        .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
         .expect("list");
     assert_eq!(
         list,
@@ -2551,17 +2740,20 @@ fn papercut_history_tools_separate_metadata_full_read_and_archive() {
     );
     assert!(!list.contains("secret report"));
     let read = rt
-        .run_papercut_history(PapercutHistoryAction::Read)
+        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
         .expect("read");
     assert!(read.contains("secret report"));
     assert_eq!(
-        rt.run_papercut_history(PapercutHistoryAction::Archive)
-            .expect("archive"),
+        rt.run_papercut_history(
+            PapercutHistoryAction::Archive,
+            &archive_read_arguments(&read)
+        )
+        .expect("archive"),
         "archived 1 papercut report(s) at papercuts.archive-0000000000000001.jsonl"
     );
     assert!(active.borrow().is_none());
     assert_eq!(
-        rt.run_papercut_history(PapercutHistoryAction::List)
+        rt.run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
             .expect("empty list"),
         "0 active papercut report(s)\n"
     );
@@ -2580,8 +2772,15 @@ fn papercut_history_archive_fails_closed_on_malformed_snapshot() {
         requests: Rc::new(RefCell::new(0)),
     }));
     assert_eq!(
-        rt.run_papercut_history(PapercutHistoryAction::Archive)
-            .expect_err("malformed record"),
+        rt.run_papercut_history(
+            PapercutHistoryAction::Archive,
+            &archive_generation_arguments(
+                blake3::hash(active.borrow().as_ref().unwrap())
+                    .to_hex()
+                    .as_str()
+            )
+        )
+        .expect_err("malformed record"),
         "invalid papercut record at line 1"
     );
     assert_eq!(
@@ -2592,8 +2791,15 @@ fn papercut_history_archive_fails_closed_on_malformed_snapshot() {
         b"{\"schema\":2,\"agent_id\":\"agent-one\",\"session_id\":\"session-one\",\"timestamp_us\":1000000,\"report\":\"report\"}\n".to_vec(),
     );
     assert_eq!(
-        rt.run_papercut_history(PapercutHistoryAction::Archive)
-            .expect_err("unsupported schema"),
+        rt.run_papercut_history(
+            PapercutHistoryAction::Archive,
+            &archive_generation_arguments(
+                blake3::hash(active.borrow().as_ref().unwrap())
+                    .to_hex()
+                    .as_str()
+            )
+        )
+        .expect_err("unsupported schema"),
         "unsupported papercut record schema at line 1"
     );
 }
@@ -2632,7 +2838,15 @@ fn papercut_history_on_old_harness_fails_before_storage_rpc() {
             PapercutHistoryAction::Archive,
         ] {
             assert_eq!(
-                rt.run_papercut_history(action).expect_err("old harness"),
+                rt.run_papercut_history(
+                    action,
+                    &if action == PapercutHistoryAction::Archive {
+                        archive_generation_arguments(blake3::hash(b"").to_hex().as_str())
+                    } else {
+                        cbor_map(vec![])
+                    }
+                )
+                .expect_err("old harness"),
                 "papercut history tools require harness protocol 10.1 or newer"
             );
         }
@@ -2678,7 +2892,7 @@ fn oversized_papercut_read_returns_tool_error_then_accepts_next_read() {
     invoke.tool_name = tau_proto::ToolName::new(PAPERCUT_READ_TOOL_NAME);
     invoke.arguments = cbor_map(Vec::new());
     let big = rt
-        .run_papercut_history(PapercutHistoryAction::Read)
+        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
         .expect("valid, large Markdown");
     assert!(big.len() > tau_client::MAX_OUTBOUND_FRAME_BYTES as usize);
     let terminal = papercut_history_terminal(&invoke, Ok(big));
@@ -2686,6 +2900,8 @@ fn oversized_papercut_read_returns_tool_error_then_accepts_next_read() {
         panic!("oversized result must become tool error");
     };
     assert!(error.message.contains("tool result limit"));
+    assert!(!error.message.contains("generation:"));
+    assert!(error.details.is_none());
     assert_eq!(
         active.borrow().as_ref().expect("not archived").len(),
         line.len() * 1_100 + 1_100
@@ -2705,7 +2921,7 @@ fn oversized_papercut_read_returns_tool_error_then_accepts_next_read() {
     );
     invoke.call_id = ToolCallId::new("call-small");
     let small = rt
-        .run_papercut_history(PapercutHistoryAction::Read)
+        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
         .expect("subsequent small read");
     assert!(matches!(
         papercut_history_terminal(&invoke, Ok(small)),
