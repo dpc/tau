@@ -229,6 +229,26 @@ Supported origins are narrow configured `/user_avatars/` and `/static/` paths
 or official HTTPS Gravatar, without credentials/redirects. Image checks do not
 prove safety. Cancellation can leave stored artifacts.
 
+On supporting builds, `avatar.state="blocked_origin"` includes
+`failure_source="local_url_policy"` and a fixed `reason`:
+`external_scheme_not_https`, `external_host_not_allowed`, or
+`external_nondefault_port`. This reports the extension's local URL-policy rejection,
+not a refusal from Zulip. The extension attempts neither an avatar
+download nor an Artifact import. The reason identifies the first failed origin
+check, before path/query checks run. A configured hostname with a wrong port can
+fail the external-host check.
+
+Structured warnings use `operation=profile_avatar`, `stage=local_url_policy`,
+`category=blocked_origin`, and the same fixed reason. Safe relation fields are
+`host_class=configured|gravatar|other|none`,
+`configured_scheme=matches|differs`, and
+`configured_effective_port=matches|differs`; port comparisons include parsed
+defaults. These fields distinguish origin mismatches without exposing hostnames,
+URLs or native IDs. Use the returned reason and safe warning fields to diagnose
+a rejection; do not request raw avatar URLs or loosen policy automatically.
+An older `blocked_origin` result alone does not identify the specific mismatch
+or establish that a later build fixes the reported avatar incident.
+
 ### Editing the bot's own avatar
 
 `zulip_update_self_profile` accepts `{"avatar":"<tau-artifact:blake3:…>"}` or a bare
