@@ -43,10 +43,23 @@ fn hello_inspection_support_does_not_extend_authority_enum() {
     let old: crate::Hello =
         serde_json::from_value(value.clone()).expect("valid inspection test fixture");
     assert!(!old.declaration_inspection);
+    assert_eq!(old.build_identity, None);
+    value["build_identity"] = serde_json::json!({
+        "release": "1.2.3", "revision": "123abcd"
+    });
     value["declaration_inspection"] = serde_json::json!(true);
     let new: crate::Hello =
         serde_json::from_value(value.clone()).expect("valid inspection test fixture");
     assert!(new.declaration_inspection);
+    assert_eq!(
+        new.build_identity.as_ref().expect("build identity").release,
+        "1.2.3"
+    );
+    let encoded = crate::encode_message_to_vec(&new).expect("encode Hello");
+    assert_eq!(
+        crate::decode_message_from_slice::<crate::Hello>(&encoded).expect("decode Hello"),
+        new
+    );
     let old_decoder: OldHello =
         serde_json::from_value(value).expect("valid inspection test fixture");
     assert!(old_decoder.capabilities.is_empty());

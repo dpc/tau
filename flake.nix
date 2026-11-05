@@ -166,7 +166,7 @@
           };
 
         # Placeholders are 40 / 16 raw bytes that the binary embeds via
-        # a `static [u8; N]` in `crates/tau-harness/src/version.rs`.
+        # statics in `tau-client::build_info` and `tau-harness::version`.
         # The strings below MUST byte-for-byte match those statics, and
         # the substituted values MUST be the same length so `bbe` can
         # patch them in place without shifting any file offsets.

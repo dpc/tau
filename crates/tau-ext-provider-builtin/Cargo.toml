@@ -23,6 +23,9 @@ quota-test-support = []
 # Production scheduler frames for cross-crate standalone accounting acceptance.
 standalone-compaction-test-support = []
 
+[build-dependencies]
+built.workspace = true
+
 [dependencies]
 blake3.workspace = true
 dialoguer.workspace = true

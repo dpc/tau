@@ -129,6 +129,7 @@ fn write_initial_ui_handshake(writer: &mut PeerOutputWriter<BufWriter<std::proce
     writer
         .write_message(&HarnessInputMessage::Hello(Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: PROTOCOL_VERSION,
             client_name: "tau-cli".parse().expect("valid terminal UI client name"),
             client_kind: ClientKind::Ui,
@@ -510,6 +511,7 @@ fn harness_process_rejects_attach_session_mismatch() {
     writer
         .write_message(&HarnessInputMessage::Hello(Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: PROTOCOL_VERSION,
             client_name: "attach-test".parse().expect("valid client name"),
             client_kind: ClientKind::Ui,

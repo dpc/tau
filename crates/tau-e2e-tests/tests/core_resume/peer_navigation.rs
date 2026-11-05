@@ -109,6 +109,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     let mut peer = tau_socket::SocketPeer::connect(&target_socket)?;
     peer.send(&HarnessInputMessage::Hello(tau_proto::Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
             .expect("callback client name must satisfy the identifier grammar"),
@@ -231,6 +232,7 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
     let mut peer = tau_socket::SocketPeer::connect(&target_socket)?;
     peer.send(&HarnessInputMessage::Hello(tau_proto::Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)?,
         client_kind: tau_proto::ClientKind::External,

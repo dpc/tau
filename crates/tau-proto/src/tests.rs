@@ -2577,6 +2577,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
     vec![
         HarnessInputMessage::Hello(Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: PROTOCOL_VERSION,
             client_name: test_extension_name("provider"),
             client_kind: ClientKind::Provider,
@@ -4535,7 +4536,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 6})
+        serde_json::json!({"major": 16, "minor": 7})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4634,6 +4635,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
 fn directional_message_wire_form_uses_flat_message_tag() {
     let input = HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: PROTOCOL_VERSION,
         client_name: test_extension_name("provider"),
         client_kind: ClientKind::Provider,
@@ -4645,7 +4647,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 16, "minor": 6})
+        serde_json::json!({"major": 16, "minor": 7})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4694,6 +4696,7 @@ fn ui_session_admission_wire_round_trip() {
     let expected = SessionId::parse("session-1").expect("valid session id");
     let hello = HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: PROTOCOL_VERSION,
         client_name: test_extension_name("ui"),
         client_kind: ClientKind::Ui,
@@ -4737,7 +4740,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 6})
+        serde_json::json!({"major": 16, "minor": 7})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)

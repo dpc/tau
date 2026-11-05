@@ -25,6 +25,7 @@ fn contract_is_default_and_input_free() {
 
 fn info(status: tau_proto::SessionAgentWorkStatus) -> InternalSelfInfo {
     InternalSelfInfo {
+        extensions: Vec::new(),
         agent_id: "engineer-test".parse().expect("agent id"),
         session_id: "session-test".parse().expect("session id"),
         session_dir: None,
@@ -39,6 +40,43 @@ fn info(status: tau_proto::SessionAgentWorkStatus) -> InternalSelfInfo {
         provider_quota: None,
         work_status: status,
     }
+}
+
+/// Build diagnostics distinguish package versions from protocol versions and
+/// render absent metadata explicitly without permitting extra header lines.
+#[test]
+fn extension_headers_show_reported_builds_and_explicit_unknowns() {
+    let mut info = info(
+        tau_proto::SessionAgentWorkStatus::new(tau_proto::AgentWorkStatusPhase::Unreported, None)
+            .expect("status"),
+    );
+    info.extensions = vec![
+        crate::internal_self_extension::InternalSelfExtension {
+            name: "tool-a".parse().expect("name"),
+            instance_id: 10.into(),
+            restart_attempt: 2,
+            build_identity: Some(tau_proto::BuildIdentity {
+                release: "3.2.1\ninjected: no".to_owned(),
+                revision: Some("abcdef0-modified".to_owned()),
+            }),
+        },
+        crate::internal_self_extension::InternalSelfExtension {
+            name: "tool-b".parse().expect("name"),
+            instance_id: 11.into(),
+            restart_attempt: 0,
+            build_identity: None,
+        },
+    ];
+    let rendered = format_headers(&info);
+    let lines: Vec<_> = rendered
+        .lines()
+        .filter(|line| line.starts_with("extension:"))
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("tool-a instance=10 restart=2"));
+    assert!(lines[0].contains("build=abcdef0-modified"));
+    assert!(!rendered.lines().any(|line| line.starts_with("injected:")));
+    assert!(lines[1].contains("release=unknown build=unknown"));
 }
 
 /// The production resolver emits requested and frozen effective effort

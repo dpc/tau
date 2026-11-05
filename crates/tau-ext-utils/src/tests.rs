@@ -162,6 +162,13 @@ fn configured_frames_with_config(
 fn inspection_matches_configured_utility_declarations() {
     for enabled in [false, true] {
         let ordinary = startup_frames(enabled);
+        let HarnessInputMessage::Hello(hello) = &ordinary[0] else {
+            panic!("ordinary startup begins with Hello");
+        };
+        assert_eq!(
+            hello.build_identity,
+            Some(tau_client::package_build_identity!(built_info))
+        );
         let expected: Vec<_> = ordinary
             .into_iter()
             .filter_map(|frame| match frame {
@@ -185,6 +192,10 @@ fn inspection_matches_configured_utility_declarations() {
             panic!("inspection must emit only Hello and completion");
         };
         assert!(hello.declaration_inspection);
+        assert_eq!(
+            hello.build_identity,
+            Some(tau_client::package_build_identity!(built_info))
+        );
         assert_eq!(result.tools, expected);
         assert!(result.gaps.is_empty());
         assert!(result.providers.is_empty());

@@ -1211,6 +1211,10 @@ fn inspection_provider_metadata_requires_no_credentials() {
         panic!("inspection must emit only Hello and completion");
     };
     assert!(hello.declaration_inspection);
+    assert_eq!(
+        hello.build_identity,
+        Some(tau_client::package_build_identity!(built_info))
+    );
     assert_eq!(inventory.providers.len(), 1);
     assert_eq!(inventory.providers[0].models, expected);
     assert!(!expected.is_empty());

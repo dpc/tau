@@ -135,6 +135,7 @@ fn format_headers(info: &InternalSelfInfo) -> String {
         compaction,
         provider_quota,
         work_status,
+        extensions,
     } = info;
     let session_dir = session_dir.as_deref().map_or_else(
         || "(none)".to_owned(),
@@ -156,6 +157,26 @@ fn format_headers(info: &InternalSelfInfo) -> String {
         status_name(work_status.phase()),
     );
     append_context(&mut output, context);
+    for extension in extensions {
+        let release = extension
+            .build_identity
+            .as_ref()
+            .map_or("unknown", |info| info.release.as_str());
+        let revision = extension
+            .build_identity
+            .as_ref()
+            .and_then(|info| info.revision.as_deref())
+            .unwrap_or("unknown");
+        let _ = write!(
+            output,
+            "\nextension: {} instance={} restart={} release={} build={}",
+            extension.name,
+            extension.instance_id,
+            extension.restart_attempt,
+            escape_header_bytes(release.as_bytes()),
+            escape_header_bytes(revision.as_bytes()),
+        );
+    }
     if let Some(inference) = &compaction.inference {
         let _ = write!(output, "\ncompaction: {inference}");
     }

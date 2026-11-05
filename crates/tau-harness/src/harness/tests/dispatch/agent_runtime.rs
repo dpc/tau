@@ -489,6 +489,7 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
                 connection_id: connection_id.clone(),
                 kind: tau_proto::ClientKind::Tool,
                 peer_capabilities: Default::default(),
+                build_identity: None,
                 require: true,
                 respawn_allowed: true,
                 pid: None,

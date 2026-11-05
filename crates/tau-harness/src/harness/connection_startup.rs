@@ -119,6 +119,7 @@ impl Harness {
                     connection_id: conn_id,
                     kind: kind.clone(),
                     peer_capabilities: Default::default(),
+                    build_identity: None,
                     tool_prefix: ext_config.tool_prefix.clone(),
                     require: ext_config.require,
                     respawn_allowed: true,

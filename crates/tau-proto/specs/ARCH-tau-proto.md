@@ -1,5 +1,9 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 16.7 / source SDK 0.22.0 adds optional diagnostic `BuildIdentity` to
+Hello. Missing metadata remains unknown; older readers may ignore it. This adds
+no events, replay requirements, or admission authorities.
+
 Protocol 16.6 and source SDK 0.21.0 carry optional `MessageLinks` on delivered,
 edited, and sent reports and facts. Projection exposes publisher-scoped root,
 previous, and immediate-reply IDs alongside the message's own `message_ref`;

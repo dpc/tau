@@ -1866,6 +1866,7 @@ impl Harness {
                     }
                 };
                 if let Some(entry) = self.extensions.entries.get_mut(source_id) {
+                    entry.build_identity = hello.build_identity;
                     entry.peer_capabilities = hello.capabilities.into_iter().collect();
                 }
                 if let Some(warning) = protocol_version_warning

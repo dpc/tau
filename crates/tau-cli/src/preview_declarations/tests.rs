@@ -46,6 +46,7 @@ fn encoded_frames(messages: &[HarnessInputMessage]) -> Vec<u8> {
 /// Supported identity for tool-only fixtures.
 fn hello(supported: bool) -> HarnessInputMessage {
     HarnessInputMessage::Hello(tau_proto::Hello {
+        build_identity: None,
         declaration_inspection: supported,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: "inspection-fixture".parse().expect("name"),

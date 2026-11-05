@@ -83,6 +83,7 @@ fn deterministic_minor_protocol_skew_continues_without_warning()
     );
     peer.send(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: peer_version,
         client_name: "tau-e2e-minor-skew".parse()?,
         client_kind: ClientKind::Ui,

@@ -151,6 +151,7 @@ fn admitted_ui(
         &connection,
         HarnessInputMessage::Hello(tau_proto::Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("paste-test"),
             client_kind: tau_proto::ClientKind::Ui,

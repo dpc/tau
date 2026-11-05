@@ -24,6 +24,9 @@ workspace = true
 # dispatcher with empty discovery and a private cwd, without a real model.
 echo-agent = []
 
+[build-dependencies]
+built.workspace = true
+
 [dependencies]
 base64.workspace = true
 blake3.workspace = true

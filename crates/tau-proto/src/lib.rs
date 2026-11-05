@@ -20,6 +20,8 @@ use serde::de as path_serde_de;
 
 mod artifact;
 mod bridge_receiver;
+mod build_identity;
+pub use build_identity::BuildIdentity;
 mod byte_count;
 mod context;
 mod context_visibility;
@@ -123,7 +125,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(16, 6);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(16, 7);
 
 /// Reporter-owned filename used by the locked papercut history RPC.
 pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";

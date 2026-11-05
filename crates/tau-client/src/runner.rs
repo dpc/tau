@@ -364,6 +364,7 @@ pub(crate) fn write_hello<State>(
     }
     handle.send_startup(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         declaration_inspection: false,
+        build_identity: builder.build_identity.clone(),
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: builder.name.clone(),
         client_kind: builder.kind.clone(),

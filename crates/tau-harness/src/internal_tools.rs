@@ -17,6 +17,7 @@ use crate::agent as path_crate_agent;
 use crate::discovery::DiscoveredSkillSource;
 use crate::error::HarnessError;
 use crate::harness::Harness;
+use crate::internal_self_extension::InternalSelfExtension;
 use crate::{
     AgentId, AgentToolCall, event as path_crate_event, runtime_dir as path_crate_runtime_dir,
 };
@@ -211,6 +212,8 @@ pub struct AgentOwnedInternalToolCall {
 /// tool.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InternalSelfInfo {
+    /// Ready extension instances and their self-reported build metadata.
+    pub extensions: Vec<InternalSelfExtension>,
     /// Stable public identity of the calling agent.
     pub agent_id: tau_proto::AgentId,
     /// Session that owns the calling agent.
@@ -982,6 +985,7 @@ impl<'a> InternalToolHost<'a> {
                     .join(agent.identity.session_id.as_str())
             });
         Some(InternalSelfInfo {
+            extensions: self.harness.self_extension_info(),
             agent_id,
             session_id: agent.identity.session_id.clone(),
             session_dir,

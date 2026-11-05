@@ -121,6 +121,7 @@ fn quit_projection_follows_exact_ui_admission() {
             ui_id,
             HarnessInputMessage::Hello(tau_proto::Hello {
                 declaration_inspection: false,
+                build_identity: None,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("projection-ui"),
                 client_kind: tau_proto::ClientKind::Ui,
@@ -158,6 +159,7 @@ fn quit_projection_follows_initial_ui_hello() {
             &ui_id,
             HarnessInputMessage::Hello(tau_proto::Hello {
                 declaration_inspection: false,
+                build_identity: None,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("initial-projection-ui"),
                 client_kind: tau_proto::ClientKind::Ui,
@@ -400,6 +402,7 @@ fn runtime_probe_is_quarantined_and_not_counted_as_a_served_ui() {
             probe_id.clone(),
             HarnessInputMessage::Hello(tau_proto::Hello {
                 declaration_inspection: false,
+                build_identity: None,
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: tau_proto::ExtensionName::parse("tau-runtime-probe")
                     .expect("probe name"),
@@ -725,6 +728,7 @@ fn tree_request_is_silently_denied_for_other_client_origins() {
         &external_id,
         HarnessInputMessage::Hello(tau_proto::Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name(
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,

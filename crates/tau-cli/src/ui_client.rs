@@ -343,6 +343,7 @@ pub(crate) fn hello_message(
 ) -> HarnessInputMessage {
     HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: PROTOCOL_VERSION,
         client_name,
         client_kind: ClientKind::Ui,

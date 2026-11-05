@@ -55,6 +55,7 @@ fn input(configure: Configure) -> Cursor<Vec<u8>> {
 fn hello() -> tau_proto::Hello {
     tau_proto::Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: "inspection-test"
             .parse()
@@ -96,6 +97,7 @@ fn inspection_finishes_before_runtime_construction() {
         [
             HarnessInputMessage::Hello(tau_proto::Hello {
                 declaration_inspection: true,
+                build_identity: None,
                 ..
             }),
             HarnessInputMessage::InspectionComplete(_),
@@ -127,6 +129,64 @@ fn ordinary_continuation_preserves_single_handshake() {
         frames(output).as_slice(),
         [HarnessInputMessage::Hello(_), HarnessInputMessage::Ready(_),]
     ));
+}
+
+/// A bootstrap identity must survive runtime continuation without a second
+/// Hello or silently changing the build after the harness has admitted the
+/// connection.
+#[test]
+fn bootstrap_build_identity_is_preserved_and_cannot_change_on_continuation() {
+    /// Minimal versioned runtime used for the bootstrap contract.
+    struct VersionedRuntime;
+    impl TauExtension for VersionedRuntime {
+        type State = ();
+        fn name(&self) -> &'static str {
+            "inspection-test"
+        }
+        fn register(self, builder: &mut crate::ExtensionBuilder<()>) {
+            builder.build_identity(tau_proto::BuildIdentity {
+                release: "7.8.9".to_owned(),
+                revision: None,
+            });
+        }
+    }
+    for matches in [true, false] {
+        let mut hello = hello();
+        hello.build_identity = Some(tau_proto::BuildIdentity {
+            release: if matches { "7.8.9" } else { "0.0.1" }.to_owned(),
+            revision: None,
+        });
+        let advertised = hello.build_identity.clone();
+        let mut output = Vec::new();
+        let prepared = prepare_inspection(
+            input(configure(ConfigurePurpose::Runtime)),
+            &mut output,
+            hello,
+            |_| panic!("not inspection"),
+        )
+        .expect("bootstrap")
+        .expect("runtime");
+        let result = prepared.run(VersionedRuntime, |runner, reader, writer| {
+            runner.run(reader, writer, ())
+        });
+        if matches {
+            result.expect("matching identity").expect("runtime");
+        } else {
+            assert!(result.is_err());
+        }
+        let frames = frames(output);
+        let HarnessInputMessage::Hello(hello) = &frames[0] else {
+            panic!("Hello")
+        };
+        assert_eq!(hello.build_identity, advertised);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(frame, HarnessInputMessage::Hello(_)))
+                .count(),
+            1
+        );
+    }
 }
 
 /// Pure declaration failure must not echo secret-bearing configuration errors

@@ -10,6 +10,7 @@ use std::collections::hash_map as path_std_collections_hash_map;
 use std::io as path_std_io;
 
 mod backend_observation;
+mod built_info;
 mod cache_contract;
 mod cache_refresh;
 mod chat_completions;
@@ -2843,6 +2844,7 @@ where
     }
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.build_identity(tau_client::package_build_identity!(built_info));
         let settings_snapshot = self.settings_snapshot;
         let startup_profiles = self.startup_profiles;
         let publish_models_after_configure = startup_profiles.is_none();

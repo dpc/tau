@@ -51,6 +51,7 @@ mod harness;
 mod history_reader;
 mod image_verification;
 mod internal_envelope;
+mod internal_self_extension;
 pub mod internal_tools;
 mod model;
 #[cfg(feature = "output-length-test-barrier")]

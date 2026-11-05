@@ -50,6 +50,8 @@ pub(crate) enum ExtensionState {
 
 /// One admitted extension instance and its live routing state.
 pub(crate) struct ExtensionEntry {
+    /// Self-reported build identity from this connection's admitted Hello.
+    pub(crate) build_identity: Option<tau_proto::BuildIdentity>,
     /// Stable configured extension identity.
     pub(crate) name: tau_proto::ExtensionName,
     /// Run-local extension instance identity.

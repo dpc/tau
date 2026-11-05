@@ -16,6 +16,8 @@ use crate::{ClientError, ClientResult, ExtensionPlugin, InterceptDecision};
 /// Builder used by a [`crate::TauExtension`] to declare startup frames and
 /// handlers.
 pub struct ExtensionBuilder<State> {
+    /// Optional reporting package identity sent in Hello.
+    pub(crate) build_identity: Option<tau_proto::BuildIdentity>,
     /// Configure consumed by a preceding declaration-aware bootstrap.
     pub(crate) initial_configure: Option<tau_proto::Configure>,
     /// Whether that bootstrap already emitted the connection's Hello.
@@ -82,6 +84,7 @@ impl<State> ExtensionBuilder<State> {
         let name = tau_proto::ExtensionName::parse(name.as_ref().to_owned())
             .map_err(|error| ClientError::builder(error.to_string()))?;
         Ok(Self {
+            build_identity: None,
             initial_configure: None,
             hello_sent: false,
             name,
@@ -102,6 +105,12 @@ impl<State> ExtensionBuilder<State> {
             intercept_handler: None,
             error: None,
         })
+    }
+
+    /// Supplies this package's build identity for the initial Hello.
+    pub fn build_identity(&mut self, identity: tau_proto::BuildIdentity) -> &mut Self {
+        self.build_identity = Some(identity);
+        self
     }
 
     /// Declares that this extension publishes external-message reports.

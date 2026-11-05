@@ -655,7 +655,8 @@ fn fixture_extension_originator() -> PromptOriginator {
 fn restart_tool_can_return_error() {
     let frames = run_restart_frames(&[invoke_restart()], 1);
 
-    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(&frames[0], HarnessInputMessage::Hello(hello)
+        if hello.build_identity == Some(tau_client::package_build_identity!(built_info))));
     assert!(matches!(frames[1], HarnessInputMessage::Subscribe(_)));
     assert!(matches!(frames[2], HarnessInputMessage::Intercept(_)));
     let Some(Event::ToolRegistrationDeclared(declaration)) = emitted_event(&frames[3]) else {

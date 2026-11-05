@@ -20,6 +20,14 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Prepared SDK 0.22.0 (not published)
+
+Protocol 16.7 adds optional build identity to Hello. Proto/client source versions
+are 0.22.0; the SDK leaf versions are unchanged. Existing 16.x peers remain
+compatible, but producers must adopt the new field to report build metadata.
+Publication, downstream rebuilds, and activation are separate operations.
+See [the client integration recipe](../crates/tau-client/README.md#build-identity).
+
 ### Published SDK 0.21.0
 
 Protocol **16.6** adds optional typed message links and linked-message retrieval

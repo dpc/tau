@@ -1175,6 +1175,7 @@ impl Harness {
                 connection_id: new_connection_id,
                 kind,
                 peer_capabilities: Default::default(),
+                build_identity: None,
                 tool_prefix,
                 require: config.require,
                 respawn_allowed: true,

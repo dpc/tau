@@ -321,6 +321,12 @@ Intercept handlers always produce exactly one `InterceptReply` for each request.
 If the handler fails, the runner sends a pass-through reply first, then returns
 the handler error so the extension run stops without leaving the harness waiting.
 
+The optional Hello build identity comes from the reporting package, not the SDK.
+The builder and declaration-aware bootstrap use the same identity without adding
+a startup phase. Shared fixed-width package stamp slots take precedence over
+caller-generated Git metadata; absent metadata remains unknown. The identity
+provides diagnostics, not a protocol compatibility or trust assertion.
+
 ## Testing strategy
 
 Tests in `src/tests.rs` are protocol contract tests for the reusable runtime.

@@ -76,6 +76,7 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
             client
                 .send(&HarnessInputMessage::Hello(Hello {
                     declaration_inspection: false,
+                    build_identity: None,
                     protocol_version: PROTOCOL_VERSION,
                     client_name: tau_proto::ExtensionName::parse("client")
                         .expect("test identifier must satisfy its grammar"),
@@ -99,6 +100,7 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
         hello,
         HarnessInputMessage::Hello(Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: PROTOCOL_VERSION,
             client_name: tau_proto::ExtensionName::parse("client")
                 .expect("test identifier must satisfy its grammar"),

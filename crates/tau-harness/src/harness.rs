@@ -2010,6 +2010,7 @@ where
 
     writer.write_message(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse("tau-echo-provider")
             .expect("built-in echo provider name must satisfy the extension identifier grammar"),

@@ -23,6 +23,7 @@ fn connect_admitted_test_ui(
     let mut peer = tau_socket::SocketPeer::connect(socket).expect("connect test UI");
     peer.send(&HarnessInputMessage::Hello(tau_proto::Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(client_name).expect("client name"),
         client_kind: tau_proto::ClientKind::Ui,

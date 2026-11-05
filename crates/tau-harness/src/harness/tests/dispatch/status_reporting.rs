@@ -1046,6 +1046,8 @@ fn self_info_uses_prompt_authority_and_current_runtime_status() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = echo_harness(&state).expect("start");
+    let expected_extensions = h.self_extension_info();
+    assert!(!expected_extensions.is_empty());
     let recorded = path_std_sync::Arc::new(RecordingSelfInfoTool(path_std_sync::Mutex::new(None)));
     h.install_internal_tool_handlers(vec![recorded.clone()]);
     let cid = ensure_test_user_agent(&mut h);
@@ -1096,6 +1098,7 @@ fn self_info_uses_prompt_authority_and_current_runtime_status() {
         .clone()
         .expect("recorded metadata");
     assert_eq!(info.agent_id, prompt.agent_id);
+    assert_eq!(info.extensions, expected_extensions);
     assert_eq!(info.session_id, prompt.session_id);
     assert_eq!(info.model, prompt.model);
     assert_eq!(info.effort, prompt.model_params.effort);
@@ -1914,8 +1917,8 @@ fn foreground_settlement_follows_current_working_status() {
 }
 
 /// The intrinsic production handler derives nondurable storage, model context
-/// and compaction state, unavailable quota, and the current status reducer
-/// value before publishing its exact line-oriented tool result.
+/// and compaction state, unavailable quota, current status, and ready extension
+/// builds before publishing its line-oriented tool result.
 #[test]
 fn self_info_production_dispatch_reports_memory_only_current_status() {
     let td = TempDir::new().expect("tempdir");
@@ -1950,8 +1953,11 @@ fn self_info_production_dispatch_reports_memory_only_current_status() {
             _ => None,
         })
         .expect("intrinsic self-info result");
+    let (extension_rows, headers): (Vec<_>, Vec<_>) = result
+        .lines()
+        .partition(|line| line.starts_with("extension: "));
     assert_eq!(
-        result,
+        headers.join("\n"),
         format!(
             "agent_id: {}\nsession_id: s1\nsession_dir: (none)\ntau: {}\nmodel: {}\neffort_requested: {}\neffort_effective: {}\nstatus: working\nstatus_task_name: Inspect runtime identity",
             prompt.agent_id,
@@ -1961,7 +1967,28 @@ fn self_info_production_dispatch_reports_memory_only_current_status() {
             prompt.model_params.effort.effective
         )
     );
-    assert_eq!(result.lines().count(), 9);
+    let extensions = h.self_extension_info();
+    assert!(!extensions.is_empty());
+    assert_eq!(extension_rows.len(), extensions.len());
+    for (row, extension) in extension_rows.iter().zip(extensions) {
+        let (release, revision) = extension
+            .build_identity
+            .as_ref()
+            .map(|identity| {
+                (
+                    identity.release.as_str(),
+                    identity.revision.as_deref().unwrap_or("unknown"),
+                )
+            })
+            .unwrap_or(("unknown", "unknown"));
+        assert_eq!(
+            *row,
+            format!(
+                "extension: {} instance={} restart={} release={release} build={revision}",
+                extension.name, extension.instance_id, extension.restart_attempt,
+            )
+        );
+    }
     h.shutdown().expect("shutdown");
 }
 

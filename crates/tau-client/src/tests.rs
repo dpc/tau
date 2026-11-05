@@ -1594,6 +1594,44 @@ fn startup_frame_order_is_stable() {
     assert_eq!(frames.len(), 7);
 }
 
+/// The standard runner sends caller-owned metadata once, before declarations;
+/// extensions that do not opt in do not accidentally claim the SDK's version.
+#[test]
+fn startup_build_identity_is_explicit_and_caller_owned() {
+    /// Minimal extension reporting an independently versioned package.
+    struct VersionedExtension;
+    impl TauExtension for VersionedExtension {
+        type State = ();
+        fn name(&self) -> &'static str {
+            "versioned"
+        }
+        fn register(self, builder: &mut ExtensionBuilder<()>) {
+            builder.build_identity(tau_proto::BuildIdentity {
+                release: "42.1.9".to_owned(),
+                revision: Some("7654321".to_owned()),
+            });
+        }
+    }
+    let (_, frames) = run_messages(VersionedExtension, (), &[]);
+    let HarnessInputMessage::Hello(hello) = &frames[0] else {
+        panic!("first frame must be Hello");
+    };
+    assert_eq!(
+        hello.build_identity,
+        Some(tau_proto::BuildIdentity {
+            release: "42.1.9".to_owned(),
+            revision: Some("7654321".to_owned()),
+        })
+    );
+    assert!(matches!(frames[1], HarnessInputMessage::Ready(_)));
+    assert_eq!(frames.len(), 2);
+    let (_, frames) = run_messages(StartupExtension, (), &[]);
+    let HarnessInputMessage::Hello(hello) = &frames[0] else {
+        panic!("first frame must be Hello");
+    };
+    assert_eq!(hello.build_identity, None);
+}
+
 /// A bridge builder declaration must become authenticated handshake metadata.
 #[test]
 fn message_bridge_capability_is_declared_in_hello() {

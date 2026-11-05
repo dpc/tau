@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.7 adds optional package release and source revision metadata to Hello.
+Older 16.x peers may omit or ignore it; admission is unchanged. Proto/client
+source SDK 0.22.0 exposes the new field and caller-owned build helper. The
+harness keeps this diagnostic data only for the current connection and reports it
+for ready instances through `self_info`. It never journals the data or uses it for
+authority.
+SDK publication and external extension adoption remain separate.
+
 Protocol 16.6 adds optional publisher-scoped message links to delivered, edited,
 and sent facts and reports. Older 16.x readers may ignore the links; omitted
 fields preserve prior rendering. SDK 0.21.0 exposes the new public fields.

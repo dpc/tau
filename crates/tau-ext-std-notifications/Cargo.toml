@@ -17,6 +17,9 @@ name = "tau_ext_std_notifications"
 [lints]
 workspace = true
 
+[build-dependencies]
+built.workspace = true
+
 [dependencies]
 handlebars.workspace = true
 libc.workspace = true

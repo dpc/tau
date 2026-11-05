@@ -17,6 +17,9 @@ name = "tau_ext_utils"
 [lints]
 workspace = true
 
+[build-dependencies]
+built.workspace = true
+
 [dependencies]
 blake3.workspace = true
 image.workspace = true

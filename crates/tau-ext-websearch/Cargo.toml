@@ -17,6 +17,9 @@ name = "tau_ext_websearch"
 [lints]
 workspace = true
 
+[build-dependencies]
+built.workspace = true
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

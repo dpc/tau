@@ -23,6 +23,13 @@ path-based shutdown races.
 
 ## Extension boundary
 
+Hello may report a package release and source revision for diagnostics. The
+harness retains this metadata only on that admitted connection. `self_info` lists
+ready instances with configured name, run-local instance ID, restart attempt, and
+reported identity (or explicit unknowns). Disconnected, replaced, and not-yet-ready
+connections do not appear as live builds. These diagnostics require no process
+probes, durable events, or changes to protocol admission.
+
 Declaration inspection is a separate collector/SDK branch, not a normal
 harness instance or an intermediate readiness phase. An ordinary extension
 sending inspection completion fails its runtime protocol connection rather

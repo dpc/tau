@@ -677,6 +677,7 @@ fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error::Error>> {
     )?;
     peer.send(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse("provider-builtin-retry-e2e")?,
         client_kind: ClientKind::Ui,
@@ -817,6 +818,7 @@ fn ui_connect_retries_bound_socket_until_listening_and_retains_peer() {
 
     peer.send(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse("provider-builtin-connect-test")
             .expect("valid test client name"),

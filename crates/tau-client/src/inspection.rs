@@ -60,6 +60,11 @@ impl<R: Read, W: Write> ConfiguredConnection<R, W> {
                 "ordinary continuation changed Hello capabilities",
             ));
         }
+        if self.hello.build_identity != builder.build_identity {
+            return Err(ClientError::builder(
+                "ordinary continuation changed Hello build identity",
+            ));
+        }
         Ok(runtime(
             TauExtensionRunner {
                 extension: None,

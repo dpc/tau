@@ -150,6 +150,7 @@ fn write_startup(
     writer.write_frame(&TestProtocolItem::Message(TestMessage::Hello(
         tau_proto::Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-strict-compaction-provider"),
             client_kind: tau_proto::ClientKind::Provider,

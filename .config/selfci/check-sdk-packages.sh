@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.21.0",
+        "dpc-tau-proto": "=0.22.0",
     },
 }
 
@@ -140,6 +140,9 @@ tau-actions = { package = "dpc-tau-actions", version = "=${versions[dpc-tau-acti
 tau-blocking-notify-channel = { package = "dpc-tau-blocking-notify-channel", version = "=${versions[dpc-tau-blocking-notify-channel]}" }
 tau-client = { package = "dpc-tau-client", version = "=${versions[dpc-tau-client]}" }
 tau-proto = { package = "dpc-tau-proto", version = "=${versions[dpc-tau-proto]}" }
+
+[build-dependencies]
+built = { version = "0.8", default-features = false, features = ["git2"] }
 EOF
 
 if [[ "$registry_consumer" == false ]]; then
@@ -153,7 +156,29 @@ dpc-tau-proto = { path = "$tmp/packages/dpc-tau-proto-${versions[dpc-tau-proto]}
 EOF
 fi
 
+cat >"$tmp/consumer/build.rs" <<'EOF'
+fn main() {
+    built::write_built_file().expect("generate consumer metadata");
+}
+EOF
+cat >"$tmp/consumer/src/built_info.rs" <<'EOF'
+include!(concat!(env!("OUT_DIR"), "/built.rs"));
+EOF
 cat >"$tmp/consumer/src/lib.rs" <<'EOF'
+mod built_info;
+
+/// Archives capture the caller package version without borrowing SDK provenance.
+#[test]
+fn packaged_sdk_captures_consumer_build_identity() {
+    let identity = tau_client::package_build_identity!(built_info);
+    assert_eq!(identity.release, env!("CARGO_PKG_VERSION"));
+    assert_eq!(identity.revision, None);
+    let mut builder = tau_client::ExtensionBuilder::<()>::new(
+        "consumer", tau_proto::ClientKind::Tool,
+    ).expect("builder");
+    builder.build_identity(identity);
+}
+
 /// Verifies that the packaged protocol and client surfaces resolve together.
 #[test]
 fn packaged_sdk_round_trips_the_advertised_protocol_version() {
@@ -162,7 +187,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 6));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(16, 7));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 

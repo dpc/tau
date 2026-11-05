@@ -1879,6 +1879,7 @@ fn quiet_provider_harness_for_with_start_reason_storage_mode_and_hook(
             writer.write_frame(&TestProtocolItem::Message(TestMessage::Hello(
                 tau_proto::Hello {
                     declaration_inspection: false,
+                    build_identity: None,
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: crate::test_extension_name("tau-quiet-provider"),
                     client_kind: tau_proto::ClientKind::Provider,
@@ -1992,6 +1993,7 @@ fn quiet_standalone_provider_harness_for_with_start_reason_storage_mode_and_hook
             writer.write_frame(&TestProtocolItem::Message(TestMessage::Hello(
                 tau_proto::Hello {
                     declaration_inspection: false,
+                    build_identity: None,
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: crate::test_extension_name("tau-quiet-provider"),
                     client_kind: tau_proto::ClientKind::Provider,
@@ -2149,6 +2151,7 @@ fn mark_connected_test_extension_configured(
             connection_id: connection_id.clone(),
             kind,
             peer_capabilities: Default::default(),
+            build_identity: None,
             require: true,
             respawn_allowed: true,
             pid: None,

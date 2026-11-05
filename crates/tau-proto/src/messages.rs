@@ -39,6 +39,9 @@ pub enum PeerCapability {
 /// Announcement sent by a participant after connecting.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
+    /// Optional self-reported build identity, scoped to this connection only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<crate::BuildIdentity>,
     /// Opt-in support for declaration-only Configure, before runtime
     /// initialization. Older harnesses ignore this additive field.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

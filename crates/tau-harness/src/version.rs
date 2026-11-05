@@ -5,6 +5,8 @@
 //! a dedicated link section. The Nix packaging step rewrites those
 //! bytes in-place with `bbe` after the binary is built, which lets the
 //! cargo build cache stay reproducible across commits.
+//! The revision/dirty slots live in `tau-client::build_info` so bundled
+//! extensions and core share one stamp without duplicating linker sections.
 //!
 //! Why a `static [u8; N]` (and not the `built` crate's `&str`
 //! constants): release builds with LTO inline short string literals as
@@ -16,33 +18,10 @@
 //! `.rodata`/data as one contiguous, unmerged blob.
 
 mod built_info;
-#[cfg(test)]
-mod tests;
 
 /// Magic prefix used to detect an unpatched binary (i.e. plain
 /// `cargo build` outside of the Nix packaging path).
 const PLACEHOLDER_TAG: &[u8] = b"__TAU_BUILD";
-
-/// 40-byte slot for the git SHA-1 the binary was built from. Patched
-/// in place by the Nix build's `bbe` post-processing.
-#[used]
-#[allow(unsafe_code)]
-#[cfg_attr(
-    target_vendor = "apple",
-    unsafe(link_section = "__DATA,.tau_build_info")
-)]
-#[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".tau_build_info"))]
-static GIT_REVISION: [u8; 40] = *b"__TAU_BUILD_GIT_REVISION_PLACEHOLDER____";
-
-/// 17-byte slot indicating whether the packaged source was dirty.
-#[used]
-#[allow(unsafe_code)]
-#[cfg_attr(
-    target_vendor = "apple",
-    unsafe(link_section = "__DATA,.tau_build_info")
-)]
-#[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".tau_build_info"))]
-static BUILD_STATE: [u8; 17] = *b"__TAU_BUILD_DIRTY";
 
 /// 16-byte slot for the build date, formatted `YYYY-MM-DD HH:MM`.
 /// Patched in place by the Nix build's `bbe` post-processing.
@@ -71,27 +50,8 @@ fn read_static<const N: usize>(s: &'static [u8; N]) -> [u8; N] {
 /// `-modified` when the working tree was dirty at build time.
 #[must_use]
 pub fn build_revision() -> String {
-    let bytes = read_static(&GIT_REVISION);
-    if bytes.starts_with(PLACEHOLDER_TAG) {
-        return match (built_info::GIT_COMMIT_HASH_SHORT, built_info::GIT_DIRTY) {
-            (Some(hash), Some(true)) => format!("{hash}-modified"),
-            (Some(hash), _) => hash.to_owned(),
-            _ => "unknown".to_owned(),
-        };
-    }
-    format_patched_revision(&bytes, &read_static(&BUILD_STATE))
-}
-
-fn format_patched_revision(revision: &[u8; 40], state: &[u8; 17]) -> String {
-    let short = revision.get(..7).unwrap_or(revision);
-    let Ok(short) = std::str::from_utf8(short) else {
-        return "unknown".to_owned();
-    };
-    if state.starts_with(b"modified") {
-        format!("{short}-modified")
-    } else {
-        short.to_owned()
-    }
+    tau_client::build_info::revision(built_info::GIT_COMMIT_HASH, built_info::GIT_DIRTY)
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// `YYYY-MM-DD HH:MM` of the build, with the Nix-packaging patch

@@ -21,6 +21,7 @@ fn debug_event_stats_request_reports_recorded_extension_input() {
         "std-shell",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("std-shell"),
             client_kind: tau_proto::ClientKind::Tool,
@@ -396,6 +397,7 @@ fn debug_event_stats_request_rejects_dedicated_external_peer_without_leaking_cou
         &client_id,
         HarnessInputMessage::Hello(tau_proto::Hello {
             declaration_inspection: false,
+            build_identity: None,
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name(
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,

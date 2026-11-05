@@ -271,6 +271,7 @@ fn connect_images(socket: &Path) -> Result<SocketPeer, Box<dyn std::error::Error
     )?;
     peer.send(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: "prepared-image-observer".parse()?,
         client_kind: ClientKind::Ui,

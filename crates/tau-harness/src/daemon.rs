@@ -1482,6 +1482,7 @@ fn connect_daemon_helper(
     let mut peer = SocketPeer::connect(socket_path)?;
     peer.send(&HarnessInputMessage::Hello(Hello {
         declaration_inspection: false,
+        build_identity: None,
         protocol_version: PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse(client_name)
             .expect("validated daemon client name must remain canonical"),
