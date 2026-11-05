@@ -173,6 +173,15 @@ Same-call replay coalesces or returns the retained result; a new call ID is new
 intent. The ledger is process/session-local, capped at 1,024 calls, with no durable
 outbox or exactly-once guarantee. Do not resubmit uncertain sends blindly.
 
+On supporting builds, permission-denial diagnostics distinguish `stage=auth.test`
+(cold-send authentication, before posting) from `stage=chat.postMessage` (text
+posting). The only reason labels are `http_403`, `not_in_channel`,
+`restricted_action`, and `missing_permission`. Do not infer a provider code or
+underlying cause from `http_403` alone. Older generic denials identify neither
+stage nor reason.
+Report the safe labels to the owning Tau session; do not retry automatically or
+change permissions, scopes or membership without separate authorization.
+
 ### Outgoing original files
 
 `slack_send` accepts `attachments: [{artifact, filename, content_type?}]`.
