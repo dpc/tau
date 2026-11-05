@@ -207,6 +207,25 @@ Locators are not secrets or capabilities. Reads create no delivered facts or
 write/reaction/attachment authority; failed reads do not prove deletion.
 This path has mock coverage, not live Discord validation.
 
+## Provider failure diagnostics
+
+On supporting builds, the extension returns and traces bounded REST failure
+details: a fixed local stage, observed HTTP status when available and a recognized
+numeric Discord code when present. It reports neither status nor code when it
+receives no response. It omits unknown or malformed codes, provider messages,
+bodies, headers, URLs, tokens, native IDs and exact routes. The extension suppresses
+dependency diagnostics; this interface does not expose raw errors.
+
+CDN attachment/avatar failures also retain fixed stages and observed status.
+Optional avatar failures preserve public metadata. A failed second step after
+thread creation retains its safe cause details but remains an uncertain write;
+do not automatically retry or infer rollback from a rejection.
+
+These warnings use the extension's allowlisted tracing target. They do not
+provide comprehensive Gateway diagnostics or establish the cause of a past
+incident. Missing logs are inconclusive without verified capture and filtering.
+This behavior has mock coverage, not live Discord validation.
+
 ## Receiver designation
 
 `discord_register {}` selects the authenticated caller, not an arbitrary agent ID.

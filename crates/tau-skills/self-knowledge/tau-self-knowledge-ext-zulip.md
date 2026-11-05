@@ -334,6 +334,19 @@ normal-tier same-topic message. Queue-capacity losses do not count.
 History catch-up bypasses this live rate policy and still requires canonical ACK
 checkpointing; accepting volatile live work is not durable delivery.
 
+## Provider failure diagnostics
+
+On supporting builds, the extension returns safe local operation labels,
+observed HTTP status and recognized Zulip error codes for required API failures.
+It also emits structured tracing for provider failures. It reports unrecognized
+codes as `unknown` and transport failures by operation, without raw error strings
+or URLs. Diagnostics omit provider text, secrets, native IDs and exact routes.
+
+Optional enrichment failures preserve useful partial results. Attachment and
+avatar failures retain confirmed-upload counts where applicable, remote-outcome
+uncertainty and no-retry guidance. Diagnostic details do not prove rollback or
+absence of remote effects, or authorize retries or configuration changes.
+
 ## Diagnose receive restoration and queue recovery
 
 Zulip writes content-free diagnostics to supervised extension stderr.

@@ -179,6 +179,20 @@ posting). The only reason labels are `http_403`, `not_in_channel`,
 `restricted_action`, and `missing_permission`. Do not infer a provider code or
 underlying cause from `http_403` alone. Older generic denials identify neither
 stage nor reason.
+
+Supporting builds also identify `auth.test` on other cold-send authentication
+errors. The extension emits WARN records for actual cold-auth failures and each
+failed text-post attempt. Text-post warnings include the fixed stage, post class,
+closed category/reason and disposition (`definitive_failure`, `outcome_unknown`
+or `rate_limited`). These describe one attempt; they do not establish the final
+send outcome or prove that no remote copies exist. Same-call terminal replay
+does not repeat provider requests or warnings.
+
+The default `slack=info,warn` stderr filter exposes these warnings unless an
+operator filters them out. Diagnostics omit raw provider errors, bodies, headers,
+tokens, URLs, native IDs, route aliases and agent identity. Missing logs do not
+prove success or recover details that older builds never emitted.
+
 Report the safe labels to the owning Tau session; do not retry automatically or
 change permissions, scopes or membership without separate authorization.
 
