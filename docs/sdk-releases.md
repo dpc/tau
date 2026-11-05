@@ -20,7 +20,7 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.23.0 (not published)
+### Published SDK 0.23.0
 
 Proto/client 0.23.0 adds an opt-in shared build-script helper without changing
 protocol 16.7. The helper verifies ownership of the selected source root and watches
@@ -31,6 +31,25 @@ The helper reports unknown for tracked inputs it cannot reliably watch. The
 integration recipe describes the missing-file, gitlink, and symlink limits.
 Bundled extensions and core use the same helper; package stamps still take
 precedence. See [the integration recipe](../crates/tau-client/README.md#build-identity).
+
+Proto and client 0.23.0 were published in dependency order from clean source
+`00206cb06b0d6634d632ed692d0b6165a9838157` after final SelfCI, merge-queue run 33,
+and locked publish dry-runs passed. Both official sparse-index entries are
+unyanked. Downloaded archives match the local publication archives and index
+checksums. Their Cargo VCS metadata identifies that exact source and each
+package's crate directory:
+
+| Package | SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `e358f4110abb9ef6be08450bbf97bbf9f0b7c5882046697333ad0374f0de8c6c` |
+| `dpc-tau-client` | `81e6998d9d7f3633e2053488f477b07a2a06a841f7ddc9dd76bb72631dc45d8e` |
+
+The registry-only consumer passed all 15 tests on Rust 1.91 using a fresh Cargo
+home without local SDK patches. At verification, GitHub and Radicle master
+pointed to that source, as did the `dpc-tau-proto-v0.23.0` and
+`dpc-tau-client-v0.23.0` tags on both remotes.
+The 0.1.0 leaf packages and application version were unchanged. This publication
+did not activate or restart any extension or service.
 
 ### Published SDK 0.22.0
 
