@@ -8,6 +8,12 @@ XMPP bridges. Older producer versions may still append a textual suffix; stored
 suffixes are not extracted or migrated.
 Updating Tau alone does not deploy or activate those producer changes.
 
+Slack, Discord, and Zulip are also transitioning from live reply ownership to
+ordinary configured outbound grants for replies. The send-authorization contract
+below defines the intended behavior; older bridge versions may still require live
+canonical ingress and same-agent ownership. The separately maintained bridge
+projects handle implementation and deployment of this transition.
+
 ## Record justification
 
 The report-to-fact contract spans shared protocol DTOs, harness authority,
@@ -82,8 +88,9 @@ message command.
 `MessageParty.stable_id` and `MessageConversation.stable_id` are opaque in the
 publisher's identifier domain. “Stable” distinguishes an identifier from a
 changeable display label; it does not establish global identity or authority.
-Conversation data is descriptive provenance only and is never a reply or send
-route. Optional displays are presentation hints. `MessageParty.sender_auth` and
+Conversation data is descriptive provenance only and never authorizes a reply or
+send. A bridge may accept an inert identifier as an address under its own outbound
+policy. Optional displays are presentation hints. `MessageParty.sender_auth` and
 `MessageParty.sender_trust` are independent typed optional sender metadata;
 `MessageConversation.alias` is typed optional conversation metadata. The only
 sender-trust value is `untrusted`; absence is the normal/default treatment and
@@ -505,6 +512,30 @@ than replacing it with a transport prefix, subject only to the bounded exception
 below. Zulip preserves its inbound Markdown exactly, including a leading addressed
 bot mention. These mappings create no transport-specific wire fields.
 
+### Normal sends and reply addressing
+
+Slack, Discord, and Zulip expose replies and native thread targeting as optional
+arguments to their ordinary send tool, not separate reply tools or additional
+per-message permissions. Each send checks the caller's current
+configured outbound grants and the resolved destination's current outbound policy.
+Receiving a message, a dynamic inbound link, a mention, or a source locator does
+not create a send grant. Receive-only routes remain receive-only.
+
+Message locators are inert addresses, not capabilities. A permitted send may use
+a valid locator from live input, retrieval, copied context, or replay without
+requiring canonical live ingress, an ephemeral reply grant, or same-agent source
+ownership. Those sources do not restore, transfer, or expand authority. Unknown,
+inaccessible, or out-of-policy targets must fail rather than bypass policy.
+The bridge, not the generic harness or envelope, resolves native addresses and
+checks the actual target. This contract adds no wire fields or envelope semantics.
+
+Native semantics remain bridge-local: a reply target, an existing thread, and
+explicit creation of a named thread are not interchangeable. Each bridge defines
+its optional send arguments and valid combinations. Source mentions are optional
+convenience metadata, not a prerequisite for an otherwise permitted plain send.
+This contract does not change read, attachment, reaction, edit, or delete grants,
+or other bridges' existing reply-ownership requirements.
+
 ### Linked-message retrieval
 
 Delivered, edited, and sent reports may carry optional `MessageLinks`. The
@@ -539,9 +570,11 @@ For each read, the bridge rechecks the caller's permitted route and participant
 policy, including the authenticated bridge bot's own messages. Live mention-trigger
 requirements do not restrict explicitly requested reads of otherwise permitted
 messages. Retrieval creates no delivered fact or activation and grants no send,
-reply, reaction, or attachment authority. Model-visible IDs are not bearer
-capabilities. The harness neither resolves IDs nor reconstructs bridge authority
-from replay. History lists, search, and a generic journal-recall tool are outside
+reply, reaction, or attachment authority. Slack, Discord, and Zulip may accept
+returned IDs as addresses for an independently authorized ordinary send as
+described above. Model-visible IDs are not bearer capabilities. The harness neither
+resolves IDs nor reconstructs bridge authority from replay. History lists, search,
+and a generic journal-recall tool are outside
 this interface.
 
 ### Native reply and thread context
@@ -581,9 +614,13 @@ The relation must describe the transport's actual evidence:
   must not reject an otherwise admitted body.
 
 Show only available evidence; do not require invented author labels, quotations,
-or canonical references. A canonical parent reference may be shown only when the
-producer proves an existing live, canonically confirmed ownership match for that
-same agent and conversation scope. Otherwise use a distinct opaque descriptive
+or canonical references. For Slack and Discord, a parent reference may use a
+proven same-conversation native locator accepted by the bridge as an inert
+address; it need not have been delivered canonically to the same agent. It conveys
+no reply, reaction, or mutation authority. For Telegram and XMPP, a canonical
+parent reference may be shown only when the producer proves an existing live,
+canonically confirmed ownership match for that same agent and conversation scope.
+Otherwise use a distinct opaque descriptive
 identity that tools cannot accept as a reply/reaction capability. Never synthesize
 an owned parent reference from a native ID. This does not require a new ownership
 map or comparing identical private route shapes.
@@ -639,8 +676,9 @@ Zulip topics are conversation threads, not exact parent links. Quote-and-reply
 Markdown is editable sender content: preserve it byte-for-byte on creates and
 accepted edits, rather than extracting an authenticated parent, following its
 links, or recursively interpreting nested quotes. The existing activity note may
-precede an unchanged created body. `zulip_send(reply_to)` selects the owned source
-topic or DM route, not a native per-message reply target.
+precede an unchanged created body. `zulip_send(reply_to)` selects the source
+topic or DM route under current configured outbound grants, not a native
+per-message reply target or an ownership-map grant.
 
 Rostra's notification previews have a separate owning-extension contract using
 bounded synchronized local-database reads. They are not same-event IM reply

@@ -21,9 +21,15 @@ The common prompt shape is defined by
 
 Transport admission, duplicate suppression, native identity interpretation,
 reply routes, proactive destinations, retries, and remote-send policy belong to
-the publishing extension. Opaque reply and reaction references may identify
-extension-local runtime state, but they are not generic harness capabilities and
-replay does not recreate that private authority.
+the publishing extension. Slack, Discord, and Zulip are transitioning to optional
+reply/thread arguments on their ordinary send tool. Locators from live input,
+retrieval, copied context, or replay are inert addresses. Every send checks
+current configured outbound grants. No extra live-ingress, canonical ACK, or
+same-agent ownership grant authorizes those sends; receive-only routes stay
+receive-only. Older bridge versions may still require live reply ownership.
+Reaction and mutation references, and other bridges' reply references, may still
+select extension-local runtime authority; replay does not recreate that authority.
+Updating Tau alone does not deploy or activate bridge changes.
 
 These external message facts are separate from the harness-owned inter-session
 and agent-to-agent message events documented below.
