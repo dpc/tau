@@ -1,13 +1,5 @@
 # ARCH-external-message-boundary: External message boundary
 
-## Status
-
-Slack, Discord, and Zulip are transitioning from live reply ownership to ordinary
-configured outbound authorization, as specified by
-[SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
-Older bridge versions may still require live reply ownership. Updating Tau alone
-does not update or activate those separately maintained bridges.
-
 External-message bridges publish transient `message.*_reported` events through
 ordinary extension event emission. After report commit and broadcast, the
 harness stamps the authenticated extension's stable configured publisher ID
@@ -47,6 +39,9 @@ treat all references as opaque data. Durable facts may contain bounded inert sen
 conversation, message, and publisher-defined metadata
 visible to authorized event subscribers, but never transport credentials or bearer
 route values.
+
+Older bridge versions may still require live reply ownership. Updating Tau alone
+does not update or activate those separately maintained bridges.
 
 The generic infrastructure does not deduplicate, order, resolve, authorize, or
 mutate message facts. Each successfully emitted fact is a distinct immutable

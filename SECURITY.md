@@ -1179,10 +1179,10 @@ admission-anchored deadline slice ends.
 The disabled-by-default `std-slack` bridge is the separately installed
 `tau-ext-slack` executable, supervised through Tau's normal trusted same-user
 stdio extension route. It requires exact configured conversation/kind/thread
-policy and verified live-human admission. Receive permission creates only
-Tau-issued source-bound reply authority; proactive permission is a separate
-alias-only grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and
-reply-only.
+policy and configured sender admission. Receiving grants no send authority.
+Ordinary sends, including replies and thread targeting, require a configured
+outbound alias grant; message locators are inert addresses, not permissions.
+Dynamic DMs remain bounded and allowlist/exact-user-bound but grant no send authority.
 Slack submits transient message reports through ordinary interception; the
 harness retains each raw publisher claim losslessly for observation and audit.
 The harness publishes an immutable canonical fact only when the top-level claim
@@ -1190,7 +1190,9 @@ is grammar-valid and exactly matches the authenticated configured extension
 name, then stamps canonical provenance from that captured identity. A malformed
 or mismatched claim remains only a transient report. Nested message references
 remain opaque and follow projection validation rather than report admission.
-Actionable reply and reaction authority stays in extension-local runtime state.
+Reaction and mutation authority stays in extension-local runtime state. Reply
+addresses may survive restart; every send checks current outbound
+policy without requiring live ingress or canonical source ownership.
 The Slack extension drops
 recently repeated native occurrence ids with a bounded process-local cache before
 report submission. Generic event infrastructure does no native deduplication or
@@ -1223,10 +1225,10 @@ transported text; this is not an end-to-end encrypted channel.
 Slack additionally binds `auth.test` bot/workspace identity to each supported
 Events API wrapper and fails closed on missing, ambiguous, or mismatched
 installation evidence. Native U/W ids remain authoritative; fetched display
-names and operator aliases are presentation only. Agent sends reject raw Slack
-mention/control markup; the optional source-mention field can name only the
-verified human already bound to a live reply selector and is frozen with the
-bounded retry body.
+names and operator aliases are presentation only. Ordinary send permission allows
+native mentions without granting routes. The optional source-mention field can
+name only the verified human bound to retained same-agent metadata and is frozen
+with the bounded retry body. That metadata is not required for a plain reply.
 The separately maintained `tau-ext-slack` project owns its Slack-specific
 review triggers, failure/replay invariants, operational guidance, and tests.
 
@@ -1247,9 +1249,11 @@ The disabled-by-default `std-zulip` bridge is the separately installed
 stdio extension route. It uses bot HTTP Basic authentication and native
 event-queue long polling. Exact numeric sender allowlists and configured DM or
 stream/topic policies gate ingress; separately configured proactive-DM aliases
-fix outbound recipient authority. Queue identifiers and native participant,
-stream, topic, and message routes remain extension-local authority; model tools
-accept only current configured aliases or bounded Tau-issued source references.
+fix outbound recipient authority. Queue identifiers remain extension-local.
+Model tools accept configured aliases or bounded Tau-issued references; v2
+message locators are inert native addresses, not send authority. Replies use
+current configured outbound grants without live source ownership. Reaction,
+mutation, and attachment-read source requirements remain distinct.
 Opt-in send-only mode declares only the send tool for one fixed proactive-DM
 alias and rejects every inbound route, allowlist, queue, reply, reaction, and
 catch-up surface. With the default

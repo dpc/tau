@@ -53,8 +53,8 @@ require restart.
 
 Ordinary tools default off. `tool_prefix` scopes names and the text group;
 reaction, profile, participant, message and attachment reads have their own grants.
-Replies/reactions require Tau-issued live references; read locators alone do not
-grant writes.
+Reactions require Tau-issued live references. Reply locators are inert addresses
+under current outbound grants; reading a message grants no writes.
 
 Use `zulip_conversations` to discover configured destinations for `zulip_send`;
 `zulip_react` has a separate reaction tag.
@@ -94,7 +94,8 @@ get a notice. If no saved choice exists, one unambiguous historical registration
 can supply migration evidence.
 
 Handoffs do not transfer reported input, ACK/checkpoint ownership, old source,
-reply, attachment or reaction authority. They do not grant outbound tools.
+attachment or reaction authority. They do not grant outbound tools. Reply
+addresses remain inert; ordinary sends check current outbound grants.
 
 ### Ordinary send mentions
 
@@ -120,6 +121,32 @@ of the wire body. Authored inline mentions and attachment links remain unchanged
 Failed/uncertain sends publish no confirmed sent report.
 
 ### Unified sends and original files
+
+`zulip_send` combines text, attachments, mentions and optional reply addressing;
+there is no separate reply tool or permission. Both `destination` and `reply_to`
+need an ordinary configured outbound route: a stream with `proactive_send: true`
+under its exact-topic or `agent_chosen_topic` policy, or one fixed recipient in
+`proactive_direct_messages`. Receive-only streams and inbound DMs no longer
+authorize replies. Operators must review outbound routes; this change does not
+update grants or configuration.
+
+`reply_to` accepts a stable authenticated v2 locator selecting the message's topic
+or exact DM address, not a native per-message reply or automatic quote. A cached
+address avoids lookup; otherwise one message fetch recovers its current address.
+This internal address resolution needs no read grant, receive scope, sender
+admission or mention trigger. Cold DM resolution can use the existing bounded
+authenticated self-identity query when queue identity is absent; a live receive
+queue is not required. Without cached addressing, deleted/inaccessible messages
+cannot resolve. Old hash-only IDs and wrong-key locators fail.
+
+Queue replacement, eviction, handoff and restart do not themselves revoke v2
+locators or grant sending permission. Fixed-DM routes permit only one exact
+configured peer, never group DMs. `reply_to` and caller `topic` are mutually
+exclusive. `destination` plus `topic` selects an ordinary Zulip topic without a
+separate creation tool. Send-only remains fixed-DM/text-only without `reply_to`.
+Ordinary receiver, tool-grant, configuration, shutdown and upload/send lifecycle
+checks still apply; reactions, attachment reads and participants retain their
+existing live source requirements.
 
 Ordinary `zulip_send` accepts `attachments: [{artifact, filename, content_type?}]`.
 The `zulip:send`, exact send and text-group grants authorize both text and uploads.
@@ -305,8 +332,8 @@ not prove deletion.
 
 Zulip Markdown stays exact, including leading bot mentions and editable
 quote-and-reply text. Quote attribution is unverified; the bridge does not extract
-or fetch a parent. `zulip_send(reply_to)` selects the owned source topic or DM
-participants, not an exact native parent.
+or fetch a parent. `zulip_send(reply_to)` selects the source topic or exact DM
+address under current outbound grants, not an exact native parent.
 
 `mention_evidence` uses the current authoritative `mentioned` flag. A complete
 flag list without it means false; missing/malformed flags mean unknown.
@@ -324,8 +351,8 @@ live queue, retrieves bounded created-message history after its durable checkpoi
 deduplicates overlap, and advances after canonical delivery confirmation.
 First use sets a baseline without replay. It does not recover offline edits,
 deletes or reactions, nor rescan earlier history after filter changes.
-Crash recovery can duplicate messages; live reply/reaction references disappear
-on restart.
+Crash recovery can duplicate messages; live reaction ownership disappears on
+restart, but v2 reply locators remain inert addresses under current outbound policy.
 
 ## Optional ingress controls
 
@@ -360,8 +387,9 @@ The first queued create sets a fixed flush timer; a below-soft create can also
 flush pending work for the same agent. Reports retain separate exact bodies.
 The volatile queue holds at most 256 creates/4 MiB globally and 16 creates/256 KiB
 per sender. Overflow, re-registration or restart can lose bodies.
-Queued sources have no reply owner before reporting; edits replace accepted bodies
-without extending timers, deletes cancel them, and queued-source reactions drop.
+Queued sources have no mutation/reaction owner before reporting; edits replace
+accepted bodies without extending timers, deletes cancel them, and queued-source
+reactions drop.
 
 Hard-dropped stream creates can contribute body-free activity counts to a later
 normal-tier same-topic message. Queue-capacity losses do not count.

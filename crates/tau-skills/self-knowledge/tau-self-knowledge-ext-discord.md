@@ -55,9 +55,32 @@ group includes reactions.
 ## Unified sends and original files
 
 Use `discord_conversations` with the configured prefix to discover aliases.
-Ordinary `discord_send` requires current registration, live writable transport,
-and exactly one `reply_to` or configured `destination`. Thread creation retains
-its separate route requirements.
+Ordinary receive-mode `discord_send` requires current registration, live writable
+transport, and at least one of `reply_to` or configured `destination`; you may
+supply both. Every send needs the ordinary send-tool grant and a configured
+outbound route: `proactive_send: true` for guild routes, or a fixed
+`proactive_direct_messages` alias. Receive-only routes no longer authorize replies.
+Operators must review outbound grants; this change does not update them.
+
+`reply_to` takes a returned versioned message locator from delivered/sent facts,
+retrieval, linked IDs, copied context or replay. It is inert addressing, not a
+grant: no ACK, retained owner, live ingress, same-agent source, target-author
+admission or prior read is required. Versioned locators survive restart/eviction;
+legacy hashes need surviving native mappings. The tool accepts no raw native route
+arguments.
+
+Reply-only shorthand resolves exact configured guild routes or unambiguous fixed
+DM aliases. For inherited thread children, supply the parent `destination` plus
+the child's `reply_to`; the parent needs outbound permission and `include_threads`.
+Exact child policy wins. Creation-only parents grant no arbitrary child access.
+
+A native reply quotes within the selected existing conversation; it never creates
+a thread. Explicit `new_thread_name` creates a new named public child under
+`allow_thread_creation`, never reuses a duplicate title, and cannot accompany
+`reply_to`. `new_thread_tags` applies only to new forum/media children. Existing
+join consent, private membership, and active/unlocked checks still apply.
+The provider validates the exact reply target; missing targets never fall back to
+plain sends. Replies neither fetch target text nor check its author.
 
 Optional `attachments: [{artifact, filename, content_type?}]` accepts at most ten
 canonical `<tau-artifact:blake3:…>` references or bare `blake3:` keys, not paths,
@@ -73,8 +96,11 @@ The group limit is **16 MiB total**, not per file.
 The default-off `discord:send`, exact scoped send grant, and core group authorize
 both text and files. Review former text-only roles before upgrading; remove
 obsolete `discord_send_attachment` and `discord:attach` grants. There is no
-argument-level upload grant. Strict send-only mode remains text-only and requires
-`message` and `destination`; even `attachments: []` fails.
+argument-level upload grant. Strict send-only remains fixed-DM/text-only. It requires
+`message` and one or both of `destination` and `reply_to`. Replies must resolve the
+exact fixed peer. This mode needs no registration or Gateway; attachments (even
+`[]`), named creation, reads, reactions
+and discovery remain unavailable.
 
 One multipart message contains the group. An incomplete receipt leaves the whole
 outcome uncertain; thread creation may leave a child despite send failure.
@@ -173,8 +199,9 @@ adjacent `message` and `quoted_message` parts. The bridge does not fetch parents
 follow nested replies or import parent attachments. Missing content does not
 prove deletion, and quoted authors are not current authenticated speakers.
 
-Parent references are canonical only after exact same-agent/conversation ownership
-confirmation; `discord-reply-parent:` is otherwise descriptive, not a capability.
+Parent references may use proven same-conversation native locators without
+same-agent canonical ownership. They grant no send, reaction or mutation authority;
+unresolvable descriptive references are not capabilities.
 Only the outer message controls admission and routing. Parent changes and later
 reads do not refresh the snapshot. Older producers may append textual context
 instead; the renderer does not parse it into typed quotes.
@@ -255,5 +282,7 @@ The obsolete `restore_receive_registration` key fails for either value.
 Without a saved choice, one unambiguous historical registration can supply
 migration evidence.
 
-Handoffs do not transfer already reported input, ACK ownership, source/write
-authority or Artifact authority. Tool grants remain separate from designation.
+Handoffs do not transfer already reported input, ACK ownership, source/mutation
+authority or Artifact authority. Ordinary sends check current
+outbound grants and receiver requirements; locators do not grant authority.
+Tool grants remain separate from designation.

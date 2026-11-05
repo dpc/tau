@@ -8,12 +8,6 @@ XMPP bridges. Older producer versions may still append a textual suffix; stored
 suffixes are not extracted or migrated.
 Updating Tau alone does not deploy or activate those producer changes.
 
-Slack, Discord, and Zulip are also transitioning from live reply ownership to
-ordinary configured outbound grants for replies. The send-authorization contract
-below defines the intended behavior; older bridge versions may still require live
-canonical ingress and same-agent ownership. The separately maintained bridge
-projects handle implementation and deployment of this transition.
-
 ## Record justification
 
 The report-to-fact contract spans shared protocol DTOs, harness authority,
@@ -513,6 +507,10 @@ below. Zulip preserves its inbound Markdown exactly, including a leading address
 bot mention. These mappings create no transport-specific wire fields.
 
 ### Normal sends and reply addressing
+
+Older Slack, Discord, and Zulip bridge versions may still require live canonical
+ingress and same-agent reply ownership. Updating Tau alone does not update or
+activate those separately maintained bridges.
 
 Slack, Discord, and Zulip expose replies and native thread targeting as optional
 arguments to their ordinary send tool, not separate reply tools or additional

@@ -60,7 +60,7 @@ installation-scoped opaque sender references.
   Bot messages cannot issue human-only commands, link dynamic DMs, supply inbound
   reactions, or use `mention_source_user`. Independent bots can form reply loops.
 - Dynamic DMs are opt-in, runtime-only, and limited to 64 exact D-to-allowlisted-U/W
-  links. They allow reception and source replies, not proactive sends.
+  links. They allow reception, not sending; a static outbound grant is required.
   Static receive DM policy wins; proactive-only static policy does not block linking.
 - `mentions_only` means `app_mention` delivery. DMs do not use that event.
   Outside DMs, commands need a leading authenticated bot mention.
@@ -110,8 +110,8 @@ Delivery, activation, a mention or a reply selector does not establish that a
 message addresses this agent or grant it authority.
 
 Forwarded/shared previews arrive as labelled untrusted attachment quotes. The
-forwarder remains the authenticated sender and reply owner; quoted authors are
-not authenticated. The bridge uses inline text only, without fetching linked
+forwarder remains the authenticated sender and source-metadata owner; quoted authors
+are not authenticated. The bridge uses inline text only, without fetching linked
 messages, URLs, files or images. “Only show link” cannot recover a body.
 An attachment-only forward needs usable text; otherwise missing content can be
 marked beside a usable note/quote. Oversized/malformed content fails rather than
@@ -122,18 +122,26 @@ mention/command authority. Use the attachment tools to inspect originals.
 
 ## Sending and discovery
 
-`slack_send` needs text and/or attachments plus exactly one Tau-issued `reply_to`
-or proactive `destination` alias. Source replies require canonical ownership;
-deletes revoke it. Proactive sends need no registration but require live
-extension/session authority and tool permission.
+`slack_send` needs text and/or attachments and a configured outbound route
+with `proactive_send: true`. It also accepts mutually exclusive `reply_to` or
+`thread_id` message locators. `reply_to` uses the selected message's existing
+thread or starts a thread on that top-level message. `thread_id` requires a root
+locator plus `destination`, not a child or nested thread. Selectors must match the
+current installation/conversation and configured fixed root. Destination-only
+sends use the configured fixed root or post top-level.
 
-Saved versioned locators preserve read coordinates, not process-local reply
-authority. Neither `reply_to is unknown or stale` nor the newer diagnostic
-`reply_to has no retained local reply authority` proves that a TTL expired or
-that the Slack message or thread is deleted or inaccessible. The extension has
-not checked Slack availability. Copying a locator or reading its message does
-not restore reply authority. Do not automatically replace a rejected threaded
-reply with a top-level post; obtain separate authorization for any alternative send.
+`reply_to` alone is shorthand for a configured outbound route, preferring an exact
+fixed-thread route over a whole-conversation route. Versioned `slack-message:v2:`
+locators survive restart/eviction; legacy hashes need surviving address metadata.
+Locators from delivered/sent facts, reads, copied context or replay are inert
+addresses, never permissions. Sending needs current tool and extension/session
+authority, not registration, live ingress, canonical confirmation, same-agent
+source ownership or a prior read.
+
+Receive-only routes and dynamic-DM links no longer authorize replies. Operators
+must review intended static outbound grants; never change them automatically.
+Top-level replies now start threads instead of posting top-level. Do not
+automatically replace a rejected or uncertain reply with a top-level post.
 
 `slack_conversations` is default-off through its exact prefixed name or
 `slack:discover`. It returns sorted pages of static aliases, kinds, scope,
@@ -163,7 +171,10 @@ The bridge resolves references locally and prepends `<@ID> ` in order. Stale,
 unknown or other-agent references fail before I/O; it does no directory lookup.
 
 For source replies, `mention_source_user: true` mentions the verified human bound
-to `reply_to`. It defaults false and is invalid with `destination`.
+to `reply_to`. It defaults false and works with a matching `destination`.
+This optional convenience requires retained same-agent verified-human
+metadata; if absent, omit it or use `mention_users`. Plain replies need no source
+mention metadata.
 Composition order is source-user mention, `mention_users`, authored text.
 Generated mentions are wire-only; logical sent text retains authored native markup.
 The composed body must fit 40,000 Unicode scalars; it is not truncated.
@@ -216,7 +227,7 @@ remains. Add `files:write` and reinstall/re-authorize the app; no new events or
 Export files first, then supply up to ten canonical `<tau-artifact:blake3:…>`
 references or bare `blake3:64-lowercase-hex` keys. Paths, URLs and inline bytes
 are not accepted. Without files, `message` must be nonempty; with files it may be
-omitted or empty. Keep one `reply_to` or `destination`.
+omitted or empty. Use the ordinary send addressing combinations above.
 
 The group limit is **16 MiB total**. Use safe ASCII basenames of at most 128 bytes.
 Optional image hints support `avif`, `gif`, `heic`, `jpeg`, `png`, `tiff`, `webp`;

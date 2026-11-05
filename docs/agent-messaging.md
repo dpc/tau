@@ -21,7 +21,7 @@ The common prompt shape is defined by
 
 Transport admission, duplicate suppression, native identity interpretation,
 reply routes, proactive destinations, retries, and remote-send policy belong to
-the publishing extension. Slack, Discord, and Zulip are transitioning to optional
+the publishing extension. Slack, Discord, and Zulip use optional
 reply/thread arguments on their ordinary send tool. Locators from live input,
 retrieval, copied context, or replay are inert addresses. Every send checks
 current configured outbound grants. No extra live-ingress, canonical ACK, or
