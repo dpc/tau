@@ -7,9 +7,183 @@ use super::*;
 use crate::agent::PendingPromptSource;
 use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
 
+/// Full/summary previews and errors do not keep finished durable work alive.
+/// Idle shutdown must preserve its original output for exact and bare waits on
+/// cold resume, without weakening unload or consuming the eager preview.
+#[test]
+fn unread_background_completion_allows_idle_shutdown_and_cold_wait() {
+    for (failed, summary) in [(false, false), (false, true), (true, false)] {
+        for exact in [false, true] {
+            let td = TempDir::new().expect("tempdir");
+            let state = td.path().join("state");
+            let mut h = echo_harness(&state).expect("start");
+            h.config.selected_model = Some("test/model".into());
+            connect_ready_configured_extension(
+                &mut h,
+                "idle-worker",
+                "idle-worker",
+                tau_proto::ClientKind::Tool,
+            );
+            let connection = crate::test_connection_id("idle-worker");
+            h.tool_routing
+                .registry
+                .register(&connection, instant_background_test_tool_spec("idle_work"));
+            let cid = ensure_test_user_agent(&mut h);
+            let agent_id = durable_agent_id_for_conversation(&h, &cid);
+            start_background_tool_and_finish_placeholder_turn(
+                &mut h,
+                &cid,
+                "idle-source",
+                "idle_work",
+            );
+            h.config.accepted_harness_settings.session_idle_shutdown =
+                Some("1s".parse().expect("duration"));
+            h.runtime_io.idle_session = IdleSession::new(Some(Duration::from_secs(1)));
+            h.checkpoint_idle_session(Instant::now(), false);
+            assert_eq!(h.runtime_io.idle_session.deadline(), None, "running tool");
+            let output = if summary {
+                "x".repeat(16 * 1024)
+            } else {
+                "original output".to_owned()
+            };
+            let event = if failed {
+                Event::ToolErrorReported(tool_error("idle-source", "idle_work", &output))
+            } else {
+                Event::ToolResultReported(final_tool_result("idle-source", "idle_work", &output))
+            };
+            h.handle_extension_event_inner(&connection, event)
+                .expect("complete");
+            let prompt = active_prompt_for(&h, &cid);
+            h.handle_provider_response_finished(provider_text_response(
+                &prompt,
+                agent_id.clone(),
+                "finished without waiting",
+            ))
+            .expect("finish completion followup");
+            assert!(event_log_contains_any_source(&h, |event| matches!(
+                event,
+                Event::AgentPromptSubmitted(prompt)
+                    if prompt.internal_kind == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+                        && prompt.text.contains(if summary { "delivery=\"summary\"" } else { "delivery=\"full\"" })
+            )));
+            assert!(
+                h.agent_has_accepted_work(&cid, &agent_id),
+                "unload must not discard unread output"
+            );
+            assert!(!h.agent_has_idle_preventing_work(&cid, &agent_id));
+            let saved_head = h.agent_runtime.agent_registry.agents[&cid]
+                .identity
+                .head
+                .expect("completed branch");
+            h.handle_ui_navigate_tree(
+                &crate::test_connection_id("ui"),
+                tau_proto::UiNavigateTree {
+                    session_id: test_session_id("s1"),
+                    target_agent_id: Some(agent_id.clone()),
+                    target: tau_proto::UiTreeNavigationTarget::Root,
+                },
+            )
+            .expect("leave the declaration's branch");
+            assert!(
+                h.agent_has_idle_preventing_work(&cid, &agent_id),
+                "cold resume cannot recover a declaration outside the selected branch"
+            );
+            h.checkpoint_idle_session(Instant::now(), false);
+            assert_eq!(h.runtime_io.idle_session.deadline(), None);
+            h.handle_ui_navigate_tree(
+                &crate::test_connection_id("ui"),
+                tau_proto::UiNavigateTree {
+                    session_id: test_session_id("s1"),
+                    target_agent_id: Some(agent_id.clone()),
+                    target: tau_proto::UiTreeNavigationTarget::Node(saved_head),
+                },
+            )
+            .expect("restore original branch");
+            assert!(!h.agent_has_idle_preventing_work(&cid, &agent_id));
+            // The same retained output cannot justify shutdown when either
+            // storage authority is memory-only.
+            h.session_runtime.storage_mode = crate::HarnessStorageMode::MemoryOnly;
+            assert!(h.agent_has_idle_preventing_work(&cid, &agent_id));
+            h.session_runtime.storage_mode = crate::HarnessStorageMode::Durable;
+            h.agent_runtime
+                .agent_registry
+                .agents
+                .get_mut(&cid)
+                .expect("agent")
+                .identity
+                .persistence = tau_core::AgentPersistenceMode::Ephemeral;
+            assert!(h.agent_has_idle_preventing_work(&cid, &agent_id));
+            h.agent_runtime
+                .agent_registry
+                .agents
+                .get_mut(&cid)
+                .expect("agent")
+                .identity
+                .persistence = tau_core::AgentPersistenceMode::Durable;
+            let now = Instant::now();
+            h.checkpoint_idle_session(now, false);
+            assert_eq!(
+                h.runtime_io.idle_session.deadline(),
+                Some(now + Duration::from_secs(1))
+            );
+            h.runtime_io
+                .idle_session
+                .checkpoint(now - Duration::from_secs(2), false, true);
+            h.run_event_loop(None).expect("idle shutdown");
+            h.shutdown().expect("shutdown");
+            assert!(h.session_runtime.shutdown_published);
+            drop(h);
+
+            let mut h = quiet_provider_harness_with_start_reason(
+                &state,
+                tau_proto::SessionStartReason::Resume,
+            )
+            .expect("cold resume");
+            let cid = ensure_test_user_agent(&mut h);
+            assert!(
+                h.idle_recoverable_background_completion(&"idle-source".into(), &cid),
+                "cold replay must rebuild exact declaration ancestry"
+            );
+            let mut wait = wait_no_args_call("cold-wait");
+            if exact {
+                wait.arguments = CborValue::Map(vec![(
+                    CborValue::Text("tool_call_id".to_owned()),
+                    CborValue::Text("idle-source".to_owned()),
+                )]);
+            }
+            h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+                .expect("retrieve retained output");
+            assert!(
+                event_log_contains_any_source(&h, |event| match event {
+                    Event::ToolResult(result) =>
+                        !failed
+                            && result.call_id == wait.id
+                            && if exact {
+                                result.result == CborValue::Text(output.clone())
+                            } else {
+                                cbor_map_text(&result.result, "original_tool_call_id")
+                                    == Some("idle-source")
+                                    && cbor_map_text(&result.result, "output")
+                                        == Some(output.as_str())
+                            },
+                    Event::ToolError(error) =>
+                        failed && error.call_id == wait.id && error.message.contains(&output),
+                    _ => false,
+                }),
+                "failed={failed} summary={summary} exact={exact}"
+            );
+            assert!(
+                !h.idle_recoverable_background_completion(&"idle-source".into(), &cid),
+                "wait consumes the restored result exactly once"
+            );
+            h.shutdown().expect("shutdown resumed harness");
+        }
+    }
+}
+
 /// Consuming background output through waits or direct control delivery
-/// releases the idle blocker in either wait/completion order. Running and
-/// unread work remains busy; after consumption the real event loop can expire a
+/// releases unload protection in either wait/completion order. Running work
+/// remains busy; after consumption the real event loop can expire a
 /// fresh window.
 #[test]
 fn consumed_background_wait_allows_idle_shutdown() {

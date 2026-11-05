@@ -578,7 +578,8 @@ impl Harness {
         Ok(())
     }
 
-    /// Reuse the unload no-discard check so in-flight agent work cannot expire.
+    /// Keep active work alive without treating recoverable completed output as
+    /// ongoing activity. Agent unload retains its stricter no-discard check.
     pub(super) fn checkpoint_idle_session(&mut self, now: Instant, activity: bool) {
         if self
             .config
@@ -601,7 +602,7 @@ impl Harness {
                             || !agent.dispatch.pending_prompts.is_empty()
                             || agent.execution.tools_in_flight != 0
                     },
-                    |agent_id| self.agent_has_accepted_work(cid, agent_id),
+                    |agent_id| self.agent_has_idle_preventing_work(cid, agent_id),
                 )
             })
             || !self.ui_runtime.pending_action_invocations.is_empty()

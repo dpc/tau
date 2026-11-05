@@ -335,6 +335,9 @@ struct AgentTreeIndexes {
     context_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
     /// Materialized assistant-response nodes keyed by journal occurrence.
     assistant_response_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
+    /// Exact declaration occurrences for branch-qualified tool recovery,
+    /// retained independently of journal-cache residency.
+    assistant_response_nodes_by_observation: HashMap<tau_proto::ObservationId, NodeId>,
     /// Prompt nodes whose committed source event carried exact background
     /// completion provenance.
     background_completion_prompt_nodes: HashSet<NodeId>,
@@ -2668,6 +2671,38 @@ impl AgentTree {
             .copied()
     }
 
+    /// Returns whether this exact provider-declared tool call belongs to the
+    /// selected physical branch. Compaction does not remove original ancestry.
+    #[must_use]
+    pub fn tool_call_is_on_branch(
+        &self,
+        call: tau_proto::ToolCallRef,
+        head: Option<NodeId>,
+    ) -> bool {
+        let Some(node_id) = self
+            .indexes
+            .assistant_response_nodes_by_observation
+            .get(&call.declaration)
+            .copied()
+        else {
+            return false;
+        };
+        let Some(AgentNode {
+            entry: AgentEntry::AssistantResponse { output_items, .. },
+            ..
+        }) = self.node(node_id)
+        else {
+            return false;
+        };
+        matches!(
+            output_items.get(call.item_index as usize),
+            Some(ContextItem::ToolCall(_))
+        ) && self.is_ancestor_head(
+            AgentHead::Node(node_id),
+            head.map_or(AgentHead::Root, AgentHead::Node),
+        )
+    }
+
     /// Return whether this exact materialized node came from a committed
     /// background-completion prompt event.
     #[must_use]
@@ -3006,6 +3041,13 @@ impl AgentTree {
                 record.fold_semantics,
             )
         };
+        if matches!(record.event, Event::ProviderResponseFinished(_))
+            && let Some(node) = self.assistant_response_node_for_durable_event_seq(record.seq)
+        {
+            self.indexes
+                .assistant_response_nodes_by_observation
+                .insert(record.observation_id, node);
+        }
         self.indexes
             .compaction_chains
             .observe(record.seq, record.recorded_at, &record.event);

@@ -731,6 +731,33 @@ impl Harness {
             .retain(|call_id, _| retained.contains(call_id));
     }
 
+    /// Only an unreserved current-generation canonical background terminal can
+    /// be recovered by ordinary restore. Older released generations and active
+    /// plural publications retain their no-discard protection.
+    pub(super) fn idle_recoverable_background_completion(
+        &self,
+        call_id: &ToolCallId,
+        owner: &AgentId,
+    ) -> bool {
+        let tracker = &self.agent_runtime.subagents.wait_tracker;
+        if !tracker.idle_recoverable_background_completion(call_id, owner) {
+            return false;
+        }
+        let Some((call_ref, _terminal)) = tracker.completed_call_identity_if_owned(call_id, owner)
+        else {
+            return false;
+        };
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(owner) else {
+            return false;
+        };
+        agent.identity.agent_id.as_ref().is_some_and(|agent_id| {
+            self.session_runtime
+                .agent_store
+                .agent(agent_id.as_str())
+                .is_some_and(|tree| tree.tool_call_is_on_branch(call_ref, agent.identity.head))
+        })
+    }
+
     /// Commit plural wait consumption after its canonical wait terminal
     /// successfully publishes.
     pub(crate) fn commit_exact_all_wait_terminal(&mut self, wait_call_id: &ToolCallId) {

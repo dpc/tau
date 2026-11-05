@@ -1751,6 +1751,30 @@ impl WaitTracker {
         retained
     }
 
+    /// Ordinary cold restore reconstructs current canonical background
+    /// terminals, not runtime-only reservations or released older generations.
+    pub(super) fn idle_recoverable_background_completion(
+        &self,
+        call_id: &ToolCallId,
+        owner: &AgentId,
+    ) -> bool {
+        self.completed_call_identity_if_owned(call_id, owner)
+            .is_some()
+            && matches!(
+                self.calls.get(call_id),
+                Some(WaitCallState::BackgroundResult(_) | WaitCallState::BackgroundError(_))
+            )
+            && !self
+                .released_completions
+                .values()
+                .any(|released| &released.call_id == call_id)
+            && !self
+                .exact_all_waits
+                .values()
+                .chain(self.pending_exact_all_commits.values())
+                .any(|wait| wait.members.iter().any(|member| &member.call_id == call_id))
+    }
+
     /// Return the exact current-generation completion identity when it is
     /// waitable by this owner.
     pub(super) fn completed_call_identity_if_owned(

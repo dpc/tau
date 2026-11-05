@@ -3240,6 +3240,7 @@ fn wait_all_reuse_then_interruption_restores_old_generation() {
         owner.clone(),
         Some(old_terminal),
     );
+    assert!(tracker.idle_recoverable_background_completion(&"reused".into(), &owner));
     tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
     tracker.retain_call_ref("wait-any".into(), call_ref(4, 0));
     assert!(
@@ -3247,6 +3248,7 @@ fn wait_all_reuse_then_interruption_restores_old_generation() {
             .reply
             .is_none()
     );
+    assert!(!tracker.idle_recoverable_background_completion(&"reused".into(), &owner));
     tracker.record_exact_all_notice_suppressed(
         &ToolCallId::from("wait-all"),
         &ToolCallId::from("reused"),
@@ -3264,6 +3266,10 @@ fn wait_all_reuse_then_interruption_restores_old_generation() {
     assert_eq!(
         tracker.oldest_completed_for_owner(&owner),
         Some(ToolCallId::from("reused"))
+    );
+    assert!(
+        !tracker.idle_recoverable_background_completion(&"reused".into(), &owner),
+        "released older generations cannot be reconstructed by ordinary restore"
     );
 
     let reply = start_reply(start_wait_any(&mut tracker, &owner, "wait-any"));

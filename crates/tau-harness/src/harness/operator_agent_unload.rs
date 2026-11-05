@@ -133,6 +133,22 @@ impl Harness {
         cid: &AgentId,
         agent_id: &tau_proto::AgentId,
     ) -> bool {
+        self.agent_has_idle_preventing_work(cid, agent_id)
+            || self
+                .tool_routing
+                .tool_runtime
+                .background_completion_targets
+                .values()
+                .any(|owner| owner == cid)
+    }
+
+    /// Preserve active work and nonrecoverable output, but allow ordinary
+    /// durable completed output to survive idle shutdown through cold restore.
+    pub(super) fn agent_has_idle_preventing_work(
+        &self,
+        cid: &AgentId,
+        agent_id: &tau_proto::AgentId,
+    ) -> bool {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return true;
         };
@@ -207,8 +223,13 @@ impl Harness {
                 .tool_routing
                 .tool_runtime
                 .background_completion_targets
-                .values()
-                .any(|owner| owner == cid)
+                .iter()
+                .any(|(call_id, owner)| {
+                    owner == cid
+                        && (self.session_runtime.storage_mode.is_ephemeral()
+                            || agent.identity.persistence.is_ephemeral()
+                            || !self.idle_recoverable_background_completion(call_id, cid))
+                })
             || self.input_wait_pending_for(cid)
             || self.has_agent_owned_publication(cid, agent_id)
             || self

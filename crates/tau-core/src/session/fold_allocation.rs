@@ -372,6 +372,10 @@ impl AgentTree {
                 &self.indexes.assistant_response_nodes_by_event_seq,
                 additions.responses,
             ))
+            .saturating_add(map_growth(
+                &self.indexes.assistant_response_nodes_by_observation,
+                additions.responses,
+            ))
             .saturating_add(set_growth(
                 &self.indexes.background_completion_prompt_nodes,
                 additions.background,
