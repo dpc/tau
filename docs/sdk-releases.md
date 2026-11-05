@@ -20,13 +20,52 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.22.0 (not published)
+### Prepared SDK 0.23.0 (not published)
+
+Proto/client 0.23.0 adds an opt-in shared build-script helper without changing
+protocol 16.7. The helper verifies ownership of the selected source root and watches
+Git state and tracked files so Cargo refreshes metadata after commits or dirty-state
+changes. The no-argument `package_build_identity!()` reads the captured values at
+compile time.
+The helper reports unknown for tracked inputs it cannot reliably watch. The
+integration recipe describes the missing-file, gitlink, and symlink limits.
+Bundled extensions and core use the same helper; package stamps still take
+precedence. See [the integration recipe](../crates/tau-client/README.md#build-identity).
+
+### Published SDK 0.22.0
 
 Protocol 16.7 adds optional build identity to Hello. Proto/client source versions
 are 0.22.0; the SDK leaf versions are unchanged. Existing 16.x peers remain
 compatible, but producers must adopt the new field to report build metadata.
-Publication, downstream rebuilds, and activation are separate operations.
+Publication does not rebuild or activate downstream extensions.
 See [the client integration recipe](../crates/tau-client/README.md#build-identity).
+
+The original recipe's plain `built` fallback is not a provenance guarantee:
+ancestor discovery can attribute an archived package to an unrelated consumer's
+repository, and Cargo can retain stale Git metadata after commits. The
+temporary-directory archive test did not cover those cases. Prefer the corrected
+0.23.0 capture helper or independently validated caller metadata; the 0.22.0 wire field and
+shared runtime stamp support remain usable.
+
+Proto and client 0.22.0 were published in dependency order from clean source
+`c817c724fe995bef09091ad3efac22ee95ead9ca` after merge-queue run 32 and locked
+publish dry-runs passed. Both official sparse-index entries are unyanked.
+Downloaded registry archives match the index checksums and identify that exact
+source and their respective crate directories in Cargo VCS metadata:
+
+| Package | SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `1c4550e86e6ac0608309d7b1cdaec6893c9a5d984bf1d99fb19546b14cc0108e` |
+| `dpc-tau-client` | `5ff750c6f72452f399a63e0bbfa4223bd99b3e5a1a61f2bf3ad24d00bbcb5045` |
+
+The registry-only SDK consumer passed all 15 tests on Rust 1.91 with an isolated
+Cargo home and no local SDK patches. At verification, GitHub and Radicle master
+pointed to the published source. The `dpc-tau-proto-v0.22.0` and
+`dpc-tau-client-v0.22.0` tags identify that source on both remotes. The unchanged
+0.1.0 leaf packages were not republished.
+Application tag `v0.3.0` remains at `3eae7dc621b3f2d2f953a182b85cde03c0037fbb`.
+This SDK publication included no application release, deployment, configuration
+change, or service restart.
 
 ### Published SDK 0.21.0
 

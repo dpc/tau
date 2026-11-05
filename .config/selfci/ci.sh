@@ -78,6 +78,11 @@ function job_cargo() {
     selfci step fail
   fi
 
+  selfci step start "package build metadata regression"
+  if ! python3 .config/selfci/check-build-metadata.py; then
+    selfci step fail
+  fi
+
   # Submit the independent workspace gates together.
   selfci step start "Nix cargo checks"
   if ! nix build -L --no-link \

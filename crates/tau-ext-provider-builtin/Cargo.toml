@@ -24,7 +24,7 @@ quota-test-support = []
 standalone-compaction-test-support = []
 
 [build-dependencies]
-built.workspace = true
+tau-client = { workspace = true, features = ["build"] }
 
 [dependencies]
 blake3.workspace = true

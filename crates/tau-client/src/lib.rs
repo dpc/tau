@@ -24,6 +24,8 @@ mod artifact_download;
 mod artifact_media;
 mod artifact_upload;
 mod bridge_receiver;
+#[cfg(feature = "build")]
+pub mod build;
 pub mod build_info;
 mod builder;
 pub use tau_proto::BuildIdentity;

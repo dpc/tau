@@ -18,7 +18,7 @@ name = "tau_ext_test_dummy"
 workspace = true
 
 [build-dependencies]
-built.workspace = true
+tau-client = { workspace = true, features = ["build"] }
 
 [dependencies]
 rand.workspace = true

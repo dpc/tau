@@ -18,7 +18,7 @@ name = "tau_ext_utils"
 workspace = true
 
 [build-dependencies]
-built.workspace = true
+tau-client = { workspace = true, features = ["build"] }
 
 [dependencies]
 blake3.workspace = true

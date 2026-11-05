@@ -326,6 +326,15 @@ The builder and declaration-aware bootstrap use the same identity without adding
 a startup phase. Shared fixed-width package stamp slots take precedence over
 caller-generated Git metadata; absent metadata remains unknown. The identity
 provides diagnostics, not a protocol compatibility or trust assertion.
+The opt-in build-script helper verifies an explicit checkout root rather than
+discovering ancestors, rejects Cargo archive/vendor provenance, and registers
+Git-state and tracked-file watches. Runtime consumers read only the embedded
+metadata; they do not inspect repositories or inherited environment variables.
+The legacy caller-module macro accepts independently validated metadata but
+cannot establish that provenance by itself.
+If Cargo cannot reliably watch a tracked input, the helper reports unknown while
+keeping valid Git and file watches active. Source-directory symlinks permit limited
+recursive watches; file symlinks and gitlinks cannot establish a fresh identity.
 
 ## Testing strategy
 

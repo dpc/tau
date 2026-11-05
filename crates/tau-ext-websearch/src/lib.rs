@@ -9,7 +9,6 @@
 //! `SPEC-tau-ext-websearch-provider-boundary` and
 //! `testing.md`.
 
-mod built_info;
 mod composite;
 mod hosted;
 #[cfg(test)]
@@ -198,7 +197,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
         target: LOG_TARGET,
         package = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
-        revision = tau_client::package_build_identity!(built_info).revision.as_deref().unwrap_or("unknown"),
+        revision = tau_client::package_build_identity!().revision.as_deref().unwrap_or("unknown"),
         "extension startup identity"
     );
     run(std::io::stdin(), std::io::stdout())
@@ -816,7 +815,7 @@ impl TauExtension for WebsearchExtension {
     }
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
-        builder.build_identity(tau_client::package_build_identity!(built_info));
+        builder.build_identity(tau_client::package_build_identity!());
         builder
             .configure::<ExtConfig>(|cx| {
                 let secrets = cx.secrets().clone();

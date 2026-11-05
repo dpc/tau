@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.22.0",
+        "dpc-tau-proto": "=0.23.0",
     },
 }
 
@@ -142,7 +142,7 @@ tau-client = { package = "dpc-tau-client", version = "=${versions[dpc-tau-client
 tau-proto = { package = "dpc-tau-proto", version = "=${versions[dpc-tau-proto]}" }
 
 [build-dependencies]
-built = { version = "0.8", default-features = false, features = ["git2"] }
+tau-client = { package = "dpc-tau-client", version = "=${versions[dpc-tau-client]}", features = ["build"] }
 EOF
 
 if [[ "$registry_consumer" == false ]]; then
@@ -158,19 +158,14 @@ fi
 
 cat >"$tmp/consumer/build.rs" <<'EOF'
 fn main() {
-    built::write_built_file().expect("generate consumer metadata");
+    tau_client::build::emit().expect("capture consumer metadata");
 }
 EOF
-cat >"$tmp/consumer/src/built_info.rs" <<'EOF'
-include!(concat!(env!("OUT_DIR"), "/built.rs"));
-EOF
 cat >"$tmp/consumer/src/lib.rs" <<'EOF'
-mod built_info;
-
 /// Archives capture the caller package version without borrowing SDK provenance.
 #[test]
 fn packaged_sdk_captures_consumer_build_identity() {
-    let identity = tau_client::package_build_identity!(built_info);
+    let identity = tau_client::package_build_identity!();
     assert_eq!(identity.release, env!("CARGO_PKG_VERSION"));
     assert_eq!(identity.revision, None);
     let mut builder = tau_client::ExtensionBuilder::<()>::new(

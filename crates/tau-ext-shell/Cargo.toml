@@ -25,7 +25,7 @@ workspace = true
 echo-agent = []
 
 [build-dependencies]
-built.workspace = true
+tau-client = { workspace = true, features = ["build"] }
 
 [dependencies]
 base64.workspace = true

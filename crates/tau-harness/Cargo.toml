@@ -66,6 +66,7 @@ tracing.workspace = true
 
 [build-dependencies]
 built.workspace = true
+tau-client = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 image.workspace = true

@@ -14,7 +14,7 @@ use crate::{
     OAuthRefreshRejectionCache, PrewarmSupervisor, PromptCredentialAdmissionState,
     ProviderConfigurationState, ProviderDiagnosticsState, ProviderExtension, ProviderRuntime,
     QuotaCoordinator, RuntimeExecutors, RuntimeStartup, WorkerMessage, WorkerQueueState,
-    built_info, run_provider_loop, validate_configure_settings,
+    run_provider_loop, validate_configure_settings,
 };
 
 /// Runs the extension with injected executors and settings.
@@ -38,7 +38,7 @@ where
     if startup.publish_models_after_configure {
         let hello = tau_proto::Hello {
             declaration_inspection: false,
-            build_identity: Some(tau_client::package_build_identity!(built_info)),
+            build_identity: Some(tau_client::package_build_identity!()),
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: EXTENSION_NAME.parse()?,
             client_kind: ClientKind::Provider,

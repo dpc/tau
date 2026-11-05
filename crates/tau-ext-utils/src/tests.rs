@@ -167,7 +167,7 @@ fn inspection_matches_configured_utility_declarations() {
         };
         assert_eq!(
             hello.build_identity,
-            Some(tau_client::package_build_identity!(built_info))
+            Some(tau_client::package_build_identity!())
         );
         let expected: Vec<_> = ordinary
             .into_iter()
@@ -194,7 +194,7 @@ fn inspection_matches_configured_utility_declarations() {
         assert!(hello.declaration_inspection);
         assert_eq!(
             hello.build_identity,
-            Some(tau_client::package_build_identity!(built_info))
+            Some(tau_client::package_build_identity!())
         );
         assert_eq!(result.tools, expected);
         assert!(result.gaps.is_empty());

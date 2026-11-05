@@ -35,7 +35,6 @@ use crate::{
 mod agents;
 mod argument;
 mod artifact_transfer;
-mod built_info;
 mod config;
 mod cwd_state;
 mod diff;
@@ -392,7 +391,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
         target: "tau_ext_shell",
         package = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
-        revision = tau_client::package_build_identity!(built_info).revision.as_deref().unwrap_or("unknown"),
+        revision = tau_client::package_build_identity!().revision.as_deref().unwrap_or("unknown"),
         "extension startup identity"
     );
     run_impl(
@@ -1181,7 +1180,7 @@ impl tau_client::TauExtension for ShellExtension {
     }
 
     fn register(self, builder: &mut tau_client::ExtensionBuilder<Self::State>) {
-        builder.build_identity(tau_client::package_build_identity!(built_info));
+        builder.build_identity(tau_client::package_build_identity!());
         let tools = registered_tool_specs(self.initial_config.dir_lock.enable);
 
         // Replay policy is declared per handler below: historical cwd metadata

@@ -18,7 +18,7 @@ name = "tau_ext_websearch"
 workspace = true
 
 [build-dependencies]
-built.workspace = true
+tau-client = { workspace = true, features = ["build"] }
 
 [dependencies]
 serde.workspace = true

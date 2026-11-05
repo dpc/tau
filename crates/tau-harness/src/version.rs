@@ -50,7 +50,8 @@ fn read_static<const N: usize>(s: &'static [u8; N]) -> [u8; N] {
 /// `-modified` when the working tree was dirty at build time.
 #[must_use]
 pub fn build_revision() -> String {
-    tau_client::build_info::revision(built_info::GIT_COMMIT_HASH, built_info::GIT_DIRTY)
+    tau_client::package_build_identity!()
+        .revision
         .unwrap_or_else(|| "unknown".to_owned())
 }
 

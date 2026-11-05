@@ -54,6 +54,7 @@ unicode-width.workspace = true
 
 [build-dependencies]
 built.workspace = true
+tau-client = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 blake3.workspace = true

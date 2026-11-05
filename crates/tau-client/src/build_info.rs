@@ -77,15 +77,30 @@ fn resolve_revision(
     })
 }
 
-/// Capture the caller's package release and `built` build-script Git metadata.
+/// Capture the caller's package release and build-script source metadata.
 ///
-/// Generate `built.rs` in the caller's `build.rs` using
-/// `built::write_built_file()`, with `built`'s `git2` feature enabled, and
-/// include it in a `built_info` module. Then pass
-/// `package_build_identity!(built_info)` to `ExtensionBuilder::build_identity`
-/// (or the bootstrap Hello field).
+/// Prefer the no-argument form after calling `tau_client::build::emit()` from
+/// the caller's build script, using the SDK's `build` feature as a
+/// build-dependency. It verifies source ownership and installs Cargo watches.
+///
+/// The legacy module-argument form trusts caller-supplied `GIT_COMMIT_HASH` and
+/// `GIT_DIRTY`. Plain `built::write_built_file()` does not establish ownership:
+/// it can discover an enclosing consumer repository and miss Git-only changes.
 #[macro_export]
 macro_rules! package_build_identity {
+    () => {
+        $crate::BuildIdentity {
+            release: env!("CARGO_PKG_VERSION").to_owned(),
+            revision: $crate::build_info::revision(
+                option_env!("TAU_PACKAGE_GIT_REVISION"),
+                match option_env!("TAU_PACKAGE_GIT_DIRTY") {
+                    Some("true") => Some(true),
+                    Some("false") => Some(false),
+                    _ => None,
+                },
+            ),
+        }
+    };
     ($built:ident) => {
         $crate::BuildIdentity {
             release: env!("CARGO_PKG_VERSION").to_owned(),

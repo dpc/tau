@@ -1213,7 +1213,7 @@ fn inspection_provider_metadata_requires_no_credentials() {
     assert!(hello.declaration_inspection);
     assert_eq!(
         hello.build_identity,
-        Some(tau_client::package_build_identity!(built_info))
+        Some(tau_client::package_build_identity!())
     );
     assert_eq!(inventory.providers.len(), 1);
     assert_eq!(inventory.providers[0].models, expected);

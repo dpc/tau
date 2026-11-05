@@ -8,7 +8,6 @@
 
 use ciborium::value as path_ciborium_value;
 
-mod built_info;
 mod shell;
 
 #[cfg(test)]
@@ -313,7 +312,7 @@ impl TauExtension for RhaiExtension {
     }
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
-        builder.build_identity(tau_client::package_build_identity!(built_info));
+        builder.build_identity(tau_client::package_build_identity!());
     }
 }
 
@@ -394,7 +393,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
         target: LOG_TARGET,
         package = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
-        revision = tau_client::package_build_identity!(built_info).revision.as_deref().unwrap_or("unknown"),
+        revision = tau_client::package_build_identity!().revision.as_deref().unwrap_or("unknown"),
         "extension startup identity"
     );
     run(std::io::stdin(), std::io::stdout())

@@ -264,7 +264,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4ad8f11f288f48ca24471bbd51ac257aaeaaa07adae295591266b792902ae64"
 dependencies = [
  "chrono",
- "git2",
 ]
 
 [[package]]
@@ -862,12 +861,13 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-client"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "blake3",
  "ciborium",
  "dpc-tau-blocking-notify-channel",
  "dpc-tau-proto",
+ "git2",
  "serde",
  "serde_json",
  "tracing",
@@ -969,7 +969,6 @@ name = "dpc-tau-ext-provider-builtin"
 version = "0.3.0"
 dependencies = [
  "blake3",
- "built",
  "dialoguer",
  "dirs",
  "dpc-tau-client",
@@ -1001,7 +1000,6 @@ dependencies = [
 name = "dpc-tau-ext-rhai"
 version = "0.3.0"
 dependencies = [
- "built",
  "ciborium",
  "dpc-tau-client",
  "dpc-tau-proto",
@@ -1020,7 +1018,6 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
- "built",
  "ciborium",
  "dirs",
  "dpc-tau-actions",
@@ -1053,7 +1050,6 @@ dependencies = [
 name = "dpc-tau-ext-std-notifications"
 version = "0.3.0"
 dependencies = [
- "built",
  "dpc-tau-client",
  "dpc-tau-proto",
  "handlebars",
@@ -1070,7 +1066,6 @@ dependencies = [
 name = "dpc-tau-ext-test-dummy"
 version = "0.3.0"
 dependencies = [
- "built",
  "dpc-tau-client",
  "dpc-tau-proto",
  "rand 0.8.6",
@@ -1084,7 +1079,6 @@ name = "dpc-tau-ext-utils"
 version = "0.3.0"
 dependencies = [
  "blake3",
- "built",
  "dpc-tau-client",
  "dpc-tau-proto",
  "image",
@@ -1099,7 +1093,6 @@ dependencies = [
 name = "dpc-tau-ext-websearch"
 version = "0.3.0"
 dependencies = [
- "built",
  "dpc-tau-client",
  "dpc-tau-proto",
  "serde",
@@ -1159,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "dpc-tau-proto"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "ciborium",
  "dpc-tau-actions",
