@@ -5,6 +5,7 @@ use tau_client::{ExtensionBuilder, TauExtension, TauExtensionRunner};
 use tau_proto::{ArtifactDescriptor, ArtifactError, HarnessInputMessage, HarnessOutputMessage};
 
 use super::*;
+use crate::image_resolution::tests::png;
 use crate::tests::SharedTraceWriter;
 
 /// Minimal transport owner: focused state tests never invoke a network backend.
@@ -80,10 +81,11 @@ fn image_available_starts_exactly_one_selected_account_worker() {
             );
             profiles
         };
-        runtime.images.tools.executor = |_, prompt, id, _, cancelled| {
+        runtime.images.tools.executor = |_, prompt, id, _, cancelled, images| {
             assert_eq!(prompt, "a transparent leaf");
             assert_eq!(id, "image-call");
             assert!(!cancelled.is_cancelled());
+            assert!(images.is_empty());
             Err(GenerationError::Quota)
         };
         runtime.start_image_call(started(), handle).expect("start");
@@ -163,6 +165,7 @@ fn call(phase: Phase) -> ImageCall {
         session: "session".parse().expect("session"),
         provider: ProviderName::new("selected"),
         prompt: "leaf".into(),
+        attachments: Vec::new(),
         cancel: Arc::new(GenerationCancellation::default()),
         deadline: None,
         phase,
@@ -202,12 +205,12 @@ fn image_declarations_default_on_but_remain_role_authorized() {
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
             schema["properties"].as_object().expect("properties").len(),
-            1
+            2
         );
     }
     assert!(crate::ChatGptProfile::default().image_generation);
     let mut args = started().arguments;
-    assert!(parse_prompt(&args).is_some());
+    assert!(parse_arguments(&args).is_some());
     let CborValue::Map(entries) = &mut args else {
         unreachable!()
     };
@@ -215,19 +218,565 @@ fn image_declarations_default_on_but_remain_role_authorized() {
         CborValue::Text("account".into()),
         CborValue::Text("other".into()),
     ));
-    assert!(parse_prompt(&args).is_none());
+    assert!(parse_arguments(&args).is_none());
     for text in [
         " ".to_owned(),
         "x".repeat(image_generation::MAX_PROMPT_BYTES + 1),
     ] {
         assert!(
-            parse_prompt(&CborValue::Map(vec![(
+            parse_arguments(&CborValue::Map(vec![(
                 CborValue::Text("prompt".into()),
                 CborValue::Text(text)
             )]))
             .is_none()
         );
     }
+}
+
+/// Adds only explicit ordered originals, never history selection or paths.
+fn attached(mut call: ToolStarted, originals: &[Vec<u8>]) -> ToolStarted {
+    let CborValue::Map(entries) = &mut call.arguments else {
+        unreachable!("arguments")
+    };
+    entries.push((
+        CborValue::Text("attachments".into()),
+        CborValue::Array(
+            originals
+                .iter()
+                .map(|bytes| CborValue::Text(tau_proto::artifact_reference(&descriptor(bytes).key)))
+                .collect(),
+        ),
+    ));
+    call
+}
+
+/// Constructs exact content identity and size without a store or user data.
+fn descriptor(bytes: &[u8]) -> ArtifactDescriptor {
+    ArtifactDescriptor::new(
+        format!("blake3:{}", blake3::hash(bytes).to_hex())
+            .parse()
+            .expect("key"),
+        bytes.len() as u64,
+    )
+    .expect("descriptor")
+}
+
+/// Supplies one correlated storage result through the production main loop.
+fn reply(
+    runtime: &mut ProviderRuntime<fn(Option<&ProviderName>) -> BuiltinProviderProfiles>,
+    value: Result<ArtifactValue, ArtifactError>,
+    handle: &ClientHandle,
+) {
+    let request_id = runtime
+        .images
+        .tools
+        .requests
+        .keys()
+        .next()
+        .expect("outstanding")
+        .clone();
+    runtime
+        .handle_image_artifact_result(
+            ArtifactResult {
+                request_id,
+                result: value,
+            },
+            handle,
+        )
+        .expect("reply");
+}
+
+/// Configures synthetic selected-account authority without loading real state.
+fn input_runtime(
+    waker: tau_client::ManualRuntimeWaker,
+) -> ProviderRuntime<fn(Option<&ProviderName>) -> BuiltinProviderProfiles> {
+    let mut runtime = crate::tests::observation_test_runtime();
+    runtime.images.tools = images();
+    runtime.worker_waker = Some(waker);
+    runtime.load_prompt_profiles = |selected| {
+        assert_eq!(selected, Some(&ProviderName::new("selected")));
+        let mut profiles = BuiltinProviderProfiles::default();
+        let mut profile = crate::ChatGptProfile::default();
+        profile.auth.access_token = "synthetic-selected".into();
+        profiles.providers.insert(
+            ProviderName::new("selected"),
+            BuiltinProviderProfile::Chatgpt(profile),
+        );
+        profiles
+    };
+    runtime
+}
+
+/// Creates a small valid original without filesystem access or provider
+/// traffic.
+fn input_png() -> Vec<u8> {
+    png()
+}
+
+/// The strict runtime parser matches the additive schema and does not broaden
+/// artifact references into URLs, files, upload IDs or arbitrary objects.
+#[test]
+fn image_attachment_argument_contract() {
+    let base = started();
+    let key = descriptor(b"synthetic").key;
+    let reference = tau_proto::artifact_reference(&key);
+    for values in [
+        Vec::new(),
+        vec![CborValue::Text(reference.clone())],
+        vec![CborValue::Text(key.to_string()); 5],
+    ] {
+        let mut args = base.arguments.clone();
+        let CborValue::Map(entries) = &mut args else {
+            unreachable!()
+        };
+        entries.push((
+            CborValue::Text("attachments".into()),
+            CborValue::Array(values.clone()),
+        ));
+        let (_, parsed) = parse_arguments(&args).expect("valid attachments");
+        assert_eq!(parsed, vec![key.clone(); values.len()]);
+    }
+    for invalid in [
+        CborValue::Null,
+        CborValue::Text(reference.clone()),
+        CborValue::Array(vec![CborValue::Null]),
+        CborValue::Array(vec![CborValue::Text(reference); 6]),
+        CborValue::Array(vec![CborValue::Text(
+            "https://example.invalid/image.png".into(),
+        )]),
+        CborValue::Array(vec![CborValue::Text("/tmp/image.png".into())]),
+        CborValue::Array(vec![CborValue::Text("data:image/png;base64,AA==".into())]),
+        CborValue::Array(vec![CborValue::Text("file-123".into())]),
+        CborValue::Array(vec![CborValue::Text("blake3:bad".into())]),
+    ] {
+        let mut args = base.arguments.clone();
+        let CborValue::Map(entries) = &mut args else {
+            unreachable!()
+        };
+        entries.push((CborValue::Text("attachments".into()), invalid));
+        assert!(parse_arguments(&args).is_none());
+    }
+}
+
+/// Every occurrence downloads its original and acknowledges Close before the
+/// one selected-account worker can begin, including repeated references.
+#[test]
+fn image_edits_resolve_ordered_originals_before_one_worker() {
+    let first = input_png();
+    let mut second = first.clone();
+    // Trailing private metadata remains part of the unchanged original.
+    second.extend_from_slice(b"synthetic-original-metadata");
+    let originals = vec![first.clone(), second, first];
+    let frames = with_transport(|handle, waker| {
+        let mut runtime = input_runtime(waker);
+        runtime.images.tools.executor = |_, _, _, _, _, inputs| {
+            assert_eq!(inputs.len(), 3);
+            Err(GenerationError::Quota)
+        };
+        runtime
+            .start_image_call(attached(started(), &originals), handle)
+            .expect("start");
+        reply(&mut runtime, Ok(ArtifactValue::Done), handle);
+        for (index, bytes) in originals.iter().enumerate() {
+            reply(
+                &mut runtime,
+                Ok(ArtifactValue::Opened {
+                    read: format!("read-{index}").parse().expect("read"),
+                    descriptor: descriptor(bytes),
+                }),
+                handle,
+            );
+            reply(
+                &mut runtime,
+                Ok(ArtifactValue::Chunk {
+                    offset: 0,
+                    bytes: bytes.clone(),
+                    eof: true,
+                }),
+                handle,
+            );
+            assert!(runtime.worker_rx.try_recv().is_err(), "must await Close");
+            reply(&mut runtime, Ok(ArtifactValue::Done), handle);
+        }
+        let WorkerMessage::ImageGenerated { call_id, result } = runtime
+            .worker_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker")
+        else {
+            panic!("image result")
+        };
+        assert_eq!(result, Err(GenerationError::Quota));
+        runtime
+            .images
+            .tools
+            .generated(call_id, result, handle)
+            .expect("terminal");
+        assert!(runtime.images.tools.calls.is_empty());
+        assert!(runtime.images.tools.workers.is_empty());
+    });
+    let ops: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::ArtifactRequest(request) => Some(&request.op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ops.len(), 10);
+    assert_eq!(ops[0], &ArtifactOp::Available);
+    for (index, bytes) in originals.iter().enumerate() {
+        assert_eq!(
+            ops[1 + index * 3],
+            &ArtifactOp::Open {
+                key: descriptor(bytes).key
+            }
+        );
+        assert!(matches!(ops[3 + index * 3], ArtifactOp::Close { .. }));
+    }
+}
+
+/// Broken Artifact replies fail exactly once, clean up allocated reads and
+/// never invoke the paid executor, even when input bytes look like an image.
+#[test]
+fn image_input_failures_terminalize_before_paid_work() {
+    #[derive(Clone, Copy)]
+    enum Fault {
+        UnavailableStorage,
+        MissingOriginal,
+        WrongKey,
+        BadOffset,
+        BadDigest,
+        WrongEof,
+        OversizeFrame,
+    }
+    for fault in [
+        Fault::UnavailableStorage,
+        Fault::MissingOriginal,
+        Fault::WrongKey,
+        Fault::BadOffset,
+        Fault::BadDigest,
+        Fault::WrongEof,
+        Fault::OversizeFrame,
+    ] {
+        let bytes = input_png();
+        let frames = with_transport(|handle, waker| {
+            let mut runtime = input_runtime(waker);
+            runtime.images.tools.executor = |_, _, _, _, _, _| panic!("no paid work");
+            runtime
+                .start_image_call(attached(started(), &[bytes.clone()]), handle)
+                .expect("start");
+            if matches!(fault, Fault::UnavailableStorage) {
+                reply(&mut runtime, Err(ArtifactError::Unavailable), handle);
+            } else {
+                reply(&mut runtime, Ok(ArtifactValue::Done), handle);
+                if matches!(fault, Fault::MissingOriginal) {
+                    reply(&mut runtime, Err(ArtifactError::Unavailable), handle);
+                } else {
+                    reply(
+                        &mut runtime,
+                        Ok(ArtifactValue::Opened {
+                            read: "input-read".parse().expect("read"),
+                            descriptor: if matches!(fault, Fault::WrongKey) {
+                                descriptor(b"wrong identity")
+                            } else {
+                                descriptor(&bytes)
+                            },
+                        }),
+                        handle,
+                    );
+                    if !matches!(fault, Fault::WrongKey) {
+                        reply(
+                            &mut runtime,
+                            Ok(ArtifactValue::Chunk {
+                                offset: if matches!(fault, Fault::BadOffset) {
+                                    1
+                                } else {
+                                    0
+                                },
+                                bytes: if matches!(fault, Fault::BadDigest) {
+                                    vec![0; bytes.len()]
+                                } else if matches!(fault, Fault::OversizeFrame) {
+                                    vec![0; tau_proto::ARTIFACT_CHUNK_BYTES + 1]
+                                } else {
+                                    bytes.clone()
+                                },
+                                eof: !matches!(fault, Fault::WrongEof),
+                            }),
+                            handle,
+                        );
+                    }
+                }
+            }
+            assert!(runtime.images.tools.calls.is_empty());
+            assert!(runtime.images.tools.opens.is_empty());
+            assert!(runtime.worker_rx.try_recv().is_err());
+        });
+        assert_eq!(frames.iter().filter(|frame| matches!(frame, HarnessInputMessage::Emit(emit) if matches!(*emit.event, tau_proto::Event::ToolErrorReported(_)))).count(), 1);
+        if !matches!(fault, Fault::UnavailableStorage | Fault::MissingOriginal) {
+            assert!(frames.iter().any(|frame| matches!(frame, HarnessInputMessage::ArtifactRequest(request) if matches!(request.op, ArtifactOp::Close { .. }))));
+        }
+    }
+}
+
+/// Missing/invalid media is rejected by the worker before the executor seam;
+/// Artifact digest equality alone never establishes media validity.
+#[test]
+fn image_invalid_original_never_reaches_executor() {
+    with_transport(|handle, waker| {
+        let mut runtime = input_runtime(waker);
+        runtime.images.tools.executor =
+            |_, _, _, _, _, _| panic!("invalid original reached paid work");
+        let bytes = b"not image data".to_vec();
+        runtime
+            .start_image_call(attached(started(), &[bytes.clone()]), handle)
+            .expect("start");
+        for value in [
+            ArtifactValue::Done,
+            ArtifactValue::Opened {
+                read: "read".parse().expect("read"),
+                descriptor: descriptor(&bytes),
+            },
+            ArtifactValue::Chunk {
+                offset: 0,
+                bytes,
+                eof: true,
+            },
+            ArtifactValue::Done,
+        ] {
+            reply(&mut runtime, Ok(value), handle);
+        }
+        let WorkerMessage::ImageGenerated { call_id, result } = runtime
+            .worker_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker")
+        else {
+            panic!("result")
+        };
+        assert_eq!(result, Err(GenerationError::InvalidInput));
+        runtime
+            .images
+            .tools
+            .generated(call_id, result, handle)
+            .expect("terminal");
+    });
+}
+
+/// Cancellation and timeout at every transfer phase revoke dispatch authority;
+/// late Open allocations still close without reviving the canceled call.
+#[test]
+fn image_input_cancel_and_timeout_revoke_late_replies() {
+    for phase in 0..3 {
+        for timeout in [false, true] {
+            let bytes = input_png();
+            let frames = with_transport(|handle, waker| {
+                let mut runtime = input_runtime(waker);
+                runtime.images.tools.executor = |_, _, _, _, _, _| panic!("canceled call executed");
+                runtime
+                    .start_image_call(attached(started(), &[bytes.clone()]), handle)
+                    .expect("start");
+                reply(&mut runtime, Ok(ArtifactValue::Done), handle);
+                let opened = ArtifactValue::Opened {
+                    read: "read".parse().expect("read"),
+                    descriptor: descriptor(&bytes),
+                };
+                if 1 <= phase {
+                    reply(&mut runtime, Ok(opened.clone()), handle);
+                }
+                if 2 <= phase {
+                    reply(
+                        &mut runtime,
+                        Ok(ArtifactValue::Chunk {
+                            offset: 0,
+                            bytes,
+                            eof: true,
+                        }),
+                        handle,
+                    );
+                }
+                let request_id = runtime
+                    .images
+                    .tools
+                    .requests
+                    .keys()
+                    .next()
+                    .expect("pending")
+                    .clone();
+                if timeout {
+                    runtime
+                        .images
+                        .tools
+                        .timeout(&started().call_id, handle)
+                        .expect("timeout");
+                } else {
+                    runtime
+                        .images
+                        .tools
+                        .cancel(&started().call_id, handle)
+                        .expect("cancel");
+                }
+                runtime
+                    .handle_image_artifact_result(
+                        ArtifactResult {
+                            request_id,
+                            result: Ok(if phase == 0 {
+                                opened
+                            } else {
+                                ArtifactValue::Done
+                            }),
+                        },
+                        handle,
+                    )
+                    .expect("late");
+                assert!(runtime.images.tools.calls.is_empty());
+                assert!(runtime.images.tools.opens.is_empty());
+                assert!(runtime.worker_rx.try_recv().is_err());
+            });
+            assert_eq!(frames.iter().filter(|frame| matches!(frame, HarnessInputMessage::ArtifactRequest(request) if matches!(request.op, ArtifactOp::Close { .. }))).count(), if phase == 2 { 2 } else { 1 });
+        }
+    }
+}
+
+/// Canceled Open allocations retain bounded ownership rather than creating an
+/// unbounded tombstone map or silently dropping cleanup authority.
+#[test]
+fn image_canceled_open_capacity_is_bounded_until_late_cleanup() {
+    with_transport(|handle, waker| {
+        let mut runtime = input_runtime(waker);
+        for index in 0..20 {
+            let mut call = attached(started(), &[input_png()]);
+            call.call_id = ToolCallId::new(format!("call-{index}"));
+            runtime
+                .start_image_call(call.clone(), handle)
+                .expect("start");
+            if index < MAX_CALLS {
+                reply(&mut runtime, Ok(ArtifactValue::Done), handle);
+                runtime
+                    .images
+                    .tools
+                    .cancel(&call.call_id, handle)
+                    .expect("cancel");
+            }
+            assert!(runtime.images.tools.calls.is_empty());
+            assert!(runtime.images.tools.opens.len() <= MAX_CALLS);
+        }
+        assert_eq!(runtime.images.tools.opens.len(), MAX_CALLS);
+        for request_id in runtime
+            .images
+            .tools
+            .opens
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            runtime
+                .handle_image_artifact_result(
+                    ArtifactResult {
+                        request_id,
+                        result: Ok(ArtifactValue::Opened {
+                            read: "late-read".parse().expect("read"),
+                            descriptor: descriptor(&input_png()),
+                        }),
+                    },
+                    handle,
+                )
+                .expect("cleanup");
+        }
+        runtime
+            .start_image_call(attached(started(), &[input_png()]), handle)
+            .expect("capacity restored");
+        assert_eq!(runtime.images.tools.calls.len(), 1);
+        runtime.images.tools.abandon_all();
+        assert!(runtime.images.tools.opens.is_empty());
+    });
+}
+
+/// Aggregate allowance is charged before reading the next descriptor's body;
+/// duplicates still consume their full original-byte budget.
+#[test]
+fn image_original_aggregate_budget_precedes_next_read() {
+    let original = vec![0; image_generation::MAX_IMAGE_BYTES];
+    let next = vec![0; image_generation::MAX_INPUT_BYTES - original.len() + 1];
+    let frames = with_transport(|handle, waker| {
+        let mut runtime = input_runtime(waker);
+        runtime.images.tools.executor = |_, _, _, _, _, _| panic!("over-budget input executed");
+        runtime
+            .start_image_call(
+                attached(started(), &[original.clone(), next.clone()]),
+                handle,
+            )
+            .expect("start");
+        reply(&mut runtime, Ok(ArtifactValue::Done), handle);
+        reply(
+            &mut runtime,
+            Ok(ArtifactValue::Opened {
+                read: "first".parse().expect("read"),
+                descriptor: descriptor(&original),
+            }),
+            handle,
+        );
+        for (index, chunk) in original.chunks(tau_proto::ARTIFACT_CHUNK_BYTES).enumerate() {
+            let offset = index * tau_proto::ARTIFACT_CHUNK_BYTES;
+            reply(
+                &mut runtime,
+                Ok(ArtifactValue::Chunk {
+                    offset: offset as u64,
+                    bytes: chunk.to_vec(),
+                    eof: offset + chunk.len() == original.len(),
+                }),
+                handle,
+            );
+        }
+        reply(&mut runtime, Ok(ArtifactValue::Done), handle);
+        reply(
+            &mut runtime,
+            Ok(ArtifactValue::Opened {
+                read: "second".parse().expect("read"),
+                descriptor: descriptor(&next),
+            }),
+            handle,
+        );
+        assert!(runtime.images.tools.calls.is_empty());
+        assert!(runtime.worker_rx.try_recv().is_err());
+    });
+    assert!(!frames.iter().any(
+        |frame| matches!(frame, HarnessInputMessage::ArtifactRequest(request)
+        if matches!(&request.op, ArtifactOp::Read { read, .. } if read.as_str() == "second"))
+    ));
+    assert!(frames.iter().any(
+        |frame| matches!(frame, HarnessInputMessage::ArtifactRequest(request)
+        if matches!(&request.op, ArtifactOp::Close { read } if read.as_str() == "second"))
+    ));
+}
+
+/// A canceled finite worker retains capacity and identity until completion, so
+/// cancel/restart churn cannot spawn unlimited decoders or adopt a stale
+/// result.
+#[test]
+fn image_canceled_worker_slots_survive_until_completion() {
+    with_handle(|handle| {
+        let mut tools = images();
+        for index in 0..MAX_CALLS {
+            let mut pending = call(Phase::Generating);
+            pending.started.call_id = ToolCallId::new(format!("worker-{index}"));
+            let id = pending.started.call_id.clone();
+            tools.workers.insert(id.clone());
+            tools.calls.insert(id.clone(), pending);
+            tools.cancel(&id, handle).expect("cancel");
+            let mut duplicate = started();
+            duplicate.call_id = id;
+            tools.start(duplicate, handle).expect("ignore duplicate");
+            assert!(tools.calls.is_empty());
+        }
+        tools.start(started(), handle).expect("busy");
+        assert!(tools.calls.is_empty());
+        for id in tools.workers.iter().cloned().collect::<Vec<_>>() {
+            tools
+                .generated(id, Ok(input_png()), handle)
+                .expect("late completion ignored");
+        }
+        tools.start(started(), handle).expect("capacity restored");
+        assert_eq!(tools.calls.len(), 1);
+        tools.abandon_all();
+    });
 }
 
 /// Storage denial terminalizes before credentials or generation can be loaded.

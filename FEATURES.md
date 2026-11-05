@@ -200,11 +200,17 @@ role-specific behavior also includes service tiers and prompt caching.
 ChatGPT profiles declare provider-owned `generate_image` by default and can opt
 out with `image_generation: false`. It uses the selected account for one
 original PNG and returns a shared artifact key, not inline bytes or a storage
-path. Generic ordinary tools can share a public alias with a provider-scoped
+path. Add ordered `attachments` to edit 1–5 artifact originals (static PNG,
+JPEG or WebP) through that same account; omitted or empty attachments still
+generate. Tau sends attached originals, including metadata, to the remote image
+service; expired artifacts fail without falling back to generation.
+Generic ordinary tools can share a public alias with a provider-scoped
 backing; the eligible exact-provider backing wins without new selection
 configuration. The declaration remains role-disabled until
 `enable_tools: [generate_image]` enables that public surface.
-Generation never retries or falls back to another account after failure.
+Generation and edits never retry or fall back to another account after failure.
+Editing follows the upstream source and has local tests, but no live-account
+verification.
 
 `read_image` keeps inspected pixels in their native tool-result round. Durable
 prepared images use rooted shared artifacts and bounded provider byte caching;

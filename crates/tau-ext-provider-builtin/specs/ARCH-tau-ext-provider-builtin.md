@@ -71,10 +71,16 @@ unverified live-subscription limits.
 ChatGPT profiles declare a scoped ordinary `generate_image` tool unless the
 profile explicitly opts out.
 `image_tools` owns availability preflight, selected-profile credential resolution,
-bounded call admission, cancellation, and correlated artifact upload on the
-main loop. The backend worker performs one finite Images request and returns
+bounded call admission, cancellation, sequential original downloads and correlated
+artifact upload on the main loop. Optional ordered artifact attachments select
+editing; omitted or empty attachments preserve generation. Tau verifies input
+transfer size, digest and Close before resolving selected-profile credentials.
+The backend worker validates static PNG/JPEG/WebP originals under finite
+byte/decode budgets, then performs one finite Images request and returns
 original PNG bytes privately. It does not save files, publish events, or retry
-generation. Artifact failures terminate the call without account fallback;
+generation or editing. Canceled pending Opens retain bounded cleanup ownership
+until their reply or connection closure, and canceled workers retain admission
+slots until completion. Artifact failures terminate the call without account fallback;
 publication racing cancellation may leave a shared original. See
 [SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md) and
 [SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).

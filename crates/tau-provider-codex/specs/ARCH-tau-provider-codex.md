@@ -70,8 +70,15 @@ observation is rejected rather than falling back.
 Image generation is a separate finite backend operation, not Responses
 inference or typed image input. `image_generation` uses the selected subscription
 credentials for one fixed `gpt-image-2` request to `/codex/images/generations`,
-with redirects and transport retries disabled. It bounds the response, validates
-one complete PNG, and returns its original bytes unchanged. No provider prose,
+or the sibling `/codex/images/edits` endpoint for a nonempty, ordered list of
+validated originals.
+Edits use bounded inline data URLs in JSON, never remote URLs or file uploads.
+Static PNG/JPEG/WebP validation preserves original bytes and metadata, with
+independent count, raw-byte, encoded-body and sequential decode budgets.
+The edit shape follows the official Codex client at revision
+`695961ee88a2c84c0919814a4345b94a2d10f3ca`; this does not establish live entitlement.
+Both operations disable redirects and transport retries. The adapter bounds the
+response, validates one complete PNG, and returns its original bytes unchanged. No provider prose,
 image bytes, or base64 enters diagnostic output; callers own artifact storage
 and ordinary tool lifecycle. Both Standard and Lite profiles may opt in, without
 claiming account entitlement or probing it.

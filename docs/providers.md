@@ -1920,7 +1920,7 @@ server-requested delay, while retaining normal worker concurrency limits and
 initially leaving other delayed jobs untouched. A validated successful terminal
 from that exact attempt clears its matching current shared cooldown and wakes
 only peers constrained by that cooldown generation with anti-herd jitter.
-## Image generation
+## Image generation and editing
 
 ChatGPT profiles declare ordinary function tool `generate_image` for their exact
 provider namespace and serving connection by default. Set
@@ -1931,13 +1931,47 @@ disabled by default for roles. Enable it for a role with
 backing internally. If a provider instance has a `tool_prefix`, the public alias
 receives that prefix too.
 
-The only argument is `{"prompt":"..."}`: nonempty text, at most 32 KiB, with
-no account, model, size, edit, or batch arguments. One fixed `gpt-image-2`
-generation uses the selected ChatGPT account. This is an explicit paid or
-quota-consuming effect, not an entitlement guarantee or a startup probe.
+Use `{"prompt":"..."}` to generate, or add an ordered `attachments` list
+to edit originals. Omitted or empty attachments preserve generation behavior.
+The prompt must contain non-whitespace text and fit within 32 KiB. One fixed
+`gpt-image-2` generation or edit uses the selected ChatGPT account. This is a paid
+or quota-consuming operation, not an entitlement guarantee or a startup probe.
 An unavailable/expired account requires authentication; the image operation
 does not refresh and replay a failed generation, switch accounts, or use an
-API key.
+API key. No account, model, size, quality, mask or batch controls are exposed.
+
+For example, first call `generate_image` with
+`{"prompt":"A green leaf on a transparent background"}`. Then pass its returned
+artifact reference into another call:
+
+```json
+{
+  "prompt": "Keep image 1's composition and transparency; make the leaf blue.",
+  "attachments": ["<tau-artifact:blake3:FULL_DIGEST_FROM_THE_FIRST_RESULT>"]
+}
+```
+
+Supply 1–5 canonical artifact reference strings (bare canonical keys
+also work). Each occurrence counts in order as “image 1”, “image 2”, etc.;
+there is no automatic recent-image selection. Paths, HTTP/data URLs, OpenAI
+file IDs and resized `read_image` previews are not accepted. Actual original
+bytes must decode as static PNG, JPEG or WebP. Animation and unsupported or
+corrupt media fail locally before provider submission. Each original is limited
+to 16 MiB, all originals to 24 MiB, all data URLs including prefixes/padding to
+32 MiB, and serialized JSON to 33 MiB. Tau decodes one raster at a time, with
+limits of 8192 pixels per axis and 256 MiB per decode. These are Tau resource
+policies, not server acceptance guarantees; an exact 24-MiB raw total can exceed the
+independent data-URL limit because of prefixes and padding.
+
+Attaching a reference explicitly discloses its complete original bytes, including
+embedded metadata, to the selected account's remote image service. A digest
+does not establish origin or permission to disclose content. Reads do not renew
+artifact retention, and a reference in a transcript does not pin its original;
+a later edit can fail if that original has expired. Resolution failures never
+fall back to generation. Editing follows the official Codex client's
+JSON `/images/edits` contract at revision
+`695961ee88a2c84c0919814a4345b94a2d10f3ca`; selected-account entitlement and
+live edit behavior remain unverified.
 
 Before generation, the provider checks that shared artifact storage is
 available. Success returns `artifact`, `size`, and `mime_type` output headers;
@@ -1951,8 +1985,10 @@ needs a private local copy. No inline image or host storage path is returned by
 generation.
 
 Generation has a five-minute network deadline and a seven-minute overall
-availability/generation/publication deadline. It uses ordinary automatic
+availability/input-resolution/generation/publication deadline. It uses ordinary automatic
 background, wait, and cancellation handling. Failures and uncertain completion
 never retry generation; cancellation racing artifact finalization can leave
 an unreferenced original. Four concurrent image calls are admitted per provider
-process; excess calls fail busy.
+process; excess calls fail busy. Canceled workers and pending Open allocations
+retain capacity until completion/late cleanup or transport closure, so cancel
+churn cannot accumulate unbounded decoding work or cleanup state.

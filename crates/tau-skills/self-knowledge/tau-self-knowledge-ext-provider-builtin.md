@@ -127,10 +127,27 @@ Neither path guarantees complete or current text.
 ChatGPT profiles declare `generate_image` by default; opt out with
 `image_generation: false`. Roles must opt in with `enable_tools: [generate_image]`;
 an instance `tool_prefix` prefixes the alias. Standard and Lite are supported.
-Input is only `{"prompt":"..."}`, nonempty and at most 32 KiB.
+Use `{"prompt":"..."}` (non-whitespace, at most 32 KiB) to generate.
+Add `attachments: ["<tau-artifact:FULL_KEY>", ...]` to edit 1–5 originals in
+the supplied order. Omitted or empty attachments still generate. Bare canonical
+keys also work; paths, URLs, file IDs and previews do not. No masks, batches or
+automatic recent-image selection.
+
+Inputs must be valid static PNG, JPEG or WebP, at most 16 MiB each and 24 MiB
+total. Separate limits cap data URLs at 32 MiB and JSON at 33 MiB. Tau decodes one
+raster at a time, with limits of 8192 pixels per axis and 256 MiB per decode.
+Inputs at the raw-byte limit can exceed encoded limits due to padding and prefixes.
+Attached original bytes and embedded metadata go to the selected account's
+remote image service; check disclosure
+intent. Artifact reads do not pin or renew retention, so later edits can fail.
+For a generation-then-edit workflow, pass the first result's `artifact` header
+as the next call's single attachment and describe changes to “image 1”.
 
 Generation uses fixed `gpt-image-2` on the selected subscription account, without
-entitlement probes, account switching, or API-key fallback. Success returns
+entitlement probes, account switching, or API-key fallback. Nonempty attachments
+use the sibling JSON edit endpoint, without generation fallback or separate
+uploads. Edits follow the upstream source and have deterministic tests, but no
+live-account verification. Success returns
 `artifact`, `size`, and `mime_type` headers for the original PNG, at most 16 MiB.
 Pass `<tau-artifact:FULL_KEY>` directly to `import` or `read_image`; no inline image
 or store path is returned. Artifacts outlive ephemeral transcripts. Ordinary

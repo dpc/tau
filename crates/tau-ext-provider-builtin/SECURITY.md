@@ -297,11 +297,20 @@ refresh-terminal acceptance.
 
 Image generation, enabled by default unless its ChatGPT profile opts out, uses
 only the selected profile's credentials.
+With ordered edit attachments, Tau sends the named original artifact bytes,
+including embedded metadata, to that same remote account. Hash possession
+does not establish provenance or permission to disclose. Known-key downloads
+verify exact size/digest and acknowledged Close before dispatch; the worker
+fully decodes supported static media before paid work. Tau does not use previews,
+scan history, fetch external URLs or upload files to OpenAI. Missing, expired,
+corrupt, animated or over-budget inputs fail without generation fallback.
+Canceled pending Opens keep bounded late-Close authority, and canceled workers
+retain finite admission slots until completion.
 An authenticated Available artifact reply must precede the paid effect. The
 fixed subscription endpoint and `gpt-image-2` model never fall back to another
 account, an API key, or another generation attempt. Quota, authentication,
 transport and storage failures do not retry. Response bytes and PNG decoding are
-bounded; original bytes cross only the backend response and typed artifact
+bounded; output original bytes cross only the backend response and typed artifact
 upload, not ordinary tool-result payloads, transcripts, or diagnostic logs.
 The result contains only a hash key, size and MIME type. Shared originals retain
 the artifact store's session-independent lifetime, including ephemeral sessions.

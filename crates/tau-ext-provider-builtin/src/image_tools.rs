@@ -1,20 +1,24 @@
 //! Selected-account image production and main-loop-owned artifact publication.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tau_client::{ArtifactClient, ArtifactUpload, ClientHandle, ClientResult, ToolNameScope};
 use tau_proto::{
-    ArtifactOp, ArtifactRequestId, ArtifactResult, ArtifactValue, CborValue, ProviderName,
-    SessionId, ToolCallId, ToolName, ToolStarted,
+    ArtifactKey, ArtifactOp, ArtifactRequestId, ArtifactResult, ArtifactValue, CborValue,
+    ProviderName, SessionId, ToolCallId, ToolName, ToolStarted,
 };
-use tau_provider_codex::image_generation::{self, GenerationCancellation, GenerationError};
+use tau_provider_codex::image_generation::{
+    self, GenerationCancellation, GenerationError, InputImage,
+};
 
 use crate::{BuiltinProviderProfile, BuiltinProviderProfiles, ProviderRuntime, WorkerMessage};
 
+mod inputs;
 #[cfg(test)]
 mod tests;
+use inputs::Inputs;
 
 /// Fixed bound shared by availability checks, network workers and uploads.
 const MAX_CALLS: usize = 4;
@@ -27,6 +31,7 @@ type ImageExecutor = fn(
     &str,
     &tau_provider::OutboundNetworkPolicy,
     &GenerationCancellation,
+    Vec<InputImage>,
 ) -> Result<Vec<u8>, GenerationError>;
 
 /// Runtime authority and transfer correlations; no credential-bearing Debug.
@@ -39,6 +44,10 @@ pub(super) struct ImageTools {
     calls: HashMap<ToolCallId, ImageCall>,
     /// Exactly one outstanding artifact operation per call.
     requests: HashMap<ArtifactRequestId, ToolCallId>,
+    /// Open allocation cleanup survives cancellation; orphan slots bound churn.
+    opens: HashMap<ArtifactRequestId, SessionId>,
+    /// Worker slots survive cancellation until their finite completion arrives.
+    workers: HashSet<ToolCallId>,
     /// Backend function; tests replace it without live endpoint access.
     executor: ImageExecutor,
 }
@@ -50,26 +59,37 @@ impl Default for ImageTools {
             session: None,
             calls: HashMap::new(),
             requests: HashMap::new(),
-            executor: image_generation::generate,
+            opens: HashMap::new(),
+            workers: HashSet::new(),
+            executor: image_generation::generate_with_images,
         }
     }
 }
 
-/// One accepted call; original bytes only live in upload state.
+/// One accepted call, owning private bounded originals until worker dispatch.
 struct ImageCall {
+    /// Ordinary tool identity and terminal reporting authority.
     started: ToolStarted,
+    /// Captured session for directed Artifact operations.
     session: SessionId,
+    /// Selected declaration's account namespace.
     provider: ProviderName,
+    /// Bounded instruction moved into the finite worker.
     prompt: String,
+    /// Ordered artifact occurrences, consumed after availability.
+    attachments: Vec<ArtifactKey>,
+    /// Shared latched worker cancellation.
     cancel: Arc<GenerationCancellation>,
     /// Dropping a completed call wakes its deadline thread immediately.
     deadline: Option<mpsc::Sender<()>>,
+    /// Current sequential transfer or paid-operation ownership.
     phase: Phase,
 }
 
 /// Paid effect can begin only after a correlated availability success.
 enum Phase {
     Availability,
+    Resolving(Inputs),
     Generating,
     Uploading(ArtifactUpload),
 }
@@ -87,11 +107,16 @@ pub(super) fn declarations(
                 name: ToolName::new(format!("codex_image_{index}")),
                 provider_scope: Some(provider.clone()),
                 model_visible_name: Some(ToolName::new("generate_image")),
-                description: Some("Generate one original PNG from a prompt using the selected ChatGPT account. Returns a canonical <tau-artifact:FULL_KEY> reference, size and MIME type as output headers; pass the reference directly to import or read_image. Original bytes persist independently of this session, including ephemeral sessions. No edits or batches.".to_owned()),
+                description: Some("Generate one original PNG using the selected ChatGPT account, or edit with optional ordered attachments (up to 5 canonical <tau-artifact:FULL_KEY> references to static PNG, JPEG or WebP originals). Omitted or empty attachments generate a new image. Attached original bytes, including metadata, are disclosed to that account; references can expire. Returns a canonical artifact reference, size and MIME headers; pass directly to import or read_image. Originals persist independently of this session, including ephemeral sessions. No masks or batches.".to_owned()),
                 tool_type: tau_proto::ToolType::Function,
                 parameters: Some(serde_json::json!({
                     "type": "object",
-                    "properties": {"prompt": {"type": "string", "minLength": 1, "maxLength": image_generation::MAX_PROMPT_BYTES}},
+                    "properties": {
+                        "prompt": {"type": "string", "minLength": 1, "maxLength": image_generation::MAX_PROMPT_BYTES},
+                        "attachments": {"type": "array", "maxItems": image_generation::MAX_ATTACHMENTS,
+                            "items": {"type": "string"},
+                            "description": "Ordered original artifact references; image 1, image 2, etc. No paths, URLs, previews, file IDs or automatic history selection."}
+                    },
                     "required": ["prompt"],
                     "additionalProperties": false
                 })),
@@ -114,7 +139,7 @@ impl ImageTools {
         };
         self.requests.retain(|_, owner| owner != id);
         call.cancel.cancel();
-        abort_upload(&call, handle);
+        abort_transfers(&call, handle);
         report_error(
             &call.started,
             "image generation or artifact publication timed out; generation will not be retried",
@@ -149,20 +174,32 @@ impl ImageTools {
         let Some(provider) = self.declarations.get(&started.tool_name).cloned() else {
             return Ok(());
         };
-        if self.calls.contains_key(&started.call_id) {
+        if self.calls.contains_key(&started.call_id) || self.workers.contains(&started.call_id) {
             return Ok(());
         }
-        let Some(prompt) = parse_prompt(&started.arguments) else {
+        let Some((prompt, attachments)) = parse_arguments(&started.arguments) else {
             return report_error(
                 &started,
-                "image prompt must be the only argument, nonempty and at most 32 KiB",
+                "expected a nonempty prompt up to 32 KiB and optional attachments of at most 5 artifact references",
                 handle,
             );
         };
         let Some(session) = self.session.clone() else {
             return report_error(&started, "image artifact session is unavailable", handle);
         };
-        if self.calls.len() >= MAX_CALLS {
+        if self.calls.len()
+            + self
+                .opens
+                .keys()
+                .filter(|id| !self.requests.contains_key(*id))
+                .count()
+            + self
+                .workers
+                .iter()
+                .filter(|id| !self.calls.contains_key(*id))
+                .count()
+            >= MAX_CALLS
+        {
             return report_error(&started, "image generation capacity is busy", handle);
         }
         let request = ArtifactClient::new(handle.clone())
@@ -175,6 +212,7 @@ impl ImageTools {
                 session,
                 provider,
                 prompt,
+                attachments,
                 cancel: Arc::new(GenerationCancellation::default()),
                 deadline: None,
                 phase: Phase::Availability,
@@ -189,6 +227,7 @@ impl ImageTools {
         result: Result<Vec<u8>, GenerationError>,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
+        self.workers.remove(&call_id);
         if !self
             .calls
             .get(&call_id)
@@ -260,7 +299,7 @@ impl ImageTools {
         };
         self.requests.retain(|_, owner| owner != id);
         call.cancel.cancel();
-        abort_upload(&call, handle);
+        abort_transfers(&call, handle);
         handle.report_tool_cancelled(tau_proto::ToolCancelled {
             call_id: call.started.call_id,
             tool_name: call.started.tool_name,
@@ -283,6 +322,8 @@ impl ImageTools {
         }
         self.calls.clear();
         self.requests.clear();
+        self.opens.clear();
+        // In-flight workers retain capacity until completion, even on restart.
     }
 }
 
@@ -329,22 +370,36 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         let Some(id) = self.images.tools.requests.remove(&result.request_id) else {
+            if let Some(session) = self.images.tools.opens.remove(&result.request_id) {
+                close_opened(&session, &result, handle);
+            }
             return Ok(());
         };
+        let opened_session = self.images.tools.opens.remove(&result.request_id);
         let Some(mut call) = self.images.tools.calls.remove(&id) else {
             return Ok(());
         };
         let frame = tau_proto::HarnessOutputMessage::ArtifactResult(Box::new(result.clone()));
         if !tau_proto::artifact_frame_fits(&frame) {
-            abort_upload(&call, handle);
+            if let Some(session) = &opened_session {
+                close_opened(session, &result, handle);
+            }
+            abort_transfers(&call, handle);
             return report_error(
                 &call.started,
                 "image artifact response exceeded limits",
                 handle,
             );
         }
+        // An Open may allocate even if its descriptor fails validation.
+        let opened_read = match &result.result {
+            Ok(ArtifactValue::Opened { read, .. }) if opened_session.is_some() => {
+                Some(read.clone())
+            }
+            _ => None,
+        };
         let Ok(value) = result.result else {
-            abort_upload(&call, handle);
+            abort_transfers(&call, handle);
             return report_error(
                 &call.started,
                 "image artifact storage is unavailable; generation will not be retried",
@@ -353,11 +408,31 @@ where
         };
         match &mut call.phase {
             Phase::Availability if value == ArtifactValue::Done => {
-                self.start_available_image(call, handle)
+                if call.attachments.is_empty() {
+                    self.start_available_image(call, Vec::new(), handle)
+                } else {
+                    call.phase =
+                        Phase::Resolving(Inputs::new(std::mem::take(&mut call.attachments)));
+                    self.submit_image_input(call, handle)
+                }
+            }
+            Phase::Resolving(inputs) => {
+                if inputs.accept(value).is_err() {
+                    if let Some(read) = opened_read {
+                        close_read(&call.session, ArtifactOp::Close { read }, handle);
+                    }
+                    abort_transfers(&call, handle);
+                    return report_error(
+                        &call.started,
+                        "image attachment transfer failed; no image request sent",
+                        handle,
+                    );
+                }
+                self.submit_image_input(call, handle)
             }
             Phase::Uploading(upload) => {
                 if upload.accept(value).is_err() {
-                    abort_upload(&call, handle);
+                    abort_transfers(&call, handle);
                     return report_error(
                         &call.started,
                         "image artifact publication failed; generation will not be retried",
@@ -370,10 +445,61 @@ where
         }
     }
 
+    /// Keeps exactly one original transfer operation outstanding per call.
+    fn submit_image_input(
+        &mut self,
+        mut call: ImageCall,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let Phase::Resolving(inputs) = &call.phase else {
+            unreachable!("input phase")
+        };
+        if let Some(op) = inputs.next_op() {
+            let is_open = matches!(op, ArtifactOp::Open { .. });
+            let request =
+                match ArtifactClient::new(handle.clone()).start_request(call.session.clone(), op) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        abort_transfers(&call, handle);
+                        return Err(error);
+                    }
+                };
+            if is_open {
+                self.images
+                    .tools
+                    .opens
+                    .insert(request.clone(), call.session.clone());
+            }
+            self.images
+                .tools
+                .requests
+                .insert(request, call.started.call_id.clone());
+            self.images
+                .tools
+                .calls
+                .insert(call.started.call_id.clone(), call);
+            Ok(())
+        } else {
+            let Phase::Resolving(inputs) = std::mem::replace(&mut call.phase, Phase::Availability)
+            else {
+                unreachable!("input phase")
+            };
+            match inputs.into_originals() {
+                Ok(originals) => self.start_available_image(call, originals, handle),
+                Err(_) => report_error(
+                    &call.started,
+                    "image attachment verification failed; no image request sent",
+                    handle,
+                ),
+            }
+        }
+    }
+
     /// Resolves selected credentials only after storage admitted this call.
     fn start_available_image(
         &mut self,
         mut call: ImageCall,
+        originals: Vec<Vec<u8>>,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         let profiles = self.load_selected_profile(&call.provider, handle)?;
@@ -409,8 +535,21 @@ where
         let id = call.started.call_id.clone();
         call.phase = Phase::Generating;
         self.images.tools.calls.insert(id.clone(), call);
+        self.images.tools.workers.insert(id.clone());
         std::thread::spawn(move || {
-            let result = executor(credentials, &prompt, id.as_str(), &network, &cancel);
+            let result = (|| {
+                let mut images = Vec::with_capacity(originals.len());
+                for original in originals {
+                    if cancel.is_cancelled() {
+                        return Err(GenerationError::Cancelled);
+                    }
+                    images.push(InputImage::validate(original)?);
+                }
+                if cancel.is_cancelled() {
+                    return Err(GenerationError::Cancelled);
+                }
+                executor(credentials, &prompt, id.as_str(), &network, &cancel, images)
+            })();
             let _ = crate::send_worker_message(
                 &tx,
                 &waker,
@@ -424,20 +563,52 @@ where
     }
 }
 
-fn parse_prompt(arguments: &CborValue) -> Option<String> {
+fn parse_arguments(arguments: &CborValue) -> Option<(String, Vec<ArtifactKey>)> {
     let CborValue::Map(entries) = arguments else {
         return None;
     };
-    let [(CborValue::Text(key), CborValue::Text(prompt))] = entries.as_slice() else {
-        return None;
-    };
-    (key == "prompt"
-        && !prompt.trim().is_empty()
-        && prompt.len() <= image_generation::MAX_PROMPT_BYTES)
-        .then(|| prompt.clone())
+    let mut prompt = None;
+    let mut attachments = None;
+    for (key, value) in entries {
+        match (key, value) {
+            (CborValue::Text(key), CborValue::Text(value))
+                if key == "prompt"
+                    && prompt.is_none()
+                    && !value.trim().is_empty()
+                    && value.len() <= image_generation::MAX_PROMPT_BYTES =>
+            {
+                prompt = Some(value.clone())
+            }
+            (CborValue::Text(key), CborValue::Array(values))
+                if key == "attachments"
+                    && attachments.is_none()
+                    && values.len() <= image_generation::MAX_ATTACHMENTS =>
+            {
+                attachments = Some(
+                    values
+                        .iter()
+                        .map(|value| {
+                            let CborValue::Text(reference) = value else {
+                                return None;
+                            };
+                            tau_proto::parse_artifact_reference(reference).ok()
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                );
+            }
+            _ => return None,
+        }
+    }
+    Some((prompt?, attachments.unwrap_or_default()))
 }
 
-fn abort_upload(call: &ImageCall, handle: &ClientHandle) {
+/// Releases any owned input read or output upload without retrying paid work.
+fn abort_transfers(call: &ImageCall, handle: &ClientHandle) {
+    if let Phase::Resolving(inputs) = &call.phase
+        && let Some(op) = inputs.close_op()
+    {
+        close_read(&call.session, op, handle);
+    }
     if let Phase::Uploading(upload) = &call.phase
         && let Some(op) = upload.abort_op()
     {
@@ -445,6 +616,21 @@ fn abort_upload(call: &ImageCall, handle: &ClientHandle) {
     }
 }
 
+/// Closes only a correlated Open allocation; malformed identifiers are ignored.
+fn close_opened(session: &SessionId, result: &ArtifactResult, handle: &ClientHandle) {
+    if let Ok(ArtifactValue::Opened { read, .. }) = &result.result {
+        close_read(session, ArtifactOp::Close { read: read.clone() }, handle);
+    }
+}
+
+/// Best-effort cleanup does not retry paid work or retain more correlations.
+fn close_read(session: &SessionId, op: ArtifactOp, handle: &ClientHandle) {
+    if let ArtifactOp::Close { read } = &op
+        && tau_proto::artifact_identifier(read)
+    {
+        let _ = ArtifactClient::new(handle.clone()).start_request(session.clone(), op);
+    }
+}
 fn report_error(started: &ToolStarted, message: &str, handle: &ClientHandle) -> ClientResult<()> {
     handle.report_tool_error(tau_proto::ToolError {
         call_id: started.call_id.clone(),

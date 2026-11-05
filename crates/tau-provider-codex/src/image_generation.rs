@@ -5,20 +5,26 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::runtime;
 use tokio::sync::watch;
 
 use crate::ResolvedCredentials;
 
+mod input_image;
+pub use input_image::{InputImage, MAX_ATTACHMENTS, MAX_INPUT_BYTES};
+use input_image::{MAX_DATA_URL_BYTES, MAX_REQUEST_BYTES};
+
 /// Maximum original PNG accepted by shared harness artifact storage.
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
-/// Maximum prompt accepted by the prompt-only generation tool.
+/// Maximum prompt accepted by the generation/editing tool.
 pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
 /// Absolute network deadline; timeout does not prove remote work stopped.
 pub const GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
 /// Fixed subscription backend endpoint, separate from ordinary Responses.
 const GENERATION_URL: &str = "https://chatgpt.com/backend-api/codex/images/generations";
+/// Sibling JSON edit route, with the same selected-account authority.
+const EDIT_URL: &str = "https://chatgpt.com/backend-api/codex/images/edits";
 /// Bounds the JSON/base64 response before decoding it.
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
@@ -54,6 +60,9 @@ impl GenerationCancellation {
 pub enum GenerationError {
     /// The prompt is empty or exceeds the local byte bound.
     InvalidPrompt,
+    /// An attachment is unsupported, animated, malformed or beyond decode
+    /// limits.
+    InvalidInput,
     /// Local request/runtime setup failed before generation could start.
     Setup,
     /// The selected account could not authenticate or is not entitled.
@@ -78,6 +87,9 @@ impl std::fmt::Display for GenerationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::InvalidPrompt => "prompt must contain 1 through 32768 bytes",
+            Self::InvalidInput => {
+                "image attachments must be valid static PNG, JPEG or WebP originals"
+            }
             Self::Setup => "image generation could not start locally",
             Self::Authentication => {
                 "selected image-generation account is unavailable or unauthorized"
@@ -89,7 +101,9 @@ impl std::fmt::Display for GenerationError {
                 "image request cancelled locally; remote outcome is uncertain; not retried"
             }
             Self::Timeout => "image request timed out; remote outcome is uncertain; not retried",
-            Self::TooLarge => "image response exceeded the local size limit; not retried",
+            Self::TooLarge => {
+                "image request or response exceeded the local size limit; not retried"
+            }
             Self::InvalidImage => "provider did not return exactly one valid PNG; not retried",
         })
     }
@@ -108,18 +122,37 @@ pub fn generate(
     network: &tau_provider::OutboundNetworkPolicy,
     cancelled: &GenerationCancellation,
 ) -> Result<Vec<u8>, GenerationError> {
-    generate_at(
+    generate_with_images(credentials, prompt, turn_id, network, cancelled, Vec::new())
+}
+
+/// Generates or edits exactly once; nonempty ordered originals select editing.
+pub fn generate_with_images(
+    credentials: ResolvedCredentials,
+    prompt: &str,
+    turn_id: &str,
+    network: &tau_provider::OutboundNetworkPolicy,
+    cancelled: &GenerationCancellation,
+    images: Vec<InputImage>,
+) -> Result<Vec<u8>, GenerationError> {
+    let endpoint = if images.is_empty() {
+        GENERATION_URL
+    } else {
+        EDIT_URL
+    };
+    generate_images_at(
         credentials,
         prompt,
         turn_id,
         network,
         cancelled,
-        GENERATION_URL,
+        images,
+        endpoint,
         GENERATION_TIMEOUT,
     )
 }
 
 /// Runs the production transport against an explicit endpoint for local fakes.
+#[cfg(test)]
 fn generate_at(
     credentials: ResolvedCredentials,
     prompt: &str,
@@ -129,9 +162,37 @@ fn generate_at(
     endpoint: &str,
     timeout: Duration,
 ) -> Result<Vec<u8>, GenerationError> {
+    generate_images_at(
+        credentials,
+        prompt,
+        turn_id,
+        network,
+        cancelled,
+        Vec::new(),
+        endpoint,
+        timeout,
+    )
+}
+
+/// Prepares bounded JSON before entering the single-attempt network operation.
+#[allow(clippy::too_many_arguments)]
+fn generate_images_at(
+    credentials: ResolvedCredentials,
+    prompt: &str,
+    turn_id: &str,
+    network: &tau_provider::OutboundNetworkPolicy,
+    cancelled: &GenerationCancellation,
+    images: Vec<InputImage>,
+    endpoint: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, GenerationError> {
     if prompt.trim().is_empty() || prompt.len() > MAX_PROMPT_BYTES {
         return Err(GenerationError::InvalidPrompt);
     }
+    if cancelled.is_cancelled() {
+        return Err(GenerationError::Cancelled);
+    }
+    let body = request_body(prompt, images, cancelled)?;
     if cancelled.is_cancelled() {
         return Err(GenerationError::Cancelled);
     }
@@ -143,21 +204,96 @@ fn generate_at(
         .client_for_without_retries(endpoint)
         .map_err(|_| GenerationError::Setup)?;
     runtime.block_on(async {
-        let operation = request_image(client, credentials, prompt, turn_id, endpoint);
+        let operation = request_image(client, credentials, body, turn_id, endpoint);
         tokio::select! {
+            biased;
+            () = cancelled.cancelled() => Err(GenerationError::Cancelled),
             result = tokio::time::timeout(timeout, operation) => {
                 result.map_err(|_| GenerationError::Timeout)?
             }
-            () = cancelled.cancelled() => Err(GenerationError::Cancelled),
         }
     })
+}
+
+/// Minimal request preserving the generation shape when no inputs were
+/// supplied.
+#[derive(Serialize)]
+struct ImageRequest<'a> {
+    /// Fixed subscription image model.
+    model: &'static str,
+    /// User instruction, with no additional provider controls.
+    prompt: &'a str,
+    /// Exactly one output, also for editing.
+    n: u8,
+    /// Ordered occurrences, omitted entirely for generation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    images: Vec<EditImage>,
+}
+
+/// Backend-owned data URL, never an arbitrary URL accepted from tool arguments.
+#[derive(Serialize)]
+struct EditImage {
+    /// Validated original encoded with its decoded media type.
+    image_url: String,
+}
+
+/// Checks padded base64 expansion before allocating each data URL.
+fn data_url_size(bytes: usize, mime: &str) -> Result<usize, GenerationError> {
+    bytes
+        .checked_add(2)
+        .and_then(|n| n.checked_div(3))
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_add("data:;base64,".len() + mime.len()))
+        .ok_or(GenerationError::TooLarge)
+}
+
+/// Releases each source after encoding; at most one decoded raster ever exists.
+fn request_body(
+    prompt: &str,
+    originals: Vec<InputImage>,
+    cancelled: &GenerationCancellation,
+) -> Result<Vec<u8>, GenerationError> {
+    if originals.len() > MAX_ATTACHMENTS {
+        return Err(GenerationError::TooLarge);
+    }
+    let mut raw = 0usize;
+    let mut encoded = 0usize;
+    let mut images = Vec::with_capacity(originals.len());
+    for original in originals {
+        if cancelled.is_cancelled() {
+            return Err(GenerationError::Cancelled);
+        }
+        raw = raw
+            .checked_add(original.bytes.len())
+            .ok_or(GenerationError::TooLarge)?;
+        encoded = encoded
+            .checked_add(data_url_size(original.bytes.len(), original.mime)?)
+            .ok_or(GenerationError::TooLarge)?;
+        if MAX_INPUT_BYTES < raw || MAX_DATA_URL_BYTES < encoded {
+            return Err(GenerationError::TooLarge);
+        }
+        let mut image_url = format!("data:{};base64,", original.mime);
+        STANDARD.encode_string(&original.bytes, &mut image_url);
+        images.push(EditImage { image_url });
+    }
+    let body = serde_json::to_vec(&ImageRequest {
+        model: "gpt-image-2",
+        prompt,
+        n: 1,
+        images,
+    })
+    .map_err(|_| GenerationError::Setup)?;
+    if body.len() > MAX_REQUEST_BYTES {
+        return Err(GenerationError::TooLarge);
+    }
+    Ok(body)
 }
 
 /// Submits exactly one request and bounds its response before PNG validation.
 async fn request_image(
     client: reqwest::Client,
     credentials: ResolvedCredentials,
-    prompt: &str,
+    body: Vec<u8>,
     turn_id: &str,
     endpoint: &str,
 ) -> Result<Vec<u8>, GenerationError> {
@@ -171,14 +307,7 @@ async fn request_image(
         .header("originator", "tau")
         .header("x-codex-image-turn-id", turn_id)
         .header("Content-Type", "application/json")
-        .body(
-            serde_json::json!({
-                "model": "gpt-image-2",
-                "prompt": prompt,
-                "n": 1,
-            })
-            .to_string(),
-        );
+        .body(body);
     if let Some(account_id) = credentials.account_id {
         request = request.header("chatgpt-account-id", account_id);
     }

@@ -146,3 +146,12 @@ authorizes retry or account/API-key fallback. Cancellation and timeouts cannot
 prove remote generation stopped, and cancellation racing shared artifact
 finalization can leave an unreferenced original retained independently of the
 session.
+
+Nonempty, ordered edit inputs use the sibling JSON Images edit endpoint under
+that same authority. Only bounded, fully decoded static PNG/JPEG/WebP originals
+can become inline data URLs; the caller cannot supply arbitrary URLs, file IDs,
+masks or uploads. Tau sends input bytes and embedded metadata unchanged to the
+selected remote account. Count, per-original and aggregate raw bytes, encoded URLs,
+serialized JSON and sequential raster decoding have separate local bounds.
+Input or edit failure never falls back to generation. Source-backed transport
+tests do not establish live subscription entitlement.
