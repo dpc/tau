@@ -6120,7 +6120,7 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
             0,
             "ws_1",
             true,
-            "open page",
+            "open",
             "https://example.com/page",
         );
         emitter.emit_at(&target, &state, &mut writer, start, false);
@@ -6129,7 +6129,7 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
             0,
             "ws_1",
             false,
-            "open page",
+            "open",
             "https://example.com/page",
         );
         emitter.emit_at(
@@ -6187,7 +6187,8 @@ fn chatgpt_response_update_emitter_publishes_typed_native_web_search() {
         assert_eq!(native.tool_name.as_str(), "web_search");
         assert_eq!(native.phase, phase);
         assert_eq!(native.display.status, status);
-        assert_eq!(native.display.info_chips, ["open page"]);
+        assert_eq!(native.display.mode, "open");
+        assert!(native.display.info_chips.is_empty());
         assert_eq!(native.display.args, "https://example.com/page");
     }
     assert_eq!(

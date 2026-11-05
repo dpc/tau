@@ -18,7 +18,7 @@ pub(super) fn display_action(action: &serde_json::Value) -> Option<tau_proto::To
                 }),
             "query unavailable",
         ),
-        "open_page" => ("open page", action["url"].as_str(), "URL unavailable"),
+        "open_page" => ("open", action["url"].as_str(), "URL unavailable"),
         "find_in_page" => ("find in page", action["url"].as_str(), "URL unavailable"),
         _ => return None,
     };
@@ -27,7 +27,7 @@ pub(super) fn display_action(action: &serde_json::Value) -> Option<tau_proto::To
             .filter(|target| !target.trim().is_empty())
             .map(bounded_target)
             .unwrap_or_else(|| unavailable.to_owned()),
-        info_chips: vec![label.to_owned()],
+        mode: label.to_owned(),
         ..Default::default()
     })
 }

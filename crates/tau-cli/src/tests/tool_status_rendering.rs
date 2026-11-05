@@ -5715,15 +5715,17 @@ fn status_clear_response_removes_live_thinking_block() {
     assert!(!vt.screen_contains(80, "failed attempt thinking"));
 }
 
-/// Native lifecycle rows replace unavailable metadata in place and retain
-/// targets through completion, including targets shortened by the generic
-/// adaptive header.
+/// Native lifecycle rows replace unavailable metadata in place, put the action
+/// before its target, and retain targets through completion, including targets
+/// shortened by the generic adaptive header.
 #[test]
 fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
-    for (width, target) in [
-        (100, "https://example.com/page".to_owned()),
+    for (width, action, target) in [
+        (100, "open", "https://sshhole.com/".to_owned()),
+        (100, "search", "Rust releases".to_owned()),
         (
             64,
+            "open",
             format!("https://example.com/{}", "long-path/".repeat(20)),
         ),
     ] {
@@ -5758,11 +5760,16 @@ fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
                             } else {
                                 String::new()
                             },
-                            info_chips: vec![if available {
-                                "open page".to_owned()
+                            mode: if available {
+                                action.to_owned()
                             } else {
-                                "action unavailable".to_owned()
-                            }],
+                                String::new()
+                            },
+                            info_chips: if available {
+                                Vec::new()
+                            } else {
+                                vec!["action unavailable".to_owned()]
+                            },
                             ..Default::default()
                         },
                         phase,
@@ -5806,15 +5813,20 @@ fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
             "enrichment must replace rather than duplicate the pending row"
         );
         assert!(
-            vt.screen_contains(width, "https:"),
+            vt.screen_contains(width, &target[..target.len().min(5)]),
             "{:?}",
             vt.screen_text(width)
         );
-        assert!(
-            vt.screen_contains(width, "open page"),
-            "{:?}",
-            vt.screen_text(width)
-        );
+        if width == 100 {
+            assert!(
+                vt.screen_contains(
+                    width,
+                    &format!("web_search (native) {action} {target} pending")
+                ),
+                "{:?}",
+                vt.screen_text(width)
+            );
+        }
 
         renderer.handle(&update(
             tau_proto::ProviderNativeToolPhase::Completed,
@@ -5827,12 +5839,16 @@ fn provider_native_tool_lifecycle_renders_live_and_completed_rows() {
         assert!(
             screen
                 .iter()
-                .any(|line| line.contains("web_search") && line.contains("open page ok")),
+                .any(|line| line.contains("web_search") && line.contains("ok")),
             "{screen:?}"
         );
         if width == 100 {
             assert!(vt.screen_contains(width, "web_search (native)"));
             assert!(vt.screen_contains(width, &target));
+            assert!(
+                vt.screen_contains(width, &format!("web_search (native) {action} {target} ok")),
+                "{screen:?}"
+            );
         } else {
             assert!(!vt.screen_contains(width, &target));
             assert!(vt.screen_contains(width, "https:"));

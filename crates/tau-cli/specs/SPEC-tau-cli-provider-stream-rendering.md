@@ -12,10 +12,10 @@ labels the row `<name> (native)`, with the qualifier visually subdued. A started
 phase creates a live row and a completed phase settles it into current-session
 history. These rows are transient UI projection: they do not enter Tau tool
 state or counters and cannot be reconstructed after cold restart.
-For hosted web activity, the provider may include a recognized action label
-(search, open page, find in page) in a generic info chip alongside any available
-search query or page URL. The provider bounds and visibly escapes targets before
-projection; the generic renderer applies its normal width limits. Missing
+For hosted web activity, the provider may use the generic execution-mode field
+to show a recognized action label (search, open, or find in page) before any
+available search query or page URL. The provider bounds and visibly escapes
+targets before projection; the generic renderer applies its normal width limits. Missing
 targets show `query unavailable` or `URL unavailable` alongside the action label.
 Missing or unknown actions show `action unavailable` rather than implying a
 search. The provider updates the same live row as metadata arrives. It does not

@@ -3605,7 +3605,7 @@ fn hosted_web_search_actions_project_known_targets() {
         ),
         (
             serde_json::json!({"type": "open_page", "url": "https://example.com/page"}),
-            Some(("open page", "https://example.com/page")),
+            Some(("open", "https://example.com/page")),
         ),
         (
             serde_json::json!({"type": "find_in_page", "url": "https://example.com/page", "pattern": "not projected"}),
@@ -3621,7 +3621,7 @@ fn hosted_web_search_actions_project_known_targets() {
         ),
         (
             serde_json::json!({"type": "open_page", "url": "  "}),
-            Some(("open page", "URL unavailable")),
+            Some(("open", "URL unavailable")),
         ),
         (
             serde_json::json!({"type": "find_in_page", "url": null}),
@@ -3654,9 +3654,10 @@ fn hosted_web_search_actions_project_known_targets() {
             .expect("hosted web event");
             let (_, _, _, observed) = state.web_search_lifecycle().expect("lifecycle");
             assert_eq!(
-                observed.map(|display| (display.info_chips[0].as_str(), display.args.as_str())),
+                observed.map(|display| (display.mode.as_str(), display.args.as_str())),
                 label
             );
+            assert!(observed.is_none_or(|display| display.info_chips.is_empty()));
             if kind == "completed" {
                 let ContextItem::UnknownProviderItem(item) = &state.output_items_snapshot()[0]
                 else {

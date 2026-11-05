@@ -170,7 +170,7 @@ pub fn test_set_web_search_action(
         active,
         Some(tau_proto::ToolUseState {
             args: target.to_owned(),
-            info_chips: vec![action.to_owned()],
+            mode: action.to_owned(),
             ..Default::default()
         }),
     );
