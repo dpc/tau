@@ -9,20 +9,20 @@ advertise: false
 ## Enabling extensions from services and containers
 
 Set `TAU_ENABLE_EXTENSIONS=NAME[,NAME...]`, for example
-`TAU_ENABLE_EXTENSIONS=std-pim,std-xmpp`. Names are exact and case-sensitive.
-ASCII spaces or tabs around names are allowed; empty elements, other whitespace,
-punctuation, non-UTF-8 values, and unknown names fail startup. Duplicate names
-are harmless. These enables apply after config and before ordered CLI extension
-overrides, so a later `--disable-extension NAME` wins.
-Unset, empty, and space/tab-only values are no-ops. Leading, trailing, and
-consecutive commas are errors. `tau attach` and the outer `tau dev tmux` helper
-reject nonempty values because they cannot apply them to their target harness.
+`TAU_ENABLE_EXTENSIONS=std-pim,std-xmpp`. Exact case-sensitive names may have
+surrounding ASCII spaces/tabs; duplicates are harmless. Unknown names, empty
+comma-separated elements, other whitespace, punctuation, and non-UTF-8 fail
+startup. Unset/empty/space-tab-only values do nothing.
+These enables follow config but precede ordered CLI overrides, so
+`--disable-extension NAME` can win. `tau attach` and the outer `tau dev tmux`
+reject nonempty values.
 
-Use the same literal with systemd
-`Environment=TAU_ENABLE_EXTENSIONS=std-pim,std-xmpp`, Nix service environment
-attributes, or a container `--env`. Environment keys do not append when repeated,
-so construct one comma-separated value. The variable carries names only, not
-arguments, shell syntax, secrets, or extension configuration.
+Use one comma-separated value in systemd
+`Environment=TAU_ENABLE_EXTENSIONS=std-pim,std-xmpp`, Nix environment attributes,
+or container `--env`; repeated environment keys do not append. Supply names,
+not arguments, shell syntax, secrets, or extension config.
+
+## Files and retention
 
 Tau follows the XDG directory layout on Linux:
 
@@ -47,14 +47,10 @@ retention (disabled by default). The default 30-day diagnostic cleanup applies t
 session `events.jsonl` and provider request/response diagnostics, not those
 extension log files.
 
-Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.
-For a more complete, annotated configuration to learn from, see the
+Use `tau init` for starter `cli.yaml` and `harness.yaml`. See the
 [sanitized harness example](https://github.com/dpc/tau/blob/master/docs/examples/harness.yaml).
-It illustrates one person's setup, not required defaults: adapt model names,
-roles, paths, and extensions to your installation. Never copy another person's
-credentials or private drop-ins into your own config.
-Project paths in that example are fictional placeholders; its GPT-6.1 Sol role
-selections are example choices, not shipped defaults.
+Its fictional paths and GPT-6.1 Sol roles are examples, not defaults; adapt them
+without copying private credentials or drop-ins.
 
 ## Provider and model aliases
 
@@ -73,26 +69,19 @@ editing, protocol overrides, and persisted events do not resolve aliases.
 
 ## Configuration profiles
 
-`harness.yaml` can define named `profiles` patches for `inter_session`, roles,
-and supported extension settings. `tau --profile work,review` applies the normal
-built-in and user base configuration first, then `profiles.work`, then
-`profiles.review`. Later profiles use the ordinary config merge rules, so a
-later scalar replaces an earlier one and nested objects merge recursively.
-Within `inter_session`, omitted fields inherit; null clears a notice/list using
-the same semantics as top-level configuration. The review boolean overrides
-its inherited value.
+`harness.yaml` profiles patch `inter_session`, roles, and supported extension
+settings. `tau --profile work,review` applies base config, then `profiles.work`,
+then `profiles.review`. Later scalars replace earlier ones; nested objects merge.
+Within `inter_session`, omission inherits, null clears notices/lists, and the
+review boolean overrides its inherited value.
 
-The exception to ordinary profile array replacement is
-`tool_policy.canonical_main_only`: an add-only list of exact final registered
-internal tool names (not model-visible aliases). Tau first resolves the ordinary
-global/CLI list, then adds names from every selected raw profile layer in
-selection/source order, keeping the first occurrence of each name. Omission,
-`[]`, later profiles, and CLI `[]` cannot remove profile additions; unselected
-profiles add nothing. Tau rejects all other `tool_policy` fields in profiles.
-Only the committed, available canonical main may use these tools, not same-role
-workers. Define integrations globally with `enable: false`, then enable them and
-restrict their tools in a profile. Tau applies the same restrictions in manual
-and service use.
+Unlike ordinary array replacement, `tool_policy.canonical_main_only` adds exact
+final internal tool names (not model-visible aliases) after the global/CLI list,
+in selected profile/source order, deduplicating first occurrences. Omission,
+`[]`, later profiles, and CLI `[]` cannot remove profile additions.
+Profiles reject other `tool_policy` fields. Only the available canonical main,
+not same-role workers, may use these tools. Define integrations globally with
+`enable: false`, then enable/restrict them in profiles for manual or service use.
 
 ```yaml
 profiles:
@@ -126,39 +115,30 @@ to a newly spawned interactive UI.
 {harness_config}
 ```
 
-`inter_session` restricts which remote sessions this harness may discover or
-message by matching their immutable canonical startup project roots. Patterns
-must be absolute and use globset path syntax: `*` does not cross `/`, while
-`**` can. An omitted or `null` allowlist permits every remote root; an explicit
-empty allowlist permits none. An omitted, `null`, or empty denylist vetoes
-nothing. Tau evaluates the allowlist first and then lets any denylist match
-veto it. The policy applies to both `session_list` and exact cross-session
-`message` targets, but not the current session, local agents, or inbound peer
-messages. It is fixed in the startup configuration snapshot and does not
-hot-reload.
+`inter_session` filters remote discovery/messages by immutable canonical startup
+project root. Patterns must be absolute globset paths: `*` stays within `/`,
+`**` can cross it. Omitted/null allowlist permits all; `[]` permits none.
+Omitted/null/empty denylist vetoes nothing; otherwise deny matches override
+allow matches. This startup-only policy covers `session_list` and exact remote
+`message` targets, not local agents/current session or inbound messages.
 
-Set role-only `main_priority` to a nonnegative integer. After overlays, the enabled
-role with the lowest effective number wins. Zero is valid; an absent or null
-effective value means no candidate. Overlays replace values. A winning tie is a
-configuration error; Tau warns once at startup for each nonwinning tied group.
-Use priority 10 for a bot and 100 for a coordinator.
-The field never inherits from group/agent defaults. An unavailable winner fails
-without fallback; priorities cannot replace an already-bound main. Tau creates main
-on demand and binds its identity to the session; same-role workers remain ordinary.
-Bare and exact-main peer input reaches main. Ordinary remote exact-worker input
-is reviewed by default; `inter_session.review_direct_messages: false` permits
-direct delivery, including in mainless sessions. Input that requires review fails
-closed without an available main. Remove retired `agents.default_role` and
-`inter_session.receiver` keys and the unshipped boolean role field `main`; they
-fail unknown-field validation. Tau defaults to the effective main role for ordinary
-startup, serve bootstrap, and developer previews, with ordered role fallback in
-mainless configurations. You can override this default with `TAU_STARTUP_ROLE` or
-CLI `--role`; the CLI flag takes precedence. Tau applies profiles and config
-overlays before selecting the effective main role. If a launcher relied on group
-ordering with a main configured, add explicit `--role` to retain that role. Tau
-does not bind main identity through role selection, change saved agents' roles,
-or rerun an existing bootstrap ID. External bridge receiver
-policies remain independent.
+Role-only `main_priority` selects the enabled role with the lowest nonnegative
+effective value after overlays; zero is valid, absent/null is not a candidate.
+It does not inherit from group/agent defaults. A winning tie errors; nonwinning
+ties warn. An unavailable winner fails without fallback. Tau creates main on
+demand and binds its identity to the session; priority changes and same-role
+workers cannot replace it.
+
+Bare/exact-main peer input reaches main. Remote exact-worker input requires
+review by default; `inter_session.review_direct_messages: false` permits direct
+delivery, including in mainless sessions. Required review fails closed without
+an available main. Remove obsolete `agents.default_role`, `inter_session.receiver`,
+and role `main` keys; they fail validation.
+
+Startup, serve bootstrap, and previews default to the effective main role, or
+ordered role fallback without main. `TAU_STARTUP_ROLE` overrides it; CLI `--role`
+wins over the environment. Role selection does not bind main identity, change
+saved roles, rerun bootstrap IDs, or change external bridge receiver policies.
 
 `tool_policy.rules` is harness-owned declarative tool-surface policy. Rules are
 keyed so a user can disable built-ins such as `builtin.chatgpt-shell` with
@@ -168,31 +148,20 @@ rule name. Tag patterns are exact or terminal-prefix forms like `shell:*`. Rule
 names may contain dots, so CLI overrides should use a whole-map value, for
 example `tool_policy={{{{rules: {{{{builtin.chatgpt-shell: {{{{enable: false}}}}}}}}}}}}`.
 
-Agent-global, role-group, and role `required_skills` list exact skill names that must be discoverable and
-model-loadable before a role is available. Agent, group, and role requirements
-are additive and de-duplicated. Missing,
-hidden, or unreadable required skills emit a mandatory `harness.config_error`
-notice and disable that role; if the startup/default role is disabled this way,
-startup fails instead of silently falling back.
+Agent-global, group, and role `required_skills` add/deduplicate exact names.
+Missing, hidden, or unreadable skills emit `harness.config_error` and disable
+the role; a disabled startup/default role fails startup without fallback.
 
-Role-group and role `required_tools` list exact model-visible registered tool
-names, for example `required_tools: [zulip_register, zulip_send]` on a dedicated
-bot role. Requirements accumulate and de-duplicate across configuration layers;
-omission or `[]` adds nothing. Tau checks live effective availability after
-extension startup, including tool policy and the selected model's support.
-Missing tools fail startup for the selected role **and for any restored agent's
-role/model on resume**, before harness-owned recovery, initialization, or replay
-dispatch. Resumes with these prerequisites inspect saved roles without publishing
-repairs, then wait for tools before restoring agents; unrelated resumes keep
-their existing startup ordering. New-agent
-requests recheck availability, so a disconnected extension cannot leave a new
-bot silently tool-less. Other roles need not satisfy this role's requirements.
-Names refer to public/model-visible tools, not extension names or hosted provider
-capabilities. Errors name the role and missing tools; fix extension availability,
-role policy, or model support, or remove the requirement. This is a startup and
-creation guard, not a health monitor: losing tools does not kill running agents
-or change extension restart/isolation policy.
-The guard does not roll back arbitrary extension startup side effects.
+Group/role `required_tools` add/deduplicate exact model-visible names, for example
+`required_tools: [zulip_register, zulip_send]`, not extension names or hosted
+provider capabilities. Tau checks availability after extension startup, including
+tool policy/model support. Missing tools fail the selected role **and restored
+agents' saved role/model on resume**, before recovery, initialization, or replay
+dispatch. New-agent requests recheck availability.
+
+Fix extension availability, role policy, model support, or the requirement.
+This guard neither monitors/kills running agents after tool loss nor rolls back
+extension startup side effects.
 
 ### CLI UI defaults
 
@@ -202,17 +171,13 @@ The guard does not roll back arbitrary extension startup side effects.
 
 ## Extension availability
 
-Harness extensions are configured under `extensions.<name>` in `harness.yaml`.
-Use `enable: false` to disable an extension entirely. Enabled extensions default
-to `require: true`, which preserves startup-fatal behavior for harness-owned
-startup failures such as an empty command, missing required declared secret, or
-spawn failure. Set `require: false` next to `enable` when the extension is useful
-but optional; Tau will skip it on startup/config/secret/pre-ready failures,
-continue without it, and emit a warning `harness.notice` alert explaining
-the skip. Harness notices have stable `kind` strings and levels `critical`,
-`warning`, `info`, `debug`, and `trace`; CLI users can set the default threshold
-with `cli.yaml` `notice_level: warning` or runtime `:set notice-level warning`;
-that threshold affects diagnostics only and never hides the alert.
+Configure `extensions.<name>` in `harness.yaml`. `enable: false` disables it.
+Enabled extensions default to `require: true`: startup/config/secret/spawn
+failures are fatal. `require: false` skips the extension on startup or pre-ready
+failure and emits a warning `harness.notice` alert.
+Notices have stable `kind` strings and levels `critical`, `warning`, `info`,
+`debug`, `trace`. Set `notice_level: warning` in `cli.yaml` or use
+`:set notice-level warning`; this filters diagnostics, never the alert.
 
 Per-secret `optional: true` is narrower: it omits only that secret when absent.
 A missing non-optional secret skips the whole extension only when

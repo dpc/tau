@@ -6,11 +6,9 @@ advertise: false
 
 # Tau architecture overview
 
-Tau runs as a daemon-centered system.
-
-Typically, a UI process starts a new harness, uses `tau attach [SESSION]` for a
-running target, or uses `tau resume [SESSION]` for persisted state. The UI sends
-user input and renders streamed events, while the harness owns orchestration.
+The UI starts a harness, attaches to one with `tau attach [SESSION]`, or restores
+persisted state with `tau resume [SESSION]`. It sends input and renders streamed
+events; the harness daemon owns orchestration.
 
 The harness process:
 
@@ -20,14 +18,12 @@ The harness process:
 - records session membership, agent transcript, and debug logs,
 - builds agent prompts and handles model responses.
 
-Extensions are separate processes connected to the harness. They register tools and capabilities, then handle requests from the harness and return results/events. This separation keeps tool/runtime concerns outside the core harness loop.
+Extensions run as separate processes, register tools/capabilities, and return
+results/events for harness requests.
 
-Clients connect to the harness over a Unix socket. This allows multiple clients to observe or interact with the same running session while the harness remains the single coordinator.
+Multiple clients can share a session over its Unix socket.
 
 ## Multi-agent watch topology
 
-The harness owns a session-local directed acyclic agent-watch graph. Enabling a
-watch fails if the target already reaches the calling watcher; disabling can
-remove an existing edge. Watches and their notifications remain local to the
-current session. Remote peer addresses are supported by `message`, but are not
-watch targets.
+Agent watches form a session-local directed acyclic graph; cycle-forming watches
+fail. Remote peer addresses work with `message`, not watches.

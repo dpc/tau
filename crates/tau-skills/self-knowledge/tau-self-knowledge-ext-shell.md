@@ -6,273 +6,153 @@ advertise: false
 
 # Tau core-shell extension self-knowledge
 
-`core-shell` is Tau's built-in shell and filesystem extension. It runs `tau-ext-shell`, is enabled by default, and registers the everyday project-inspection and mutation tools used by agents.
+`core-shell` runs `tau-ext-shell` and is enabled by default.
 
+## Tools
 
-## Tools and behavior
+- `read`: numbered file reads, including invalid UTF-8 markers, ranges, truncation
+  metadata, and missing-path suggestions. Input cap: 10 MiB; overlapping ranges
+  can exceed the rendered-expansion cap.
+- `export`: uploads one regular file, at most 16 MiB, and returns
+  `<tau-artifact:FULL_KEY>`, `size`, and available `filename`/`mime_type` headers.
+  MIME is declared or inferred, not verified. Export renews retention even for
+  duplicate bytes; originals outlive ephemeral transcripts.
+- `import`: verifies artifact size/digest and returns a private mode-0600 `path`.
+  Pass the canonical reference and accompanying filename/MIME hints; hints are
+  not stored by digest. Import does not renew retention, execute, or extract
+  content. Pass the reference directly to `read_image` for inspection.
+- `edit`: normally the exact-text `replace` implementation. All `oldText` targets
+  must match once in the original UTF-8 snapshot and cannot overlap. Matching
+  normalizes CRLF/CR and ignores an initial BOM; writes preserve untouched bytes,
+  BOM, and local newline style. Results contain `edits`, `changed`, `total_bytes`.
+- Legacy `edit`, selected with `shell:tool-style:edit`: replaces the 1-based
+  half-open `start_line`..`end_line_exclusive` range with `newText`. Equal endpoints
+  insert; EOF append uses `total_lines + 1` at both endpoints. `context_line`
+  must match the original preceding line, or be empty at file start. Nonempty
+  replacement text without a final line ending becomes a full line.
+- `apply_patch`: patch-style edits. Editing tools send separate UI-only diffs;
+  oversized diffs may be omitted without changing the edit outcome.
+- `shell`: command execution with call-local `cwd`; timeout defaults to 300 seconds.
+- `gpt_shell`, visible as `shell_command`: equivalent GPT-style surface with
+  call-local `workdir`, not `cwd`.
+- `workdir`: reads instance-local persistent cwd, or validates/canonicalizes and
+  commits a new one. It is separate from either command's call-local override.
+- `grep`: in-process ripgrep search; no external `rg` or `RIPGREP_CONFIG_PATH`.
+  `limit` caps at 2000 matches; `context` at 20 lines. It searches regular files
+  and directories, not special files.
+- `find`: ignore-aware glob search, at most 2000 results.
+- `ls`: sorted listing, at most 2001 entries. With `limit_reached`, entries are a
+  sorted filesystem-order sample, not a complete alphabetical prefix.
+- `dir_lock`: manual directory update reservation.
 
-Model-visible tools:
+The neutral `shell:exec:shell_command` and `shell:edit:apply_patch` tags let the
+built-in ChatGPT policy re-enable those tools after disabling `shell:*`.
 
-- `read` — reads UTF-8 and non-UTF-8 files with line numbers, line-ending markers, Unicode replacement for invalid bytes plus `invalid-utf8` flags, range/ranges support, line/byte truncation metadata, a 10 MiB input safety cap, a rendered-range expansion cap that can reject large overlapping multi-range requests before rendering, and a bounded nearby-sibling suggestion for simple missing-path typos.
-- `export` — uploads one local regular file of at most 16 MiB to the persistent
-  shared content-addressed artifact store and returns canonical
-  `<tau-artifact:FULL_KEY>` and `size` output headers plus available `filename`
-  and declared `mime_type` hints. Optional export `mime_type` overrides best-effort
-  common-extension inference; media is not verified.
-  Relative paths use the invoking agent's remembered workdir. A successful new
-  export, including duplicate bytes, renews artifact age; originals persist
-  independently of ephemeral transcripts.
-- `import` — accepts one canonical `<tau-artifact:FULL_KEY>` reference (or a bare
-  internal key), downloads it without renewing retention, verifies exact size
-  and digest, and returns private unpredictable mode-0600 `path` and `size`
-  output headers for filesystem tools. Pass accompanying optional `filename` and
-  `mime_type` hints for a sanitized useful basename or common media suffix.
-  Hints are per-use, not stored by digest: key-only imports remain generic.
-  Image inspection instead passes the
-  reference directly to `std-utils`' `read_image`. Import never executes or
-  extracts content.
-- `edit` with explicit `shell:tool-style:edit` — exposes the legacy internal
-  `edit` implementation, which applies context-checked line-oriented
-  replacements. `newText` fully replaces the 1-based half-open
-  `start_line`..`end_line_exclusive` range; `start_line` is included and
-  `end_line_exclusive` is excluded. Empty insertion ranges use
-  `start_line == end_line_exclusive`, such as `1..<1` for top-of-file insertion
-  or `total_lines + 1 ..< total_lines + 1` for EOF append. Each edit has a
-   `context_line` that matches the original line immediately before `start_line`;
-   use an empty `context_line` at the beginning of a file and the original last
-   line for an EOF append.
-  Non-empty `newText` with no trailing line ending is normalized into a full
-  line; explicit line endings are preserved, so callers can create mixed
-   endings. Context mismatches report the preceding `context_line_number`. The
-   agent-visible result is minimal status only; the UI receives
-  a separate structured diff payload for changed UTF-8 files, including inline
-  changed-token segments. If that optional diff would exceed the complete
-  terminal-frame budget, it becomes an explicit truncation marker while the
-  minimal result and file/range display facts remain intact.
-- `edit` — normally exposes the exact-text internal `replace` implementation:
-  it replaces exact `oldText` ranges in one existing UTF-8 file. It matches all
-  edits in the same original snapshot after CRLF/CR-to-LF normalization and
-  ignores only an initial UTF-8 BOM; each target must occur exactly once and
-  targets cannot overlap. It validates before one write, preserves BOM and
-  untouched bytes, maps inserted newlines to local source context, and returns
-  only `edits`, `changed`, and `total_bytes`. A changed file uses the ordinary
-  structured UI-only diff; an oversized optional diff becomes an explicit
-  truncation marker while the minimal result and path display facts remain
-  intact. A no-op writes nothing and has no diff. Model calls
-  and results use `edit`; ext-shell lifecycle events retain `replace`.
-- `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. If an optional structured diff would make the complete terminal frame exceed 8 MiB, the terminal keeps its truthful success/error and changed-file evidence but replaces only the UI diff with an explicit truncation marker. It carries the neutral `shell:edit:apply_patch` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
-- `shell` — runs `sh -c`-style commands with an optional call-local `cwd` and timeout (300 seconds when omitted), stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support. Its `cwd` never changes remembered state. It is the generic shell execution alternative.
-- `workdir` — with no path, reads this shell instance's current per-agent path/status; with a path, validates, canonicalizes, commits, and persistently changes it. State uses inheritable instance-scoped metadata (for the built-in shell, `ext_core-shell_cwd`). Dependent shell/filesystem calls belong in a later turn after a setter succeeds. It carries `shell:workdir`.
-- `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. Its optional call-local `workdir` resolves from the remembered persistent workdir and never changes later calls; the separate top-level `workdir(path)` tool reads or changes persistent state, and dependent calls must occur after a successful setter in a later turn. It does not accept the removed GPT `cwd` spelling. It carries the neutral `shell:exec:shell_command` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
-- `grep` — in-process ripgrep-library literal or regex search with context, glob filtering, truncation, escaped control characters in paths, invalid-UTF-8 path markers for byte paths, `limit` capped at 2000 matches, and `context` capped at 20 lines.
-- `find` — ignore-aware glob file search with escaped control characters in paths, invalid-UTF-8 path markers, and `limit` capped at 2000 results.
-- `ls` — sorted directory listing with 1-based entry prefixes, escaped control characters/backslashes, Unicode replacement for invalid filename bytes plus `invalid-utf8` flags, `limit` capped at 2001 entries, and standard truncation metadata. When `limit_reached` is true, entries are a bounded filesystem-order sample sorted for display rather than a complete alphabetic prefix.
-- `dir_lock` — manual directory update lock/unlock for coordinating mutating agents.
+## Workdirs and execution
 
-Test builds or the `echo-agent` cargo feature also register `echo` for harness tests.
-The dedicated `grep` tool does not require an external `rg` executable and does
-not read `RIPGREP_CONFIG_PATH`; generic shell commands may still use `rg`.
-It searches regular files or directories (including explicit symlinks to regular
-files), not named special files. It uses buffered reads rather than memory maps,
-with a 16 MiB search-buffer limit, 10 MiB regex compilation limit and 16 MiB
-DFA-cache limit; exhaustion produces an error, not partial success. Cancellation
-is cooperative during traversal, reads, and result callbacks, and cannot
-interrupt a blocked filesystem operation or an executing regex matcher.
+Set the matching instance's `workdir` to the project root before project work.
+Run dependent calls in a later tool turn after success: sibling calls have no
+workdir-first ordering. Each instance has independent, inheritable/restored
+per-agent state (`ext_core-shell_cwd` for the built-in instance).
 
-Every filesystem, shell, lock, and user `!`/`!!` invocation snapshots its
-instance workdir at admission. Queued or lock-waiting work does not drift after
-a later workdir commit. Stale remembered paths are retained and fail closed;
-use an absolute `workdir` setter to repair them. Each configured ext-shell
-instance initializes only a missing metadata key from its frozen actual process
-startup cwd and remains independent of other instances.
+Every call snapshots its cwd at admission, including queued/lock-waiting calls.
+Call-local overrides never change persistent state. Stale paths fail closed;
+repair with an absolute setter. Cwd can select directory-scoped wrappers such as
+`direnv exec .`; wrappers do not virtualize file discovery or completion.
 
-When `workdir` is visible, Tau's dynamic shell guidance normally directs the
-agent to set the matching instance's workdir to the project root before project
-work. That path becomes the cwd/base for later shell and filesystem calls from
-that instance only. It can select configured directory-scoped wrappers such as
-`direnv exec .` and affects other cwd-sensitive wrappers/tools; Tau does not
-assume such a wrapper is enabled. A dependent call must follow a successful
-setter in a later tool turn because sibling calls have no workdir-first
-ordering. Prefixed shell instances show their matching prefix and independent
-path/status, and hidden workdir capabilities do not emit this guidance.
+User commands require `!instance command` or `!!instance command`; there is no
+default instance. `!` appends attributed output without activating inference;
+`!!` does not append. Headless `tau send` supports only `!!`. An acceptance timeout
+leaves the outcome unconfirmed: do not blindly retry. Running user commands keep
+idle sessions alive after UI detach, but not through explicit shutdown/crash.
 
-User commands require `!instance command` or `!!instance command`, even with one
-available instance. Instance names autocomplete; Tau never chooses a default.
-The named extension owns discovery, execution, cancellation, and running-state
-queries through opaque custom events. An acceptance timeout is an unconfirmed
-outcome, not permission to retry. `!` appends attributed output to the selected
-agent without activating inference; `!!` does not append. Headless `tau send`
-supports only `!!instance command` because it has no selected agent.
+On Linux, Android, and macOS, shell stdout/stderr use independent PTYs. Stdin
+stays closed; commands cannot accept interactive input. Tau sets `PAGER`,
+`GIT_PAGER`, `GH_PAGER`, `JJ_PAGER`, and `SYSTEMD_PAGER` to `cat` unless
+`shell.non_interactive_pager: false`. Other pager variables remain unchanged.
+Commands may queue; exhausted queue budgets return backpressure errors.
 
-The extension acquires a generic activity lease before accepting or executing
-user commands. Quiet commands keep an idle-timeout session alive even after the
-UI detaches; the hold releases after completion and any `!` context outcome.
-This does not protect against explicit shutdown or crashes. Holds have no expiry;
-an unconfirmed acknowledgement or context outcome can retain one until extension
-disconnect or operator shutdown.
+## Output limits
 
-Path and fuzzy-path completion also run in the extension, using its host
-filesystem and remembered per-agent cwd. Arbitrary shell wrappers do not
-virtualize that namespace. Bang paths query only the named instance; ordinary
-prompt paths merge labeled candidates from available instances. There is no
-terminal-local filesystem fallback.
+Inspection/edit-recovery/user-command surfaces cap visible output at 10 KiB;
+model `shell`/`shell_command` cap native `output` at 15 KiB and, where applicable,
+2,000 lines. Metadata and fully rendered provider text are outside that budget.
 
-On Linux, Android, and macOS, the model-visible `shell` / `shell_command` surfaces and user
-`!`/`!!` commands use independent stdout/stderr PTYs. Commands detect TTY output
-descriptors while stream identity remains intact. Stdin stays closed because the
-surfaces do not accept interactive input. Other platforms retain closed stdin
-and output pipes. Both model and user shell children normally override `PAGER`,
-`GIT_PAGER`, `GH_PAGER`, `JJ_PAGER`, and `SYSTEMD_PAGER` with `cat` after
-ordinary `shell.extra_env`, while preserving `TERM`. Setting
-`shell.non_interactive_pager: false` is the explicit opt-out from this
-protection. `MANPAGER`, `BAT_PAGER`, and arbitrary application-specific pager
-variables remain ordinary. The protected `cat` must resolve through the child's
-effective `PATH`.
+Truncated results include totals and a saved rendering up to 16 MiB:
+`full_output_path` means complete; `saved_output_path` with
+`saved_output_truncated: true` and `saved_output_bytes` means incomplete.
+`saved_output_unavailable: true` means no private saved file could be created.
+Files expire after both 32 later relevant calls and about 15 minutes, with cleanup
+on the next relevant call; graceful shutdown removes them.
 
-`tau-ext-shell` runs tool work through a bounded priority scheduler. Short bursts can queue instead of failing immediately when workers are busy; queued model tool calls can be canceled before they start; user `!` shell work and control-sensitive `dir_lock` calls have higher-priority lanes than bulk model work. If bounded queue or queued-argument budgets are exhausted, the tool reports a clear backpressure error instead of spawning unbounded threads.
+## Directory locks
 
-The `read`, `grep`, `find`, `ls`, edit-recovery, and user `!` / `!!` surfaces
-cap visible output at 10 KiB; model `shell` / `shell_command` caps its native
-`output` body at 15 KiB (and 2,000 lines where applicable). Small result metadata
-and fully rendered provider text are outside that body budget. A truncated result
-includes complete totals, a compact efficiency warning, and an exact path to an ephemeral saved rendering of up to
-16 MiB. A complete artifact uses `full_output_path`; output that exceeds the
-saved cap instead uses `saved_output_path`, `saved_output_truncated: true`, and
-`saved_output_bytes`. Tracked files expire only after both 32 later relevant
-ext-shell calls and about 15 minutes, and are removed on graceful shutdown.
-Ordinary cleanup runs on the first relevant call after both thresholds. If the
-platform or temporary filesystem cannot create a private artifact, the result
-instead includes `saved_output_unavailable: true`.
-Model-shell VCR recordings keep bounded saved rendering in a private key-derived sibling
-`.shell-output` file rather than recording the ephemeral path; replay verifies
-that file and creates a fresh tracked ephemeral artifact.
+`dir_lock.enable` defaults false. When enabled, file edits acquire automatic
+locks. Shell calls become read-write only while the agent holds a manual lock
+covering the effective cwd; otherwise they are read-only and do not wait on update
+locks. With locking disabled, shell calls run read-write.
 
-Selected shell tools such as `read` and `edit` attach compact repair examples to
-their tool metadata. These examples are not included in normal model tool
-definitions; the harness may show one bounded example only after a failed call.
+`dir_lock.enforce_ro_bind` defaults true: while locking is enabled, read-only
+shell calls require a read-only bind mount of cwd and fail if isolation cannot
+be installed. Disabling it makes read-only mode advisory. Backend `"memory"`
+coordinates one process; `"filesystem"` with optional private `state_dir`
+coordinates same-user processes on one host.
 
-For Tau VCR runs, `ls`, `read`, `edit`, `replace`, `apply_patch`, `shell`, and `gpt_shell` use the shared ext-shell world-operation recorder. Replay substitutes recorded filesystem effects such as directory listing, file reads, parent-path checks, directory creation, and asserted writes/removes while still running normal tool argument handling, context-line validation, patch application, diff generation, escaping, invalid-UTF-8 handling, and truncation logic. Shell terminal outcomes are recorded as world operations: finished results replay at 100x recorded speed, while recorded cancellations require a matching replay cancellation request.
+Manual reservations and running tools' automatic guards have separate lifetimes.
+`dir_lock(unlock)`, owner unlock, and `:shell-dir-force-unlock DIRECTORY` release
+only manual reservations. They neither cancel tools nor release running guards;
+backgrounding or changing cwd does not move those guards.
 
+Tau releases a delegate/side agent's manual reservation when its tracked start
+operation finishes, even if the agent remains loaded. Reacquire before resumed
+mutations; a recovery summary does not prove ownership.
 
-## Directory locks and mutation safety
+For immutable long-running work that needs no checkout, launch the built
+executable from a dedicated task directory outside the source tree, with outputs
+and any required manual write lock there. Do not use another cwd to hide checkout
+writes. Ancestor/descendant paths overlap: editing directly under `/tmp/public`
+can conflict with a writer in a child directory.
 
-`config.dir_lock.enable` defaults false. When it is true, `dir_lock` is available and mutating `edit` / `replace` / `apply_patch` calls automatically acquire matching directory locks. `shell` / `gpt_shell` calls are inferred read-write only while the agent holds a manual lock covering the command's call-local `cwd` / `workdir`; otherwise they are inferred read-only and do not wait on update locks. When directory locking is disabled, all shell calls run read-write and the UI does not show an access-mode chip. The extension publishes a `:shell-dir-force-unlock DIRECTORY` user action when a manual lock blocks work long enough to matter. `config.dir_lock.backend` defaults to `"memory"` for process-local coordination; set it to `"filesystem"` with an optional private `state_dir` to coordinate locks across Tau/ext-shell processes on the same host and user account.
+`apply_patch` locks source and destination paths, including absolute targets.
+Create dedicated scratch parents first; a missing parent may cause a lock on its
+deepest existing ancestor. Split unrelated source/scratch edits.
 
-Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bind: true` is set while directory locking is enabled. The read-only bind defaults true under `dir_lock`; when enabled, Tau requires a read-only bind mount of the tool cwd and fails the shell call if native isolation is unsupported or cannot be installed.
+Lock-wait progress names requested directories and, when known, the blocking
+owner/directory/kind. Contact that owner and check running work before unlocking.
+An interrupted `wait` does not establish the operation's terminal outcome.
 
+## Instructions and skills
 
-### Lock lifetime and long-running work
+Discovery stacks user `AGENTS.md`/`AGENTS.*.md` from
+`$HOME/.config/agents/`, `$HOME/.config/agents.local/`, `$HOME/.agents/`, and
+`$HOME/.agents.local/`, plus cwd ancestors and their `.agents.local/` files.
+Skills come from project `.agents/skills`/`.agents.local/skills` and those four
+user roots' `skills` directories. XDG user-skill names beat alternate-root
+duplicates before modified-time collision resolution. `.local` roots suit
+machine-specific files.
 
-A manual reservation and a running tool's automatic guard have separate
-lifetimes. `dir_lock(unlock)`, including an explicit owner unlock, releases only
-the manual reservation. The UI force-unlock action also releases only manual
-locks. Neither action cancels running tools or releases their automatic guards.
-Other owners can remain blocked until those operations finish, even after a
-successful manual unlock. Backgrounding a call does not end its operation.
+Agent initialization uses remembered/inherited/restored cwd. A persistent setter,
+even to the same path, refreshes that instance's project discovery; getters and
+call-local overrides do not. Dependent inference and `:skill` expansion wait for
+installation. New instructions arrive as `tau_discovery` after tool results,
+without a separate turn. Scan failure removes stale project input but preserves
+user/other-source input; use an absolute or same-path setter to repair it.
 
-The extension also releases manual reservations when a tracked delegate or side
-agent's start operation finishes, whether it succeeds or fails, even if the agent
-remains loaded. If you resume work on that agent after cleanup, acquire a fresh
-reservation before mutating files. Do not rely on a recovery or compaction summary
-as proof of current lock ownership or force-unlock another owner to recover a
-stale reservation.
+Skill metadata supports `user-invocable`, `disable-model-invocation`, and
+`argument-hint`. `disable-model-invocation` hides the skill from model discovery
+and implies user invocation. `:skill <name> [args]` or `:skill:<name> [args]`
+uses the selected agent's frozen discovery snapshot.
 
-For an immutable long-running test or campaign that does not need the source
-checkout, launch the built executable with a call-local cwd in a
-dedicated task directory outside the source-update tree. Put its writable
-outputs there and acquire a manual lock on that directory if it needs
-read-write shell mode. Do not launch from the source checkout and expect a
-later unlock or workdir change to move the running call's guard. Keep the
-source reservation for work that needs it; do not use a different cwd
-to hide writes to the checkout or bypass required source coordination.
-
-Create separate scratch directories for unrelated tasks, for example with
-`mktemp -d /tmp/public/campaign-XXXXX`. Keep reports inside their task directory
-rather than in a shared scratch parent. Directory overlap includes ancestors
-and descendants: editing a file directly under `/tmp/public` can
-wait on a running writer in `/tmp/public/campaign-XXXXX`.
-
-`apply_patch` derives locks from all source and destination paths, not just
-the shell cwd. Split unrelated source and scratch edits into separate calls;
-changing cwd does not avoid contention on an absolute patch target. Creating a
-file under a missing parent may lock the deepest existing ancestor. Create the
-dedicated scratch directory before editing files inside it.
-
-When a call reports `waiting for directory lock`, its progress text lists the
-requested directories and, when available, a best-effort snapshot of the blocker:
-the owner agent, blocking directory, and blocker kind (manual lock, automatic
-lock, or earlier queued request). The snapshot does not identify the running tool
-call and may change before the next update. Contact the reported owner and check
-active operations. A successful manual unlock does not release a running tool's
-automatic guard.
-An interrupted `wait` is not the operation's terminal result; use the
-background call's completion to establish its outcome. Following this guidance
-does not change lock ownership, cancellation, or lease semantics.
-
-
-## Agent context discovery
-
-`core-shell` discovers and publishes project/user instructions and skills:
-
-- `AGENTS.md` and `AGENTS.*.md` from `$HOME/.config/agents/`,
-  `$HOME/.config/agents.local/`, `$HOME/.agents/`, then
-  `$HOME/.agents.local/`; all supported user files are stacked when present.
-  Other coding harnesses may use the latter two locations; Tau supports them
-  for interoperability but prefers the XDG roots
-- `AGENTS.md` and `AGENTS.*.md` in current-working-directory ancestors, plus each
-  ancestor's matching `.agents.local/AGENTS.md` and `.agents.local/AGENTS.*.md`
-- skills under project `.agents/skills` and `.agents.local/skills`, followed by
-  `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`,
-  `$HOME/.agents/skills`, and `$HOME/.agents.local/skills`
-- duplicate user-skill names from XDG skill roots beat the supported alternate
-  user roots before
-  modified-time collision resolution
-
-`tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and
-`argument-hint` metadata and publishes one complete source snapshot at session
-discovery and for each correlated agent initialization. The harness atomically
-selects collision winners and freezes each initialized agent's view.
-Agent-load discovery uses the remembered/inherited/restored cwd, not the process
-startup cwd unless metadata is absent. Persistent `workdir(path)` commits,
-including same-path setters, replace only that shell instance's project discovery;
-getters and call-local overrides do not. Dependent inference and `:skill`
-expansion wait for installation even if the setter backgrounds or is cancelled.
-New advertised skills and AGENTS instructions arrive in a separate user-role
-`tau_discovery` message after the complete tool-results block in that same
-continuation. The workdir result itself is unchanged. Tau includes bodies only for
-exact content versions absent from surviving context receipts; the current
-scope list handles removals and reactivation. No separate discovery turn runs.
-True scan failure removes stale project input, retains user/other-source input,
-and reports the committed-cwd/degraded-discovery outcome. Established agents stay
-usable for absolute or same-path repair when required skills disappear.
-`disable-model-invocation` hides a skill from that agent's
-`<available_skills>` and model `skill` tool and implies user invocation, while
-`:skill <name> [args]` (or `:skill:<name> [args]`) expands against the selected
-agent's frozen snapshot.
-
-`.local` locations are intended for machine- or user-specific instructions and are usually gitignored.
-
-Skills and AGENTS files support YAML list filters `only-roles`,
-`only-role-groups`, `except-roles`, and `except-role-groups`. The two allow
-dimensions form a union first; any exclusion wins afterward. Missing allow
-lists admit everyone; explicitly empty lists match nobody. Role/group names
-match exactly, using actual configured groups rather than role-name prefixes.
-Each AGENTS file filters independently; headers are stripped from injected
-instructions. Skill winners are selected before filtering, so hiding a winner
-does not expose duplicates. Eligibility freezes at agent initialization or the
-applicable source-local project refresh, while
-later skill loads still read current bodies. Malformed filters fail open and
-produce file-specific UI warnings retained for late attachment. Unparseable
-headers preserve raw useful instructions. These filters are not filesystem ACLs.
-
-AGENTS.md files and skills are trusted prompt input. Tau follows symlinks during
-discovery; do not run Tau in projects whose instruction files or skill files you
-do not trust.
-
+Skills and AGENTS files accept YAML lists `only-roles`, `only-role-groups`,
+`except-roles`, `except-role-groups`. Allow dimensions form a union; exclusions
+win. Missing allow lists admit everyone; explicit empty lists match nobody.
+Names match actual roles/groups exactly. Winners are chosen before filtering;
+hiding one never exposes a duplicate. Eligibility freezes at initialization or
+project refresh, while later loads read current bodies. Malformed filters warn
+and fail open. These filters are not ACLs. Discovery follows symlinks: trust the
+project's instruction and skill files before running Tau there.
 
 ## Configuration
-
-Configured under `extensions.core-shell.config`:
 
 ```json5
 extensions: {
@@ -297,30 +177,22 @@ extensions: {
 }
 ```
 
-`working_directory` changes the extension process cwd only during startup config and therefore its missing-key fallback; it never overrides restored per-agent state. Late changes after runtime events are rejected. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment; empty values remove variables from the child environment. The protected pager overlay follows `extra_env` unless `shell.non_interactive_pager` is explicitly false. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.
+`working_directory` sets startup cwd, never restored agent state; late changes
+are rejected. Execution uses `<command> -c <user command>` after `shell.prefix`.
+`extra_env` overrides inherited values; empty values remove variables. The pager
+overlay applies afterward. `user_command_timeout_secs` affects user commands
+only; tool calls use their own `timeout`.
 
-`shell.allowlist` is an optional best-effort guardrail, not a sandbox or
-security boundary. When absent, shell execution remains unrestricted; an empty
-list denies every model and user shell command. Every rule requires `workdir`
-plus exactly one matcher: `command` retains globset glob syntax and
-`command_regex` uses Rust regular-expression syntax. One rule must match both.
-Matchers are whole-string and case-sensitive; regexes have implicit absolute
-anchors over the raw submitted string, including newlines, so authors should not
-add `^...$`. Inline case-insensitive regex flags are rejected. Workdir matching
-uses the canonical absolute effective cwd, with `*` confined to one component and
-`**` crossing components. Globs treat separators and newlines as ordinary
-characters. The allowlist accepts at most 32 rules, 2,048 authored UTF-8 bytes per
-pattern, and 262,144 compiled bytes per glob or regex matcher. A rule may include
-an optional `description` of at most 1,024 authored UTF-8 bytes. This trusted
-operator prose is model-visible and appears in denial diagnostics, so it must not
-contain secrets; it does not affect matching. It does not inspect
-shell syntax, wrapper argv, environment, `PATH`, or resolved executables. Generated
-denial errors show the typed configured command matcher/workdir pairs and optional
-descriptions, but never the submitted denied command. The in-process `grep` search and unrelated subprocess systems are not covered.
+`allowlist` is a guardrail, not a sandbox. Omission permits all commands; `[]`
+denies all model/user shell commands. Each rule requires canonical absolute
+`workdir` plus exactly one whole-string, case-sensitive `command` glob or Rust
+`command_regex`. Both must match. Workdir `*` stays within one component; `**`
+crosses components. Command globs treat separators/newlines as ordinary
+characters. Regexes have implicit absolute anchors; omit `^...$`.
+Case-insensitive flags are invalid.
 
-When the allowlist is present, the shell prompt also identifies command
-enforcement and lists typed `command_glob`/`command_regex` plus `workdir`
-selector pairs and optional descriptions. Both selectors in one pair must match.
-This presentation sorts and de-duplicates complete entries without changing enforcement; an empty list
-states `none (all shell commands are denied)`. Selector strings use JSON
-escaping, including brace escapes, so glob syntax remains literal prompt text.
+Limits: 32 rules, 2,048 authored UTF-8 bytes per pattern, 262,144 compiled bytes
+per matcher, optional `description` up to 1,024 bytes. Descriptions appear in
+model guidance/denials: do not include secrets. Rules do not inspect shell syntax,
+wrapper argv, environment, `PATH`, or resolved executables, and do not cover
+in-process `grep` or unrelated subprocess systems.

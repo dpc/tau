@@ -4,7 +4,7 @@ description: Use when configuring, operating, or troubleshooting Tau std-swarm, 
 advertise: false
 ---
 
-# Tau std-swarm extension self-knowledge
+# Tau Swarm
 
 `std-swarm` is Tau's disabled-by-default Tau Swarm bridge. Install the
 separately maintained `tau-ext-swarm` executable and make it available through
@@ -41,9 +41,6 @@ descriptions preserve whitespace. Values reject prohibited controls and enforce
 UTF-8 byte ceilings of 128 bytes for task ID, 160 for title, and 16 KiB for a
 present nonempty description.
 
-Command deduplication, task metadata, blocker history, pending updates, and acknowledgements
-live only in extension process memory. An ordinary Iroh reconnect preserves
-them. Tau restart or extension restart clears all of them.
-The extension retains one Tau Swarm application-incarnation ID across ordinary
-reconnects. A restarted process declares a fresh ID, which lets the server fence
-ambiguous commands and lifecycle state owned by the previous process.
+Deduplication, task metadata, blockers, pending updates, and acknowledgements
+survive Iroh reconnects only. Tau/extension restart clears them and declares a
+new application-incarnation ID so the server can fence the old process's state.

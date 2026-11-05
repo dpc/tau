@@ -6,16 +6,12 @@ advertise: false
 
 # Tau source code
 
-For debugging or detailed understanding, inspect the Tau source code rather than guessing from behavior.
-
 ## Exact-byte inspection
 
-Rendered tool text intentionally escapes matching exact prompt-envelope closing
-sentinels; ordinary typed tool results neutralize the `tau_internal` closing token.
-Distinct source bytes can therefore look identical in textual output: a literal
-closing token and its already-escaped visible form can render the same way.
-This is presentation escaping, not a change to the file on disk. For byte-sensitive
-reviews, inspect a bounded range as hex (for example,
+Tool text escapes exact prompt-envelope closing sentinels; ordinary typed
+results neutralize the `tau_internal` closing token. Literal and already-escaped
+tokens can therefore look identical, without changing disk bytes.
+For exact-byte reviews, inspect bounded hex (for example,
 `sed -n '148,149p' crates/tau-proto/src/prompt_envelope.rs | od -An -tx1`),
 or compare the bytes locally and print only a boolean rather than the source text.
 See [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md)
@@ -43,4 +39,4 @@ Install the corresponding `tau-ext-*` package from the Tau flake, then enable
 and configure its `std-*` instance explicitly. Telegram gateway-client mode also
 uses the flake's `tau-telegram-gateway` package.
 
-When an agent needs a local checkout, prefer a reusable cache location such as `~/.cache/tau/src` to avoid re-downloading the repository for every investigation.
+Reuse a checkout such as `~/.cache/tau/src`.

@@ -6,8 +6,6 @@ advertise: false
 
 # Tau CLI UI
 
-Tau's terminal UI is the interactive `tau` client. It connects to a harness daemon, renders the transcript, and owns prompt input behavior such as commands, history, key bindings, external editor integration, and prompt completions.
-
 ## Configuration files
 
 CLI UI configuration lives under `~/.config/tau/`:
@@ -19,52 +17,35 @@ Runtime UI toggles changed with `:set` are stored in the state directory as `cli
 
 ## Mouse handling
 
-Mouse handling is enabled by default. To make the CLI UI ignore mouse activity,
-including wheel-driven prompt-history navigation, set this static option in
-`cli.yaml` or a `cli.d` drop-in:
+To disable default mouse handling, including wheel-driven prompt history,
+set this static option in `cli.yaml` or a drop-in:
 
 ```yaml
 mouse: false
 ```
 
-Tau explicitly disables terminal mouse reporting while it owns the terminal, so
-the terminal keeps native wheel scrolling, text selection, and link activation.
-This option is not a `:set` toggle and does not affect the harness, project
-state, or session.
+With `mouse: false`, Tau disables terminal mouse reporting so native scrolling,
+selection, and links work. This is not a `:set` toggle.
 
 ## Agent message labels
 
-Harness-owned `message` activity keeps each agent's `@`-prefixed routing id
-visible and adds the known display/task name in parentheses, independently for
-sender and recipient. Routing identities use a bright style while parenthetical
-context retains the base header style. Unknown agents and peers without
-trustworthy advertised metadata remain id-only; cross-session endpoints render
-as `session/@agent`. Display names are escaped, bounded presentation metadata
-and never alter semantic message content or routing identity. Late authoritative
-name updates reproject historical UI blocks without rewriting the stored message
-event.
+Message headers show routing IDs as `@agent` or `session/@agent`, plus known
+display/task names in parentheses. Names do not change routing. Later name
+updates refresh historical headers, not stored messages; unknown peers stay ID-only.
 
 ## Watched-agent activity
 
-The terminal shows one activity row per direct watched target. `running` means
-the watched agent's current complete stats report it running. `watching` means
-the watched agent is not running but recursively watches an active
-descendant; the row's `-> @agent-id` suffix identifies a nearest directly running
-witness. Direct state wins when both apply. Recursive activity is a CLI-only
-projection over the session's live watch DAG and does not change navigation,
-routing, persistence, or model-visible watch notifications. The bottom `@N` chip
-keeps its session-wide scope, counts unique recursively effective watch targets,
-excludes the selected agent, and retains active-prompt fallback for agents
-outside every watch edge.
+Each directly watched target gets a row: `running` for its own activity,
+`watching` if idle but recursively watching an active descendant.
+`-> @agent-id` names a nearest running witness; direct activity wins.
+This recursive display does not change model-visible watch notifications.
+The session-wide `@N` chip counts unique effective watch targets, excludes
+the selected agent, and includes active-prompt fallback outside watch edges.
 
 ## Status-indicator legend
 
-Selected-agent and watched-agent rows start with two adjacent indicators:
-`<work-status><current-activity>`. The first reports the agent's task status;
-the second reports its transient current turn activity. They are independent, so
-they can repeat the same glyph: `⏳⏳` means the agent reported its task as
-waiting for an expected self-resolving event, and its current activity is also a
-waiting tool.
+Rows start with independent `<work-status><current-activity>` indicators.
+`⏳⏳`, for example, means a reported waiting task and a currently waiting tool.
 
 The work-status indicator is:
 
@@ -89,35 +70,27 @@ The current-activity indicator is:
 
 ## All-agent overview
 
-The no-agent-selected screen is both the start-new-agent input target and an
-overview of messages between all agents. It deduplicates sender and recipient
-projections of the same message and follows `:set show-messages`. Ctrl-K/Ctrl-J
-include the overview when cycling among active agents. Submitting a prompt there
-still starts a new agent. The overview is local to that CLI: attachment catch-up
-includes currently loaded agents, not messages whose endpoints already unloaded.
+The no-agent-selected screen shows deduplicated inter-agent messages, subject
+to `:set show-messages`. Ctrl-K/Ctrl-J include it when cycling active agents;
+submitting there starts a new agent. Attachment catch-up covers loaded agents,
+not messages whose endpoints already unloaded.
 
 ## Commands
 
 Type `:` as the first non-whitespace character to enter command mode and open command/action completion. Type `::text` to submit literal prompt text beginning with `:`, while `/` remains available for absolute and token-level path completion. Built-in commands include session and agent management, model/role switching, `:name <display name>` to rename the currently selected agent, `:skill <name> [args]` for explicit user-invocable skill injection, `:theme <name>` to switch only the current CLI UI's theme for this run, `:set`, `:tree`, `:fast`, `:detach`, `:quit`, and `:quit-session`. Extension-provided actions can add dynamic commands and argument completions at runtime. `:skill:<name> [args]` is accepted as a compact form; arguments are appended after the skill body without placeholder substitution.
 
-`:quit` (alias `:q`) asks the harness to release this UI. Plain `tau` and interactive
-`tau resume` enable automatic shutdown when their last UI leaves. `:detach`
-disables that policy for the entire daemon incarnation before disconnecting;
-later reconnections and ordinary quits cannot re-enable it. Headless launches
-start with automatic shutdown disabled. `:quit-session` requests unconditional
-canonical shutdown and disconnects every attached UI. Final stderr says
-`Session detached` or `Session terminated` after terminal cleanup; unconfirmed
-termination gets an explicit diagnostic instead.
+`:quit` (alias `:q`) leaves this UI. Plain `tau` and interactive `tau resume`
+stop when the last UI leaves unless `:detach` has disabled that policy for the
+daemon's remaining lifetime. Reconnecting/quitting cannot re-enable it; headless
+launches start with it disabled. `:quit-session` shuts down the daemon and all
+UIs. Final stderr confirms detach/termination or diagnoses unconfirmed termination.
 
 `:theme` completion lists built-in selectors (`tau-plain-dark`, `tau-plain-light`, and `tau-dpc`) plus valid user themes from `<config_dir>/themes/*.json5`. It is intentionally not persistent: it does not edit `cli.yaml`, update `cli.json`, or affect another attached UI.
 
-`:set notice-level <critical|warning|info|debug|trace>` controls which
-diagnostic harness/UI notices this UI shows. The default is `info`; `warning`
-hides routine lifecycle chatter such as extension ready messages, while `debug`
-and `trace` show progressively noisier developer detail. Direct command responses,
-alerts such as extension configuration errors, and critical notices remain
-visible at every threshold. Compact mode additionally hides all diagnostics,
-including model-facing internal prompts even when `show-internal-prompts` is on.
+`:set notice-level <critical|warning|info|debug|trace>` filters diagnostics
+(default `info`). `warning` hides routine lifecycle notices; direct command
+responses, alerts, and critical notices remain visible. Compact mode hides
+diagnostics and internal prompts even with `show-internal-prompts` on.
 
 ## Prompt history and editing
 
@@ -142,28 +115,18 @@ Submitted prompts are kept in the current process and persisted under the state 
 
 ## Compact and verbose transcript modes
 
-The CLI starts in verbose mode. This is the information-dense view of agent
-actions and performance: existing `:set` choices continue to control thinking,
-tools, turn stats, and other presentation details. Press Ctrl-V, invoke the configurable
-`verbose-mode-toggle` action, or type `:verbose-mode-toggle` to switch to the
-compact conversation view.
+The CLI starts verbose, honoring `:set` choices. Ctrl-V, the configurable
+`verbose-mode-toggle` action, or `:verbose-mode-toggle` switches to compact view.
 
-Compact mode is the conversation-focused view for daily use. It is a stricter
-top-level filter that hides all thinking and turn statistics. Completed
-historical tools and results disappear; each currently
-running tool retains the same informative status line as verbose mode without
-its payload body, and that line disappears on success, error, or cancellation.
-User and agent messages,
-direct responses, alerts, critical notices, prompt input, navigation, watched activity, and other
-user-facing UI remain available. `Message` and `WatchResponse` agent activity
-retain only their existing headers; their bodies and typed watched-agent
-status-update transcript rows are hidden. `WatchPrompt` retains its content.
+Compact view hides thinking, turn stats, completed tools/results, and running
+tool payloads. Running tool status lines disappear at completion. User/agent
+messages, direct responses, alerts, critical notices, input, navigation, and
+watched activity remain. `Message` / `WatchResponse` retain headers only;
+typed watched-agent status rows disappear; `WatchPrompt` retains content.
 
-Switching back restores the retained verbose transcript and the prior `:set`
-choices; compact mode does not mutate them or discard transcript data. The mode
-belongs only to the current CLI process/attachment, is not written to `cli.json`,
-and resets to verbose when the CLI starts. It changes neither harness or agent
-behavior nor journal, provider, or model context.
+Switching back restores the transcript and prior settings. The mode is local
+to this attachment, does not persist in `cli.json`, and changes no model context
+or harness behavior.
 
 ## Prompt completions
 
@@ -222,16 +185,11 @@ accepts either spelling and inserts the canonical bare id.
 
 ## Shared agent navigation modes
 
-Navigation classification is shared by UIs attached to the same daemon. Use
-`:agent suspend`, `:agent resume`, or `:agent auto` for absolute `suspended`,
-`active`, or `active-auto` modes. Selection, drafts, transcript view, and
-presentation remain local to each UI. Overrides survive UI reconnect while the
-agent remains loaded in the same daemon session; unload and harness restart
-forget them.
-Selecting an agent does not resume it. Successfully submitting a visible prompt
-to an existing selected agent does: the harness makes that exact target `active`,
-and the CLI waits for the authoritative complete stats snapshot rather than
-changing its cache optimistically.
+`:agent suspend`, `:agent resume`, and `:agent auto` set shared navigation modes
+`suspended`, `active`, and `active-auto`. They survive UI reconnect, not agent
+unload or daemon restart. Selection, drafts, and transcript view stay UI-local.
+Selection alone does not resume an agent; successful visible prompt submission
+to an existing selected agent makes it `active`.
 
 Use `tau agent list <session-id>` for a stable headerless TSV roster from a
 running session; `--include-suspended`, `--include-unavailable`,

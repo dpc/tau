@@ -5,76 +5,67 @@ description: Use when configuring, operating, or troubleshooting Tau std-telegra
 
 # Tau std-telegram extension self-knowledge
 
-`std-telegram` is Tau's disabled-by-default configuration for the separately
-maintained `tau-ext-telegram` executable. Tau does not bundle or install that
-executable. Install the Tau flake's `tau-ext-telegram` package and ensure it is
-available through `PATH` before enabling the instance. Tau still starts it
-through the normal supervised stdio extension route. The
+`std-telegram` is disabled-by-default configuration for the separately maintained
+`tau-ext-telegram`. Install the Tau flake's package on `PATH` before enabling it;
+Tau supervises it over stdio. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az3sPdSePnxtBvP9pTLwUwVgpMU68r)
-owns its source and detailed operational documentation; its Cargo README
-installation instructions remain conditional on a future registry publication.
-For Tau protocol 16.0, rebuild the bridge and gateway with registry SDK crates
-`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update them with the
-compatible harness before separately authorized activation. Older-protocol bridge
-binaries are rejected before configuration; changing the advertised version alone
-is not a migration. The separate authenticated gateway protocol remains 0.
+owns setup and operational documentation. Its Cargo README installation
+instructions depend on future registry publication.
 
-Local-poll mode requires a named bot-token secret, a nonempty numeric
-`allowed_user_ids` list, and an optional exact `chat_id`. Without `chat_id`, an
-allowlisted user can link one private chat with `/start`; group and supergroup
-chats require explicit configuration. Agents become routes only after their
-`telegram_register` tool enables registration. The desired registrations remain
-in the configured instance's Session-scope state across restarts, but active
-routes are restored only for agents still loaded after replay completes.
-`telegram_send` can use only the configured or linked chat; the model cannot
-choose a native destination.
+For Tau protocol 16.0, rebuild bridge and gateway with registry
+`dpc-tau-client`/`dpc-tau-proto` 0.16.0 and update them with a compatible harness
+before separately authorized activation. Older-protocol bridges fail before
+configuration; changing the advertised version is not migration.
+The authenticated gateway protocol remains 0.
 
-The typed reply-context producer may supply bounded `reply_to_message` context
-from the same event, chat, and thread beside the unchanged normalized outer
-request in both local-poll and gateway-client delivery. It uses only supplied
-parent text/caption and available author labels. Shared rendering uses adjacent
-`message` and `quoted_message` text parts. Older producers may still append
-textual context. `quote.text` is a sender-selected, unverified excerpt, not a full
-authenticated parent. The producer excludes `external_reply`, parent attachments,
-recursion, and fetching. Missing content is unavailable, not proof of deletion.
-Native parent identities are opaque descriptive data, not
-fabricated canonical references or `telegram_send` capabilities. Only the outer
-message drives admission, `/to`, route selection, and mentions.
+## Local polling and routing
 
-The producer freezes context with its delivery/checkpoint text through retries and
-ACKs; parent changes never refresh it. The producer shrinks or omits optional
-context to preserve the original outer body within delivery limits. Typed context
-requires rebuilding the producer against the 0.19.0 source SDK; the legacy 0.16
-producer remains unchanged. This adds no native per-message send
-routing and does not deploy or activate the producer.
+Configure a named bot-token secret, nonempty numeric `allowed_user_ids`, and
+optional exact `chat_id`. Without `chat_id`, an allowlisted user can link one
+private chat with `/start`; groups/supergroups require explicit configuration.
+Agents become routes after `telegram_register` enables them. Desired registrations
+persist in Session-scope instance state, but restart restores active routes only
+for agents still loaded after replay.
 
-Assign a distinct generic `tool_prefix` to each configured bot instance.
-Tau preserves the `std-telegram` identity, tool role, disabled default,
-managed-secret delivery, startup timeout, state and checkpoint roots, publisher
-identity, desired-registration restoration, network policy, and supervised
-stdio lifecycle when it launches the standalone executable.
+`telegram_send` can use only the configured/linked chat, not a model-chosen native
+destination. Give each bot instance a distinct generic `tool_prefix`.
 
-The Tau flake also exports the standalone project's `tau-telegram-gateway`,
-which operators must install and supervise separately. Gateway-client mode
-configures an exact local gateway socket path and a named per-instance client
-secret. The sidecar does not receive the bot token or choose Telegram
-destinations in that mode; the gateway owns polling, sender and chat admission,
-durable update checkpoints, and outbound routing. Mutual authentication does
-not contain malicious same-UID processes, and external Telegram text always
-remains untrusted content.
+## Reply context
 
-A separate trusted instance can use `mode: gateway_fixed_chat_send` to send
-summaries through an existing gateway credential without receiving Telegram
-messages. Configure only `gateway_socket_path`, `gateway_client_secret`, and a
-nonempty exact `allowed_agent_ids` list; the named secret must already be
-declared for that instance, and the gateway must already have its fixed
-`--chat-id`. This mode declares only `telegram_send`, never registers or polls,
-and never accepts bot-token, destination, Telegram allowlist, or polling fields.
-It sends text verbatim without the normal agent prefix and shares the gateway's
-existing aggregate rate limit. The shared gateway key still authorizes normal
-route operations as well as route-free fixed sends, so this mode is trusted
-extension/session policy rather than containment of compromised same-key code.
+Local-poll and gateway-client delivery may include bounded same-event/chat/thread
+`reply_to_message` context beside the normalized outer request in `message` and
+`quoted_message` parts. `quote.text` is a sender-selected unverified excerpt.
+The producer does not fetch parents, include `external_reply` or parent
+attachments, or recurse. Missing content does not prove deletion.
 
-The standalone project's README, security notes, linked specifications, and
-tests own the detailed command, routing, retry, replay, durability, gateway,
-exit-status, and troubleshooting contracts.
+Parent identities are descriptive, not canonical references or `telegram_send`
+capabilities. Only the outer message controls admission, `/to`, routes and mentions.
+Context remains frozen through retries/ACKs; parent changes do not refresh it.
+Optional context may shrink or disappear to preserve the outer body.
+
+Typed context requires rebuilding against the 0.19.0 source SDK; the legacy 0.16
+producer remains unchanged and may append textual context instead.
+This adds no native per-message send routing.
+
+## Gateway modes
+
+The flake exports `tau-telegram-gateway`; operators install and supervise it
+separately. Gateway-client mode uses an exact local socket path and named
+per-instance client secret. The gateway, not the sidecar, owns the bot token,
+polling, admission, durable checkpoints and outbound routing.
+Mutual authentication does not contain malicious same-UID processes.
+External Telegram content remains untrusted.
+
+A trusted instance can set `mode: gateway_fixed_chat_send` to send summaries
+without ingress. Configure only `gateway_socket_path`, `gateway_client_secret`,
+and nonempty exact `allowed_agent_ids`; declare the secret on that instance and
+configure the gateway's fixed `--chat-id` first.
+
+This mode exposes only `telegram_send`, never registers/polls, and rejects
+bot-token, destination, Telegram allowlist and polling fields. It sends verbatim
+text without the normal agent prefix and shares the gateway's aggregate rate
+limit. The shared key also authorizes normal route operations: fixed-send mode
+is trusted extension policy, not containment of compromised same-key code.
+
+Consult the standalone project's README, security notes and linked specifications
+for command, retry, durability, gateway and troubleshooting contracts.

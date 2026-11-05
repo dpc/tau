@@ -11,12 +11,10 @@ reporter. It also supplies artifact-backed `read_image`; load
 `tau-self-knowledge-ext-shell` for shell artifact transfer and
 `docs/artifacts.md` for image/reference details.
 
-`read_image` preserves tool causality and prepares exact encoded pixels locally.
-The harness chooses durable Artifact references only for persistent invocations
-with scoped storage authority; ephemeral/memory-only invocations remain inline.
-The tool does not infer persistence from a key or silently fall back after an
-Artifact upload failure. Back up the complete Artifact store and roots together
-with reference-bearing journals.
+`read_image` prepares encoded pixels locally. Persistent invocations with scoped
+storage authority use durable Artifact references; ephemeral/memory-only calls
+stay inline. Upload failure does not trigger fallback. Back up the complete
+Artifact store and roots with reference-bearing journals.
 
 Use `timer` for real-time external waits, not to poll for tool completion
 (use `wait` for that). Timers belong to the session; they can wake a running
@@ -33,13 +31,12 @@ or cancel. Accepted daily timers reconstruct from session replay, but a
 stopped session cannot wake itself; timezone changes and downtime affect
 firing. See `crates/tau-ext-utils/README.md` for precise DST/restart behavior.
 
-Call `papercut` only for an incidental Tau harness, tooling, environment,
-confusing, or suspicious problem, then continue the primary task. Do not
-report a non-event or retry a failed report. It records local plaintext notes
-in per-instance User-scope extension state; do not include secrets or
-unnecessary personal data. Reports can be lost in memory-only mode or on
-storage/shutdown failure. Active reports and archived files are retained
-indefinitely, not automatically filed, redacted, rotated, or deleted.
+Call `papercut` once for an incidental harness, tooling, environment, confusing,
+or suspicious problem, then continue. Do not report non-events or retry failures.
+Reports are plaintext in per-instance User state: omit secrets/personal data.
+Memory-only mode and storage/shutdown failures can lose reports. Otherwise
+active and archived reports stay indefinitely without automatic filing,
+redaction, rotation, or deletion.
 
 Operators can review the normal instance with `tau dev papercut list
 --markdown`; `tau dev papercut clear` **archives**, rather than deletes,

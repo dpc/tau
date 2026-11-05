@@ -12,23 +12,19 @@ as `email_list_folders`, `email_read`, and `email_send`, and publishes `:email`
 approval/denial actions. The old `std-email` instance alias is removed; rename it
 to `std-pim` and nest email settings under `config.email`.
 
-Use this skill when helping a user configure email. Do not include personal addresses, server names, passwords, authserv-ids, or message contents unless the user explicitly provided them for that answer.
+Do not include private account data or message contents unless the user provided
+them for that answer.
 
 
 ## Secure baseline
 
-Start from fail-closed settings:
-
-- Keep `extensions.std-pim.enable: true` only when the user really wants PIM access.
-- Set the email module's `config.email.enable: true`; it is false by default.
-- Set each account's `enable: true`; accounts are disabled by default.
-- Keep `policy.incoming_auth.require: true`; this is the default and should normally stay true.
-- Keep `policy.incoming_auth.allow_dmarc_only: false`; the default requires aligned DKIM.
-- Configure exact `policy.incoming_auth.trusted_authserv_ids` for the user's trusted mailbox provider or final MTA.
-- Keep `incoming_allow`, `outgoing_allow`, and `folders.allow` narrow.
-- Set `policy.allow_state_policy_extensions: false` if the user wants config-only allowlists and no persistent whitelist changes from `:email ... whitelist` actions.
-
-Never recommend disabling incoming auth just to make a message pass. Prefer manual approval for edge cases.
+Enable the extension, email module, and each account; modules/accounts default
+to disabled. Keep `policy.incoming_auth.require: true`,
+`policy.incoming_auth.allow_dmarc_only: false`, and narrow `incoming_allow`,
+`outgoing_allow`, and `folders.allow`. Set exact `trusted_authserv_ids` for the
+trusted mailbox provider or final MTA. Approve edge cases manually rather than
+disabling authentication. For config-only allowlists, set
+`policy.allow_state_policy_extensions: false`.
 
 
 ## Example harness config
@@ -98,16 +94,15 @@ extensions:
           allow_state_policy_extensions: true
 ```
 
-Important fields:
+IMAP defaults to port 993 / `tls: required`; SMTP to 587 / `tls: start_tls`.
+Password auth needs `auth.password_secret` and a matching secret declaration.
+`auth.method: none` supports SMTP-only/relay setups, not IMAP.
+OAuth supports Gmail, not generic providers; command-based password/token
+sources are rejected.
 
-- Standard extension name: `std-pim`.
-- Model-visible email tools are split by command, for example `email_list_folders`, `email_list_recent`, `email_read`, `email_request_access`, and `email_send`.
-- IMAP default: port 993 with `tls: required`.
-- SMTP default: port 587 with `tls: start_tls`.
-- Password auth requires `auth.password_secret` and a matching declaration under `extensions.std-pim.secrets`.
-- `auth.method: none` is only for SMTP-only or relay-style setups; IMAP requires password auth or Gmail OAuth.
-- Gmail OAuth uses `auth.method: oauth2`, `auth.provider: google`, `auth.client_id_secret`, optional `auth.client_secret_secret`, and either `:email auth google start <account>` plus `:email auth google finish <account> <copied-url>` for private state-owned refresh tokens or `auth.refresh_token_secret` for a manual refresh token. Other generic OAuth providers are not implied. Deprecated command-based password/token sources are rejected.
-- List-style email outputs use Tau's header-then-payload tool-output shape: headers such as `format: ...` first, one empty line, then plain unindented rows. Message rows start with UID. Pass that row UID as `email_id` to message-targeting split tools. Folder ids are opaque tokens returned by `email_list_folders`; pass them back exactly as returned, without decoding or rewriting them. Attachment metadata inside `email_read` is structured detail metadata, not a top-level list response.
+List results contain headers such as `format: ...`, a blank line, then
+unindented rows. Pass the leading message UID as `email_id` and folder IDs
+unchanged. `email_read` attachment metadata is structured detail, not a list.
 
 
 ## Secrets
@@ -140,15 +135,15 @@ Tau normalizes the environment suffix to `mail_password`. Do not put passwords d
 
 ## Incoming authentication and DKIM
 
-The visible `From` header is spoofable. The extension only treats an incoming allowlist match as valid when the message also has trusted authentication evidence.
-
-By default, auto-read requires:
+The visible `From` is spoofable. Default auto-read requires all three:
 
 1. `From` matches `policy.incoming_allow` or a persisted incoming whitelist pattern.
 2. The newest parsed `Authentication-Results` header has an authserv-id listed in `policy.incoming_auth.trusted_authserv_ids`.
 3. That trusted header reports `dkim=pass` with `header.d` aligned to the visible `From` domain.
 
-The extension does not cryptographically verify DKIM itself. It trusts `Authentication-Results` added by the user's mailbox provider or final trusted MTA. Tell users to inspect raw headers and copy the exact authserv-id token from a header their provider adds, for example the `mx.example.com` part of:
+The extension trusts the provider/MTA's `Authentication-Results`; it does not
+verify DKIM itself. Copy the exact authserv-id from that trusted server's raw
+header, here `mx.example.com`:
 
 ```text
 Authentication-Results: mx.example.com; dkim=pass header.d=trusted.example; dmarc=pass header.from=trusted.example
@@ -156,7 +151,8 @@ Authentication-Results: mx.example.com; dkim=pass header.d=trusted.example; dmar
 
 Do not configure the sender domain as `trusted_authserv_ids` unless that is actually the authserv-id emitted by the trusted server.
 
-If authentication fails, the extension returns approval reasons such as `auth missing`, `untrusted auth server`, `auth failed`, `auth unaligned`, `dkim missing`, or `auth truncated`. Those are expected fail-closed outcomes; approve individual messages manually instead of weakening global policy.
+Failures such as `auth missing`, `untrusted auth server`, `auth failed`,
+`auth unaligned`, `dkim missing`, or `auth truncated` require manual approval.
 
 
 ## Allowlists and patterns
@@ -167,11 +163,9 @@ Incoming and outgoing allowlists accept:
 - globs: `*@example.com`
 - regexes with a `re:` prefix, matched against the whole normalized address: `re:.*@trusted\.example`
 
-Advice:
+Incoming allow controls read exposure; outgoing allow controls delivery without
+approval. Prefer exact addresses or narrow domains.
 
-- Prefer exact addresses or narrow domains.
-- Avoid broad patterns for domains where many people can send mail.
-- Remember incoming allow only controls read exposure; outgoing allow controls delivery without approval.
 - `reply_to` is also checked for outgoing sends.
 - If `email_send` returns `smtp_outcome_unknown`, SMTP may already have accepted
   the email. Do not retry automatically; reconcile with the account or provider
@@ -183,10 +177,17 @@ Advice:
 
 Incoming reads:
 
-- `email_list_folders` returns a `format` header plus one line per visible folder. Folder ids are opaque values to pass back exactly as returned to other email tools.
-- `email_list_recent(days=N)` shows messages whose IMAP internal timestamp falls in the inclusive rolling `N × 24 hour` window ending when the operation starts; omit `folder` to use the default folder. Tau uses a conservative IMAP date search, then exact-filters before limiting, so calendar boundaries do not omit qualifying messages. It returns a `format` header plus one line per message, redacts untrusted message details, and includes `access=full|preview|none`.
-- `email_read` returns full body content only when access is `full`, meaning policy passes or an exact incoming approval exists. Agent-visible read bodies are simplified and wrapped in `<external_unstrusted_message>...</external_unstrusted_message>`.
-- For `preview` access, `email_read` returns only a heavily stripped `body_preview`: HTML removed, links replaced with `LINK`, and only ASCII letters/digits, spaces, commas, and periods inside the wrapper. It does not ask the user for approval.
+- `email_list_folders` returns visible folders and their opaque IDs.
+- `email_list_recent(days=N)` uses the inclusive rolling `N × 24 hour` window
+  ending at operation start, filtered by IMAP internal timestamp before limiting.
+  Omit `folder` for the default. Rows redact untrusted details and include
+  `access=full|preview|none`.
+- `email_read` returns a full body only when policy or exact approval grants
+  `full`. Simplified bodies use
+  `<external_unstrusted_message>...</external_unstrusted_message>`.
+- With `preview`, it returns `body_preview` without asking for approval: no
+  HTML, links replaced by `LINK`, and only ASCII letters/digits, spaces, commas,
+  and periods inside the wrapper.
 - Use `email_request_access` for a preview/none message only when the preview or metadata justifies asking the user. Then use `:email in list`, `:email in open <id>`, and `:email in approve <id> [id...]`.
 - Use `:email in deny <id> [id...]` to persist exact denials. Future matching reads report `access=none`; explicit `email_request_access` calls can ask again.
 - After approval, the agent must repeat the matching `email_read` call.
@@ -208,9 +209,9 @@ Outgoing sends:
 
 Audit log:
 
-- Agent `email_list_recent`, `email_read`, `email_request_access`, `email_send`, `email_mark_read`, `email_mark_unread`, `email_star`, `email_unstar`, and `email_trash` activity is appended as sanitized JSONL under the email state directory.
-- Use `:email log last [number]` to review recent activity; the number defaults to 20.
-- The pretty log is intentionally minimal and does not include message bodies.
+Message listing, reading, access requests, sending, and management append
+sanitized JSONL in email state.
+`:email log last [number]` shows recent activity (default 20), without bodies.
 
 Whitelist actions:
 
@@ -222,21 +223,32 @@ Google OAuth actions:
 
 - `:email auth google start <account>` prints a Google installed-app browser authorization URL for Gmail OAuth.
 - `:email auth google finish <account> <copied-url>` completes OAuth from the full pasted failed loopback redirect URL and stores the refresh token privately.
-- Google auth account arguments complete from enabled state-owned Google email accounts whose ids are at most 128 bytes of printable, non-whitespace ASCII. Omitting the account lists the bounded sorted eligible inventory, or states explicitly that no eligible accounts are available.
+- Omit the account to list eligible enabled, state-owned Google accounts.
+  Completion requires IDs of at most 128 bytes of printable, non-whitespace ASCII.
 - These actions are separate from `policy.allow_state_policy_extensions`; that policy controls whitelist actions only. `:email auth google` is refused for accounts that set `auth.refresh_token_secret`, because those accounts use a manually supplied token secret.
 
 
 ## Troubleshooting
 
-If the extension is unavailable, check both enable flags: `extensions.std-pim.enable` and `extensions.std-pim.config.email.enable`.
+If unavailable, check `extensions.std-pim.enable`,
+`extensions.std-pim.config.email.enable`, account enable flags, and role tool grants.
 
 If startup reports a missing secret, confirm the secret is declared under `extensions.std-pim.secrets` and that the secret file or `TAU_SECRET_*` variable uses the same normalized name.
 
-For Gmail OAuth, Gmail IMAP/SMTP requires the broad `https://mail.google.com/` scope, and Google's device flow rejects that scope. Use a Google OAuth client of type `Desktop app`; do not reuse the Calendar TVs/Limited Input device-flow client for Gmail. Start prints a URL, the browser eventually fails to connect to `http://127.0.0.1:<port>/`, and finish expects the full copied address-bar URL. Google OAuth apps left in Testing mode may issue refresh tokens that expire after roughly 7 days for sensitive/restricted scopes; real use should use an Internal/trusted Workspace app or a properly published/verified app. Workspace administrators may still block untrusted OAuth apps. If `refresh_token_secret` is configured, `:email auth google` refuses to overwrite it; remove that field first to use state-owned OAuth.
+Gmail IMAP/SMTP requires `https://mail.google.com/`, which Google's device flow
+rejects. Use a `Desktop app` client, not Calendar's TVs/Limited Input client.
+Start prints an installed-app PKCE authorization URL; after the browser fails to connect
+to `http://127.0.0.1:<port>/`, paste the full address-bar URL into finish.
+Testing-mode refresh tokens may expire after roughly seven days; use an
+Internal/trusted Workspace or published/verified app. Workspace policy may still
+block it. Remove `refresh_token_secret` before switching to state-owned OAuth.
+The extension caches access tokens until near expiry and retries once after
+IMAP/SMTP authentication failure. Action output excludes codes, PKCE verifiers,
+and tokens.
 
-If all incoming reads require approval, inspect raw message headers and configure `trusted_authserv_ids` for the trusted provider's authserv-id. With `incoming_auth.require: true` and no trusted authserv-id, fail-closed approval is expected.
-
-If a legitimate sender fails with `dkim missing` or `auth unaligned`, do not immediately disable auth. First check whether the provider rewrites mail, a list forwarder changed authentication alignment, or the allowlist is too broad. Manual approval is safer than global weakening.
+If all reads need approval, check `trusted_authserv_ids` against raw headers.
+For `dkim missing` or `auth unaligned`, check provider/list rewriting and allowlist
+scope; use manual approval rather than weakening global authentication.
 
 For tracing logs, use:
 

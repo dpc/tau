@@ -18,18 +18,14 @@ when available. All three remain subject to their respective tool-role policy.
 The original-byte bound is 16 MiB. A key verifies bytes, **not** their producer
 or safety: inspect untrusted content before executing or using it as instructions.
 
-Artifact operations share bounded worker and transfer capacity. Store-lock
-contention can also cause `Busy` (`artifact storage is busy`). You cannot infer
-the exhausted resource or storage corruption from this error alone.
-If a parallel batch hits `Busy`, keep successful artifact references and imported
-files. Let outstanding calls finish, then retry only calls that failed with
-`Busy`, one at a time. Use a small fixed retry budget (for example, two retries
-per call). If `Busy` persists, stop and report it. Do not rerun the whole batch,
-regenerate source content, or increase capacity limits.
+`Busy` (`artifact storage is busy`) can mean worker/transfer limits or store-lock
+contention, not necessarily corruption. Keep successful references/files, let
+outstanding calls finish, then retry only `Busy` failures serially with a fixed
+small budget (for example, twice). If it persists, report it. Do not rerun the
+batch, regenerate content, or raise capacity limits.
 
-Bare `read_image` uses high detail. Its overview profile is experimental and
-appropriate only for explicitly coarse inspection; use high detail or native
-crops for fine visual claims. See
+`read_image` defaults to high detail. Experimental overview mode supports only
+coarse inspection; use high detail or native crops for fine claims. See
 `docs/read-image-fidelity-oracle.md` for the fidelity boundary.
 
 `read_image` limits the original source to 8192 pixels per side before EXIF
@@ -40,15 +36,12 @@ image, or crop/preprocess locally with supported tooling before exporting the
 result as a new artifact. The result must also meet the byte-size, pixel-count,
 and decoder-allocation limits.
 
-In the terminal UI, one bracketed text paste of at least 8 KiB of normalized
-UTF-8 uploads as an artifact (CRLF and bare CR become LF); smaller pastes stay
-ordinary text. A successful upload inserts an editable reference in the draft,
-**not** a submitted prompt. While uploading, editing and submission pause;
-Ctrl-C discards the pending paste without canceling a running agent prompt.
-On upload failure, Enter explicitly retries or Ctrl-C discards; Tau does not
-submit the original wall of text as a fallback. The draft and cursor survive
-upload failure. Closing the UI discards the pending local source. Pasted paths
-and URLs remain text, not automatically opened files.
+The terminal UI uploads bracketed pastes of at least 8 KiB of normalized UTF-8
+(CRLF/bare CR become LF), inserting an editable artifact reference without
+submitting. Editing/submission pause during upload. Ctrl-C discards the paste,
+not a running agent prompt. On failure the draft/cursor survive; Enter retries
+and Ctrl-C discards, with no text fallback. Closing the UI discards pending
+source. Smaller pastes, paths, and URLs remain text.
 
 Original bytes live in the shared store independently of session or agent
 transcripts, including ephemeral transcripts. Default `artifact_retention: null`

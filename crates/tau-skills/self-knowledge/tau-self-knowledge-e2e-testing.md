@@ -4,38 +4,26 @@ description: Use when running or explaining Tau end-to-end tests with dev tmux, 
 advertise: false
 ---
 
-# Tau E2E testing self-knowledge
+# Tau E2E testing
 
-Tau has a hidden `tau dev tmux` helper for manual, agent-controlled terminal E2E
-checks of the current checkout. It is development infrastructure, not a
-sandbox: commands still run as the local user.
+The hidden `tau dev tmux` helper runs manual terminal E2E checks of the current
+checkout. It is **not a sandbox**: commands still run as the local user.
 
-## `tau dev tmux start`
+## Scratch session
 
-`tau dev tmux start` creates a helper-owned scratch root with isolated:
+`tau dev tmux start` creates isolated `HOME`, `XDG_CONFIG_HOME`,
+`XDG_STATE_HOME`, and `XDG_RUNTIME_DIR` under a unique temporary root. It starts
+a private tmux server, disables extensions by default, and enables `core-shell`
+in scratch `work/` (or `--workdir`).
 
-- `HOME`
-- `XDG_CONFIG_HOME`
-- `XDG_STATE_HOME`
-- `XDG_RUNTIME_DIR`
-
-It starts Tau in a private tmux server, disables all extensions by default, and
-enables `core-shell` with its working directory pointed at scratch `work/` (or
-an explicit `--workdir`).
-
-When no scratch path is supplied, `start` generates a unique temporary root and
-prints it in the startup output. Use `--scratch-root` or its shorter `--root`
-alias when a specific reusable scratch location is needed. The printed capture,
-send, and stop commands include the selected scratch root. If target commands are
-run without a root, they use the deterministic historical fallback root instead
-of discovering the generated one.
+Use the printed capture/send/stop commands, which include the generated root.
+Commands without a root use the historical deterministic fallback, not discovery.
+Supply `--scratch-root` (alias `--root`) for a reusable location.
 
 ## Provider access opt-in
 
-Provider credentials are not copied by default. When `~/.config/tau/testing.yaml`
-is absent, the helper prints a warning and the tmux Tau remains local-only.
-
-To intentionally allow selected providers for manual E2E testing, create:
+No provider credentials are copied unless
+`~/.config/tau/testing.yaml` lists exact extension-instance/provider-profile pairs:
 
 ```yaml
 testing_providers:
@@ -45,46 +33,28 @@ testing_providers:
     provider: openrouter
 ```
 
-Each entry is an exact configured extension instance and provider profile. To
-discover profile names, run this in the real Tau environment before starting the
-scratch tmux session:
+Discover names in the real environment before starting scratch:
 
 ```sh
 tau provider list
 ```
 
-An authenticated setup registration consists of credential-free settings and
-one typed credential directory:
+An authenticated registration has credential-free settings and typed credentials:
 
 ```text
 ~/.local/state/tau/providers/<extension>/<provider>.json
 ~/.local/state/tau/secrets/ext/<extension>/providers/<provider>/
 ```
 
-An explicit keyless registration consists only of its settings file and has no
-provider credential directory.
+Keyless registrations have only settings. The helper copies only listed pairs
+and enables their exact extension instances. It keeps `provider-builtin`'s
+canonical identity and adds scratch-only built-in component/provider-role config
+for renamed instances. It does not copy unrelated providers, sessions, logs,
+`harness.yaml`, `cli.yaml`, or other user config/state.
 
-For provider-management details, read
-`tau-self-knowledge-ext-provider-builtin`.
+Absent `testing.yaml` or an empty `testing_providers` list produces a warning
+and copies no credentials. Do not request all providers or use path-like names;
+both names use validated Tau namespaces. Treat copied credentials as available
+to both the test process and its agent.
 
-Only those exact registration pairs are copied into scratch Tau state. A
-keyless pair copies settings only. Unrelated
-providers, sessions, logs, general
-`harness.yaml`, `cli.yaml`, and other user config/state are deliberately not
-copied. `tau dev tmux start` enables every exact extension instance named by the
-allowlist. It retains the canonical built-in identity for `provider-builtin` and
-adds scratch-only built-in component and provider-role configuration for renamed
-instances so their copied profiles can publish models.
-
-If `testing.yaml` exists but `testing_providers` is empty, the helper warns and
-copies no provider credentials.
-
-## Security expectations
-
-- Keep the default safe: no provider credentials are available unless
-  `testing.yaml` explicitly lists exact providers.
-- Do not ask Tau to copy all providers.
-- Do not put path-like names in `testing_providers`; both names use validated Tau
-  namespaces.
-- Treat any copied provider credential as available to the tmux Tau process and
-  the agent being tested.
+Read `tau-self-knowledge-ext-provider-builtin` for provider management.

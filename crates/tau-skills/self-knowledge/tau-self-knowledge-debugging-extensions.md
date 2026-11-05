@@ -6,33 +6,24 @@ advertise: false
 
 # Debugging Tau extensions
 
-## Enable the right tracing
+## Enable tracing
 
-Set `TAU_LOG` in the environment that starts or restarts the harness, for
-example:
+Set `TAU_LOG` when starting/restarting the harness:
 
 ```sh
 TAU_LOG='extension_target=debug,warn' tau
 ```
 
-Use the extension's documented tracing target and level; `trace` is useful for
-timing or reconnect investigation. `TAU_LOG` uses `RUST_LOG`/`EnvFilter`
-directive syntax. A valid explicit value replaces the component's normal
-filter, so include `warn` when warnings from unrelated targets should remain
-visible. Supervised extensions inherit the harness environment, except secret
-variables. They read the filter when they start. Setting `TAU_LOG` on a later
-`tau attach` changes only that new UI process, not existing harness or
-extension children.
+Use the extension's documented target; `trace` helps with timing/reconnects.
+The value uses `RUST_LOG`/`EnvFilter` syntax and replaces the normal filter;
+include `warn` to retain unrelated warnings. Children inherit the harness
+environment except secrets and read the filter at startup. Setting `TAU_LOG`
+on a later `tau attach` changes only that new UI.
 
 ## Inspect one session
 
-1. Identify the session with `tau session list`.
-2. Inspect its private log directory. Extension files use the configured
-   instance name, so do not assume a filename such as `std-slack.log`.
-3. Read the extension's recent stderr and `tau-harness.log` together. An
-   extension log that repeatedly ends at a stderr-close marker indicates
-   process exits; a live process can instead have an internal reconnect loop,
-   which its extension-specific target should describe.
+Find the session with `tau session list`, then read extension and harness logs
+together. Filenames use configured instance names, not necessarily `std-slack`.
 
 ```sh
 logs="${XDG_STATE_HOME:-$HOME/.local/state}/tau/sessions/<session_id>/logs"
@@ -41,23 +32,18 @@ tail -n 200 "$logs/tau-harness.log"
 tail -n 200 "$logs/<extension-instance>.log"
 ```
 
-For a crash, use the last extension lines plus the matching harness lines to
-find startup/configuration or supervision failures. For a reconnect loop, keep
-the same bounded window and use the extension's runbook to interpret its
-connection, handshake, heartbeat, and retry categories. Restart after correcting
-environment, configuration, credentials, or network reachability; do not infer
-that an attach changed an existing child.
+Repeated stderr-close markers indicate process exits. A live process may instead
+be reconnecting internally; use its target/runbook to interpret connection,
+handshake, heartbeat, and retry records. Restart after fixing environment,
+configuration, credentials, or reachability; attaching does not update a child.
 
-## Treat stderr as private
+## Privacy and mirroring
 
-`logs/<extension-instance>.log` is the authoritative raw stderr file. `tau
-serve --mirror-extension-stderr` is optional and default-off; its process-stderr
-copy is framed, escaped, bounded, lossy, and visible to a wider journal-reader
-audience. It cannot replace the private raw file for complete bytes or ordering.
+`logs/<extension-instance>.log` contains authoritative raw stderr: unredacted
+at the sink, unrotated within a session, and subject to whole-session retention
+(disabled by default), not shorter diagnostic cleanup. Review before sharing;
+even first-party redaction does not make the whole file public-safe.
 
-Raw extension stderr is unredacted at the sink boundary. It can contain
-identifiers, queries, filesystem paths, or custom-extension text even when a
-first-party extension intentionally redacts sensitive values from its own
-records. Do not share it without review. It is unrotated within the session and
-follows whole-session retention (disabled by default), rather than the shorter
-diagnostic cleanup period.
+`tau serve --mirror-extension-stderr` adds a default-off, framed, escaped,
+bounded, lossy copy to process stderr. It exposes data to a wider journal-reader
+audience and cannot replace the private raw file for complete bytes or ordering.

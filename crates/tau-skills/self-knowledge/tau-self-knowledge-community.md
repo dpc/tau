@@ -6,11 +6,8 @@ advertise: false
 
 # Tau community and help
 
-Tau's official and preferred community venue is:
-
-- [Tau Zulip chat](https://tauofunix.zulipchat.com/) — questions, ideas, support, and general conversation.
-
-Other places to talk about Tau or ask for help:
+[Tau Zulip chat](https://tauofunix.zulipchat.com/) is the official, preferred venue.
+Other channels:
 
 - [GitHub Discussions](https://github.com/dpc/tau/discussions) — questions, ideas, and packaging requests.
 - [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw) — support chat for dpc's projects.

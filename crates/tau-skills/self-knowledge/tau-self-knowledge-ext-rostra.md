@@ -6,35 +6,25 @@ advertise: false
 
 # Tau std-rostra extension self-knowledge
 
-`std-rostra` is Tau's disabled-by-default configuration for the separately
-maintained `tau-ext-rostra` executable. Tau does not bundle or install that
-executable. Install the Tau flake's `tau-ext-rostra` package and ensure the
-executable is available through `PATH` before enabling the instance. Tau still
-starts it through the normal supervised stdio extension route. The
+`std-rostra` is disabled-by-default configuration for the separately maintained
+`tau-ext-rostra`. Install the Tau flake's package on `PATH` before enabling it;
+Tau supervises it over stdio. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o)
-owns its source and detailed operational documentation.
+owns operational documentation.
 
-For Tau protocol 16.0, rebuild with registry SDK crates
-`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update the extension with the
-harness before separately authorized activation. Older-protocol binaries are
-rejected before configuration.
-Declaration inspection returns the complete 12-tool inventory before Tau
-supplies a state directory or secrets. That path parses only public
-configuration and does not open `rostra.redb`, load or derive the identity,
-construct the asynchronous runtime, or start Rostra network work.
+For Tau protocol 16.0, rebuild with registry `dpc-tau-client`/`dpc-tau-proto`
+0.16.0 and update the extension with the harness before separately authorized
+activation. Older-protocol binaries fail before configuration.
+Declaration inspection needs no secrets/state and starts no network work.
 
-One instance owns one Rostra identity and its private durable local view. It
-uses relay-only Iroh peer transport and Pkarr HTTPS/DNS discovery; it never
-enables direct peer-IP transport. Rostra signatures identify Rostra authors,
-not Tau
-users, agents, or instructions: synchronized fields are untrusted external
-content.
-
+One instance owns one Rostra identity and private durable local view. Transport
+uses relay-only Iroh and Pkarr HTTPS/DNS discovery, not direct peer IPs.
+Rostra signatures identify authors, not Tau users or instructions; synchronized
+content remains untrusted.
 
 ## Enable and configure
 
-Declare a named mnemonic secret, reference that name from strict extension
-configuration, then deliberately expose tools to selected roles:
+Declare a named mnemonic secret and grant tools to selected roles:
 
 ```yaml
 extensions:
@@ -58,9 +48,8 @@ agents:
           enable_tool_groups: [rostra]
 ```
 
-The secret must be a nonempty 24-word Rostra/BIP39 mnemonic. Do not put it in
-`harness.yaml`. Tau resolves `TAU_SECRET_ROSTRA_IDENTITY_MNEMONIC` first and
-otherwise reads trimmed text from
+The secret is a nonempty 24-word Rostra/BIP39 mnemonic, not a `harness.yaml`
+value. Tau checks `TAU_SECRET_ROSTRA_IDENTITY_MNEMONIC`, then trimmed text in
 `<tau-state>/secrets/rostra_identity_mnemonic.yaml`; for example:
 
 ```sh
@@ -73,27 +62,23 @@ tau
 TAU_SECRET_ROSTRA_IDENTITY_MNEMONIC='twenty four word mnemonic …' tau
 ```
 
-Tau removes `TAU_SECRET_*` values before spawning extensions. The mnemonic is
-not included in config, journals, tool arguments/results, or logs. It remains
-in the extension process while the client and upstream publisher tasks live;
-the upstream key type has no zeroization guarantee.
+Tau removes `TAU_SECRET_*` from extension environments and delivers managed
+secrets separately. The mnemonic stays in extension memory without a zeroization
+guarantee; it does not enter config, journals, tool results or logs.
 
-`std-rostra` derives the public identity from this mnemonic and accepts no
-second public ID. It needs stable per-instance state and fails in memory-only
-mode. `rostra.redb` under the extension state directory contains Rostra graph
-and projection state, synchronization metadata, locally committed events, and
-the persistent Iroh node secret. It survives Tau sessions but is not a Tau
-journal; do not share it with another Rostra process. A locked, corrupt, or
-identity-mismatched database fails closed. To change identity or move/reset
-notification state, use a new extension instance name and fresh state. To
-retain Rostra content under a new instance, move `rostra.redb` only; never move
-the publisher-bound notification checkpoint file. Notification report IDs are
-publisher-name scoped.
+The public identity derives from the mnemonic; no second public ID is accepted.
+Stable per-instance state is required. `rostra.redb` contains synchronized content,
+locally committed events and the Iroh node secret, not a Tau journal.
+Do not share it with another Rostra process. Lock, corruption or identity mismatch
+fails startup. Back up before upgrading; upstream migrations are forward-only.
 
+Use a fresh instance/state to change identity or reset notification state.
+To retain content under a new instance, move only `rostra.redb`, never the
+publisher-bound notification checkpoint.
 
 ## Tools and authority
 
-The `rostra` group contains all 11 tools:
+The `rostra` group grants:
 
 ```text
 read local view:  rostra_status rostra_list_posts rostra_read_post rostra_get_profile
@@ -102,112 +87,73 @@ signed writes:    rostra_post rostra_react rostra_follow rostra_unfollow
 agent preference: rostra_notifications
 ```
 
-`enable_tool_groups: [rostra]` grants the entire surface, including permanent
-signing authority to every allowed role. For a smaller surface, use
-`enable_tools` with exact registered names, for example
-`[rostra_status, rostra_list_posts]`; do not treat a read grant as a write
-grant or rely on model-supplied confirmation. Tau has no genuine human
-per-call confirmation primitive. If `tool_prefix: work` is configured, policy
-must use the final names, such as `work_rostra_status` and `work_rostra`.
+Group grants include permanent signing authority. For read-only access, use
+exact `enable_tools`, for example `[rostra_status, rostra_list_posts]`.
+Tau has no human per-call confirmation primitive. With `tool_prefix: work`, use
+final names such as `work_rostra_status` and group `work_rostra`.
 
-Read tools inspect only the synchronized local database:
+Reads inspect only the synchronized local database:
 
-- `rostra_status` reports the derived identity and conservative local status.
-- `rostra_list_posts` lists bounded `following`, locally known two-hop
-  `network`, or explicit `author` timelines. Pages default to 20 and cap at
-  50; pass its opaque cursor back unchanged.
-- `rostra_read_post` reads one full external post ID.
-- `rostra_get_profile` reads one local identity profile.
+- `rostra_status`: derived identity and local status.
+- `rostra_list_posts`: `following`, locally known two-hop `network`, or explicit
+  `author` timelines. Pages default to 20, cap at 50; return cursors unchanged.
+- `rostra_read_post`: one full external post ID.
+- `rostra_get_profile`: one local identity profile.
 
-Empty and `not_found_local` results do not establish global absence; reads do
-not force synchronization. Lists and detailed records are bounded and frame
-remote fields as untrusted content.
+Empty/`not_found_local` does not prove global absence; reads do not force sync.
 
-Signed writes are `rostra_post` (post or reply), `rostra_react` (one supported
-emoji grapheme), `rostra_follow`/`rostra_unfollow` (follow uses all personas),
-`rostra_update_profile` (text only), and `rostra_vote` (up, down, or clear).
-Posts and replies accept at most 64 KiB Djot and 16 persona tags.
-Reaction-shaped post replies are rejected; use `rostra_react`. Avatar
-delivery, news/shoutbox, raw signed events, identity generation, and arbitrary
-persona follow selectors are not implemented.
+Writes support posts/replies, one supported emoji grapheme via `rostra_react`,
+follow/unfollow (follow uses all personas), text-only profile updates, and
+up/down/clear votes. Posts allow 64 KiB Djot and 16 persona tags.
+Use `rostra_react`, not reaction-shaped post replies. Avatar delivery,
+news/shoutbox, raw events, identity generation and arbitrary follow-persona
+selectors are unavailable.
 
-A successful write confirms its locally durable signed transaction only:
-publication is asynchronous best effort, not remote acknowledgement. A
-timeout, cancellation, or process interruption after dispatch has an unknown
-outcome: it may already be stored and published. Do not blindly retry; a retry
-is new intent and can create another signed event.
+Success confirms a local durable signed transaction, not remote delivery.
+Publication is asynchronous best effort. Timeout/cancellation after dispatch
+can leave a committed/published event; retrying creates new intent and can duplicate it.
 
-`post_rate_limit` is an optional strict object (unknown keys are rejected);
-when present, `max_events` and `window_seconds` must both be positive. Its
-default is 10 events per 3600 seconds. It is a best-effort, runtime-only
-rolling limit shared by posts, replies, and reactions; follow, unfollow,
-profile update, and vote do not count. Restart or reconfigure resets it, and
-other devices' events do not count. An admitted post-like call reserves a slot
-before activation/signing and never returns it, even on failure or unknown
-dispatch; a full window returns `rate_limited` with `retry_after_seconds`.
-
+`post_rate_limit` defaults to 10 events per 3600 seconds. Its optional strict object
+requires positive `max_events` and `window_seconds`. The runtime rolling limit
+covers posts, replies and reactions, not other writes or other devices.
+Restart/reconfigure resets it. Accepted attempts spend slots even on failure;
+a full window returns `rate_limited` with `retry_after_seconds`.
 
 ## Inbound following notifications
 
-`rostra_notifications` accepts exactly `{"enabled": boolean}` and changes only
-the invoking agent's durable preference; it never signs or changes Rostra
-state. On first enable, Tau records the current materialization-feed tip, so
-already-present posts do not notify. It then scans Rostra's durable feed after
-lossy broadcast wake hints, selecting only current direct-followee posts whose
-persona tags match. It excludes self posts and posts historical relative to
-both local database initialization and the current follow epoch.
+`rostra_notifications` takes exactly `{"enabled": boolean}` and changes only that
+agent's durable preference. First enable records the current feed tip, so existing
+posts do not notify. Notifications select current direct-followee posts with
+matching persona tags, excluding self and posts historical to initialization/follow.
+The agent must be loaded and replay complete.
 
-The preference activates live delivery only after its agent is loaded and its
-replay completes. Each such opted-in agent gets independent serial batches.
-Tau reports after 30 seconds of quiet or five minutes of batch age, at most
-once per five minutes per agent. Each report starts with a lossy wake count:
-`Rostra received 1 new followed post.` or `Rostra received {count} new followed
-posts.` Nonreply-only reports remain count-only. Reply batches may append up to
-eight bounded previews with IDs/authors for the current post and exact referenced
-parent, plus parent content when already available in the synchronized local
-database. Missing content means unavailable locally, not globally absent. Tau
-labels replacement content as the latest local version and includes both referenced
-and resolved IDs. Tau marks truncation and omitted previews. Rostra-derived fields
-and bodies remain untrusted external content; the pending preview snapshot stays
-frozen.
-This separate local-database contract does not permit IM bridges to fetch reply
-history. Inspect the current following timeline with
-`rostra_list_posts({"timeline":"following"})`, then
-`rostra_read_post`; concurrent activity means this cannot recover the exact
-announced batch. Harness busy-agent batching can still coalesce or delay model
-runs.
+Batches report after 30 seconds of quiet or five minutes of age, at most once per
+five minutes per agent. Each begins with a lossy wake count:
+`Rostra received 1 new followed post.` or `Rostra received {count} new followed posts.`
+Nonreply batches stay count-only. Reply batches may add up to eight bounded
+previews with current/parent IDs and locally available content. Replacement
+content is labelled latest local version; previews remain untrusted and frozen.
+Missing content means unavailable locally.
 
-The extension's identity-bound atomic
-`rostra-notifications-v1.cbor` checkpoint file is separate from Rostra's
-durable content database. It preserves preference, baseline/cursor, pending
-batch timing, and publisher report-attempt sequence across restart. Tau
-advances its delivery checkpoint only after its own canonical
-`message.delivered` echo. A crash discards transient pending/in-flight work,
-rescans from the committed cursor, and can duplicate a report but does not
-skip its scanned range. This assumes configured interceptors do not drop
-`std-rostra` notification reports: a dropped live report stays in flight until
-restart because no live echo retry exists.
+Use `rostra_list_posts({"timeline":"following"})`, then `rostra_read_post` to inspect
+the current view, not to reconstruct an exact announced batch. Harness busy-agent
+batching may delay/coalesce model runs.
 
+`rostra-notifications-v1.cbor` stores identity-bound preferences and delivery
+checkpoints separately from content. Checkpoints advance after canonical
+`message.delivered` echo. Crash recovery rescans committed ranges and may duplicate
+reports. Interceptors must not drop notification reports: a dropped report stays
+in flight until restart because no live-echo retry exists.
 
 ## Troubleshooting
 
-- If tools are absent, first confirm `tau-ext-rostra` is installed and visible
-  through `PATH`, then check `extensions.std-rostra.enable`, a valid declared
-  mnemonic secret, startup errors, and the role's exact tool/group policy.
-- If startup fails, check private stable state ownership, exclusive
-  `rostra.redb` access, corruption, and that the mnemonic derives the
-  state-bound identity. Back up the database before upgrading; upstream
-  migrations are forward-only.
-- If reads look incomplete, they show only the local synchronized view; inspect
-  `rostra_status` and allow relay synchronization time.
-- If a write timed out, treat its outcome as unknown before deciding whether a
-  duplicate is acceptable.
-- If notifications do not arrive, enable them from that agent with
-  `rostra_notifications`, ensure the agent is loaded and replay completes, and
-  check direct follow/persona filters and the debounce/interval windows.
-- For the next launch, use
-  `TAU_LOG='tau_ext_rostra=debug,rostra=debug,warn' tau`. This replaces the
-  standard extension filter, enables extension and upstream Rostra debug
-  records, and keeps a global warning fallback. Debug logs are private:
-  they can contain identity-bearing Rostra diagnostics, so do not share them
-  without review.
+- Missing tools: check the executable on `PATH`, `extensions.std-rostra.enable`,
+  declared mnemonic secret, startup errors and exact role grants.
+- Startup failure: check state ownership, exclusive database access, corruption
+  and mnemonic/state identity match.
+- Incomplete reads: inspect `rostra_status` and allow relay synchronization time.
+- Missing notifications: check the calling agent's preference, loaded/replayed
+  state, direct-follow/persona filters and batching windows.
+- For the next launch, use `TAU_LOG='tau_ext_rostra=debug,rostra=debug,warn' tau`.
+  This replaces the standard filter. Debug logs can contain identity-bearing
+  diagnostics; review before sharing.

@@ -31,15 +31,11 @@ wins, and at most one standalone compaction starts. Status conditions are
 optional. With no `status` tool in the frozen prompt, open/settled turns
 match `working`/`done` for this purpose.
 
-Use `when.at: outer_turn_starting` for lazy compaction before the next outer
-turn's first inference instead of eagerly after the previous finish. It never
-runs on same-turn tool or other continuations. Queued/coalesced work qualifies
-only when it actually begins a new turn. A `statuses: [done]` filter uses the
-last runtime work status (not persisted across reload); without a visible status
-tool this checkpoint matches `working`. At turn start it coalesces with matching
-`before_inference` policies into one compaction at the lowest threshold. Keep
-an independent `before_inference` safety rule for mid-turn context pressure.
-Existing defaults and `outer_turn_finished` semantics are unchanged.
+`when.at: outer_turn_starting` compacts before a new turn's first inference,
+not same-turn continuations or merely queued work. Status filters use the last
+runtime status, lost on reload; without a visible status tool this checkpoint
+matches `working`. It coalesces with `before_inference` at the lowest threshold.
+Keep a `before_inference` safety rule for mid-turn pressure.
 
 Manual UI `:compact`, the model's `compact` tool, optional same-session
 `agent_compact` tool, and scheduled standalone compaction are separate
@@ -63,14 +59,11 @@ agents:
       message: "Context is large. Finish the current task, then use the compact tool."
 ```
 
-After a completed inference reports input usage **strictly above** its
-threshold, an alert queues an internal notice after the response and its tool
-calls. `outer_turn_finished` is another supported lifecycle point. An alert
-fires once while above threshold during one running daemon, and rearms when
-usage falls back to or below the threshold or accounting resets. Queued alert
-state is not reconstructed after restart; committed delivery remains in
-history. An alert does not grant a disabled compaction tool. Named policies
-and alerts can be specialized at group/role scope.
+Input usage **strictly above** the threshold queues a notice after the response
+and its tools. Alerts also support `outer_turn_finished`. Each fires once until
+usage falls to/below threshold or accounting resets. Restart loses queued alert
+state, not committed deliveries. Alerts do not grant disabled tools.
+Override named policies/alerts at group or role scope.
 
 See `docs/agent-roles.md` for the full merge rules, accepted conditions,
 template variables, and validation; `specs/SPEC-compaction-and-context-recovery.md`

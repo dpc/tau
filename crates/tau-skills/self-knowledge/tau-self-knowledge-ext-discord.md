@@ -7,27 +7,19 @@ advertise: false
 # Tau Discord bridge self-knowledge
 
 `tau-ext-discord` is a separately maintained MessageBridge executable. Its
-project owns the exact credential, route, and transport schema. Consult its
-`docs/setup.md` for private maintainer guild-channel setup, `SECURITY.md` for
-trust boundaries, and `docs/design.md` and `docs/runtime.md` for the full contract
-and limits. Do not infer compatibility from the Cargo package version:
-the linked-message producer uses registry `dpc-tau-client`/`dpc-tau-proto`
-SDK 0.21.0 / protocol 16.6. Update the installed
-extension together with a compatible harness before activation, which requires
-separate authorization.
-Historical SDK 0.7.0 / protocol 9.0 and SDK 0.10.0 / protocol 10.2
-binaries are rejected before configuration. Updating the SDK does not establish
-full live Discord connectivity.
+`docs/setup.md` owns setup, `SECURITY.md` owns trust boundaries, and
+`docs/design.md` and `docs/runtime.md` own the full contract and limits.
+The linked-message producer uses registry `dpc-tau-client`/`dpc-tau-proto`
+SDK 0.21.0 / protocol 16.6. Update the installed extension with a compatible
+harness before separately authorized activation. Ready or registration success
+does not prove Discord authentication, Gateway connectivity, or delivery.
 
 ## Private maintainer channel
 
-Use a normal private guild **text channel**, not strict send-only mode (which
-supports a fixed 1:1 DM). Channel permissions and bridge admission are separate:
-explicitly allowlist every authorized human with `allowed_user_ids`. Admitted
-messages remain untrusted external content.
-
-The owning setup guide supplies a complete names-only harness skeleton. Its
-extension-owned `config` uses:
+Use a private guild **text channel**, not strict send-only mode (a fixed 1:1 DM).
+Channel permissions do not replace `allowed_user_ids`; admitted content remains
+untrusted. The owning setup guide supplies a complete names-only harness skeleton.
+Its extension-owned `config` uses:
 
 ```yaml
 bot_token_secret: discord_bot_token
@@ -44,266 +36,182 @@ conversations:
     proactive_send: true
 ```
 
-Replace ID placeholders with exact nonzero u64 integers. Omit `send_only`
-(defaults false). This admits personal bot mentions in the configured channel,
-not ordinary chatter, and does not require privileged guild message-content
-intent. Do not broaden it to all messages without explicit operator/provider
-approval.
+Replace placeholders with exact nonzero u64 IDs. Omit `send_only` (default false).
+This receives personal bot mentions without privileged guild message-content
+intent. Broadening reception requires operator/provider approval.
 
-Declare `discord_bot_token: {}` and `discord_identity_key: {}` under the outer
-instance's `secrets`. Provision them through Tau's managed-secret sources before
-harness startup; see `tau-self-knowledge-secrets`. Never put values in config,
-docs, or shell history. The `.yaml` secret files contain raw UTF-8 text, not YAML
-mappings. Use a bot token and a separate stable identity key.
+Declare `discord_bot_token: {}` and `discord_identity_key: {}` in the instance's
+`secrets`, then provision a bot token and a separate stable identity key through
+Tau's managed-secret sources before startup. Secret `.yaml` files contain raw
+UTF-8 text, not mappings; see `tau-self-knowledge-secrets`.
 
-Receiver eligibility is not send-tool authorization. For coordinator-only send
-tools, deny `discord:*` tags globally, then enable only the final names
+Receiver eligibility does not grant tools. For coordinator-only sending with
+`tool_prefix: maintainer`, deny `discord:*` tags globally, then enable only
 `maintainer_discord_register`, `maintainer_discord_conversations`, and
-`maintainer_discord_send` on the existing coordinator role when the outer
-instance has `tool_prefix: maintainer`. Audit inherited and other explicit
-enables, which can restore tools after tag denial. The instance name does not
-prefix tools. Do not enable the whole group: it includes reactions.
-Send grants now authorize both text and file egress in ordinary receive mode.
-Review former text-only roles before upgrading; no argument-level upload grant
-exists. Inbound attachment reads and profile reads remain independent.
+`maintainer_discord_send` on that role. Audit inherited and explicit enables;
+they can restore denied tools. Instance names do not prefix tools, and the whole
+group includes reactions.
 
 ## Unified sends and original files
 
-Ordinary `discord_send` accepts optional
-`attachments: [{artifact, filename, content_type?}]`, with at most ten entries.
-Each `artifact` is a canonical `<tau-artifact:blake3:…>` reference or bare
-`blake3:` key, never a path, URL or inline bytes. Omitted or empty attachments
-require nonempty `message`; nonempty attachments allow an omitted or empty
-`message`. Keep exactly one existing `reply_to` or configured `destination`; optional
-thread creation retains its existing grants and validation.
+Use `discord_conversations` with the configured prefix to discover aliases.
+Ordinary `discord_send` requires current registration, live writable transport,
+and exactly one `reply_to` or configured `destination`. Thread creation retains
+its separate route requirements.
 
-Use 1–128-byte ASCII basenames containing letters, digits, `.`, `_`, `-`, without
-a leading dot. Optional MIME hints support image/avif, image/gif, image/heic,
-image/jpeg, image/png, image/tiff and image/webp; omission uses
-application/octet-stream. Hints do not convert or validate bytes.
-The bridge verifies every original's digest and size and closes all originals
-before provider effects. The limit is 16 MiB across all originals, not per file; sequential Artifact
-reads share a 60-second deadline. One reservation covers provider completion.
+Optional `attachments: [{artifact, filename, content_type?}]` accepts at most ten
+canonical `<tau-artifact:blake3:…>` references or bare `blake3:` keys, not paths,
+URLs or inline bytes. Without attachments, `message` must be nonempty; with
+attachments it may be omitted or empty.
+
+Filenames must be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`,
+without a leading dot. Optional MIME hints accept image/avif, image/gif,
+image/heic, image/jpeg, image/png, image/tiff and image/webp; omission uses
+application/octet-stream. Hints do not validate or convert bytes.
+The group limit is **16 MiB total**, not per file.
 
 The default-off `discord:send`, exact scoped send grant, and core group authorize
-text and files. Remove obsolete `discord_send_attachment` and `discord:attach`
-grants; no upload alias remains. Strict send-only mode stays text-only: its
-schema requires `message` and `destination` and rejects even `attachments: []`.
-Files need ordinary receive mode, current registration and authorized routes.
-This source change does not switch a deployment's mode.
+both text and files. Review former text-only roles before upgrading; remove
+obsolete `discord_send_attachment` and `discord:attach` grants. There is no
+argument-level upload grant. Strict send-only mode remains text-only and requires
+`message` and `destination`; even `attachments: []` fails.
 
-One native multipart message contains the entire group. Incomplete or mismatched
-receipts leave the outcome uncertain; they do not establish per-file success or rollback. Thread creation can
-leave a child even when the message fails. Never automatically retry uncertain
-writes. Inbound `discord_list_attachments` and `discord_download_attachment`
-remain separately tagged `discord:attachments`, requiring current same-agent
-canonical incoming references; importing an original grants no send authority.
+One multipart message contains the group. An incomplete receipt leaves the whole
+outcome uncertain; thread creation may leave a child despite send failure.
+Do not automatically retry uncertain writes.
+
+Inbound `discord_list_attachments` and `discord_download_attachment` require the
+separate `discord:attachments` grant and current same-agent canonical incoming
+references. Importing bytes grants no send authority.
 
 ## Room participants
 
-`discord_list_room_participants {"message_id":"…","limit":20}` requires the
-separate default-off `discord:participants:read` grant, outside the core group.
-It is unavailable in send-only mode. Use an existing read locator; every call
-requires the current receiver and fresh receive-authorized proof of that exact
-room, without fetching the message body.
+`discord_list_room_participants {"message_id":"…","limit":20}` requires
+`discord:participants:read` (default off, outside the core group), the current
+receiver, and a receive-authorized room locator. It is absent in send-only mode.
 
-DMs return `basis: "direct_recipients"`, including authenticated self.
-Threads return `basis: "thread_members"`: joined members, not current viewers.
-Ordinary guild channels return `status: "unsupported"` and `complete: false`;
-group DMs remain rejected. Thread reads require the application's `GUILD_MEMBERS`
-entitlement; this does not change Gateway subscriptions or automatically enable
-intents, scopes or portal settings.
+- DMs return `basis: "direct_recipients"`, including self.
+- Threads return `basis: "thread_members"` for joined members, not viewers.
+  They require the application's `GUILD_MEMBERS` entitlement.
+- Ordinary guild channels return `status: "unsupported"` and `complete: false`;
+  group DMs remain unsupported.
 
-`limit` defaults to 20 and accepts 1–100. Pass the returned `next_after` as `after`,
-an exclusive canonical nonzero decimal u64 user-ID string. A full thread page
-requires continuation, possibly to an empty terminal page. `complete` marks the
-end of traversal after the current cursor; it does not promise an atomic snapshot
-or the whole roster.
-Rows contain native string `user_id`, `is_self` and optional untrusted
-`display_name` bounded to 256 UTF-8 bytes.
-
-One call reads one bounded thread page, with no profile fan-out or avatar import,
-under a 1-MiB response cap and 30-second deadline. Provider denial is a redacted
-error, not an empty success. Membership is not presence and grants no source
-ownership, send authority or independent profile permission. Source support does
-not prove live application entitlement or authorize activation.
+`limit` defaults to 20, range 1–100. Pass `next_after` as `after`; it is an
+exclusive nonzero decimal u64 user-ID cursor. A full thread page needs continuation,
+possibly to an empty terminal page. `complete` marks traversal end, not an atomic
+roster. Rows include native `user_id`, `is_self`, and optional untrusted
+`display_name`. Membership grants neither presence information nor tool authority.
 
 ## User profiles and automatic avatars
 
-`discord_get_user_profile {"user_id":"123456789"}` is default-off, tagged
-`discord:profiles:read`, outside the core group, and absent in strict send-only
-mode. It requires the current registered receiver and live transport. Canonical
-nonzero decimal native user snowflakes work, including bots. Application IDs
-are not a substitute for bot user IDs. This grant permits global public user
-lookup, including targets outside sender tiers, without admitting them or
-granting message access.
+`discord_get_user_profile {"user_id":"123456789"}` requires
+`discord:profiles:read` (default off, outside the core group), current registration
+and live transport. It is absent in strict send-only mode.
+Use a nonzero decimal native user snowflake, including bot user IDs, not application
+IDs. Public lookup may target users outside sender tiers without admitting them.
 
-Opaque delivered `sender.stable_id` resolves only while a matching acknowledged,
-non-deleted incoming source remains owned by this receiver under an available
-route. There is no mention-only/general reverse index or restart persistence.
-Returned native `user_id` permits later lookup without source retention.
+Opaque `sender.stable_id` works only while this receiver retains an acknowledged,
+non-deleted incoming source on an available route. It does not survive restart
+or eviction; retain the returned native `user_id` for later lookup.
 
-Results contain native and opaque identity plus bounded untrusted public user
-metadata: names, bot/system flags, public flags, avatar/banner hashes, accent
-color and optional primary-guild/avatar-decoration data. Private OAuth account
-fields, guild membership, nicknames, roles and guild avatars are outside the lookup.
-Timezone and last-seen are unavailable (`not_exposed_by_discord`); presence is
-unavailable (`not_collected`), never inferred offline. No privileged presence
-intent or application-metadata lookup is introduced.
+Results contain untrusted public user metadata, not private OAuth fields, guild
+membership, nicknames or roles. Timezone and last-seen are `not_exposed_by_discord`;
+presence is `not_collected`, not offline.
 
-The tool automatically imports a static custom PNG requested at 256px or the
-documented default avatar, not banners or decorations. It uses only constructed
-Discord CDN paths, without credentials, redirects or caller-supplied URLs.
-The limit is 1 MiB with PNG MIME/signature checks, not image decoding or safety
-validation. `avatar.status="imported"` returns canonical Artifact reference, bare
-key, size, filename and MIME type. Optional image/import failures preserve
-metadata with `avatar.status="unavailable"` and `artifact_may_exist`; base lookup
-failure is a tool error. Profile imports share the binary-transfer reservation.
-Cancellation or receiver/session retirement suppresses stale results but may
-leave committed artifacts. Reads create no canonical facts or source-write rights.
+The tool imports a static custom PNG requested at 256px or the default avatar,
+up to 1 MiB. `avatar.status="imported"` returns an Artifact reference, key, size,
+filename and MIME type. Optional avatar failures preserve metadata with
+`avatar.status="unavailable"` and `artifact_may_exist`; base lookup failure is an
+error. Checks do not prove image safety; cancellation may leave stored artifacts.
 
 ## Editing the bot's own profile
 
-`discord_update_self_profile` patches only the authenticated bot. Supply any
-combination of `username`, `avatar`, and `banner`; omitted fields stay unchanged.
-`username` must be a non-null string of 2–32 characters, subject to Discord's
-additional name rules. For images, supply canonical `<tau-artifact:blake3:…>`
-references or bare `blake3:…` keys; explicit `null` clears that image.
-For example, `{"avatar":"<tau-artifact:blake3:…>","banner":null}` replaces the
-avatar and clears the banner without changing the username.
+`discord_update_self_profile` accepts `username`, `avatar`, and `banner`; omitted
+fields stay unchanged. `username` is a non-null 2–32-character string subject to
+Discord's name rules. Images use canonical Artifact references or bare `blake3:…`
+keys; `null` clears an image. For example,
+`{"avatar":"<tau-artifact:blake3:…>","banner":null}` replaces the avatar and clears
+the banner.
 
-The separate default-off `discord:profiles:write` grant is outside the core
-group. The tool requires the current registered ordinary receiver and is absent
-in strict send-only mode. Read/send grants do not authorize profile edits.
-Obtain explicit user authorization before changing grants or live configuration.
-
-The bridge rejects empty patches, unknown fields, target IDs, URLs, paths and
-inline image bytes. Images must be PNG/JPEG/GIF originals up to 1 MiB each; signature
-and framing checks do not decode images or prove safety. The bridge verifies
-all originals and receives their Close acknowledgements before one self-only
-PATCH. Discord decides whether to accept the images.
-The bridge does not retry or roll back edits. An uncertain outcome may mean the
-profile has changed. Treat returned profile metadata as untrusted.
-
-## Startup versus live delivery
-
-A credential-free, network-isolated smoke test of the verified extension reached
-Ready on Tau `91d51d60` (wire 10.4) with null and empty config. That proves
-protocol admission and lifecycle startup only. Ready or successful registration
-does not prove asynchronous Discord authentication/Gateway startup, channel
-permissions, receive admission, or actual delivery. Normal sends require current
-registration and a live writable transport; use `discord_conversations` (with
-the configured prefix) to discover aliases rather than supplying native IDs.
-
-Do not automatically retry failed or uncertain writes: a send may have taken
-effect without a confirmed receipt.
+The separate default-off `discord:profiles:write` grant is outside the core group.
+The tool requires the current ordinary receiver and is absent in send-only mode.
+Obtain authorization before changing grants or live configuration.
+Images must be PNG/JPEG/GIF originals up to 1 MiB each. Empty patches, target IDs,
+URLs, paths and inline bytes fail. Discord may reject valid-looking input.
+The bridge does not retry or roll back edits; an uncertain result may mean the
+profile changed.
 
 ## Ordinary send mentions
 
-With an existing send grant, you can include mentions in authored content without
-a separate mention grant, configuration or argument. Use native `<@USER_ID>`,
-`<@&ROLE_ID>`, `@everyone` or `@here` syntax. Profile and participant tools return
-native user IDs when their separate read grants are available; opaque sender
-references are not native mention syntax.
+Existing send permission allows native `<@USER_ID>`, `<@&ROLE_ID>`, `@everyone`
+and `@here` in text, captions, DMs, replies and thread/forum starters, including
+send-only mode. No separate mention grant is needed. Opaque sender references
+are not native mention syntax; separately granted profile/participant reads can
+return native IDs.
 
-The bridge preserves caller content across text and attachment sends, DMs,
-strict send-only mode, replies and thread starts, including forum starters.
-Both ordinary messages and forum starters allow user, role and everyone/here
-mentions. Discord permissions and notification settings determine their effects;
-successful posting does not guarantee a notification. A reply alone does not
-notify its author (`replied_user: false`); include an explicit mention to request
-that notification.
+Discord permissions and notification settings determine effects. A reply alone
+does not notify its author (`replied_user: false`); include an explicit mention.
 Mentions do not change destination, thread-creation or send authority.
 
 ## Native mention evidence
 
-Delivered messages and full-body edits may carry optional typed
-`mention_evidence`. Absence or a missing boolean means unknown, not false.
-The evidence describes at most 32 unique native personal targets using opaque
-IDs comparable with sender IDs. Targets can include bots and unadmitted users; role and
-everyone/here mentions are excluded. Optional names are untrusted hints bounded
-to 256 bytes and 80 Unicode scalars. There is no per-person platform field,
-source span, prose guessing, or directory lookup.
+Delivered messages and full-body edits may include `mention_evidence`. Missing
+evidence or booleans mean unknown. Up to 32 unique personal targets use opaque IDs
+comparable with sender IDs; role and everyone/here mentions are excluded.
+Optional names are untrusted. Self comparison refers to the authenticated bridge,
+not a Tau agent, and happens before list truncation.
 
-Before truncating the list, the producer compares targets with the authenticated
-bridge identity, not a particular Tau agent. The people list is partial and cannot
-prove absence.
-Full and buffered edits replace evidence atomically with their current body.
-Frozen typed parent snapshots remain separate; parent mentions do not become
-outer-message evidence. Mentions grant no recipient, invitation, admission,
-trust, reply selector, or tool capability. Delivery, activation, or an available
-reply selector does not mean the message addresses this agent.
+The list can be partial and cannot prove absence. Edits replace evidence with
+their body; quoted parents contribute no outer evidence. Delivery, activation,
+mentions and reply selectors do not establish that a message addresses this
+agent or grant it authority.
 
 ## Native reply context
 
-The typed reply-context producer preserves the normalized outer request and may
-supply bounded context for an ordinary same-conversation native reply. It quotes
-only the matching parent body supplied with that event. Missing content does not
-prove deletion. Shared rendering places the request and quote in adjacent
-`message` and `quoted_message` text parts, with an available author identity when
-useful. The producer never fetches a parent, follows nested replies, or imports
-parent attachments. Quoted authors are not authenticated current speakers.
+Same-conversation replies may carry a frozen parent quote from the event in
+adjacent `message` and `quoted_message` parts. The bridge does not fetch parents,
+follow nested replies or import parent attachments. Missing content does not
+prove deletion, and quoted authors are not current authenticated speakers.
 
-A parent reference is canonical only after an exact existing same-agent,
-same-conversation ownership match confirmed on the canonical downpath. Otherwise
-`discord-reply-parent:` identifies opaque descriptive data, not a tool capability.
-Quoted text and labels remain external data under the shared message renderer;
-only the admitted outer message drives commands, mentions, routing, and admission.
-The create snapshot stays fixed through delivery, ACKs, retries, and outer edits;
-parent changes never refresh it. The producer shrinks or omits optional context
-to preserve the unchanged outer body within its limits. Installing this skill
-does not deploy or activate the separately maintained producer.
-Older producers may still append textual context; the renderer does not parse
-those suffixes into typed quotes.
+Parent references are canonical only after exact same-agent/conversation ownership
+confirmation; `discord-reply-parent:` is otherwise descriptive, not a capability.
+Only the outer message controls admission and routing. Parent changes and later
+reads do not refresh the snapshot. Older producers may append textual context
+instead; the renderer does not parse it into typed quotes.
 
 ## Linked messages
 
-Enable receive-mode `discord_get_message` (`discord:read`, default off), then use
-`{"message_id":"<message_ref or linked ID>"}` to recover current permitted content.
-It is outside the core tool group and absent in send-only mode. Its sole argument
-is a string of at most 180 characters. Results contain `message_id`, descriptive
-`author`, untrusted `text`, and optional `root_id`, `previous_id`, and `reply_to_id`.
-Follow only the links you need; there is no search or history-list interface.
+Enable `discord_get_message` (`discord:read`, default off, outside the core group)
+and call `{"message_id":"<message_ref or linked ID>"}`. The sole argument is at most
+180 characters. The tool requires the current ordinary receiver and current
+receive authorization; proactive-DM or creation-only permission is insufficient.
+`mentions_only` controls live activation, not historical reads; Discord's
+`MESSAGE_CONTENT` rules still apply.
 
-`root_id` identifies a proven thread/branch starter, not an ordinary reply parent.
-Forum/media child starters can establish it; a public parent also needs independent
-receive permission and admission. Private or unproven roots are omitted.
-`reply_to_id` separately identifies an ordinary same-channel native reply.
-`previous_id` is the immediate predecessor in the same thread or 1:1 DM, proven
-by one `before=id&limit=1` probe, never a guild-channel neighbor or an earlier
-message substituted for a denied author. Missing links mean unknown.
+Results contain `message_id`, descriptive `author`, untrusted `text`, and available:
 
-Live delivery supplies proven forum-root/reply links without new reads; retrieve
-the message by its own ID for other available links. Sent facts carry known
-root/reply links.
-Edits do not inherit links, and reads never refresh frozen quote snapshots.
+- `root_id`: a proven thread/branch starter, not an ordinary reply parent.
+- `reply_to_id`: an ordinary same-channel native reply parent.
+- `previous_id`: the immediate predecessor in the same thread or 1:1 DM, not a
+  guild-channel neighbor or a substitute preceding a denied author.
 
-Native-coordinate `discord-message:v1:` IDs encode guild, channel, message, and
-peer as hex (absent guild/peer is zero). They are not secrets or capabilities.
-Delivery references add an epoch-hash suffix for ACK uniqueness; `discord_get_message`
-accepts that suffix but returns the stable bare locator. These IDs survive restart,
-reconnect, and cache eviction with registration and fresh route, participant, and provider
-checks. Legacy hashes require retained acknowledged same-agent ownership and
-stop resolving after eviction or restart.
+Follow needed links; there is no search/history-list tool. Missing links mean
+unknown. Live delivery can include proven forum-root/reply links; read a message
+by its own ID for other available links.
 
-Only the current registered receiver can read. Creation-only eligibility or
-proactive-DM permission is insufficient. `mentions_only` controls live activation,
-not explicit historical reads; Discord's `MESSAGE_CONTENT` rules remain unchanged.
-Reads create no delivered facts, activate no agent, and grant no write, reaction,
-or attachment authority. Current content may change or disappear; a failed read
-does not prove deletion. This path has mock coverage, not live Discord validation.
+Native-coordinate `discord-message:v1:` locators survive restart, reconnect and
+eviction, subject to fresh policy/provider checks. Delivery references add an
+epoch suffix; reads accept it and return the bare locator. Legacy hashes need
+retained same-agent ownership and stop resolving after eviction or restart.
+Locators are not secrets or capabilities. Reads create no delivered facts or
+write/reaction/attachment authority; failed reads do not prove deletion.
+This path has mock coverage, not live Discord validation.
 
 ## Receiver designation
 
-In receive mode, `discord_register {}` means “make the authenticated calling agent
-the receiving agent.” It has no arbitrary agent-ID argument. The tool takes empty
-arguments; `{"enabled":false}` and direct `discord_unregister` invocations are
-rejected rather than creating a pause control. A configured `role` restricts
-eligible callers by immutable creation role.
-Optional `target: canonical_main` also restricts registration to the harness-owned
-main. The default target is ordinary. Canonical targeting requires advertised
-protocol 16.5 or newer within 16.x; unsupported revisions fail before Ready or
-provider access.
+`discord_register {}` selects the authenticated caller, not an arbitrary agent ID.
+`{"enabled":false}` and direct `discord_unregister` calls fail; they are not pause
+controls. Optional `role` constrains immutable creation role.
 
 ```yaml
 register_on_start: true
@@ -311,28 +219,22 @@ target: canonical_main
 # role is optional; when supplied, it constrains immutable creation role.
 ```
 
-`register_on_start` defaults to `false`. With this default, the bridge restores a
-saved eligible manual designation after restart, but Tau does not select a first
-receiver or create one. With `true`, the bridge starts receive processing without
-an LLM registration call.
-For the ordinary target, it keeps an eligible saved receiver or selects the oldest
-eligible existing agent; lazy creation requires admitted external input and an
-explicit `role`. Canonical targeting selects only the committed main at startup.
-Admitted input may lazily create a missing main without an explicit role or
-bootstrap prompt. It never falls back to an ordinary agent or replaces an
-unavailable bound main. The target constraint applies to saved restoration,
-automatic resolution, manual registration, and legacy migration evidence.
-Busy receivers remain sticky, and same-agent registration is a no-op.
+`register_on_start` defaults false: it restores an eligible saved manual choice
+but does not choose or create a first receiver. When true, ordinary targeting keeps
+an eligible saved receiver or selects the oldest eligible agent; lazy creation
+requires admitted input and an explicit `role`.
 
-The bridge stores a versioned receive designation in session ExtensionData under
-`receive-designation.json`; it is not an operator filesystem path. Ephemeral
-sessions retain that choice only in memory. The old
-`restore_receive_registration` configuration key is rejected for either value with
-migration guidance. A missing designation can use one unambiguous historical
-registration as migration evidence, but a saved designation wins.
+`target: canonical_main` requires protocol 16.5 or newer within 16.x. It selects
+only the committed main; admitted input can create a missing main without a role
+or bootstrap prompt. It never substitutes an ordinary agent or replaces an
+unavailable bound main. Busy receivers remain selected; same-agent registration
+is a no-op.
 
-An actual handoff may send a best-effort notice to a still-loaded prior receiver.
-Already reported input and its ACK correlation remain with their original agent.
-Old source, write, and Artifact authority does not transfer. Separate send,
-reaction, attachment, discovery, and send-only grants remain independent of receive
-designation.
+The designation lives in session ExtensionData as `receive-designation.json`,
+not an operator filesystem path; ephemeral sessions retain it only in memory.
+The obsolete `restore_receive_registration` key fails for either value.
+Without a saved choice, one unambiguous historical registration can supply
+migration evidence.
+
+Handoffs do not transfer already reported input, ACK ownership, source/write
+authority or Artifact authority. Tool grants remain separate from designation.

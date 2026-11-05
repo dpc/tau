@@ -4,55 +4,46 @@ description: Use when debugging Tau sessions, daemons, runtime behavior, socket 
 advertise: false
 ---
 
-For context-window failures, distinguish the provider's typed rejection from
-the harness recovery decision. Providers cannot authorize reactive compaction;
-inspect the durable inference checkpoint, model capability, role policy,
-activation cut, branch correlation, and whether streamed/final semantic output
-made recovery unsafe.
-
 ## Important paths
 
-Tau follows the XDG directories:
+Tau follows XDG directories. Linux defaults:
 
 - Config: `~/.config/tau/`
-  - `cli.yaml`, `cli.d/*.yaml` — CLI display and key-binding config.
-  - `harness.yaml`, `harness.d/*.yaml` — harness, agent roles/defaults, extensions, and independent session, agent, and diagnostic retention config.
-- State: `~/.local/state/tau/` on Linux.
-  - If no XDG state dir is available, inspection defaults may fall back to `.tau/state`.
-  - `cli.json` — persisted CLI runtime toggles such as show-diff, show-thinking, show-tools, turn stats.
-  - `providers/<extension>/<provider>.json` — provider settings.
-  - `secrets/ext/<extension>/providers/<provider>/` — typed provider credentials.
+  - `cli.yaml`, `cli.d/*.yaml`: display and key bindings.
+  - `harness.yaml`, `harness.d/*.yaml`: roles, extensions, and retention.
+- State: `~/.local/state/tau/`; inspection may fall back to `.tau/state` without
+  an XDG state directory.
+  - `cli.json`: persisted UI toggles.
+  - `providers/<extension>/<provider>.json`: provider settings.
+  - `secrets/ext/<extension>/providers/<provider>/`: typed credentials.
 - Sessions: `~/.local/state/tau/sessions/<session_id>/`
-  - `events.cbor` — durable per-session membership journal (`session.agent_loaded` / `session.agent_unloaded`).
-  - `meta.json` — canonical durable-session existence manifest with canonical creation time and a derived last-touched ordering/retention hint.
-  - `lock` — flock used while the daemon has the session loaded for writing.
-  - `events.jsonl` — best-effort debug runtime event log. It is an ordered subsequence of attempted observations, not authoritative replay state; a missing row does not prove an event was absent.
-  - `debug/provider-requests/<provider-instance>/*.json.zst` — zstd-compressed provider request, response, and `responses-attempt-failure` captures written best-effort for an attributed durable session whose directory still exists. Request/response records can contain full prompt, tool, model, and provider-controlled content, including failed Codex received streams. The separate `responses-attempt-failure` records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
-  - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
-  - `logs/<extension>.log` — stderr for each spawned extension.
+  - `events.cbor`: durable membership (`session.agent_loaded` /
+    `session.agent_unloaded`).
+  - `meta.json`: session existence, creation time, and derived last-touched hint.
+  - `lock`: flock while loaded for writing.
+  - `events.jsonl`: best-effort runtime observations, not replay authority.
+  - `debug/provider-requests/<provider-instance>/*.json.zst`: private captures.
+  - `logs/tau-harness.log`, `logs/<extension>.log`: harness/extension stderr.
 - Agents: `~/.local/state/tau/agents/<agent_id>/`
-  - `events.cbor` — durable agent transcript log and source of truth for replaying that agent tree.
-  - `meta.json` — agent metadata such as cwd, creation time, and latest prompt preview.
-  - `lock` — flock used while the daemon has the agent loaded for writing.
+  - `events.cbor`: authoritative transcript/tree replay.
+  - `meta.json`: cwd, creation time, latest prompt preview.
+  - `lock`: flock while loaded for writing.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`
-  - `sockets/<session-key>.sock` — deterministic Unix socket for one immutable session.
-  - `claims/<session-key>.lock` — lifetime `flock`; its JSON content is diagnostic
-    only. The full BLAKE3 session key, not a PID, is routing authority.
+  - `sockets/<session-key>.sock`: one immutable session's socket.
+  - `claims/<session-key>.lock`: lifetime flock. Its JSON and PID are diagnostic;
+    the full BLAKE3 session key determines routing.
 
 ## Runtime discovery from supervised components
 
-Shell tools run through a supervised configured component. By default,
-`tau_runtime_socket_access: hidden` gives that component an intentionally empty,
-read-only `${XDG_RUNTIME_DIR}/tau/harnesses` mount. Consequently, `tau session
-list --json` run there can correctly return `[]` while host-side listeners are
-live. Perform daemon discovery from the host, outside the supervised extension
-namespace. Set `tau_runtime_socket_access: ambient` only for a trusted component
-that genuinely needs ambient harness discovery; do not change the default.
-See the [extension configuration](../../../docs/extensions.md#runtime-socket-discovery)
-and [configured-extension boundary](../../../SECURITY.md) for the policy.
+The default `tau_runtime_socket_access: hidden` gives shell/extension processes
+an empty, read-only `${XDG_RUNTIME_DIR}/tau/harnesses` mount. Thus
+`tau session list --json` can return `[]` while host listeners are live.
+Discover daemons from the host. Use `tau_runtime_socket_access: ambient` only
+for trusted components that need it; do not change the default.
+See [extension configuration](../../../docs/extensions.md#runtime-socket-discovery)
+and the [configured-extension boundary](../../../SECURITY.md).
 
-Use this content-free check before treating a missing runtime pair as unlink or
-resume failure:
+Check namespace masking before diagnosing an unlinked socket or resume failure:
 
 ```bash
 printf 'XDG_RUNTIME_DIR=%s\n' "$XDG_RUNTIME_DIR"
@@ -62,39 +53,43 @@ find "$XDG_RUNTIME_DIR/tau/harnesses" -maxdepth 1 -printf '%y %f\n'
 ss -xlpn | grep '/tau/harnesses/'
 ```
 
-`ss` pathname strings together with an empty read-only bind mount mean namespace
-masking, not proof that a listener was unlinked.
+`ss` pathnames plus an empty read-only bind mount indicate masking, not unlink.
 
-## Event logs are usually the first place to look
+## Inspection workflow
 
-For session misbehavior, inspect `~/.local/state/tau/sessions/<session_id>/events.jsonl` early. It is append-only JSONL meant for post-mortems and may include transient observations absent from durable replay. It is useful for missing UI updates, streaming, tool progress, connection churn, ordering, and short-lived states, but it is deliberately incomplete.
+1. Use `tau session list`; `--dir DIR` filters by exact canonical project root
+   and `--json` returns structured records. Relative filters resolve from caller
+   CWD; invalid filters exit 2. For historical sessions, inspect state directories
+   and their `meta.json` or mtimes.
+2. Read `events.jsonl` around the failure for UI updates, streaming, tools, and
+   transient ordering; cross-check harness and extension logs.
+3. Use session `events.cbor` for membership replay and agent `events.cbor` for
+   transcript/tree reconstruction. Check runtime claims/sockets for attach failures.
+4. Use private provider captures for exact wire shape, and
+   `tau-self-knowledge-cache` for durable usage/cache accounting.
 
-Producers redact and serialize each line, then attempt immediate nonblocking
-admission to one process-wide FIFO bounded at 1,024 retained lines and 64 MiB
-including in-flight line and path bytes. A detached worker takes
-`<session>/events.jsonl.lock` per line, appends at exact EOF, and flushes without
-fsync. Queue overflow, lock/open/write failure, uncertain rollback, and
-nonjoining process exit can omit rows; OS-cache loss or a torn final line is
-also possible. The worker never delays semantic event handling or fsyncs. No
-shutdown path requests or waits for a drain or joins
-the worker; it may continue draining while the process remains alive, and exit
-may interrupt queued or in-flight work. Restart does not repair a torn tail.
+`events.jsonl` can omit rows or end with a torn line after queue pressure, I/O
+failure, or exit. Shutdown does not drain/fsync it; restart does not repair it.
+Absence proves nothing about whether an event occurred. Useful fields are
+`type` (`from_connection`, `published`, `disconnected`, `new_client`),
+`recorded_at_micros`, `source`, `event_name`, and `event`.
 
-Each debug log line includes fields such as:
+```bash
+tail -n 200 ~/.local/state/tau/sessions/<session_id>/events.jsonl | jq .
+find ~/.local/state/tau/sessions -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' | sort -n
+ls -lah ~/.local/state/tau/sessions/<session_id>/logs
+```
 
-- `type` — commonly `from_connection`, `published`, `disconnected`, or `new_client`.
-- `recorded_at_micros` — timestamp useful for ordering and latency gaps.
-- `source` — connection id when known.
-- `event_name` — protocol event name.
-- `event` — compacted event payload.
-
-Use session `events.cbor` when debugging membership replay, and agent `events.cbor` when debugging transcript/tree reconstruction. Use `events.jsonl` when debugging runtime behavior.
+Without a valid `TAU_LOG`, built-in components log their own target at `info`
+and others at `warn`; custom extensions choose their fallback. A valid value
+replaces the filter. Set it when starting/restarting the harness, not on a later
+`tau attach`. Load `tau-self-knowledge-debugging-extensions` for extension
+startup, reconnects, raw stderr privacy, and the lossy service-stderr mirror.
 
 ## Drive a running session
 
-Use `cargo r -- dev send <session_id> <line...>` to inject user-equivalent input into a running daemon-bound session. This is useful for agent-powered debugging because it goes through the socket protocol and normal UI event path instead of editing persisted logs by hand.
-
-Examples:
+Use `cargo r -- dev send <session_id> <line...>` for user-equivalent input
+through the running session's socket/UI path:
 
 ```bash
 cargo r -- dev send <session_id> "normal user message"
@@ -103,257 +98,99 @@ cargo r -- dev send <session_id> :model test/model
 cargo r -- dev send <session_id> '!pwd'
 ```
 
-The command requires the session id and finds the matching running daemon through
-its deterministic session-keyed runtime claim. Exact admission verifies the
-daemon's immutable session; discovery never uses a PID as routing or liveness
-authority. It
-supports normal prompts, core commands, and `!` / `!!` shell-command
-submissions.
+The command verifies session identity and supports prompts, core commands, and
+`!` / `!!` shell submissions. It rejects `dev send <session_id> :compact`
+because it has no agent target; another UI's selection does not supply one.
+Attach, select the agent, and enter `:compact`, or use enabled model tools
+`compact {}` / `agent_compact {agent_id}`. See
+[manual compaction tools](tau-self-knowledge-harness.md#manual-compaction-tools).
 
-To compact manually, attach to the session, select the intended agent, and
-enter `:compact` in that UI. The harness rejects `dev send <session_id> :compact`
-because it supplies no agent target. Attaching another UI does not give
-`dev send` that UI's selected agent. When the tools are enabled, model callers
-can use `compact {}` for themselves or `agent_compact {agent_id}` for another
-loaded agent. See the [manual compaction tools](tau-self-knowledge-harness.md#manual-compaction-tools)
-for policy and completion behavior.
+## Provider captures and cache evidence
 
-## Quick inspection workflow
+Use `zstdcat` or `zstd -dc` before `jq`. Request/response captures can contain
+full prompts, tools, model output, provider text, and credentials.
+`responses-attempt-failure` records omit prose/raw values but retain bounded
+shape, lengths, and validated IDs/codes; still keep them private.
+Missing/truncated captures and decompression errors do not prove absence of
+provider activity.
 
-1. Identify a running session with `tau session list`; use `--dir DIR` for an
-   exact canonical project-root filter or `--json` for structured session/root
-   records. Relative filters resolve from caller CWD, and invalid filters exit 2
-   rather than looking like an empty live result. For historical sessions,
-   inspect `~/.local/state/tau/sessions/` and sort by `meta.json` or directory
-   mtime.
-2. Read `events.jsonl` around the failing prompt first.
-3. Cross-check with `logs/tau-harness.log` and extension logs for errors or panics.
-4. Check session/agent `events.cbor` only when the bug involves replay or persisted semantic contents.
-5. Check runtime daemon files under `${XDG_RUNTIME_DIR}/tau/` when the bug involves attach/resume, wrong project daemon selection, or socket connection failures.
-6. For provider/cache-shape bugs, inspect `debug/provider-requests/` for the exact request body, successful response, or bounded failed-attempt record. Match Responses inference requests and failures with `agent_prompt_id`, `logical_attempt`, and `wire_dispatch_index`; a transparent repair increments the dispatch index inside one attempt. Unary compaction requests omit inference correlation.
-
-Extension logs normally contain a small `info` baseline for configuration and
-important lifecycle or durable-completion transitions. With no valid `TAU_LOG`,
-each built-in component enables its own first-party target at `info` and all
-other targets at `warn`. Custom extension processes own their logging fallback.
-A valid `TAU_LOG` replaces the built-in filter completely.
-
-For `tau serve --mirror-extension-stderr`, the per-session
-`logs/<extension>.log` remains the authoritative, byte-compatible raw file.
-Process stderr receives only a lossy, bounded, escaped copy with validated
-extension name, immutable child generation, PID, and `line`, `chunk`, `eof`, or
-`dropped` boundary. Queue pressure or sink/setup failure can omit mirror
-records, and same-name generations can overlap; use the private raw file when
-completeness or exact bytes matter. The mirror widens the audience to journal
-readers and does not redact arbitrary custom extension stderr.
-
-Treat debug and trace extension output as private: it can contain identifiers,
-queries, paths, and script-authored text. Extension stderr is unredacted,
-unrotated within the session, and follows whole-session retention rather than
-the shorter diagnostic cleanup. Dependency warnings may also contain public
-identifiers or filesystem paths, so treat the complete file as private.
-Setting `TAU_LOG` while running `tau attach`
-changes only the new UI; it cannot reconfigure existing processes.
-
-Helpful commands:
+Match Responses inference records by `agent_prompt_id`, `logical_attempt`, and
+`wire_dispatch_index`; transparent repair increments the dispatch index within
+one attempt. Unary compaction omits inference correlation.
 
 ```bash
-# Pretty-print recent debug events for one session.
-tail -n 200 ~/.local/state/tau/sessions/<session_id>/events.jsonl | jq .
-
-# Find recent session directories.
-find ~/.local/state/tau/sessions -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' | sort -n
-
-# Inspect logs for one session.
-ls -lah ~/.local/state/tau/sessions/<session_id>/logs
-
-# Inspect exact provider request/response captures, if present.
 find ~/.local/state/tau/sessions/<session_id>/debug/provider-requests -maxdepth 2 -type f -print
-# Responses-backend request/response fields.
+# Responses request.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-request.json.zst | jq 'select(.backend == "responses") | .body.previous_response_id, .body.input'
-# Synthetic terminal projection; absent record_kind admits older terminal records.
+# Synthetic terminal projection; absent record_kind admits older records.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-response.json.zst | jq 'select(.record_kind == "provider_response_finished" or .record_kind == null) | select(.backend == "responses" or .backend.kind? == "responses") | .provider_response_id, .usage, .provider_response_finished.output_items, .provider_terminal_event'
-# Exact Codex received text, including rejected events; do not mistake it for a terminal report.
+# Exact Codex received text, including rejected events; not a terminal report.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-websocket-response.json.zst | jq 'select(.record_kind == "received_response") | {logical_attempt, wire_dispatch_index, attempt_id, raw_events, prefix_truncated, last_received_event, last_received_event_index, last_event_truncated, accepted_terminal, capture_complete, error, error_truncated, decode_error}'
-# Failed Responses attempt: content-free class/transport facts and bounded shape.
+# Bounded failed-attempt evidence.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-responses-attempt-failure.json.zst | jq '{logical_attempt, wire_dispatch_index, classification, wire, provider, transport, truncation}'
-
-# Chat Completions request, successful-response, and HTTP-error fields.
+# Chat Completions request and response/error fields.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-request.json.zst | jq 'select(.backend == "chat_completions") | .body.messages'
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-response.json.zst | jq 'select(.backend == "chat_completions") | .usage, .output_items, .raw_events, .http_status, .body'
 ```
 
+Codex `received_response` captures retain text before decoding/validation.
+After the 1-MiB / 4,096-event prefix fills, `prefix_truncated` marks a gap and
+`last_received_event` retains the latest message with its one-based index and
+truncation flag. `accepted_terminal` means parser acceptance, not durable
+compaction success. See `docs/providers.md` for transport exclusions/privacy.
+`agent_watch` exposes sanitized current retry/work status, not attempt history
+or raw provider errors; inspect provider-local logs for those.
 
-## Token/cache efficiency analysis
+For durable accounting, use `tau agent cache AGENT` / `tau session cache SESSION`.
+For transient event analysis, select canonical `type: "published"` records named
+`provider.response_finished`; do not combine them with incoming
+`provider.response_finished_reported` or count streaming
+`provider.response_updated` as responses.
 
-For durable cache evidence, start with `tau agent cache AGENT` or
-`tau session cache SESSION`; load `tau-self-knowledge-cache` for its views,
-source limits, and privacy boundary. Use the following debug-log method
-only for transient event ordering or session-log-specific questions.
-`events.jsonl` is best-effort, not a complete accounting source; absence
-does not prove no call. Raw Provider input uses
-`provider.response_finished_reported`; the enriched harness-canonical published record
-uses `provider.response_finished`. Prefer canonical `type: "published"` records for
-harness-derived usage, or select one name/type explicitly rather than combining both.
-
-Useful one-shot summary:
-
-```bash
-python3 - <<'PY'
-import json, pathlib
-sid = '<session_id>'
-p = pathlib.Path.home() / '.local/state/tau/sessions' / sid / 'events.jsonl'
-rows = []
-for ln, line in enumerate(p.open(), 1):
-    j = json.loads(line)
-    ev = j.get('event', {})
-    if ev.get('event') == 'provider.response_finished' and j.get('type') == 'published':
-        pl = ev.get('payload', {})
-        usage = pl.get('usage') or {}
-        sp = pl.get('agent_prompt_id') or '?'
-        inp = usage.get('prompt_sent_tokens') or pl.get('input_tokens') or 0
-        cached = usage.get('prompt_cached_tokens') or pl.get('cached_tokens') or 0
-        out = usage.get('response_received_tokens') or pl.get('output_tokens') or 0
-        rows.append((sp, ln, inp, cached, inp - cached, out, pl.get('originator')))
-
-for label, subset in [('all', rows), ('user', [r for r in rows if (r[6] or {}).get('kind') == 'user']), ('extension', [r for r in rows if (r[6] or {}).get('kind') == 'extension'])]:
-    total_in = sum(r[2] for r in subset)
-    total_cached = sum(r[3] for r in subset)
-    total_uncached = sum(r[4] for r in subset)
-    total_out = sum(r[5] for r in subset)
-    pct = 100 * total_cached / total_in if total_in else 0
-    print(label, 'observed responses', len(subset), 'input', total_in, 'cached', total_cached, 'non-read input', total_uncached, 'read_pct', round(pct, 1), 'output', total_out)
-
-print('\nlargest non-read observations:')
-for sp, ln, inp, cached, uncached, out, origin in sorted(rows, key=lambda r: r[4], reverse=True)[:10]:
-    pct = 100 * cached / inp if inp else 0
-    print(sp, 'line', ln, 'input', inp, 'cached', cached, 'non-read input', uncached, 'read_pct', round(pct, 1), 'output', out, 'origin', origin)
-PY
-```
-
-Red flags found in past sessions:
-
-- Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `agent.prompt_created` / `provider.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `agent.start_request`, `ui.prompt_submitted`, and the following `provider.response_finished`.
-- `harness.context_usage_changed` currently follows all `provider.response_finished` events, including extension-originated prompts. Treat context/token stats carefully if side-channel prompts are present.
-- Large tool outputs in `agent.prompt_created` messages can dominate context: repeated large `read` slices, cargo/check output, clippy output, or colorized `jj diff`. Grep for `┄total <n>┄` markers in `events.jsonl` to find compacted large payloads.
-- For exact, uncompacted provider payloads, check request/response captures with `zstdcat`. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `agent.prompt_created` and serialized `body.input`; response files show Tau's parsed `provider.response_finished` shape plus the raw terminal provider event when available. Failed-attempt files are deliberately not exact payloads: they contain only bounded/redacted operational evidence.
-- Repeated `provider.response_updated` streaming events are numerous and not useful for aggregate token accounting. Prefer `provider.response_finished`.
-
-Quick checks for side-channel waste:
+Extension prompts (`originator: {kind: "extension"}`) can resend history and
+affect `harness.context_usage_changed`. Inspect `agent.start_request`,
+`ui.prompt_submitted`, and the following response. Look for `┄total <n>┄`
+markers for large tool payloads. Exact captures help explain
+`previous_response_id`, tool ordering, or serialized `body.input` differences.
 
 ```bash
-# Show extension-originated prompt/response activity.
 grep -n 'agent.start_request\|std-notifications\|"kind":"extension"' ~/.local/state/tau/sessions/<session_id>/events.jsonl
-
-# Search logs for runtime errors; no matches does not rule out token waste.
 grep -RniE 'error|warn|panic|cache|token' ~/.local/state/tau/sessions/<session_id>/logs
 ```
 
-## Debug watcher-visible provider status
-
-For Codex native-compaction or ordinary stream failures, inspect
-`*-websocket-response.json.zst` with `record_kind == "received_response"`.
-`raw_events` preserves exact text before decoding and validation, including the
-rejected event; `error` retains bounded internal detail and `decode_error` retains
-the original JSON error. These differ from synthetic `provider_response_finished`
-captures. Match prompt, logical attempt, wire-dispatch index and optional attempt
-ID. After the 1-MiB / 4,096-event prefix fills, `prefix_truncated` marks the gap and
-`last_received_event` retains the latest message with a one-based index and its
-own truncation flag. Failure/cancellation never claims complete unseen output;
-`accepted_terminal` describes parser acceptance, not durable compaction success.
-Capture is best effort and cannot recover bytes lost by an older running build.
-See `docs/providers.md` for transport exclusions and privacy.
-
-`agent_watch` reports only sanitized retry/work categories, saturating attempts,
-and approximate delays. Enabling or re-enabling shows the current snapshot rather
-than attempt history. Raw endpoint bodies and provider error text intentionally
-remain unavailable across the watch boundary; inspect provider-local debug logs
-under the existing diagnostics policy when those details are required.
-
 ## Interactive prompt latency traces
 
-Operational logs expose content-free observations for the local interactive
-prompt path. They are diagnostic observations, not protocol, correlation,
-ordering, acceptance, or durability facts. They never contain prompt text,
-payload values, paths, credentials, or durable observation identifiers.
+These content-free operational observations use process-local monotonic timing,
+not cross-process/restart causality, protocol identity, or replay authority.
 
-Decoded-delivery ownership measurements use separate default-off
-`tau_cli::delivery_memory` and `tau_harness::delivery_memory` TRACE targets.
-See [`docs/decoded-delivery-memory-measurement.md`](../../../docs/decoded-delivery-memory-measurement.md)
-for the exact `TAU_LOG` invocation, output files, privacy caveats, ownership
-cuts, and estimator limits.
+- `tau_cli::prompt_submission`: input, history admission, frame construction.
+- `tau_cli::frontend_progress`: writer wait, write, flush, and hold times.
+- `tau_cli_term_raw::frontend_progress`: redraw, layout, lock, and flush timing.
+  A flush does not prove terminal receipt/paint. Enable
+  `tau_cli_term_raw::frontend_progress=trace` in `TAU_LOG`; interactive records
+  use that UI's `ui.log`.
+- `tau_harness::prompt_ingress`: UI prompt/agent-creation ingress. Socket wait
+  includes idle time; wake timing includes the sender/wake tail.
+- `tau_harness::prompt_acceptance`: TRACE precursors and an INFO aggregate for
+  immediate authenticated, non-internal `HumanUi` prompt dispatch, excluding
+  queued prompts, agent creation, and internal/replay/message-wake traffic.
+  `result_class` is `publication_accepted`, `semantic_admission_rejected`, or
+  `stale_or_torn_down`. Debug-record admission measures synchronous admission,
+  not detached filesystem writes; `residual_us` is unclassified elapsed time.
 
-- `tau_cli::prompt_submission` reports the fixed stages
-  `raw_submit_clear`, `highterm_history_menu`, `chat_history`,
-  `chat_history_routing`, and `frame_construct`. Fields are the wrapping
-  process-local `diagnostic_seq` where available, `prompt_bytes`, fixed
-  `history_admission`/`event_kind` classes, and microsecond durations.
-  Admission is `queued`, `ignored_empty`, `dropped_full`,
-  `dropped_unavailable`, or `ephemeral`. Raw and HighTerm stages deliberately
-  have no inferred cross-component correlation.
-- `tau_cli::frontend_progress` reports fixed `message_kind`, `encoded_bytes`,
-  `write_us`, `flush_us`, `metering_us`, `total_hold_us`, `writer_wait_us`,
-  `writer_total_hold_us`, and `writer_total_us`. Both writer records carry the
-  same optional process-local `diagnostic_seq` as the prompt frame constructor.
-- `tau_cli_term_raw::frontend_progress` separates redraw notification, shared-state
-  lock, layout preparation, writer, and flush timing. For six selected canonical
-  transcript facts it may also report one invariant event/class label, the
-  CLI-local delivery id, mutation/frame generations, mutation-to-flush duration,
-  or count-only bounded overflow/indeterminate context. A success means only that
-  Tau wrote and flushed the frame; it does not prove terminal receipt or paint.
-- `tau_harness::prompt_ingress` reports fixed event/message classes, encoded
-  bytes, `socket_wait_read_decode_us`, `ingress_wait_us`,
-  `wake_to_take_ready_us`, exact one-slot occupancy, and the existing
-  `blocked_reader_count`. Socket wait includes idle time before bytes arrive.
-  The slot timestamp precedes the control wake and therefore includes the
-  sender/wake tail, so the wake duration is conservative rather than a causal
-  protocol interval. Its `traffic_class` is exactly `ui_prompt_submitted` or
-  `ui_create_agent`; unrelated frames and prompt drafts do not emit these
-  prompt-ingress records.
-- `tau_harness::prompt_acceptance` has TRACE-only precursors and one INFO
-  aggregate. It accepts only an authenticated, non-internal `HumanUi` prompt
-  that enters immediate dispatch after its activation observation; UI agent
-  creation, queued prompts, internal/harness/extension/passive/replay/message-wake
-  traffic, and unrelated session metadata do not own the aggregate. The existing
-  activation append and durable session-retention touch retain their fixed
-  TRACE schemas (`activation_append_us` and `session_meta_touch_us` respectively).
-  The aggregate emits exactly once with terminal `result_class`
-  `publication_accepted`, `semantic_admission_rejected`, or
-  `stale_or_torn_down`.
-- The INFO aggregate's fixed, content- and identity-free schema is
-  `ui_dispatch_to_publication_acceptance_us`, `setup_us`,
-  `interception_wait_us`, `semantic_admission_fold_us`,
-  `debug_record_admission_us`,
-  `bus_admission_us`, `residual_us`, `precursor_stats_count`, and
-  `eligible_connection_count`, plus `result_class`. Setup runs from immediate
-  dispatch to generic-publication entry; interception wait accumulates parked
-  interceptor replies; semantic admission/fold and bus admission name their
-  completed publication phases; debug-record admission is synchronous processing and queue
-  admission rather than detached filesystem writing; `precursor_stats_count`
-  counts only the session-metadata precursor inside this aggregate window;
-  residual is unclassified elapsed time; and eligible connections counts
-  bus delivery outcomes without retaining recipient identities or errors.
-  Prompt text, model data, target identity, request/observation IDs, and protocol
-  correlation never appear in this aggregate.
-- Both precursor and aggregate records use only process-local monotonic timing.
-  They are operational observations, not protocol, persistence, event-log,
-  replay, watcher, or publication authority, and they neither change nor
-  suppress existing watcher delivery.
+For default-off `tau_cli::delivery_memory` / `tau_harness::delivery_memory`
+TRACE targets, see
+[`docs/decoded-delivery-memory-measurement.md`](../../../docs/decoded-delivery-memory-measurement.md)
+for invocation, outputs, privacy, ownership cuts, and estimator limits.
 
-All counters use bounded state and wrapping fixed-size process-local sequences;
-none enters wire, journals, replay, or semantic persistence. Durations use
-process-local monotonic clocks and cannot establish causality across processes
-or restarts. Presentation correlation adds no queue and is disabled before
-delta accounting unless its TRACE target is enabled. To inspect it in an
-interactive UI, include `tau_cli_term_raw::frontend_progress=trace` in
-`TAU_LOG`; enabled records use that UI's `ui.log`. This operational sink has no
-durability guarantee, performs no durability sync, and could instead be stderr
-or a sink. It must not be interpreted as protocol identity or replay state.
+## Compaction failures
 
-### Debugging manual compaction
+A provider rejection does not authorize reactive compaction. Inspect the durable
+inference checkpoint, model/role policy, activation cut, branch correlation, and
+any semantic output already delivered.
 
-Trace `agent.manual_compaction_requested` by request id, then expect exactly
-one pre-start failure or a matching `agent.standalone_compaction_started`.
-After transaction success/failure, verify one terminal background event for
-the initiating call. For self requests, the start cut must include the complete
-sibling tool-result round; a request without that boundary remains deferred.
+For manual requests, trace `agent.manual_compaction_requested` by request ID:
+expect one pre-start failure or matching `agent.standalone_compaction_started`,
+then one terminal background event after transaction success/failure.
+Self-compaction must include the complete sibling tool-result round; without
+that boundary it remains deferred.

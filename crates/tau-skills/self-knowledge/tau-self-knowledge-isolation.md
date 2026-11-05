@@ -52,56 +52,37 @@ persistent harness.
 
 ## Linux launch view
 
-On Linux, every supervised extension starts in a fresh user namespace and mount
-namespace. Tau maps the calling user, makes mount propagation private, and
-installs the selected state view. When a state root exists, it stages a private
-bind of real state to install that view. It then changes to the configured
-working directory and executes the complete
-configured `prefix ++ command ++ suffix` argv. It removes `TAU_SECRET_*` and
-`TAU_EXTENSION_TAU_STATE_ACCESS` from the child environment but otherwise does
-not present a sanitized environment.
+On Linux, Tau starts each supervised extension in fresh user/mount namespaces,
+maps the calling user, makes mount propagation private, installs the state view,
+changes cwd, and executes `prefix ++ command ++ suffix`. It removes
+`TAU_SECRET_*` and `TAU_EXTENSION_TAU_STATE_ACCESS`; the rest of the environment
+is not sanitized.
 
-When a state root exists, Tau masks the entire Tau secret root in both modes.
-A persistent harness restores the per-instance direct-state bind after the
-restricted state view. A persistent Provider, and only a persistent Provider,
-additionally receives its selected
-`<state>/providers/<instance>` tree as a recursive read-only bind.
-That tree contains credential-free settings; tool extensions receive neither
-this mount nor a settings snapshot. Provider debug captures do not create a
-writable mount: they cross a dedicated bounded non-journaled protocol message,
-and the harness derives and writes their session/instance path.
+Both modes mask the entire secret root. Only persistent Providers also receive
+`<state>/providers/<instance>` as a recursive read-only bind of credential-free
+settings; tool extensions receive neither this mount nor a settings snapshot.
+Providers send debug captures through a bounded non-journaled protocol message
+for the harness to write, not through a writable mount.
 
-When it stages real state, the launcher then covers that temporary tree with an
-empty read-only mount. This prevents access through the staging source after
-the selected destination binds exist. The working directory must be canonical and
-cannot be in masked Tau state; an unset `cwd` selects the harness process cwd.
-The extension still receives its ordinary configured argv, stdin/stdout
-protocol pipes, configured free-form `Configure.config`, instance name, optional
-tool prefix, authorized startup secrets, and Provider settings snapshot where
-applicable.
+Tau masks its temporary staging bind after installing destination mounts.
+The working directory must be canonical and outside masked state; unset `cwd`
+uses the harness cwd. Extensions still receive their configured argv, protocol
+pipes, `Configure.config`, instance name, optional tool prefix, authorized
+secrets, and applicable Provider settings snapshot.
 
 For `read_only`, Tau uses Linux 5.12 `mount_setattr` with `AT_RECURSIVE`;
 it does not fall back to a nonrecursive remount that could leave nested mounts
 writable. Namespace, ID-map, mount, cwd, or exec failures fail supervised
-startup closed. Non-Linux Tau does not run a supervised extension with an
-unmasked fallback. Memory-only harnesses force `hidden`, create no host state,
-and mask an existing state root if one exists.
+startup closed. Non-Linux Tau does not use an unmasked fallback.
 
 ## Component-specific read-only mounts
 
-The harness state policy applies to supervised extensions. `core-shell` adds a
-separate command-level Linux hardening measure: for commands requesting a
-read-only working directory, it clones and recursively read-only bind-mounts
-that cwd before exec. The command otherwise sees the host filesystem as before.
-If this Linux mount setup cannot run, `core-shell` reports the unavailable
-read-only mount rather than silently claiming one; non-Linux has no such bind
-mount. If the selected cwd is a Tau session or state subtree, that selected
-subtree receives the same read-only bind behavior; `core-shell` has no separate
-session-directory mount.
-
-This is distinct from `tau_state_access`: it protects a shell command's chosen
-cwd subtree, whereas `tau_state_access` controls the extension process's Tau
-state view.
+`core-shell` separately protects commands requesting a read-only cwd with a
+recursive read-only bind on Linux. Other host files remain visible. Linux setup
+failure reports the mount unavailable; non-Linux has no such mount.
+This protects only the selected cwd, including a selected Tau state/session
+subtree; there is no separate session-directory mount. `tau_state_access`
+instead controls the extension process's Tau state view.
 
 ## What this does not defend against
 

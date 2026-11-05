@@ -4,13 +4,10 @@ description: Use when configuring or operating Tau std-pim, including split emai
 advertise: false
 ---
 
-# Tau std-pim extension self-knowledge
+# PIM: email and calendars
 
-`std-pim` is Tau's standard personal information management extension. It runs
-the separately installed `tau-ext-pim` executable, registers model-visible split
-tools such as `email_list_folders`, `email_read`, `email_send`,
-`calendar_search`, and `calendar_create`, and publishes `:email` and `:calendar`
-user actions.
+`std-pim` runs the separately installed `tau-ext-pim` executable. It provides
+split email/calendar tools and `:email` / `:calendar` approval actions.
 
 For Tau protocol 16.0, rebuild the extension with registry SDK crates
 `dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update it with the harness
@@ -21,45 +18,28 @@ is removed; rename it to `std-pim`. PIM
 configuration accepts only the nested `config.email` and `config.calendar`
 module keys.
 
-Use this skill when helping a user configure PIM. Do not include personal addresses, server names, passwords, tokens, calendar URLs, event details, or message contents unless the user explicitly provided them for that answer.
+Do not include private account or message/event data unless the user provided
+it for that answer.
 
 
 ## Capabilities
 
-Email:
-
-- list folders as opaque `<folder>` ids
-- list recent messages
-- read full mail only when policy or exact user approval allows it
-- send, trash, star/unstar, mark read/unread
-- queue unsafe incoming reads and outgoing sends for `:email` approval actions
-- Gmail IMAP/SMTP Google OAuth2/XOAUTH2 via installed-app PKCE: `:email auth google start <account>` and `:email auth google finish <account> <copied-url>`
-- explicit `smtp_outcome_unknown` errors when SMTP may have accepted a direct
-  email; do not retry automatically, and reconcile with the account/provider
-  first
-- append sanitized audit logs under the extension state directory
-
-Calendar:
-
-- list calendars as opaque ids
-- list active event rows and active blocking free/busy rows with cursor pagination
-- deliberately include cancellation records in `calendar_search` with `include_cancelled: true`
-- read one event by id, including a targeted cancelled event when available
-- read-only ICS feed accounts for standard `.ics` calendars, including timezone-aware event times and bounded recurrence expansion
-- Google Calendar native API reads and user-approved writes: create, update, delete, and RSVP
-- Google OAuth device authorization via `:calendar auth google start <account>` and `:calendar auth google finish <account>`
-- append sanitized calendar audit logs and queue writes for `:calendar change` approval by default
+- Email: list folders/messages, read, send, trash, star/unstar, mark read/unread,
+  Gmail OAuth, and approval queues. Load `tau-self-knowledge-email` for setup,
+  authentication, tools, and approval commands.
+- Calendar: paginated event/free-busy reads, read-only timezone-aware ICS feeds
+  with bounded recurrence expansion, and Google Calendar create/update/delete/RSVP.
+  Writes require `:calendar change` approval by default.
+- Both modules keep sanitized audit logs in extension state.
 
 
 ## Config shape
-
-`std-pim` nests module config under `config.email` and `config.calendar`.
 
 ```yaml
 {pim_config}
 ```
 
-Important migration from old email-only config:
+Migration and tool grants:
 
 - Rename `extensions.std-email` to `extensions.std-pim`.
 - Move old email fields from `extensions.std-email.config.*` to `extensions.std-pim.config.email.*`.
@@ -70,7 +50,8 @@ Important migration from old email-only config:
 
 ## Secrets
 
-Declare secret names under `extensions.std-pim.secrets`, then provide the values as Tau secrets. Secret files are trimmed UTF-8 text despite the `.yaml` suffix.
+Declare names under `extensions.std-pim.secrets`. Secret files contain trimmed
+UTF-8 text, not YAML:
 
 ```sh
 mkdir -p ~/.local/state/tau/secrets
@@ -90,33 +71,37 @@ Or for one startup, use `TAU_SECRET_<NAME>`, for example `TAU_SECRET_MAIL_PASSWO
 
 ## Google email authorization
 
-For Gmail IMAP/SMTP, set `auth.method: oauth2`, `auth.provider: google`, `auth.client_id_secret`, and optionally `auth.client_secret_secret`. Omit `auth.refresh_token_secret` and authorize with `:email auth google start <account>` then `:email auth google finish <account> <copied-url>`, or set `refresh_token_secret` for a manually provisioned refresh token. Gmail requires the broad `https://mail.google.com/` scope for IMAP/SMTP XOAUTH2, and Google's device flow rejects that scope, so state-owned Gmail auth uses installed-app authorization-code + PKCE with manual loopback URL paste.
+Gmail requires a `Desktop app` OAuth client, installed-app PKCE, and the
+`https://mail.google.com/` scope. Do not reuse Calendar's device-flow client.
+Use `:email auth google start <account>` followed by
+`:email auth google finish <account> <copied-url>` with the full failed loopback
+address-bar URL, or configure `auth.refresh_token_secret` for a manual token.
+Load `tau-self-knowledge-email` for fields and troubleshooting.
 
-Google auth account arguments complete from the current enabled,
-interactive-flow-eligible account inventory for that email or calendar module.
-Omitting the account lists a bounded sorted inventory, or states that no
-eligible accounts are available. Disabled, non-Google, and manual-refresh-token
-accounts are excluded, as are account ids that cannot be inserted exactly as one
-safe command token. Eligible ids are at most 128 bytes and contain only
-printable, non-whitespace ASCII.
-
-Use a Google OAuth client of type `Desktop app` for Gmail; do not reuse the Calendar TVs/Limited Input device-flow client. Start prints a browser URL, the browser eventually fails to connect to `http://127.0.0.1:<port>/`, and finish expects the full copied address-bar URL. Google OAuth apps left in Testing mode may issue refresh tokens that expire after roughly 7 days for sensitive/restricted scopes; real use should use an Internal/trusted Workspace app or a properly published/verified app. Workspace administrators may still block untrusted OAuth apps. If `refresh_token_secret` is set, `:email auth google` refuses to overwrite it; remove that field first to use state-owned OAuth. These OAuth actions are not controlled by `email.policy.allow_state_policy_extensions`; that policy only controls whitelist actions. Access tokens are cached in memory until near expiry and are retried once after IMAP/SMTP authentication failure. Action output never includes pasted codes, PKCE verifiers, refresh tokens, or access tokens.
+Omit the account argument to list eligible Google accounts. Completion excludes
+disabled, non-Google, and manual-token accounts. Eligible IDs contain at most
+128 bytes of printable, non-whitespace ASCII.
 
 
 ## Google Calendar authorization
 
-For new Google Calendar configs, omit `refresh_token_secret` and use the device flow. Create a Google OAuth client of type `TVs and Limited Input devices`; desktop, web, Android, and iOS client IDs fail the device authorization start request with `invalid_client: Invalid client type`. Google may show both a client id and client secret for that client type. Configure both `client_id_secret` and `client_secret_secret`; the start request uses the client id, and the finish/token exchange can use the client secret. The device flow requests the full Google Calendar scope because Google's device endpoint rejects some narrower Calendar scopes such as `https://www.googleapis.com/auth/calendar.events`.
+Omit `refresh_token_secret` to use device authorization. Create a Google OAuth
+client of type `TVs and Limited Input devices`; other types fail with
+`invalid_client: Invalid client type`. Configure `client_id_secret` and
+`client_secret_secret`. The device endpoint requires the full Calendar scope;
+it rejects some narrower scopes such as
+`https://www.googleapis.com/auth/calendar.events`.
 
 1. Start Tau with the `std-pim` config and the Google client id and client secret present.
 2. Run `:calendar auth google start <account>`.
 3. Open the printed URL manually and enter the printed user code.
 4. Run `:calendar auth google finish <account>`.
 
-The extension stores the returned refresh token in private calendar state. The action output never includes the refresh token. Action events are transient by default, and only the short-lived user code and URL are shown.
-
-Manual refresh tokens still work for power users by setting `refresh_token_secret` on the Google backend and declaring/providing that secret. If `refresh_token_secret` is set, `:calendar auth google` refuses to overwrite it; remove the field first to use state-owned OAuth.
-
-Google access tokens are short-lived and cached in memory until near expiry. Restarting Tau drops the access-token cache but keeps the refresh token.
+The extension stores refresh tokens in private calendar state and shows only
+the short-lived code and URL. Action events are transient by default.
+To supply a manual token, declare/provide `refresh_token_secret`; interactive
+authorization refuses to overwrite it. Restarting drops the in-memory access-token
+cache, not the refresh token.
 
 
 ## Calendar policies and output safety
@@ -128,26 +113,34 @@ Recommended defaults:
 - `calendar.policy.write.require_approval: true`
 - keep `calendar.accounts[*].calendars.allow` narrow
 
-PIM list-style tool results should follow Tau's standard header-then-payload shape: headers such as `format: ...` first, one empty line, then plain unindented rows. The `format` header describes the space-separated payload columns, and each item row starts with the main item id. Empty lists use a single `(no matches found)` payload line. Email folder ids and calendar ids are opaque ids returned by list tools; pass those opaque ids back exactly as returned by `email_list_folders` or `calendar_list_calendars`, without decoding or rewriting them. Email list rows still name the first column `uid`; pass that value as `email_id` to message-targeting tools such as `email_read`. Implicit/default values such as selected folder/calendar or defaulted calendar range bounds are response headers instead of repeated in every row. `calendar_search` returns active events by default; set `include_cancelled: true` only to investigate cancellations. Google cancellation tombstones without complete range bounds are omitted because they cannot be placed in a bounded result. `calendar_free_busy` excludes cancelled, transparent, and self-declined events. Both reads default to 20 rows and reject limits above 100. If either returns `next_cursor`, invoke that tool with `{{ "cursor": "..." }}` only: the opaque cursor retains the original normalized query. `calendar_get` remains a targeted inspection path and can return a cancelled event when its provider exposes it. `calendar_search` and `calendar_free_busy` are bounded reads; if `start` is omitted they default to midnight 2 days before the current date, and if `end` is omitted it defaults to 7 days after `start`. Provider page, row, or cursor-cycle safety failures return visible errors instead of successful short pages.
+List results have headers, a blank line, then unindented space-separated rows.
+`format` names the columns; the first column is the item ID (`uid` for email,
+passed as `email_id`). Empty results contain `(no matches found)`. Defaults
+appear in headers. Pass opaque folder/calendar IDs back unchanged.
+
+`calendar_search` returns active events; use `include_cancelled: true` to
+investigate cancellations. It omits Google tombstones without complete range
+bounds. `calendar_get` can inspect a cancelled event by ID.
+`calendar_free_busy` excludes cancelled, transparent, and self-declined events.
+Both paginated reads default to 20 rows, allow at most 100, and return errors
+rather than incomplete successful pages on safety failures.
+For `next_cursor`, call the same tool with `{{ "cursor": "..." }}` only.
+The cursor retains the query. Without `start`, reads begin at midnight two days
+before today; without `end`, they end seven days after `start`.
 
 ICS feed accounts should use `https://` or `webcal://` URLs, especially for private feed tokens. Non-loopback `http://` ICS feed URLs are rejected unless the account backend sets `allow_plain_http: true`; loopback HTTP remains available for local tests.
 
-Calendar writes should normally return `approval_required`; then the agent should wait for the user to inspect and approve with `:calendar change list`, `:calendar change open <id>`, and `:calendar change approve <id>`. Existing Google event writes use internally cached ETags. A provider rejection after dispatch, including an ETag mismatch, has an unknown remote outcome and requires manual reconciliation rather than an automatic retry.
-If an approved or direct Google write says the change may have applied, do not
-retry it. Reconcile the result manually in Google Calendar. Approved changes
-with unknown outcomes remain in `sending`, and later approval attempts stay
-blocked to avoid repeating a mutation Google may already have accepted.
+On `approval_required`, wait for user review via `:calendar change list`,
+`:calendar change open <id>`, and `:calendar change approve <id>`.
+Google writes use cached ETags. A rejection after dispatch, including an ETag
+mismatch, has an unknown remote outcome: reconcile in Google Calendar, do not
+retry. Approved unknown-outcome changes remain in `sending` and block reapproval.
 
 ## Email policies and output safety
 
-Recommended defaults:
-
-- keep `email.policy.incoming_auth.require: true`
-- configure exact `email.policy.incoming_auth.trusted_authserv_ids`
-- keep `email.policy.incoming_auth.allow_dmarc_only: false` unless the user explicitly accepts the weaker policy
-- keep `incoming_allow`, `outgoing_allow`, and `folders.allow` narrow
-
-Incoming email body reads are fail-closed. If policy does not allow full access, the model should use `email_request_access`, then wait for `:email in open <id>` and `:email in approve <id>`. Outgoing `email_send` calls that violate recipient policy queue under `:email out` actions; users can approve them with `:email out approve <id> [id...]` or reject them with `:email out deny <id> [id...]`.
+Load `tau-self-knowledge-email` before configuring email policy or approvals.
+Keep incoming authentication enabled and allowlists narrow. Never retry
+`smtp_outcome_unknown` automatically: the provider may have accepted the email.
 
 
 ## Troubleshooting

@@ -5,7 +5,7 @@ description: Use when auditing Tau agent execution, performance, cost, session s
 
 # Durable agent tracing
 
-Choose the least sensitive projection that answers the question:
+Choose the least sensitive projection:
 
 ```console
 tau agent trace <agent-id> --include-descendants --format agent-performance-jsonl
@@ -13,61 +13,49 @@ tau agent trace <agent-id> --include-descendants --format agent-tools-toon
 tau agent trace <agent-id> --include-descendants --format tau-jsonl
 ```
 
-The CLI itself defaults to `agent-tools-toon` in lite mode. Prefer
-`agent-performance-jsonl` for content-free audits. It covers ordinary
-provider usage/cost, tool/background lifecycle, typed waits and effective input
-timeouts, outer turns, and standalone compaction attempts. It still exposes
-identities, models, activity timing, usage, cost, membership, and work patterns.
+- `agent-performance-jsonl`: content-free usage/cost, tools/background calls,
+  typed waits/effective timeouts, outer turns, and standalone compaction attempts.
+  It still reveals identities, models, timing, membership, and work patterns.
+- `agent-tools-toon` (CLI default, lite) or `agent-tools-jsonl`: semantic
+  explanation, including unredacted prose/reasoning, messages, tool arguments
+  and output. Lite caps each text/output item at 4 KiB but retains complete
+  `text_bytes`/`text_lines` and `output_bytes`/`output_lines`; full keeps content.
+- `tau-jsonl`: every selected canonical journal occurrence, for replay or
+  journal-integrity investigation.
 
-For a session-wide activity/usage summary, run
-`tau session stats --session SESSION_ID`; it traverses durable session
-membership and agent journals, marking unavailable facts rather than inventing
-them. For a human conversation export from a durable agent branch, run
-`tau agent export chat AGENT_ID` (Markdown by default, or `--toons` for
-strict TOON). The export contains metadata, user prompts, and assistant
-responses: keep it private. Neither is a provider invoice.
+Compact formats use `tau.agent_trace_compact`, schema `0`, with `call`,
+`activation`, and `relationship` items plus prose/messages. Items include relative
+append time, optional Unix append time, and owning journal sequence. Only explicit
+observation/call/message references establish correlation; cross-agent adjacency
+and wall-clock order do not establish causality. Missing facts remain
+`source_not_selected`, `unresolved`, or `incomplete`.
 
-The live UI `$self/$subtree` equivalent-USD estimate counts an agent and its
-authenticated same-session creator descendants, including completed children;
-messaged peers are not descendants. It resets with the active session/runtime.
-Coverage and fallback prices make this an eyeballed comparison, not billing
-reconciliation. An offline trace and a live status display can cover different
-windows of activity.
+Qualified `*_us` intervals require selected, explicitly linked, nondecreasing
+endpoints; there is no generic `duration_us`. Completion waits reference terminal
+owners through `output_ref` rather than copying output.
 
-Use `agent-tools-toon` or `agent-tools-jsonl` only for bounded semantic
-explanation. Both formats use `tau.agent_trace_compact`, schema version `0`, and contain
-provider-declared `call`, assistant prose/reasoning, explicit directional
-messages, content-free `activation`, and typed `relationship` items. Every item
-includes relative append time, optional absolute Unix append time, and owning
-journal sequence. Treat only explicit observation/call/message references as
-correlation or causal evidence; wall-clock order and adjacency across agents are
-not causal evidence. Missing selected facts remain `source_not_selected`,
-`unresolved`, or `incomplete`.
+Tracing takes a finite read-only snapshot: locked EOF for inactive journals,
+validated checkpoint prefix for running ones. It does not contact the harness,
+pause writers, or follow writes; checkpoints may omit recent activity.
+Historical identities/timestamps do not change when journals move sessions.
 
-Qualified `*_us` intervals exist only when both explicitly linked endpoints are
-selected and nondecreasing. There is no generic `duration_us`.
-Completion-delivering waits point to the terminal owner through `output_ref`;
-they never copy owner output. Lite bounds each semantic text/output item at
-4 KiB while retaining complete `text_bytes`/`text_lines` and
-`output_bytes`/`output_lines`; full retains complete content.
+## Summaries and exports
 
-Treat every trace as sensitive: compact formats expose unredacted assistant
-prose, displayable reasoning, explicit messages, tool arguments/output, exact
-timestamps, and identity/activity metadata. Captured identity/timestamps remain
-historical journal facts when journals move between sessions.
+- `tau session stats --session SESSION_ID`: durable membership/journal summary;
+  marks unavailable facts.
+- `tau agent export chat AGENT_ID`: private durable-branch conversation with
+  metadata, prompts, and responses. Markdown by default; `--toons` selects
+  strict TOON.
+- Live UI `$self/$subtree`: approximate equivalent-USD for an agent and its
+  authenticated same-session creator descendants, including completed children,
+  not messaged peers. It resets with the active session/runtime and may cover
+  a different window than offline traces.
 
-Use `tau-jsonl` only for complete replay or journal-integrity investigation. It
-contains every selected canonical journal occurrence.
+None is a provider invoice; coverage and fallback prices limit estimates.
+Keep trace artifacts in owner-only files. Content-free metadata is still
+sensitive; other formats may include images and secrets as well as text.
 
-Tracing is a finite read-only snapshot. An inactive journal uses its locked EOF;
-a currently loaded/running journal uses an exact validated checkpoint prefix, so
-the trace may be stale and omit the newest writes. It never contacts the harness,
-pauses the writer, or follows later writes.
-
-Keep all trace artifacts private and use owner-only files. Compact and native
-formats can contain unredacted reasoning, messages, arguments, outputs, images,
-and secrets. Use session `events.jsonl` only for transient observations, private
-provider captures only for exact wire shape, and component logs for operational
-failures; load `tau-self-knowledge-debugging` before that escalation.
-
-`docs/agent-trace.md` owns exact schemas and field definitions.
+Use session `events.jsonl` for transient observations, private provider captures
+for exact wire shape, and component logs for operational failures; load
+`tau-self-knowledge-debugging` before escalating. `docs/agent-trace.md` owns
+schemas and field definitions.

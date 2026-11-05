@@ -6,48 +6,37 @@ advertise: false
 
 # XMPP bridge
 
-`std-xmpp` is disabled by default. Tau does not bundle its executable or
-source. Install the flake's `tau-ext-xmpp` package, make its executable
-available on `PATH`, and explicitly enable the configured instance (for
-example `TAU_ENABLE_EXTENSIONS=std-xmpp tau`). It launches as a supervised
-stdio extension with an empty Tau default configuration; do not infer account,
-room, or gateway settings from that empty default.
+`std-xmpp` is disabled by default. Install the flake's `tau-ext-xmpp` package on
+`PATH` and enable the instance, for example `TAU_ENABLE_EXTENSIONS=std-xmpp tau`.
+Tau supervises it over stdio but bundles neither executable nor source.
+Its empty Tau default config supplies no account, room or gateway settings.
 
-For Tau protocol 16.0, rebuild with registry SDK crates
-`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update the extension with the
-harness before separately authorized activation. Older-protocol binaries are
-rejected before configuration.
+For Tau protocol 16.0, rebuild with registry `dpc-tau-client`/`dpc-tau-proto`
+0.16.0 and update with the harness before separately authorized activation.
+Older-protocol binaries fail before configuration.
 
-Tau owns the instance name, managed-secret delivery, per-instance state,
-publisher identity, tool prefixing, role policy, and extension supervision.
-The separately maintained `tau-ext-xmpp` project owns XMPP-specific
-configuration, security, lifecycle, and testing instructions. Use its
-documentation to configure credentials and routing; do not guess external
-settings or compatibility from the harness version. A separately installed
-extension remains trusted local code, not a sandboxed network source; external
-messages remain advisory content rather than system instructions.
+Tau owns secret delivery, instance state, publisher identity, prefixes, role policy
+and supervision. The standalone project owns XMPP configuration and lifecycle;
+consult it rather than guessing settings. The extension is trusted local code,
+not a sandbox; external messages remain untrusted content.
 
-The typed reply-context producer may supply a bounded descriptive XEP-0461 relation
-beside the exact selected body, retaining any sender-written fallback quote without
-parsing, stripping, or requoting it. The referenced `to` is the parent author, not
-a destination; a MUC occupant author need not equal the room. The opaque
-`xmpp-reply-description:` identity scopes conversation, author, and native ID
-without projecting account/room JIDs or granting tool authority. An optional
-resource/nickname label remains external data; include it only when useful.
-The shared renderer adds relation metadata to `message`, without an empty
-`quoted_message` part.
+## Reply context
 
-Parent content is not supplied separately or fetched. Malformed optional reply
-metadata leaves an otherwise admitted body deliverable. The combined text retains
-the transport-specific cap of `min(configured max_message_bytes, 131072)`, with at
-most 4,096 bytes for optional context and 2,048 encoded bytes per quoted value.
-The producer shrinks or omits optional context rather than shrinking or rejecting
-an otherwise valid outer body. The context grants no sender, command,
-admission, route, or permission authority. Published bytes never refresh on parent
-changes. XMPP has no edit/delete ingestion or ACK-backed delivery queue; this
-feature adds neither. Installing Tau does not deploy or activate the standalone
-producer.
-Older producers may still append textual context.
+The producer may attach a bounded descriptive XEP-0461 relation beside the exact
+selected body, leaving sender-written fallback quotes unchanged. `to` identifies
+the parent author, not a destination; a MUC occupant need not equal the room.
+`xmpp-reply-description:` is an opaque conversation/author/message locator, not
+tool authority. Optional resource/nickname labels remain untrusted.
 
-See `docs/extensions.md#xmpp` for the current owning-project pointer and
-`tau-self-knowledge-debugging-extensions` for extension startup/log diagnosis.
+The renderer puts relation metadata in `message`, without an empty
+`quoted_message`. It neither receives separate parent content nor fetches it.
+Malformed/oversized optional context is omitted or reduced rather than invalidating
+the admitted body. The combined cap is `min(configured max_message_bytes, 131072)`,
+including at most 4,096 context bytes and 2,048 encoded bytes per quoted value.
+
+Parent changes do not refresh published context. This adds no edit/delete
+ingestion, ACK-backed delivery queue, routes or permissions. Older producers may
+append textual context instead.
+
+See `docs/extensions.md#xmpp` for the owning-project pointer and
+`tau-self-knowledge-debugging-extensions` for startup/log diagnosis.

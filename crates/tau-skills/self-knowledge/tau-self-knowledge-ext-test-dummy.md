@@ -4,55 +4,44 @@ description: Use when testing Tau test-dummy, including restart_test_dummy, test
 advertise: false
 ---
 
-# Tau test-dummy extension self-knowledge
+# Test-only dummy extension
 
-`test-dummy` is a disabled-by-default test extension. It runs `tau-ext-test-dummy` and exists to exercise harness extension supervision, tool dispatch, restarts, config errors, and prompt interception behavior.
+`test-dummy` runs `tau-ext-test-dummy` for supervision, dispatch, restart, and
+interception tests. Keep it disabled in normal configurations.
 
 
 ## Features
 
-- Registers `restart_test_dummy`, a tool that historically either exits the extension process or returns an error at random, and disabled-by-default `typed_image_test_dummy`.
-- Can be configured with deterministic `restart_mode` for tests: `random`,
+- `restart_test_dummy` supports `restart_mode`: `random`,
   `success`, `error`, `exit`, `hold_no_side_effect`, or
   `hold_until_success_release`, or `exit_once_then_success`.
-- `configure_user_data_probe: true` performs one synchronous Configure-time
-  ExtensionData write to the fixed User-scope `configure-probe` leaf with fixed
-  `configured` bytes. It exists only to test ephemeral harness startup and
-  accepts no configurable path or content.
-- `typed_image: true` enables `typed_image_test_dummy`, which returns a fixed
-  in-memory 1×1 PNG as typed provider content for
-  the hermetic durable-replay test. It honors captured Inline/Artifact policy
-  using the SDK uploader for a single fixed prepared payload. It accepts no
-  arguments and does not directly read or write image files.
+- `configure_user_data_probe: true` writes fixed `configured` bytes to the
+  User-scope `configure-probe` leaf during Configure, to test ephemeral startup.
+  Neither path nor content is configurable.
+- `typed_image: true` enables no-argument `typed_image_test_dummy`: a fixed
+  in-memory 1×1 PNG for durable-replay tests, using captured Inline/Artifact
+  policy and the SDK uploader, without image-file I/O.
 - `provider_context_raw_message: true` enables one test-only tool that publishes
   an existing message-bridge delivered report to its exact `agent_id` and `text`
   arguments. Gated provider-context placement E2Es are its only intended caller.
-- `hold_no_side_effect` accepts one no-argument invocation, emits correlated
-  readiness progress after its bounded worker starts, and performs no
-  filesystem, network, environment, or child-process operation. It joins on
-  cancellation/disconnect and has a fixed ten-second terminal deadline.
+- `hold_no_side_effect` accepts one no-argument call, reports correlated
+  readiness, performs no external operations, joins on cancellation/disconnect,
+  and has a ten-second terminal deadline.
 - `hold_until_success_release` requires the caller to own a private `0700` root,
   choose a fresh absent socket leaf, and generate a nonce for each invocation.
-  The extension binds and removes only that leaf, reports readiness before
-  arming release, and accepts 4096-byte-bounded newline-delimited JSON frames
-  containing the exact active `call_id` and configured `release_nonce`. An exact
-  match returns the normal `restart succeeded` result; bad frames do not release
-  it. Readiness and each admitted frame read stay bounded, but no independent
-  elapsed-time deadline races authenticated release, correlated cancellation,
-  or disconnect/shutdown. Listener and client-configuration failures settle
-  fail closed, and teardown joins all worker threads without synthetic success.
+  It binds/removes only that leaf and reports readiness before arming release.
+  Release requires a newline-delimited JSON frame of at most 4096 bytes matching
+  `call_id` and `release_nonce`; success returns `restart succeeded`.
+  Readiness/frame reads are bounded, but release has no competing timer.
+  Cancellation/disconnect joins workers; listener/configuration errors fail
+  closed without synthetic success.
 - `exit_once_then_success` requires one absolute marker below a caller-owned
-  private `0700` fixture root. The first live call reports correlated progress,
-  atomically creates that marker, and exits without a terminal. A replacement
-  checks the regular existing marker and returns `restart succeeded`. Missing or
-  relative configuration, a missing parent, a non-regular marker, and filesystem
-  errors fail closed; the initially absent marker leaf is intentional. The mode
-  has no timing or general fault-scripting controls.
+  private `0700` fixture root. The first call reports progress, atomically creates
+  the absent marker, and exits without a terminal. The replacement checks the
+  regular marker and returns `restart succeeded`. Invalid config, missing parent,
+  non-regular marker, or filesystem errors fail closed. No timing/fault scripting.
 - Ignores replay-marked `tool.started` deliveries so historical restart events do not emit tool replies or exit the extension again; malformed config is surfaced as `ConfigError`.
 - Intercepts `agent.prompt_submitted` and rewrites whole-word `tao` to `tau`, preserving letter case. When it changes text it emits a transient harness notice message: `did you mean "Tau"? — corrected for you`.
-
-This extension is not intended as user-facing functionality. It should stay disabled in normal configs.
-
 
 ## Configuration
 

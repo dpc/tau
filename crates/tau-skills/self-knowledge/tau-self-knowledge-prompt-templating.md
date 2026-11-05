@@ -14,14 +14,13 @@ and
 [`SPEC-exact-sentinel-prompt-envelopes`](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md);
 template authors must not invent local provenance wrappers for them.
 
-Tau renders prompt fragments and system prompt templates with Handlebars in strict mode. Unknown variables make that fragment/template fail to render and prevent prompt dispatch, so prefer documented variables and guard optional data with stable fields like `cwd` or `working_directory.present`.
+Tau uses strict Handlebars: unknown variables prevent prompt dispatch.
+Guard optional data with `cwd` or `working_directory.present`.
 
-Context-size alert `message` values use the same prompt-fragment template data
-and helpers. Tau renders each enabled alert with the owning prompt snapshot;
-whitespace-only output omits that alert for the prompt, and a render error
-rejects prompt materialization before provider dispatch.
+Context-size alert `message` uses the same data/helpers and owning prompt
+snapshot. Whitespace-only output omits an alert; render errors prevent dispatch.
 
-Templates are plain prompt text, not HTML. Tau disables default HTML escaping so paths and shell snippets render exactly. Use `xml_escape` only when inserting text into XML-shaped prompt sections.
+HTML escaping is off. Use `xml_escape` for XML-shaped sections.
 
 ## Where templates are configured
 
@@ -51,29 +50,25 @@ agents:
       textFile: prompt-fragments/long-policy.hbs
 ```
 
-The two fields are mutually exclusive. Absolute paths are unchanged; relative
-paths start at Tau's config directory containing `harness.yaml`, including for
-fragments declared in `harness.d` files or command-line config layers. An
-unreadable or non-UTF-8 selected file is a fatal config error. Tau also loads
-fragments attached to disabled roles, but does not read files referenced only
-by unselected profiles. Loaded text has exactly the existing inline rendering,
-additive layering, and full-fragment de-duplication behavior.
+`text` and `textFile` are mutually exclusive. Relative paths start at the
+directory containing `harness.yaml`, including from `harness.d` or CLI layers.
+Unreadable/non-UTF-8 files fail config loading. Disabled roles' fragments still
+load; unselected profiles' files do not. File text uses inline rendering,
+additive layering, and full-fragment de-duplication.
 
-This is configuration organization, not secret storage or redaction. Fragment
-content still enters rendered model prompts and any applicable diagnostics.
+Fragment content enters model prompts and applicable diagnostics; do not put
+secrets in it.
 
-`agents.prompt_fragments` apply to every role in every role group, including fragments supplied by one-shot harness config overrides. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
+`agents.prompt_fragments` apply globally, including one-shot config overrides;
+group/role fragments apply at that scope. New groups should define `roles:`;
+group fragments without roles mainly override built-ins. Ascending `priority`
+orders fragments; values below `100` precede generated sections such as skills.
 
-Tau's built-in global fragment lists available agent roles for `agent_start`
-whenever the effective prompt tool surface includes that tool. Tau omits it
-from prompt template data for roles or models without it.
-Ordinary prompt fragments whose templates render only whitespace are likewise
-omitted from the `prompt_fragments` array exposed to custom system templates.
+Tau includes its role catalog only when `agent_start` is available.
+Whitespace-only fragments are omitted from `prompt_fragments`.
 
-Configured extensions can also publish runtime prompt-fragment declarations. Tau
-commits those transient events through interception before changing prompt
-assembly, removes a contributor's fragments when it disconnects, and does not
-replay them to late subscribers.
+Extensions can publish transient runtime fragments through interception.
+Disconnect removes their fragments; late subscribers receive no replay.
 
 Roles can also choose a full system prompt template with `prompt_override`; custom templates live under `~/.config/tau/prompts/<name>.hbs`.
 
@@ -96,22 +91,16 @@ Prompt fragments can use:
 - `skills` — prompt-visible skills, with `name`, `description`, and `baseDir`.
 - `agent_context` — extension-published per-agent context, keyed by context name. Each key is an array of contributions with `extension_name` and `value`.
 
-Full system prompt templates additionally receive `agent_id` for a concrete
-agent plus rendered `prompt_fragments` and `tool_prompt_fragments` arrays. Tau's
-built-in templates intentionally omit `agent_id`; custom templates retain it for
-explicit placement, while agents can query current authoritative identity with
-the input-free `self_info({})` tool. Each fragment item has `name`, `priority`,
-`content`, and `early`. Tool prompt fragment `content` already includes Tau's
-automatic ``### `<tool>` instructions`` heading.
-They also receive optional `payload_envelope_provenance_notice` text whenever selected
-context contains a Tau-stamped payload envelope. Custom templates should render
-that rule once; omitting it replaces Tau's model-visible provenance cue.
+Full templates also receive `agent_id` for a concrete agent, plus rendered
+`prompt_fragments` and `tool_prompt_fragments` with `name`, `priority`, `content`,
+and `early`. Built-ins omit `agent_id`; agents can use `self_info({})`.
+Tool fragment content includes ``### `<tool>` instructions``.
+Render optional `payload_envelope_provenance_notice` once when present; omitting
+it removes Tau's model-visible provenance cue for stamped payload envelopes.
 
-Extension fragments can also be capability-gated by their consumer. In
-particular, Tau includes the shared `shell.workdir` fragment only when the
-effective role/model tool snapshot contains a `shell:workdir` capability, and
-coalesces declarations from multiple shell instances into one rendered
-fragment.
+Consumers may capability-gate extension fragments. `shell.workdir` requires
+`shell:workdir` in the effective tool snapshot; multiple shell instances
+coalesce into one fragment.
 
 ## Helpers
 

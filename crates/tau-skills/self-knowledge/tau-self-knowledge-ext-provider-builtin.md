@@ -6,218 +6,12 @@ advertise: false
 
 # Tau provider-builtin extension self-knowledge
 
-## Codex partial answers
+`provider-builtin` runs `tau-ext-provider-builtin`, is enabled by default, and
+publishes configured, locally credential-usable models. Publication does not prove
+remote authentication, entitlement, or available quota. See `docs/providers.md`
+for profile schemas and route-specific detail.
 
-Codex `partial_answer` text is visible answer text, not a final-answer summary.
-Tau preserves an observed partial phase through saved history and request replay,
-including model switches; it does not infer broader phase support for new models
-or change the missing/unknown-phase fallback. A phase alone never requests more
-sampling. When a completed response explicitly sets `end_turn=false`, Tau continues
-the same outer turn through normal checkpointed inference without synthetic input,
-with at most 16 additional no-tool samplings. Further nonterminal output stops with
-an error, but Tau keeps its text and usage. Tools retain their usual round ownership.
-Cancellation and restart use durable continuation/checkpoint state, not an
-adapter-local loop.
-
-## Public Sign in with ChatGPT
-
-`tau provider add chatgpt-plan` is the separate public Responses/SSE plan-sharing
-route. It requires persistent `--state` or `--config` setup, not `--output -`,
-so a validated issued registration survives catalog failure or canceled model
-selection. It is
-not legacy `chatgpt`/Codex and not generic API-key `responses`. It opens a
-real loopback callback listener, validates OIDC signatures and transaction
-bindings, saves the issued account/workspace client, requires the returned direct
-plan scope, and lets the user choose an account-catalog model. Missing context
-limits require explicit entry. Credentials never migrate from Codex.
-
-Use separate provider names for accounts/workspaces. `login NAME` reauthorizes
-the same registration without changing settings. `logout NAME` attempts remote
-renewable-session revocation and clears local tokens while retaining the
-registration; unconfirmed revocation is reported. Disabled plan grants are
-retained without models; repeat add with the same name to grant permission and
-choose models. Restart after model-settings changes.
-
-Refresh runs in retained prompt workers under a per-credential crash-released OS
-lock plus main-loop Secret read/CAS/reload. The lock domain is the same state
-root/instance as Secret; profile aliases of one reference share it. Lock waits
-are bounded/cancelable, but accepted rotations are saved even after cancellation.
-An ambiguous exchange failure suppresses that generation in the running process:
-sign in again rather than expecting background retries. After a crash the next
-owner reloads and asks the server to validate the saved token; no exactly-once or
-crash-safe remote exchange guarantee exists.
-
-The initial surface is text/reasoning/local Function tools, full client history,
-`store:false`, `stream:true`, and developer `additional_tools`. No hosted/custom
-tools, image generation, WebSocket continuation, native compaction or paid-key
-fallback is exposed. Only `response.completed` succeeds. Inference failures are
-terminal, not automatically replayed; explicit later requests remain possible.
-This new-provider policy does not change existing provider retries. Local-summary
-compaction remains available. Model catalog visibility does not prove plan
-entitlement, available usage, or absence of separately enabled credits.
-See `docs/providers.md`; validation is offline/loopback, not live account testing.
-
-## Native Grok
-
-Use `tau provider add grok` for native device OAuth and a setup-time catalog
-snapshot. `login NAME` replaces only the local credential; `logout NAME`
-currently supports native Grok and deletes only its `grok_oauth` Secret, never
-remote revocation. Rename keeps its stable identity. Missing credentials
-withdraw models until login. No ChatGPT auth, cookies, private Build headers or
-paid API-key fallback is used.
-
-Runtime refresh matches the Codex baseline: process-local generation
-single-flight, existing main-loop Secret CAS and authoritative reload. An exact
-401 can force one refresh; 403 cannot. Failed rotation generations need login.
-Cross-process exchanges and crash-before-save can lose a rotating token; there
-is no global lock or exactly-once claim.
-
-Discovery requires joined text-route metadata and known contexts; update
-settings and restart for model changes. Exact audited `grok-4.7` and discovered
-aliases default to function tools; other routes need explicit capability
-configuration. Native tool images are explicit opt-in and not live verified.
-Grok standalone compaction uses xAI's native opaque compact endpoint and replays
-its single encrypted item. OAuth compact entitlement and live fidelity remain
-unverified. Proven pre-output request/body transport and absolute-deadline
-failures use the bounded compaction scheduler. Unknown status/output failures
-remain terminal, and no native failure selects a second paid summary
-implementation. No Fast/quota,
-subscription-entitlement, free/unlimited or extra-usage safety promise exists.
-See `docs/providers.md` for the public client-ID caveat, pricing and partial-limit
-behavior. Never initiate login, live inference or paid traffic without consent.
-
-Native Codex standalone compaction displays sampled N/? activity counts from
-validated notifications, not a percentage or the provider sequence number.
-Canonical transaction success alone seals an observed count as N/N; failure or
-cancellation never does. No count is invented when attaching after the updates.
-Other backends can populate optional current/total compaction counts; none of
-this transient activity contains or persists compaction output.
-
-## Image generation
-
-ChatGPT profiles declare ordinary function tool `generate_image` for their exact
-provider namespace and serving connection by default. Set
-`image_generation: false` to opt out. Standard and Lite are supported. The
-declaration is default-off for roles; configure
-`enable_tools: [generate_image]` on an allowed role and Tau selects its eligible
-account backing internally. An instance `tool_prefix` prefixes the alias.
-The only input is `{"prompt":"..."}`, nonempty and at most 32 KiB. The backend
-uses fixed `gpt-image-2` and the selected subscription account; it does not
-probe entitlement, switch accounts, or fall back to an API key.
-
-Artifact availability is checked before generation. Success returns
-`artifact`, `size`, and `mime_type` output headers for the original PNG, up to
-16 MiB with alpha/metadata intact. The artifact value is the canonical
-`<tau-artifact:FULL_KEY>` reference; pass it directly to `import` for a private
-path on the shell host or to `read_image` where supported. Shared originals outlive
-sessions, including ephemeral transcripts. No inline image or store path is
-returned. Ordinary background/wait/cancel applies; failed or uncertain
-generation is never retried. Cancellation during publication may orphan the
-shared original. The network deadline is five minutes; the overall call deadline
-is seven minutes. Expired credentials require authentication before another
-explicit invocation.
-
-## Provider overview
-
-`provider-builtin` is Tau's built-in provider extension. It runs `tau-ext-provider-builtin`, is enabled by default, publishes available models from configured providers, and executes agent turns for built-in provider backends.
-
-`tau dev preview-declarations` can inspect config-owned provider/model metadata
-without reading credentials or starting provider runtime work. It reports
-state-owned profiles omitted and runtime availability unverified, so provider
-results are partial and the command exits nonzero. This is a cooperative
-declaration preview, not the effective `print-tools`/`print-prompt` path or proof
-that a model can be invoked.
-
-Audited ChatGPT/Codex Standard Responses routes advertise provider-hosted web search.
-The harness selects it through each role's `agents.web_tools` policy and uses
-cached search by default. Lite never advertises hosted search. Hosted calls stay
-inside provider inference and never become Tau tool requests; an ambiguous
-transport retry may repeat billable search.
-During a hosted call, the terminal shows a transient `web_search (native)` row
-and retains its completed row for the current UI session. For recognized upstream
-actions, the row shows a short `search`, `open page`, or `find in page` chip with
-any available search query or page URL, using the first nonempty query from a
-query list. The provider visibly escapes and shortens targets for compact
-display. Missing targets show `query unavailable` or `URL unavailable`; unknown
-or missing actions show `action unavailable`. The upstream provider may withhold
-this metadata until completion or omit it. Tau updates the same row
-when metadata arrives, without inventing an operation or target.
-These rows are not Tau tool facts and do not affect tool counters. Tau cannot
-reconstruct them after a cold restart.
-Hosted search may read and navigate accessible pages without a second fetch.
-Use the separate external `web_fetch` selectively for missing, stale, or
-unreadable pages or a different extraction; it is not required after each
-search. Cached/index access may be stale, live access requires explicit policy,
-and neither extraction path guarantees complete page text.
-
-## Provider retries
-
-Opaque-compacted conversations may attempt unchanged replay across private
-ChatGPT account aliases with the same exact upstream model and effective
-Responses mode. Both routes must be currently published by one configured
-Tau-owned built-in provider instance, with matching frozen private profiles.
-This includes old retained windows after restart: canonical source model IDs
-are interpreted through current configuration, not historical profile settings.
-Missing source routes, other adapters, or different models/modes do not qualify.
-`:model` preflights retained opaque history before installing an override.
-Remote acceptance is not guaranteed; rejection preserves the original bytes and
-provenance without stripping, history loss, or account fallback.
-
-Required ChatGPT/Codex Responses, Chat Completions, and OpenRouter inference
-keeps retrying during the running session until success or explicit
-cancellation, unless Tau can positively prove the unchanged request is
-deterministic and invalid. Standalone compaction keeps pre-output transport
-failures pending in five-attempt bursts, with one-, two-, four-, then capped
-five-minute backoffs between bursts. Later trusted delays still apply. Other transient
-failures stop at or beyond the fifth total attempt: if encountered after a
-transport burst, they terminalize immediately.
-Transient failures use the same scheduler and shared cooldown, while
-deterministic failures stop immediately. Unknown inference failures retry
-conservatively; billing, quota, credits, usage windows, and reloadable
-auth/configuration retry slowly.
-Only the live transport retry retains its logical prompt. Terminal compaction
-failures pause inference and require explicit `:compact` or authorized
-`agent_compact` recovery; ordinary terminals, ingress, and timers do not rearm them.
-After a restart during backoff, Tau pauses interrupted compaction.
-Deploying this policy does not reclassify or revive historical exhausted failures.
-Use `:retry` to release a parked retry early, or cancel to stop.
-A clean local-summary terminal with only reasoning or empty text has typed
-`local_summary_unusable` authority: discard the draft and try a strictly smaller
-complete prefix, with four such successors per episode. Capacity
-and length successors cannot reset this allowance; transport retries have their
-separate cadence. Exhaustion requires explicit recovery. Native opaque
-compaction, malformed/tool output, cancellation, and ambiguous work do not gain
-this authority. Standalone rows label compact request input and full
-continuation context separately; preserved suffixes prevent interpreting their
-ratio as context reduction.
-
-Delayed work is parked in one in-memory scheduler and does not consume a
-provider worker. Tau shows a retry status with the reason, next delay, and
-cancellation instruction. Same-profile limits share cooldown state, trusted
-server timing hints remain lower bounds except for usage-window reset estimates,
-and mutable profiles are reloaded before later attempts. Usage-window estimates
-remain informational because the user or provider may restore access early; Tau
-continues bounded periodic probes. Retry state does not survive a cold process
-restart.
-
-Within one provider process, a permanently rejected ChatGPT OAuth refresh is
-suppressed for the exact unchanged credential/profile generation across startup
-quota, prewarm, prompt, retry, and scheduled quota resolution. Credential or
-profile change permits a new attempt; cold restart may probe once again. A
-failed preemptive refresh may fall back only to the authoritative locked access
-token while it remains valid, never to an expired or stale pre-lock bearer. This
-does not change the logical prompt's slow authentication retry cadence.
-A canonical provider HTTP 401 instead overrides local expiry once for its exact
-credential generation. Tau reloads and may force one refresh, but will not
-automatically replay with the same rejected bearer if recovery fails. Omitted
-refresh replacements preserve existing fields; replacement access-token expiry
-comes from JWT `exp`, and refresh/CAS adoption fails closed if the pinned
-ChatGPT account identity is missing, inconsistent, or changed.
-
-## Provider profiles and CLI
-
-Provider registrations pair credential-free JSON settings with a typed credential
-record in the configured extension instance's private state. Manage them with:
+## Profiles and setup
 
 ```sh
 tau provider add
@@ -228,596 +22,326 @@ tau provider remove <name>
 tau provider rename <old> <new>
 ```
 
-Use `--extension <instance>` when more than one enabled built-in provider
-instance exists. Authenticated setup writes the credential first and settings
-last; explicit keyless setup writes only settings. Removal deletes settings
-first. Restart Tau after settings changes. Credential rotation is observed at
-the next prompt boundary without restart.
-
-Add defaults to mutable XDG state. `--config` targets portable XDG config, and
-`--config --output -` emits canonical credential-free JSON for dotfiles while
-publishing any required credential only into host-local Secret state. Explicit
-keyless output requires no Secret state. Config and state names
-must be disjoint; list/show report source identity and remove can infer a unique
-source or accept `--config`/`--state`. The retired state `provider-settings/`
-directory is never discovered; manually move only its JSON and leave Secret
-records untouched.
-
-Login replaces only the existing profile's host-local typed Secret after
-revalidating its source and exact settings bytes. It never changes settings,
-replaces config symlinks, or creates a state shadow. For a renamed instance use
-`tau provider --extension <instance> login <name>`. Bare ChatGPT add offers login
-for a config profile with absent or expired OAuth; noninteractive use and affected
-list rows show that exact command.
-
+Use `--extension <instance>` when multiple built-in instances exist.
 `tau provider add [KIND]` accepts `chatgpt`, `chatgpt-plan`, `grok`,
-`chat-completions`, `responses`, or `openrouter`; no kind opens a picker. API-key setup explicitly selects masked
-direct entry, a configured named secret, or keyless mode where supported.
-Named-secret values are materialized only into the instance's canonical Secret
-record. Selecting an existing configured name remains eager: setup refuses an
-unavailable source before writing settings. The picker also offers `Enter
-secret name for deferred binding…`, or opens that prompt directly when no
-declarations exist. This distinct deferred mode accepts any valid source name,
-including an existing declaration, and writes credential-free settings but no
-Secret record, so a declaratively managed profile can exist disabled until the
-exact declaration and value are deployed and Tau is restarted. Restart
-re-imports the current source and disables the profile with a redacted,
-source-name-only notice if it is unavailable. Bound declarations do not enter
-`Configure.secrets`; one per-instance lifecycle lock binds startup source
-selection, typed-secret publication, and the retained Configure settings
-snapshot.
+`chat-completions`, `responses`, and `openrouter`; omission opens a picker.
 
-Supported profile kinds:
+| Profile kind | Route |
+|---|---|
+| `chatgpt` | Private ChatGPT/Codex OAuth Responses; inference is WebSocket-only |
+| `chatgpt_plan` (CLI `chatgpt-plan`) | Separate public Sign in with ChatGPT plan-sharing Responses/SSE |
+| `grok` | Native Grok subscription OAuth |
+| `chat_completions` | OpenAI-compatible HTTP/SSE `/chat/completions`, including local servers |
+| `openrouter` | Chat Completions with explicit or discovered models |
+| `responses` | Generic public `/responses`, explicit model list and `sse` or `websocket` transport |
 
-- `chatgpt` — ChatGPT/Codex OAuth credentials for the Responses backend.
-- `chatgpt_plan` — separate public Responses/SSE plan-sharing registration; CLI
-  spelling `chatgpt-plan`, never legacy Codex credentials.
-- `grok` — native Grok subscription OAuth.
-- `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, typed API-key credential, model list, max output tokens, extra body, and compatibility options. The provider-kind picker labels it `OpenAI-compatible Chat Completions`.
-- `openrouter` — OpenRouter profile with a typed API-key credential and either explicit or fetched models.
-- `responses` — generic public Responses endpoint with base URL, optional API
-  typed API-key credential, explicit `sse` or `websocket` transport, and an explicit model list.
-  Omitted transport in an older profile means SSE. The provider-kind picker
-  labels it `OpenAI Responses API`.
+Settings contain no credentials; typed credentials live in private Secret state.
+Add defaults to mutable XDG state. `--config` targets portable XDG config;
+`--config --output -` emits credential-free JSON while storing required
+credentials locally. Config/state names must be disjoint. Remove accepts
+`--config`/`--state` or infers a unique source. The retired `provider-settings/`
+directory is not discovered: move only its JSON, not Secret records.
 
-For `Qwen/Qwen3.8-27B`, configure a model-local Chat Completions
-compatibility block with explicit cut-point bands for literal reasoning efforts
-`low`, `medium`, and `xhigh`, plus `single_initial_system_message: true`. Select
-role effort `xhigh`, retain
-Qwen's fixed thinking sampler, set
-`chat_template_kwargs.preserve_thinking: true` and `reasoning_replay: both`, and use the
-server's actual context reservation as `context_window`. Non-thinking is a
-separate profile with no published reasoning effort and
-`chat_template_kwargs.enable_thinking: false`. Servers without a top-level
-`reasoning_effort` extension, including current llama.cpp releases, should publish
-only `xhigh` with wire policy `omit` and rely on Qwen's default template behavior.
-Start local
-operation with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY=1`; increase it only
-after measuring server batching, KV cache, and memory headroom.
+Restart after settings changes; credential rotation takes effect at the next
+prompt boundary. Login replaces credentials without modifying settings, config
+symlinks, or creating a state shadow. For renamed instances:
+`tau provider --extension <instance> login <name>`.
 
-Generic Chat Completions and Responses model entries may additionally publish
-`max_input_tokens` and `max_output_tokens`. The former narrows request admission
-and reserve-based compaction below the total `context_window`; omission preserves
-the legacy context-window boundary. The latter describes model capability and
-clamps a nonzero provider-profile output policy, while omission leaves that
-policy unchanged and policy zero still omits the wire cap.
+API-key setup offers masked direct entry, a named secret, or keyless operation
+where supported. Existing-name selection requires an available source.
+`Enter secret name for deferred binding…` instead saves settings without a
+Secret record, allowing deployment before the declaration/value exists.
+Restart imports the current bound source; unavailable sources disable the profile.
+Declare sources under `extensions.provider-builtin.secrets`; there is no ordinary
+`extensions.provider-builtin.config` credential schema.
 
-When the exact llama.cpp route loads and accepts vision, add
+Explicit keyless profiles use `credential: {"kind":"none"}` and never read/write
+Secret records. Lost credentials never silently enable keyless requests.
+Invalid filenames/profiles or legacy/inline credential fields reject the entire
+startup settings snapshot without migration. Missing/malformed referenced
+credentials omit the affected profile's models.
+
+`tau dev preview-declarations` inspects config-owned metadata without credentials
+or provider runtime work. State-owned profiles are omitted and availability
+unverified, so provider results are partial and the command exits nonzero. It is
+not effective `print-tools`/`print-prompt` output.
+
+## ChatGPT/Codex
+
+Private `chatgpt` never falls back to HTTP/SSE or a paid API key. Set
+`responses_lite_compatibility: true` in the profile and restart to request Lite;
+capability still depends on the exact model. Tau never changes modes as a retry
+fallback. Both modes omit provider-inline context management.
+
+Set top-level `application_idle_timeout_secs: 900` in the credential-free
+ChatGPT provider JSON for a fifteen-minute application-message silence limit.
+This is not a `harness.yaml` key. Default: 300 seconds; accepted range:
+1–4294967295. Consumed Text messages renew the limit, including metadata;
+Ping/Pong does not. It is not a total turn deadline and does not alter prewarm,
+setup, or standalone compaction limits. Longer limits delay stall recovery.
+
+Tau reuses account/mode/agent WebSockets and `previous_response_id` where
+possible. A stale chain can trigger one full-replay repair before semantic output;
+it cannot splice a replay onto partial output. Retryable failures return to the
+logical-prompt scheduler.
+
+Codex `partial_answer` is visible answer text, not a final summary. Tau preserves
+observed phases across history/replay/model switches without inferring capability.
+A phase alone requests no continuation. Explicit `end_turn=false` continues the
+same outer turn, with at most 16 additional no-tool samplings; exhaustion retains
+text/usage and errors.
+
+Use exact published capabilities, not model-name guesses:
+
+- `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-6.1-terra` are selectable without changing
+  the `gpt-6-sol` default. They use local-summary compaction. Public coding routes
+  need `responses`, not Chat Completions tool traffic; tested entries live at
+  `crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-sol.json` and
+  `crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-terra.json`.
+- `:model chatgpt/gpt-6.2-astra` selects a provisional private entry. Its
+  272,000-token local budget (258,400 effective input) is not verified capacity.
+  It uses Standard client tools and local-summary compaction; do not infer
+  native efforts, hosted search, images, phase, or native compaction.
+- Image tool results require exact-route support and role permission.
+  `ARCH-tau-provider-codex` records pinned evidence, not live visual-fidelity tests.
+  Reference-bearing image history requires the Artifact store and root registry
+  alongside journals for backup/restore; missing/corrupt images fail the consuming
+  request before submission.
+
+Opaque-compacted history can attempt unchanged replay across private account
+aliases only within one built-in provider instance, with the same exact upstream
+model and effective Responses mode and matching current frozen profiles.
+`:model` preflights compatibility. Remote acceptance is not guaranteed; rejection
+preserves history rather than stripping opaque bytes or falling back accounts.
+
+### Hosted search and image generation
+
+Audited Standard routes advertise hosted search; Lite does not.
+`agents.web_tools` selects the implementation, cached by default. Hosted search
+runs inside inference, not as a Tau tool; ambiguous retries may repeat paid search.
+Its transient `web_search (native)` UI rows do not survive cold restart or count
+as tool facts. Hosted search may navigate accessible pages without `web_fetch`;
+fetch only when content is missing, stale, unreadable, or needs another extraction.
+Neither path guarantees complete or current text.
+
+ChatGPT profiles declare `generate_image` by default; opt out with
+`image_generation: false`. Roles must opt in with `enable_tools: [generate_image]`;
+an instance `tool_prefix` prefixes the alias. Standard and Lite are supported.
+Input is only `{"prompt":"..."}`, nonempty and at most 32 KiB.
+
+Generation uses fixed `gpt-image-2` on the selected subscription account, without
+entitlement probes, account switching, or API-key fallback. Success returns
+`artifact`, `size`, and `mime_type` headers for the original PNG, at most 16 MiB.
+Pass `<tau-artifact:FULL_KEY>` directly to `import` or `read_image`; no inline image
+or store path is returned. Artifacts outlive ephemeral transcripts. Ordinary
+background/wait/cancel applies; uncertain/failed generation is not retried.
+Cancellation during publication may leave an orphan artifact. Network deadline:
+five minutes; overall call: seven minutes. Expired credentials require login
+before another explicit invocation.
+
+## Public Sign in with ChatGPT
+
+`tau provider add chatgpt-plan` requires persistent `--state` or `--config`,
+not `--output -`. It registers a separate account/workspace client using a real
+loopback callback and direct plan scope; Codex credentials never migrate.
+Choose a catalog model and enter missing context limits explicitly.
+
+Use separate names for accounts/workspaces. `login NAME` reauthorizes the same
+registration; `logout NAME` attempts remote session revocation and clears local
+tokens while retaining registration, reporting unconfirmed revocation. Disabled
+grants retain registration without models; repeat add with the same name to grant
+permission and choose models.
+
+Refresh uses a per-credential OS lock and saved-token reload. After an ambiguous
+exchange failure, sign in again rather than expecting background retries.
+Cross-process coordination does not guarantee crash-safe remote token exchange.
+
+This route supports text/reasoning/local Function tools, full history,
+`store:false`, `stream:true`, and developer `additional_tools`. It exposes no
+hosted/custom tools, image generation, WebSocket continuation, native compaction,
+or paid-key fallback. Local-summary compaction remains available.
+Only `response.completed` succeeds; inference failures are terminal, without
+automatic replay. Catalog visibility does not establish plan entitlement or rule
+out separately enabled credits. Validation is offline/loopback, not live-account.
+
+## Native Grok
+
+`tau provider add grok` uses device OAuth and a setup-time catalog snapshot.
+`login NAME` replaces credentials; `logout NAME` deletes only local `grok_oauth`,
+without remote revocation. Missing credentials withdraw models. Update settings
+and restart for model changes.
+
+Exact audited `grok-4.7` and discovered aliases default to Function tools; other
+routes require explicit capabilities. Native tool images require opt-in and lack
+live verification. Native compaction replays one encrypted item; OAuth compact
+entitlement and live fidelity remain unverified.
+
+An exact 401 can force one refresh; 403 cannot. Failed rotation generations need
+login. Refresh coordination is process-local: cross-process exchange/crash can
+lose rotating tokens. Grok never falls back to ChatGPT auth, cookies, private
+Build headers, or paid API keys. Unknown status/output failures remain terminal;
+native failures do not select another paid summary implementation.
+
+Do not initiate login, live inference, or paid traffic without consent. No
+free/unlimited, entitlement, extra-usage, or quota-safety promise exists; consult
+`docs/providers.md` for client-ID, pricing, and partial-limit caveats.
+
+## Compatible and public API models
+
+Configure actual context limits and route capabilities. Generic Chat Completions
+accepts `supported_tool_types: []` or `["function"]`; parallel support requires
+Function support. OpenRouter discovery independently checks `tools`,
+`tool_choice`, and `parallel_tool_calls`; absent/unversioned metadata grants
+no capability. Tau does not force `provider.require_parameters`.
+
+`max_input_tokens` narrows admission/compaction below `context_window`.
+`max_output_tokens` declares capability and clamps a nonzero profile output policy;
+policy zero still omits the wire cap. Profile/model `tags` publish their union.
+
+For `Qwen/Qwen3.8-27B`, use model-local explicit `low`/`medium`/`xhigh`
+reasoning bands, `single_initial_system_message: true`, role effort `xhigh`,
+Qwen's fixed thinking sampler, `chat_template_kwargs.preserve_thinking: true`,
+and `reasoning_replay: both`. Use the server's actual context reservation.
+Servers lacking top-level `reasoning_effort`, including current llama.cpp, should
+publish only `xhigh` with wire policy `omit`. Non-thinking needs a separate profile
+with no effort and `chat_template_kwargs.enable_thinking: false`.
+Start local serving with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY=1`.
+
+For a verified vision-capable llama.cpp route, configure both
 `input_modalities: ["text", "image"]` and
-`tool_result_modalities: ["text", "image"]` to only that model entry. Both
-fields are required together; omitted fields keep text-only behavior. Tau then
-publishes `read_image` and lowers its typed result as one correlated multimodal
-`tool` message with text followed by high-detail `image_url` data URL parts.
-Tau never infers this capability from Qwen or other model names.
+`tool_result_modalities: ["text", "image"]` on that model entry. Omission remains
+text-only; Tau never infers vision from a model name.
 
-For API-key profiles, setup asks for the authority first: `Enter API key now`,
-`Use named secret`, or `No API key` where the profile kind supports keyless
-operation. Existing configured names remain eager; `Enter secret
-name for deferred binding…` creates an explicit deferred binding for any valid
-source name, including an existing declaration. Only direct entry opens the
-masked value prompt.
+Public `responses` requires explicit models. Setup preselects WebSocket only for
+the exact official OpenAI base URL, otherwise SSE; runtime neither probes nor
+falls back between transports. Omitted transport in older profiles means SSE.
+Each attempt replays the full typed transcript, without `previous_response_id`
+or `store`. This is not Realtime. The route supports text, completed reasoning,
+and Function tools, not hosted/custom tools or image/file inputs. Tau preserves
+validated opaque reasoning for replay without displaying it.
 
-Settings contain either a stable opaque Secret-scope credential identity with a
-closed credential-slot kind or,
-for supported local-compatible profiles, the exact explicit
-`credential: {"kind":"none"}` marker. Explicit keyless profiles create and read
-no Secret record. Missing or malformed credential selection remains invalid, so
-credential loss never silently enables unauthenticated requests. Provider
-startup loads and validates referenced typed records before publishing models;
-missing or malformed referenced credentials exclude the profile. Runtime
-reloads credentials at prompt boundaries and refreshes ChatGPT OAuth records
-with compare-and-swap, so a losing refresher never retries a rotated token.
-Initial and due-retry Secret reads run asynchronously with a 30-second response
-deadline. Accepted prompts remain FIFO while credential work finishes out of
-order; cancellation removes one waiter, and late results cannot dispatch work.
-Only the same provider, startup Responses mode, and credential-content
-generation share an OAuth refresh. Best-effort quota starts after `Ready` and
-yields to inference.
+`responses.models[].reasoning_effort.mapping` uses increasing cut points/native
+levels starting at `0.0`. Omission maps `[none, minimal, low, medium, high, xhigh, max]`;
+`[]` disables control. Boundaries at/below `0.5` select the higher band; those
+above select the preceding lower band. Migrate retired `efforts` arrays.
 
-Initial Configure validates the complete bounded provider settings snapshot
-before retaining parsed profiles or publishing models. An invalid filename or
-profile, including legacy or inline credential fields, rejects the whole snapshot:
-the extension publishes neither models nor Ready and the harness emits one
-mandatory replayable warning. Invalid-filename warnings expose no raw filename;
-profile-validation warnings may identify only the already-validated provider
-name and a closed reason. Neither form exposes paths or settings values. Startup
-does not mutate or migrate the rejected settings.
+Public Responses `response.incomplete_details.reason: "max_output_tokens"`
+preserves validated partial output/usage but never retries unchanged requests or
+executes truncated Function calls. Replay-safe plain reasoning-only output may
+use one bounded continuation. Other incomplete reasons remain failures.
 
-The profile kinds route to three deliberately separate wire backends.
-`chat_completions` and `openrouter` use the OpenAI-compatible HTTP/SSE
-`/chat/completions` adapter, including route-declared Function tools and semantic
-transcript replay; this is the supported route for local servers such as
-llama.cpp. Generic Chat Completions models accept only `[]` or `["function"]`
-for `supported_tool_types`; parallel support requires Function support.
-OpenRouter discovery instead derives Function, selector, and parallel support
-from the independent exact `tools`, `tool_choice`, and `parallel_tool_calls`
-memberships in each model's `supported_parameters`. Missing, null, empty, or
-unversioned cached discovery metadata grants no support.
+## Retries and compaction
 
-For an OpenRouter model with `tools` but no `tool_choice`, automatic mode sends
-the Function definitions and relies on the documented default. Disabled mode
-omits both definitions and selector so the model cannot call them. Parallel
-control requires both `tools` and `parallel_tool_calls`. The extension does not
-force `provider.require_parameters`; optional request fields therefore do not
-unnecessarily narrow OpenRouter routing. Tau still owns all tool definitions,
-authorization, and execution.
-`chatgpt` uses the private ChatGPT OAuth/Codex Responses adapter. Its ordinary
-inference is WebSocket-only with no HTTP/SSE fallback. HTTPS is retained only for
-OAuth and quota acquisition; native standalone compaction uses the ordinary
-Responses WebSocket route. It is not a public
-API-key OpenAI Responses provider.
+ChatGPT/Codex, Chat Completions, and OpenRouter inference retries until success or
+cancellation unless Tau proves the unchanged request invalid. Unknown failures
+retry conservatively; billing/quota/auth/configuration failures retry slowly.
+This does not apply to the terminal-failure policies above.
 
-Select the provisional private catalog entry `gpt-6.2-astra` with
-`:model chatgpt/gpt-6.2-astra` (or the configured account namespace).
-It does not change selected defaults. The November 1, 2026 official Codex audit
-at `4b4a5cf25aa5b064c866218b405c848745fd280f` and stable `rust-v0.166.0`
-found no exact-model metadata or special handling. Tau keeps ordinary Standard
-client tools and local-summary compaction, with a conservative local fallback
-budget of 272,000 tokens (258,400 effective input), not verified capacity.
-Tau makes no native effort, summary, verbosity, phase, hosted search, image,
-native/inline compaction, output-cap, or model-specific pricing claims.
-The audit did not verify live rollout/account access; do not equate this entry
-with older `gpt-6-astra`, claim a successful live test, or change account/session
-defaults.
-See `docs/providers.md` for the audit and selection caveats.
+Retry delays release worker slots; concurrency defaults to 8, configurable with
+`TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Same-profile jobs share cooldowns.
+Server timing hints remain lower bounds except usage-window reset estimates:
+Tau keeps bounded probes because access may return early. Retry state does not
+survive cold restart. Use `:retry` to release the selected parked prompt early,
+or cancel to stop. A successful probe can wake same-profile peers; merely
+refreshing quota display does not clear cooldowns.
 
-`responses` uses a generic API-key `/responses` adapter with explicit SSE or
-WebSocket transport. The setup wizard preselects WebSocket only for the exact
-official OpenAI base URL and SSE for compatible endpoints. Runtime never probes,
-infers, or falls back between transports. It
-requires user-configured models and does not discover models or choose provider
-presets. Each turn sends the complete typed Responses transcript. It supports
-assistant text, completed reasoning items, and Function tools. Plain
-`reasoning_text` follows the existing `show-thinking` UI behavior. Opaque,
-summary-only, and encrypted reasoning is retained without a display projection;
-malformed reasoning is rejected. The complete validated item is replayed
-verbatim. The backend preserves Responses replay sidecars and does not send
-`previous_response_id` or `store`; it does not expose hosted/custom tools,
-image/file inputs, or compaction. Existing `openrouter` profiles remain on Chat
-Completions.
+An exact high-volume streaming loop stops with `stop_reason: repetition_detected`
+and clears tentative output. The harness treats it as a loop guard, not a
+retryable provider turn.
 
-WebSocket attempts use one fresh connection and one `response.create` envelope.
-Retries reconnect and replay the full local transcript; they do not reuse
-connection-local `previous_response_id` state. This public Responses mode is not
-OpenAI Realtime.
+Rejected OAuth refresh generations remain suppressed within the process until
+credentials/profile change. An exact provider 401 permits one forced refresh,
+not replay with the rejected bearer if recovery fails. A failed preemptive refresh
+can use only the authoritative still-valid access token.
 
-Public Responses SSE and WebSocket attempts classify only exact nested
-`response.incomplete_details.reason: "max_output_tokens"` as output-length
-incompletion. Tau preserves validated partial prose, reasoning, usage, and the
-nested response id but never retries the unchanged request or executes a
-truncated Function call. Replay-safe plain reasoning-only output may use the
-existing single bounded continuation. Standalone summary compaction retains the
-partial terminal outside context for accounting and inspection, never installs
-it as a replacement window, and never retries it automatically. Other
-incomplete reasons remain provider failures.
+`compact`/`agent_compact` require advertised standalone capability.
+Known native absence uses local summary; a definitive native rejection before
+semantic output permits one local request in the same transaction.
+Cancellation/post-content failure never falls back. Configured thresholds remain
+independent of native support; `provider_default` without a numeric default
+has no boundary.
 
-Each `responses.models[]` entry can set `reasoning_effort.mapping` to exact
-portable cut points and supported native levels. Omission uses the standard full
-mapping for `[none, minimal, low, medium, high, xhigh, max]`; an explicit empty
-mapping disables the control. Non-empty mappings start at `0.0` and strictly
-increase both cut points and levels. Boundaries at or below `0.5` belong to the
-higher band, while boundaries above `0.5` belong to the preceding lower band.
-Profiles using the former `efforts` array must migrate to mapping bands.
-`tau provider add` omits the field, so generated profiles receive the full
-default. Each request explicitly sends the harness-effective native level as
-`reasoning.effort`; the native `none` level uses the API spelling `none`.
+Standalone pre-output transport failures remain pending in five-attempt bursts,
+with one-, two-, four-, then capped five-minute backoffs between bursts.
+Other transient failures stop at or beyond the fifth total attempt.
+Terminal failures pause inference until explicit `:compact` or authorized
+`agent_compact`; ingress/timers do not rearm them. Restart pauses interrupted
+compaction. Clean empty/reasoning-only local summaries may retreat to a smaller
+complete prefix, at most four successors; exhaustion needs explicit recovery.
 
-The extension has no ordinary `extensions.provider-builtin.config` credential
-schema. Inline credentials remain in provider auth/profile storage; referenced
-credentials use the separately scoped `extensions.provider-builtin.secrets`
-declarations described above.
-ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
+Chat Completions/OpenRouter/public Responses advertise local-summary compaction
+when context is nonzero. `local_summary_compaction` accepts optional
+`max_input_bytes`, `max_output_tokens`, `max_output_bytes`; `{}` keeps defaults:
+no prefix-byte cap, inherited ordinary output policy, 256 KiB output-byte bound,
+no proactive threshold. No separate default generation cap exists. Retired
+`serialization_profile`/`context_window_tokens` keys are invalid.
 
-Compatible model entries may also set
+Summary requests retain the ordinary prefix and append a harness instruction.
+Any returned tool call fails without execution. Tau accepts nonempty bounded
+final text, discards reasoning, and stores one synthetic checkpoint.
+Chat Completions output-limit continuations assemble the narrative; warnings
+require checking both Tau policy and server generation caps. Cancellation,
+post-output failure, insufficient context, or route loss does not authorize
+ambiguous resend. Native compaction counts `N/?` describe observed activity,
+not percentage reduction; only canonical success seals `N/N`.
+
+## Cache, cost, and diagnostics
+
+Chat Completions ignores cache counters unless `compat.cache_usage` selects
+`open_ai` or `deep_seek`; pair this with `compat.stream_options: true`.
+OpenRouter selects streamed read/write telemetry but publishes no cache contract:
+upstream residency, privacy, and lifecycle remain unknown.
+
+Generic Chat Completions/public Responses `cache_contract` is an operator
+assertion about the exact route, not discovery. Hits do not prove TTL.
+Tau has no native Anthropic/Gemini cache-object create/PATCH/delete client.
+Cache refresh is disabled by default; global opt-in still requires safe sliding
+read-renewal contracts, explicit prices/quota policy, and measured break-even
+evidence. It does not authorize unbounded idle traffic.
+
+Route-local OpenAI cache controls:
+
+- `compat.openai_prompt_cache.key: agent` derives a stable key.
+- Both adapters accept `options: { mode: implicit, ttl: 30m }`.
+- Chat Completions explicit mode:
+  `options: { mode: explicit, ttl: 30m, boundary: system_prompt }`.
+- Public Responses explicit mode:
+  `options: { mode: explicit, ttl: 30m, boundary: first_input_text }`.
+  This marks the first eligible non-assistant text block, not a system boundary
+  or cross-agent cache; no eligible block fails locally.
+
+Implicit mode may write volatile suffixes at a premium. Retired
+`compat.prompt_cache_key: bool` and `retention: in_memory` / `"24h"` settings are
+invalid; Tau does not translate them to the new contract.
+
+Optional prices are nonnegative decimal USD values:
 `est_uncached_input_cost_1m_usd`, `est_cached_input_cost_1m_usd`,
-`est_cache_write_input_cost_1m_usd`, and `est_output_cost_1m_usd` to
-non-negative decimal USD prices per million tokens. They may set
-`est_cache_storage_cost_1m_token_hour_usd` per million token-hours. Use quoted
-decimal strings for fractional prices; integer JSON numbers
-are also accepted. Missing values resolve built-in default prices for known
-compatible model ids (`deepseek-v4-flash`, now a retired alias for V4.1 Flash,
-uses conservative **peak** estimates `$0.30`/`$0.006`/`$1.20`, not exact
-time-of-day billing) and otherwise use the central GPT-5.5-equivalent `$5`/`$.50`/`$30`
-fallback, including local and free models; explicit profile prices always take
-precedence. Hardcoded ChatGPT ordinary-input/output values follow OpenAI's basic
-public API pricing table. GPT-6 models, including `gpt-6.1-sol`, publish all four
-standard short-context API-equivalent rates; other private models omit cache
-prices and use the non-authoritative central display fallback. Long-context,
-service-tier, regional, and tool fees are excluded. A missing write price uses
-ordinary input; missing storage usage
-or price contributes no storage charge. The harness accumulates ordinary input,
-cache reads, cache writes, output, and reported token-time storage into this
-deliberately rough equivalent-API estimate per agent for the current runtime
-only.
+`est_cache_write_input_cost_1m_usd`, `est_output_cost_1m_usd`, and
+`est_cache_storage_cost_1m_token_hour_usd`. Quote fractional decimals; integers
+are accepted. Missing prices can use fallback estimates even for local/free
+models. Displays are rough current-runtime API equivalents, not subscription
+billing; see `docs/provider-price-audit.md`.
 
-Select `chatgpt/gpt-6.1-terra` without changing the `gpt-6-sol` default
-or existing role selections. It uses the same conservative Standard tool
-workflow and local-summary compaction as Sol 6.1, with image tool results
-and `low`/`medium`/`high`/`xhigh`/`max` efforts. Tau's shared local budget
-does not establish private capacity: upstream Codex selects a 500,000-token
-default and lists an 872,000-token maximum, while Tau retains its
-1,050,000-token total and 997,500-token input convention.
-Use the tested `crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-terra.json`
-entry for public Responses; that route also supports effort `none`.
-Public Chat Completions cannot carry Terra tool traffic. Terra's four base
-API-equivalent rates are `$1` input, `$0.05` cached input, `$1.25` cache writes,
-and `$5` output per million tokens. See `docs/providers.md` for route and price caveats.
+ChatGPT quota `Q?` means weekly data is unavailable, stale, or unbound.
+`Q-`, `Q=`, `Q+`, `Q!` require fresh exact-model pool binding; credits do not
+count as weekly usage.
 
-`chatgpt/gpt-6.1-sol` is selectable without changing the `gpt-6-sol` default.
-It offers Function/Custom tools and local-summary standalone compaction, a
-1,050,000-token window, and low/medium/high/xhigh/max efforts. Private native
-compaction, Lite, phase, and verbosity remain unadvertised without
-exact route evidence. For public API coding use a `responses` profile and the
-tested `crates/tau-ext-provider-builtin/fixtures/provider-models/gpt-6.1-sol.json`
-model entry. The public Responses
-adapter remains text/Function-only; public Chat Completions has no Sol 6.1
-tool calling. See `docs/providers.md` and `docs/provider-price-audit.md` for
-pricing and capability limits.
+`cache_diagnostics: off|metadata` freezes at startup. Metadata and separate exact
+request/response captures default on for durable inference/compaction; disabling
+metadata does not disable exact captures. Ephemeral activity is excluded.
+Inspect native compact `received_response`/`raw_events` and terminal/truncation
+flags, not the synthetic finished capture. `tau agent/session cache` recognizes
+scalar records but does not analyze them; see `docs/agent-cache.md`.
 
-Chat Completions cache counters are ignored by default. Set
-`compat.cache_usage` to `open_ai` or `deep_seek` only when the exact route uses
-that response schema, and pair a selected schema with
-`compat.stream_options: true` so the supported `include_usage` stream member
-requests terminal usage. DeepSeek hit/miss counters are parsed only through
-that explicit capability and remain response-local telemetry with probabilistic
-residency. OpenRouter profiles and discovered models select streamed
-OpenAI-compatible read/write telemetry by default, but never publish a cache
-policy or cache controls: router-selected upstreams leave cache mechanism,
-privacy, residency, renewal, and lifecycle unknown. Tau drops generic cache
-contracts on OpenRouter routes. Unsupported Anthropic/Gemini-compatible cache
-details remain absent; the extension has no native cache-object lifecycle
-client.
+## Networking
 
-Generic Chat Completions and public Responses model entries may add an optional
-`cache_contract` describing documented cache kind, TTL shape, renewal, output
-floor, quota treatment, and privacy posture for that exact route. This is an
-operator assertion, not discovery: Tau never derives a hard TTL from route names
-or recent hits. The adapter supplies prefix identity version `1`. Contracts are
-transient model current state and contain no cache keys, object names, prompt
-content, regions, timestamps, or hit history. They add no PATCH, delete, journal,
-or restart behavior. Current generic backends reject
-manual-deletion support because none owns a typed delete operation.
+Startup snapshots `http_proxy`, `https_proxy`, `all_proxy`, `no_proxy`; lowercase
+wins over uppercase. HTTP/WS use the HTTP class, HTTPS/WSS the HTTPS class, then
+`ALL_PROXY`. Only `NO_PROXY` bypasses a selected proxy; failures never fall back
+directly. Supported proxies use HTTP/HTTPS with optional percent-encoded Basic
+credentials, not SOCKS, PAC/WPAD, desktop discovery, or integrated auth.
+Redirects are unsupported. Restart after environment changes.
 
-Anthropic documents explicit breakpoints with sliding 300-second or 3,600-second
-TTLs, read renewal, and zero-output `max_tokens: 0` writes. A generic declaration
-may describe one of those modes only when the exact configured proxy guarantees
-it; Tau does not lower Anthropic `cache_control` or dispatch refresh requests.
-With Anthropic's `1.25x`/`2x` write and `0.1x` read multipliers, equal-prefix
-cost reaches the discrete break-even point after one five-minute read or two
-one-hour reads. Tau never converts that fact into a roughly four-minute cadence
-or traffic during unknown or unbounded idle.
-
-Gemini explicit context caching is a named externally managed provider object:
-its creation sets a fixed expiry, Gemini can PATCH the TTL/expiry, and deletion
-is provider-side. A generic exact-route contract may state
-`explicit_object`, `fixed` TTL, and `patch_expiry` with named-object storage,
-ZDR incompatibility, provider-specific residency, and
-`manual_deletion: unavailable`. That records provider semantics while accurately
-stating that Tau has no typed create/PATCH/delete operation. A Chat Completions
-profile can retain an opaque externally managed object reference in
-non-conflicting `extra_body`; Tau persists that configured request member and
-clones it into each attempt, but does not model separate object identity,
-lifecycle, or accounting state in runtime metadata or journals. The raw
-storage-price field can state a token-hour rate, but generic
-Gemini-compatible routes do not report object storage usage.
-
-Gemini implicit caching is only an automatic-prefix optimization. Use unknown
-residency, unsupported renewal, and unknown output floor unless the exact
-compatibility route documents stronger facts. Tau keeps compatible request
-prefixes stable but sends no keepalive, prewarm, or lifecycle traffic.
-
-For an exact generic GPT-5.6 route using typed OpenAI controls, publish the
-1,800-second lifetime as `sliding_known` with `read` renewal and an unknown
-output floor. Cache creation and each successful cache reuse renew the full
-30-minute window. Older models need a separate conservative policy: typical
-eviction is not a hard TTL, so use unknown residency and unsupported renewal
-unless the exact route has a stronger documented contract. OpenAI read/write
-counters remain observations, never TTL evidence.
-The harness cache-refresh scheduler is disabled by default and requires explicit
-global opt-in. It accepts only safe sliding read-renewal contracts, explicit
-prices, concrete quota policy, and measured writes plus break-even reads. One
-observation can authorize only one non-generating full-prefix resend during a
-bounded wait. Real prompts and Provider cooldowns take priority; failure never
-enters inference retry, and no lifecycle state survives restart. Observed
-eviction or a recent read never infers a TTL.
-
-Generic OpenAI-compatible cache request controls are opt-in and route-local:
-`compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat
-Completions accepts `options: { mode: implicit, ttl: 30m }` without a marker or
-`options: { mode: explicit, ttl: 30m, boundary: system_prompt }`. Explicit mode
-marks the end of a non-empty system prompt, preventing an implicit breakpoint
-from writing a volatile transcript suffix. Implicit mode accepts the provider's
-automatic behavior, including a possible volatile-suffix write premium. Public
-Responses also accepts `options: { mode: implicit, ttl: 30m }` and
-`options: { mode: explicit, ttl: 30m, boundary: first_input_text }`. It preserves
-top-level `instructions`, marks the earliest Tau-constructed non-assistant
-input-text block, and rejects locally when no eligible block exists. This is
-per-agent multi-turn cost control, not a system-prompt boundary or cross-agent
-reuse. The former `retention: in_memory` / `"24h"` profile setting is rejected:
-legacy `prompt_cache_retention: "24h"` and new `ttl: 30m` are different
-contracts and Tau does not translate one into the other.
-The retired `compat.prompt_cache_key: bool` is invalid. Tau neither guesses
-cache support from route names nor adds native Anthropic/Gemini cache clients or
-cache lifecycle traffic.
-
-ChatGPT's full account quota snapshot is acquired best-effort from `/wham/usage`
-and reconciled with sparse in-band WebSocket `codex.rate_limits` observations
-without delaying model work. Tau shows neutral `Q?` for a selected model when provider quota
-current-state exists but weekly data is absent, unbound, stale, expired, or
-timing-untrusted. `Q-`, `Q=`, `Q+`, and `Q!` require a fresh explicit in-band
-pool binding for the exact model. Tau does not infer colored applicability from
-a default/sole pool, treat credits as weekly usage, or fabricate a reset when a
-cached boundary passes. Quota capability remains available for the running
-harness after account state is cleared, keeping live and late clients on the
-same neutral unknown state.
-
-
-## Runtime behavior
-
-ChatGPT, public Responses, Chat Completions and OpenRouter profiles support startup-frozen `cache_diagnostics: off|metadata`.
-Metadata defaults on for durable ordinary inference and standalone compaction, and uses the existing
-private opaque capture directory and thirty-day diagnostic retention. Exact
-request/response captures remain independently default-on for durable activity;
-setting metadata off does not disable them. Ephemeral/memory-only activity
-remains excluded. Scalar records correlate actual dispatches and finite attempts
-and retain bounded raw usage and typed repair/socket facts, not bodies, routes,
-credentials or provider IDs. Native Codex raw compact responses
-are retained before decoding/validation in private `received_response` captures,
-including failures and the rejected event; that operation reports exact-response
-capability. Inspect `raw_events`, truncation/terminal flags, and private error detail
-rather than confusing these with the separate synthetic
-`provider_response_finished` capture. See `docs/providers.md` for bounds and
-coverage limits. Public Responses records one
-full-replay dispatch at most, with no local repair or connection reuse. Its exact
-request retains a null dispatch index before the final cancellation check; the
-diagnostic dispatch row alone establishes index one. Public local-summary
-compaction uses the same backend-scoped metadata and owner-supplied harness
-attempt while keeping logical attempt null. Chat Completions
-records at most one actual send and retains its latest observed allowlisted usage
-snapshot even on later failure, without merging, summing or normalizing repeated
-usage members. Its cache counters follow exact-route compatibility selection;
-its local-summary compaction uses the existing scheduler ordinal for both
-diagnostic attempt fields. Both adapters emit their local-summary attempt end
-before the built-in extension's final narrative validation, so backend success
-does not claim canonical compaction success.
-Per-item attribution and other adapters remain unsupported. Entered Codex warm backend calls have scalar-only
-`cache_refresh` records: prompt/attempt ordinals are null, exact bodies are not
-retained, and backend outcomes are distinct from worker/harness refresh status.
-`tau agent/session cache`
-recognizes the new files but does not yet join or analyze their scalar records;
-it reports that analysis as unavailable. See `docs/agent-cache.md`.
-
-Built-in provider HTTP and WebSocket networking snapshots `http_proxy`,
-`https_proxy`, `all_proxy`, and `no_proxy` at provider startup, with each
-lowercase variable taking precedence over its uppercase equivalent. HTTP/WS use
-the HTTP proxy class and HTTPS/WSS use the HTTPS class, then fall back to
-ALL_PROXY. `NO_PROXY` is the only direct bypass; a selected proxy never falls
-back directly after failure. Supported proxy URLs use HTTP or HTTPS with
-optional percent-encoded Basic credentials. SOCKS, PAC/WPAD, desktop discovery,
-integrated authentication, and redirects are unsupported. Restart after changing
-network environment.
-
-Release acceptance covers HTTP and HTTPS through HTTP and HTTPS proxies, WS
-through an HTTP proxy, and WSS through HTTP and HTTPS proxies. Secure targets
-through HTTPS proxies cover proxy TLS, CONNECT, target TLS, and the target
-request or WebSocket upgrade as distinct wire layers.
-
-TLS always verifies with platform trust. `TAU_PROVIDER_CA_BUNDLE` can add one
-bounded certificate-only PEM bundle captured at startup; it cannot disable or
-replace platform verification. Reqwest does not expose the status of a rejected
-HTTPS/WSS CONNECT tunnel, so Tau safely reports a hidden proxy 407 as a redacted
-proxy-route transport failure rather than guessing authentication from error
-text. Plain HTTP/WS proxy 407 responses remain specifically classified.
-
-The harness assembles prompts and routes provider-owned turns to this extension.
-After Secret hydration, the extension publishes a transient
-`ProviderModelsDeclared` containing only locally credential-usable routes. Missing
-or malformed credentials omit routes, and later observed credential changes publish
-replacement declarations. This does not promise remote authentication. After generic
-commit and activation, the harness derives canonical `ProviderModelsUpdated`
-current state. The extension streams response updates and emits final response
-events with stop reasons and usage/cache diagnostics.
-
-ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previous_response_id` when possible so follow-up requests can send only newly added messages while upstream carries reasoning state. If an upstream stored response id expires, Tau retries once with a full replay within that finite provider attempt; an ambiguous failed attempt then returns to the logical-prompt scheduler.
-
-All currently published ChatGPT/Codex models support native image function
-output, so `read_image` is available when role policy permits it. This includes
-GPT-6 Sol/Sol 6.1/Luna/Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4,
-GPT-5.4 Mini, and GPT-5.3 Codex in every configured ChatGPT account namespace.
-The same exact-model check governs advertised image modalities and wire
-lowering; unknown/experimental IDs stay text-only. The audit uses upstream
-Codex modality metadata and `view_image` function-output encoding, not a live
-account or visual-fidelity test. Image support does not imply Lite, phase, or
-native compaction support. See `ARCH-tau-provider-codex` for pinned evidence.
-
-The built-in provider can resolve typed prepared-image references through the
-existing Artifact RPC, including compaction and cache prewarm. It caches verified
-encoded bytes with 64 MiB/64-entry bounds and shares concurrent same-key fetches;
-this is not a token or embedding cache. Missing/corrupt content fails only the
-consuming request before model submission. Existing image/data-URL budgets still
-apply. Durable persistent invocations with ready scoped authority use references;
-ephemeral/memory-only or not-yet-ready invocations stay inline. Text-only routes omit historical images without fetching
-their bytes. Reference-bearing history requires the full Artifact store and root
-registry alongside journals when backing up or restoring.
-
-ChatGPT GPT-5.6 Sol, Terra, and Luna publish a 353,400-token effective context
-window and include `max` among their published reasoning choices. They use
-standard Responses and parallel direct tool calls by default.
-GPT-6 Sol and Luna are also built-in ChatGPT/Codex choices. They publish a
-1,050,000-token total window, a 997,500-token effective input ceiling, a
-128,000-token output capability, and the documented reasoning choices from
-`none` through `max` except `minimal`. Their comparison costs use OpenAI's
-standard short-context API rates and do not claim private subscription billing.
-They remain on standard Responses and use local-summary standalone compaction
-until the private native compaction contract is separately audited. They also
-omit unaudited provider-inline context management.
-Responses Lite is available only by setting `responses_lite_compatibility: true` on that
-ChatGPT profile (or answering Yes during `tau provider add`) and restarting.
-Ordinary Codex inference's application-message silence limit defaults to 300 seconds.
-Set top-level `application_idle_timeout_secs: 900` in the existing credential-free
-ChatGPT provider JSON and restart Tau for fifteen minutes. This is not a
-`harness.yaml` key. Positive integer seconds up to 4294967295 are accepted;
-prewarm, connection setup and standalone compaction keep their existing limits.
-Text application consumption renews the limit, including metadata; WebSocket
-Ping/Pong does not. Longer waits delay genuine-stall recovery without changing
-retry/repair or cancellation. One content-free envelope-end log summarizes received
-control-frame counts/ages and application receive/consume/semantic timing.
-These are local complete-message observations, not network timing or matched pongs;
-backpressure and the active-envelope observation boundary limit coverage.
-Tau never changes modes as a retry fallback. Both modes omit provider-inline
-context management. Astra also uses native standalone compaction, with a
-244,800-token default threshold (90 percent of its raw 272,000-token window);
-named after-done policies can run earlier. Astra remains on standard Responses
-even when its profile requests Lite compatibility. Manual and automatic native
-compaction send the full closed window plus `compaction_trigger` over the
-ordinary Responses WebSocket route and install exactly one validated opaque
-compaction item. The harness preserves the exact post-cut suffix. All Codex
-models support standalone compaction: native where available, otherwise local
-summary through the same ordinary Responses mode. A definitive native rejection
-before semantic output permits one local request in the same transaction;
-known native absence goes directly local. Local attempts never repair
-transparently; pre-output transient failures use bounded logical retries,
-and cancellation or post-content native failure never falls back. Native absence
-clears only the native default threshold, not configured numeric/reserve
-policies. There is no surface-switch fallback.
-The startup mode also separates prompt
-cache/thread/socket identity, causing one cold transition after upgrade, while
-quota and retry identity remain account/provider based.
-
-The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account, startup-selected Responses mode, and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys use the same mode-aware identity and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. ChatGPT/Codex inference is WebSocket-only: retryable WS failures return to the in-memory logical-prompt scheduler, while proven terminal WS errors surface without an HTTP fallback.
-
-Fresh WebSocket setup first emits a fixed secret-free connecting status, then races
-DNS/TCP/TLS/upgrade against the prompt cancellation registry and a 30-second
-deadline. Timeout is retryable transport work; all unsuccessful upgrades release
-their same-key reservation.
-
-Best-effort ChatGPT cache prewarm runs on a capped supervised worker, not the
-provider event loop. Matching real work, cancellation, shutdown, or profile
-rotation wakes it. Its connection and non-generating response phases are each
-bounded to 30 seconds, and stale canceled/invalidated sockets cannot return to
-the pool.
-
-A prewarm response id is eligible only on its exact socket and
-profile/mode/cache identity when the real lowered input retains the warmed input
-as an exact prefix. Fingerprint or prefix divergence, cancellation, invalidation,
-or a stale ownership generation discards the anchor and sends full context.
-
-One finite Codex inference attempt has one immediate WS repair budget. An exact
-stale-chain/connection-limit code or dead socket may consume it only before
-semantic output. Dispatch is reported at the first request send and transport
-bytes remain cumulative across the repair. Once assistant, reasoning, tool, or
-opaque output begins, Tau does not replay and splice the turn; transient output
-is cleared before extension-owned logical retry. Canonical provider codes, never
-arbitrary prose, authorize these classifications.
-
-After setup, ChatGPT/Codex inference is WebSocket-only with a separate default
-configurable application-message idle watchdog (default five minutes). The timer
-resets on consumed Text messages, never Ping/Pong, and is not an
-absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt,
-clears tentative output, and parks the logical prompt for another attempt.
-
-Prompt execution concurrency defaults to 8 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures. Trusted later `Retry-After` and reset hints remain lower bounds except for usage-window reset estimates: users or providers may restore access early, so Tau keeps probing at the bounded persistent-failure cadence instead of sleeping until the reported reset. Retry state exists only for the running process/session and is not replayed after cold restart.
-
-
-Provider response streaming note: built-in providers submit explicit transient
-`provider.response_updated_reported` append deltas for visible assistant/reasoning text
-and `provider.response_finished_reported` terminal payloads. The harness publishes the
-correlated canonical update and durable finished facts. Retry diagnostics are provider
-status updates.
-
-Live byte stats are public provider-owned `provider.response_updated.response_stats`
-samples. Built-in providers count backend response bytes at the transport receive
-boundary before semantic parsing, include non-visible streamed tool-call
-arguments, and do not count request bytes, HTTP headers, or tool execution
-outputs/results. They are not transcript or final-response content.
-
-Built-in providers optionally include provider-owned
-`first_semantic_output_elapsed_micros` in those live stats. It measures from a
-finite attempt's first backend send/enqueue to the first synchronously accepted
-non-empty assistant/reasoning/tool semantic unit; material opaque reasoning is
-observed at completion. Scheduled retries start a fresh measurement, while
-Codex's transparent pre-semantic repair retains the original dispatch boundary.
-The value is captured before batching, repeated on later samples, and remains
-live-only: it is absent from finished output, journals, replay, snapshots, and
-final turn stats.
-
-Built-in providers also run a conservative exact streaming repetition guard over assistant text, reasoning text, and tool-call argument deltas. When a high-volume tight exact loop is detected, the provider clears transient streamed output and finishes with `stop_reason: repetition_detected`, empty final output items, and bounded display-only error text; the harness treats this as a loop-guard trigger rather than retrying the provider turn.
-
-### Watcher-visible provider work
-
-Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
-### Standalone compaction tools
-
-`compact` and `agent_compact` require a live provider route whose selected
-model advertises standalone compaction. Unsupported or inline-only models are
-rejected without a durable accepted request. Provider failures terminate the
-background tool exactly once.
-The static `:retry` command can release the selected agent's exact parked
-logical prompt immediately. This one-job override preserves retry accounting,
-does not initially wake peer jobs, and still waits for a bounded provider worker
-slot. If that exact probe commits a successful terminal response, Tau clears the
-matching current provider cooldown generation and wakes same-profile peers with
-stable anti-herd jitter. Errors, cancellation, stale successes, and best-effort
-quota display updates do not clear inference cooldowns.
-
-## Tau-owned summary compaction fallback
-
-Configured named thresholds decide when to compact, independently of capability
-metadata. Existing usage, lifecycle/status, closed-cut, and prefix-budget safety
-checks still apply. `provider_default` without a numeric default has no boundary.
-External extensions must own their standalone lowering; Tau cannot fabricate
-wire support for one that rejects the common operation.
-Codex local summary uses the shared final-trigger instruction, disables tool
-choice, and validates one private 256 KiB-bounded narrative while discarding
-reasoning and rejecting tools. Its private wire has no supported output-token
-cap or override object; acceptance bounds do not limit remote generation.
-
-Chat Completions, OpenRouter, and public Responses models advertise standalone
-summary compaction by default when their configured context window is nonzero.
-Omitting `local_summary_compaction` uses no prefix byte cap, inherits ordinary
-request output policy (including zero to omit the limit), uses a 256 KiB output-byte
-bound, and publishes no proactive threshold. The object accepts independent
-optional `max_input_bytes`, `max_output_tokens`, and `max_output_bytes`
-overrides; `{}` keeps all defaults. There is no separate default summary generation
-cap. The model output capability narrows explicit summary overrides when present;
-inherited policy keeps ordinary capability handling. Tau rejects the retired `serialization_profile` and
-`context_window_tokens` keys with migration guidance and rejects output limits
-that exceed the model token window or Tau's byte ceiling before model
-publication. Tau sends the ordinary provider request prefix for the immutable cut,
-including the normal system prompt, tools, history, images, raw tool arguments,
-and cache controls, then appends one harness-authored `<tau_internal>` user
-message. Any tool call fails without execution. Tau accepts one nonempty bounded
-assistant final text, discards reasoning and opaque replay data, and stores the
-exact text once as one synthetic user checkpoint without a wrapper or
-deterministic supplement. Ordinary opted-in debug capture applies.
-Chat Completions output-limit terminals retain provisional prose and full
-reasoning, replayed as distinct attempts with harness-authored continuation
-steers. Success publishes only the byte-exact assembled narrative. A canonical
-no-output continuation capacity rejection discards the draft and reasoning and
-retreats to the immediate previous closed original prefix. Each output-limit hit
-warns; check both Tau's request/summary policy and the server generation cap.
-Configured byte bounds apply separately to the assembled narrative and retained
-reasoning; deadlines remain unchanged.
-Unsupported output, insufficient context, cancellation, route loss, stale state,
-and post-output failures end the durable transaction without inference fallback
-or ambiguous resend.
+TLS uses platform trust. `TAU_PROVIDER_CA_BUNDLE` adds a bounded certificate-only
+PEM bundle at startup; it cannot disable/replace verification. Hidden HTTPS/WSS
+CONNECT 407s may appear as redacted proxy-route transport failures.

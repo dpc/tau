@@ -6,9 +6,7 @@ advertise: true
 
 # Tau self-knowledge
 
-Tau is a coding agent harness.
-
-To enable self-help it includes a built-in repository of skills with information about Tau itself.
+Tau is a coding agent harness. Load the focused skills below for self-help.
 
 ## Build information
 
@@ -16,44 +14,45 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 
 ## Built-in self-knowledge skills
 
-- `tau-self-knowledge` — overview of built-in Tau-specific skills.
-- `tau-self-knowledge-introduction` — conduct a short, conversational Tau onboarding.
-- `tau-self-knowledge-architecture` — high-level overview of Tau architecture and core components.
-- `tau-self-knowledge-harness` — session serve, idle shutdown, upgrade/recovery, attach/resume, daemon startup, and sockets.
-- `tau-self-knowledge-config` — directories, important config files, and provider setup commands.
-- `tau-self-knowledge-secrets` — declared extension secrets, source resolution, Configure and Secret RPC delivery, provider credentials, redaction, and limits.
-- `tau-self-knowledge-isolation` — supervised-extension state views, Linux namespaces and read-only mounts, component exceptions, and trusted-boundary limits.
-- `tau-self-knowledge-cli-ui` — terminal UI behavior, commands, prompt history, key bindings, and prompt completions.
-- `tau-self-knowledge-agent-coordination` — delegation, messaging across agents and sessions, watches, status, background tools, timers, and discovery.
-- `tau-self-knowledge-roles` — role/group policy, tool permissions, runtime selections, and identity inspection.
-- `tau-self-knowledge-skills` — create, discover, invoke, inspect, and resolve collisions between skills.
-- `tau-self-knowledge-context-management` — automatic/manual compaction policy, model-aware thresholds, context-size alerts, and overflow recovery.
-- `tau-self-knowledge-artifacts` — artifact references, export/import, read_image, large terminal pastes, and retention.
-- `tau-self-knowledge-trust-and-data` — file authority, provider/integration egress, private local storage, and safe support evidence.
-- `tau-self-knowledge-extension-authoring` — extension development route, declaration preview versus effective runtime inspection, and interceptors.
-- `tau-self-knowledge-email` — secure configuration for the standard `std-pim` email module.
-- `tau-self-knowledge-ext-pim` — extension capabilities, configuration, OAuth, and approval workflow for the standard `std-pim` email/calendar extension.
-- `tau-self-knowledge-ext-rostra` — `std-rostra` configuration, Rostra tool authority, durable local state, synchronization, and following notifications.
-- `tau-self-knowledge-ext-xmpp` — separately installed, default-disabled XMPP bridge and its owning configuration guide.
-- `tau-self-knowledge-ext-slack` — Slack Socket Mode setup, scopes, event subscriptions, routing, security modes, and troubleshooting.
-- `tau-self-knowledge-ext-telegram` — Telegram bot setup, route registration, send authority, gateway-client mode, and troubleshooting.
-- `tau-self-knowledge-ext-discord` — Discord bridge receiver designation, tool grants, routing, and migration behavior.
-- `tau-self-knowledge-ext-github-standalone` — GitHub bridge for a dedicated agent/bot-owned account: receiver designation, admission configuration, and migration; `tau-ext-github-watch` reuses the user's account and setup.
-- `tau-self-knowledge-ext-zulip` — Zulip extension configuration, message routing, and troubleshooting.
-- `tau-self-knowledge-ext-swarm` — separately installed Tau Swarm endpoint pinning, credentials, blockers, updates, reconnects, and process-memory lifetime.
-- `tau-self-knowledge-ext-provider-builtin` — built-in providers and models: ChatGPT/Codex Responses, Grok, Chat Completions, OpenRouter, and image generation.
-- `tau-self-knowledge-ext-rhai` — extension details for the disabled `std-rhai` trusted local scripting extension and Rhai event hooks.
-- `tau-self-knowledge-ext-shell` — extension details for `core-shell` filesystem, shell, editing, directory-lock, and AGENTS.md discovery tools.
-- `tau-self-knowledge-ext-utils` — `std-utils` timer wakeups and papercut reporting, inspection, and opt-in history access.
-- `tau-self-knowledge-ext-std-notifications` — extension details for prompt/response sounds, idle notifications, OSC 1337, bells, and notification commands.
-- `tau-self-knowledge-ext-test-dummy` — extension details for the disabled test-only dummy extension and restart/interception behavior.
-- `tau-self-knowledge-ext-websearch` — `std-websearch` provider pools, all hosted adapters, credentials, current provider plans, failover, and configuration.
-- `tau-self-knowledge-prompt-templating` — prompt fragment and system template variables, helpers, priorities, and examples.
-- `tau-self-knowledge-source-code` — where to fetch Tau source code for debugging or detailed understanding.
-- `tau-self-knowledge-community` — places to ask questions or talk about Tau.
-- `tau-self-knowledge-debugging` — debugging workflow for Tau sessions, daemon behavior, logs, state, and provider request captures.
-- `tau-self-knowledge-debugging-extensions` — supervised extension logging, startup/crash/reconnect investigation, and stderr privacy.
-- `tau-self-knowledge-cache` — offline agent/session cache inspector, attribution, continuity, geometry, and partial evidence.
-- `tau-self-knowledge-tracing` — content-free execution audits, bounded semantic traces, complete journal exports, and privacy boundaries.
-- `tau-self-knowledge-e2e-testing` — manual E2E testing with `tau dev tmux`, scratch state, and opt-in provider profile access through `testing.yaml`.
-When working _on_ Tau project, prefer the repository's local developer-centric skills when available.
+- `tau-self-knowledge` — this index.
+- `tau-self-knowledge-introduction` — conversational onboarding.
+- `tau-self-knowledge-architecture` — components and event flow.
+- `tau-self-knowledge-harness` — daemon, sockets, attach/resume, shutdown, upgrades.
+- `tau-self-knowledge-config` — files, directories, provider setup.
+- `tau-self-knowledge-secrets` — declarations, resolution, Secret RPC, rotation, redaction.
+- `tau-self-knowledge-isolation` — state visibility, Linux mounts, trust limits.
+- `tau-self-knowledge-cli-ui` — commands, keys, history, completion.
+- `tau-self-knowledge-agent-coordination` — delegation, messaging, watches, status, background work.
+- `tau-self-knowledge-roles` — role/group policy, permissions, runtime overrides, identity.
+- `tau-self-knowledge-skills` — discovery, invocation, inspection, collisions.
+- `tau-self-knowledge-context-management` — compaction policies, alerts, overflow recovery.
+- `tau-self-knowledge-artifacts` — references, export/import, read_image, large pastes, retention.
+- `tau-self-knowledge-trust-and-data` — file authority, egress, retention, support evidence.
+- `tau-self-knowledge-extension-authoring` — SDK, declarations, interceptors, runtime inspection.
+- `tau-self-knowledge-email` — secure `std-pim` email setup and approvals.
+- `tau-self-knowledge-ext-pim` — email/calendar configuration, OAuth, tools, approvals.
+- `tau-self-knowledge-ext-rostra` — setup, authority, state, synchronization, notifications.
+- `tau-self-knowledge-ext-xmpp` — optional XMPP bridge setup.
+- `tau-self-knowledge-ext-slack` — Socket Mode, scopes, events, routing, security.
+- `tau-self-knowledge-ext-telegram` — bot/gateway setup, routes, send authority.
+- `tau-self-knowledge-ext-discord` — receivers, grants, routing, migration.
+- `tau-self-knowledge-ext-github-standalone` — dedicated bot-account bridge; `tau-ext-github-watch` reuses the user's account.
+- `tau-self-knowledge-ext-zulip` — setup, routing, troubleshooting.
+- `tau-self-knowledge-ext-swarm` — endpoint pinning, credentials, tasks, reconnects, lifetime.
+- `tau-self-knowledge-ext-provider-builtin` — ChatGPT/Codex, Grok, Chat Completions, OpenRouter, images.
+- `tau-self-knowledge-ext-rhai` — trusted local scripts and event hooks.
+- `tau-self-knowledge-ext-shell` — filesystem, shell, editing, locks, AGENTS.md.
+- `tau-self-knowledge-ext-utils` — timers, papercut reporting/history.
+- `tau-self-knowledge-ext-std-notifications` — sounds, idle hooks, OSC 1337, bells, commands.
+- `tau-self-knowledge-ext-test-dummy` — test-only restarts and interception.
+- `tau-self-knowledge-ext-websearch` — provider pools, adapters, credentials, plans, failover.
+- `tau-self-knowledge-prompt-templating` — fragments, variables, helpers, priorities.
+- `tau-self-knowledge-source-code` — upstreams, checkout, exact-byte inspection.
+- `tau-self-knowledge-community` — help and discussion.
+- `tau-self-knowledge-debugging` — sessions, daemon, logs, state, provider captures.
+- `tau-self-knowledge-debugging-extensions` — startup, crashes, reconnects, stderr privacy.
+- `tau-self-knowledge-cache` — offline cache inspection and evidence limits.
+- `tau-self-knowledge-tracing` — content-free audits, semantic traces, journal exports.
+- `tau-self-knowledge-e2e-testing` — `tau dev tmux`, scratch state, `testing.yaml`.
+
+When working on Tau, prefer the repository's developer skills.

@@ -22,13 +22,10 @@ capabilities: read `docs/messages.md` for external message publication and
 semantics. `tau-self-knowledge-ext-rhai` provides a user-facing scripting
 alternative, not a replacement for the extension protocol.
 
-For a credential-free declaration preview run
-`tau dev preview-declarations`; it reports config-derived declarations and
-gaps, **not** effective prompt/tools, selected role/model policy, credentials,
-or runtime readiness. It may launch configured trusted extension executables
-in a bounded inspection exchange. A partial or failed report is not an empty
-runtime inventory. For effective composition, use
+`tau dev preview-declarations` previews config-derived declarations and gaps
+without credentials. It may launch trusted extension executables for bounded
+inspection; it does not establish effective tools/prompts, policy, or readiness.
+A partial/failed report is not an empty inventory. For effective composition use
 `tau --role ROLE dev print-tools` and `tau --role ROLE dev print-prompt`;
-these start a temporary ordinary harness, configure extensions, and can have
-their normal side effects. See `docs/declaration-inspection.md` for the
-precise preview scope and outcomes.
+these start a temporary harness and extensions with their normal side effects.
+See `docs/declaration-inspection.md` for scope and outcomes.

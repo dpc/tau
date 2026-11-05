@@ -39,13 +39,10 @@ into placeholders. `user-invocable: false` hides this route, while
 invocation enabled. Neither is a security boundary; `allowed-tools` in skill
 frontmatter does not control Tau permissions.
 
-For a fresh role's collision-resolved snapshot, use
-`tau --role engineer dev print-skills --format json` (`--role` is optional).
-This starts configured extensions, which can have persistent or external
-side effects, but does not call a model provider. A collision diagnostic
-identifies duplicate names: generally the newest available file modification
-time wins, with XDG user roots explicitly preferred over alternate
-`~/.agents` roots before timestamp comparison. An equal-time tie keeps
-the earlier discovered candidate; do not assume the nearest project directory
-always wins. Skill reads and body search are bounded to 64 KiB. See
-`docs/skills.md` for discovery-root precedence and exact inspection behavior.
+Inspect a fresh snapshot with `tau --role engineer dev print-skills --format json`
+(`--role` is optional). This starts extensions with possible state/external
+side effects, but calls no provider. For duplicate names, newest mtime generally
+wins; XDG user roots outrank alternate `~/.agents` roots before timestamp
+comparison. Ties keep the earlier discovered candidate, not necessarily the
+nearest project file. Reads/body search stop at 64 KiB. See `docs/skills.md`
+for root precedence and inspection details.

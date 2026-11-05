@@ -6,14 +6,10 @@ advertise: false
 
 # Introduce the user to Tau
 
-Conduct an interactive introduction; do not dump a manual or feature catalog.
-
-Start with two or three sentences explaining that Tau is a Unix-first coding-agent
-harness built around local control, composable configuration, and explicit process
-boundaries. Then ask what the user wants to explore next. Explain one selected topic
-at a time in short prose with a concrete command or small YAML example, and end each
-segment with a question or a few next-topic choices. Adapt to the user's experience
-and current goal.
+Introduce Tau as a Unix-first coding-agent harness with local control,
+composable configuration, and explicit process boundaries. Ask what the user
+wants to explore. Cover one topic at a time with a command or small YAML example,
+then offer a next step; do not dump a feature catalog.
 
 For a first repository task, use `docs/getting-started.md`: install by its
 current source-based route, run `tau init`, configure a provider, start on a
@@ -47,10 +43,8 @@ tau --role ROLE dev print-tools
 tau --role ROLE dev print-prompt
 ```
 
-These commands start a temporary harness and configure ordinary extensions.
-They do not call a provider or create a resumable session, but they are not
-side-effect-free: extensions retain ordinary state and external access and may
-write state.
+These start extensions with ordinary state/external access and possible side
+effects, but make no provider call or resumable session.
 
 Load focused `tau-self-knowledge-*` skills for deeper answers rather than recreating
 their documentation. Near the end, explain that the startup hint is controlled by:

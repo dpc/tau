@@ -4,7 +4,7 @@ description: Use when configuring or troubleshooting the separately maintained s
 advertise: false
 ---
 
-# Tau standalone GitHub bridge self-knowledge
+# Standalone GitHub bridge
 
 `tau-ext-github-standalone` (formerly `tau-ext-github`) is a separately maintained
 inbound MessageBridge executable for a dedicated agent/bot-owned GitHub account.
@@ -13,13 +13,10 @@ with each calling agent watching selected issues and pull requests. The receiver
 and repository-admission configuration below belongs to the standalone bridge,
 not the watch extension.
 
-Consult the standalone project's `README.md` and `docs/upstream-contracts.md` for
-its exact secret, repository, actor-admission, and polling schema, build
-instructions, compatibility evidence, and limits. Use the watch project's
-`README.md` for its separate configuration. Rebuild each extension against the
-SDK required by the target harness and check the owning project's compatibility
-guidance. Do not assume historical compatibility evidence applies to a newer
-harness.
+Use the standalone project's `README.md` and `docs/upstream-contracts.md` for
+secrets, admission/polling schema, builds, and compatibility; use the watch
+project's `README.md` for its config. Rebuild against the target harness's SDK
+and check current compatibility guidance.
 
 When migrating from `tau-ext-github`, change the executable path and named Nix
 package to `tau-ext-github-standalone`. Keep the configured Tau extension instance
@@ -43,9 +40,9 @@ role: coordinator # role to deliver to; optional, constrains registration and au
 
 `register_on_start` defaults to `false`: a saved eligible manual designation
 resumes after restart, but there is no initial automatic selection or creation.
-With `true`, the bridge keeps an eligible saved receiver or selects the oldest
-eligible existing agent. Lazy creation requires admitted repository activity and an
-explicit `role`; without a role, automatic mode selects existing agents only.
+With `true`, it keeps an eligible saved receiver or selects the oldest eligible
+agent. Lazy creation needs admitted repository activity and an explicit `role`;
+otherwise it selects existing agents only.
 Unknown roles fail visibly. Busy receivers remain sticky, and same-agent
 registration is a no-op.
 
