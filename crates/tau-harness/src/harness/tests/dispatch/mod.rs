@@ -186,6 +186,7 @@ fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: 
     harness.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -381,6 +382,7 @@ pub(super) fn provider_text_response(
     text: &str,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -420,6 +422,7 @@ fn provider_repetition_response(
     agent_id: tau_proto::AgentId,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -731,6 +734,7 @@ fn seed_background_placeholder_for_agent(
             agent_id,
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1025,6 +1029,7 @@ pub(super) fn setup_routed_test_tool_calls_with_background(
         .insert(spid.clone(), cid);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1166,6 +1171,7 @@ pub(super) fn provider_tool_response(
     arguments: CborValue,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1442,6 +1448,7 @@ pub(super) fn context_overflow_response(
     prompt: &tau_proto::AgentPromptCreated,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1496,6 +1503,7 @@ pub(super) fn standalone_compaction_success_response(
     summary: &str,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1714,6 +1722,7 @@ fn seed_historical_open_prefix_failure(
     h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1884,6 +1893,7 @@ fn provider_compact_call(
     call_id: &ToolCallId,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2462,6 +2472,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         .agents
         .insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

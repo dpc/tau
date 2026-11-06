@@ -1065,6 +1065,7 @@ fn standalone_compaction_failure_message(
         tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded => {
             "context_window_exceeded"
         }
+        tau_proto::StandaloneCompactionFailureReason::MessageTooLarge => "message_too_large",
         tau_proto::StandaloneCompactionFailureReason::ContextIrreducible => "context_irreducible",
     }
 }
@@ -2101,6 +2102,7 @@ where
                 writer.write_message(&HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(
                         tau_proto::ProviderResponseFinishedReport {
+                            compaction_input_bytes: None,
                             error_category: None,
                             automatic_compaction_decision: None,
                             estimated_api_cost_rates: None,
@@ -2198,6 +2200,7 @@ where
                 writer.write_message(&HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(
                         tau_proto::ProviderResponseFinishedReport {
+                            compaction_input_bytes: None,
                             error_category: None,
                             automatic_compaction_decision: None,
                             estimated_api_cost_rates: None,

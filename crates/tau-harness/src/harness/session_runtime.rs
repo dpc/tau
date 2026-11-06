@@ -284,6 +284,7 @@ impl Harness {
             return false;
         }
         let response = ProviderResponseFinished {
+            compaction_input_bytes: None,
             interrupted_retry: true,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             agent_prompt_id: checkpoint.agent_prompt_id.clone(),

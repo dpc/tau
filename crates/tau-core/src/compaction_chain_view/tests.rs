@@ -388,6 +388,7 @@ fn terminal_boundaries_do_not_create_passes_or_cost() {
         66,
         76,
         Event::AgentCompacted(AgentCompacted {
+            compaction_input_bytes: None,
             agent_id: started.agent_id.clone(),
             transaction_id: started.transaction_id.clone(),
             cut: AgentHead::Root,

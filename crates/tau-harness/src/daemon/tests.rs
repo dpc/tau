@@ -351,6 +351,7 @@ fn daemon_trace_correlation_requires_created_agent_and_binds_once() {
 
     let make_finished =
         |agent_id: tau_proto::AgentId, prompt_id: &str| tau_proto::ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             agent_prompt_id: prompt_id.parse().expect("prompt id"),

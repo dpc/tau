@@ -1626,6 +1626,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
     assert!(vt.screen_contains(100, "@1"));
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: agent_id("engineer"),
@@ -4547,6 +4548,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         },
     ));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4875,6 +4877,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
 
     // The paired harness oracle withholds this fact while admission is Full.
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),

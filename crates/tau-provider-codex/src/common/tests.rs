@@ -26,7 +26,7 @@ fn message_size_close_is_terminal_without_token_overflow_authority() {
             assert_eq!(error.retry_decision().is_none(), too_big);
             assert_eq!(
                 error.failure_kind(),
-                too_big.then_some(ProviderFailureKind::RequestRejected)
+                too_big.then_some(ProviderFailureKind::WebSocketMessageTooLarge)
             );
             assert_eq!(
                 error.error_category(),

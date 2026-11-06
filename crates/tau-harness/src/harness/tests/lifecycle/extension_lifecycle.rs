@@ -354,6 +354,7 @@ fn disconnected_tool_completes_pending_call() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -549,6 +550,7 @@ fn disconnected_tool_is_removed_cleanly() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -787,6 +789,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -884,6 +887,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     );
 
     let response = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -1018,6 +1022,7 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -1122,6 +1127,7 @@ fn duplicate_tool_call_id_becomes_model_visible_tool_error() {
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -1215,6 +1221,7 @@ fn reused_prior_tool_call_id_becomes_model_visible_tool_error() {
         .insert("old-call".into());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -1304,6 +1311,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
     .expect("cancel");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -1397,6 +1405,7 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -2406,6 +2415,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -2597,6 +2607,7 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
             .agents
             .insert(test_agent_prompt_id("sp-old"), cid.clone());
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -2643,6 +2654,7 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         .expect("automatic interrupted recovery");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -2845,6 +2857,7 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
         .insert(test_agent_prompt_id("sp-query"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -2963,6 +2976,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -3064,6 +3078,7 @@ fn length_stopped_tool_call_is_preserved_but_never_executed() {
         .insert(test_agent_prompt_id("sp-length"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -3151,6 +3166,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         .head
         .expect("pre-action selected head");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -3415,6 +3431,7 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
     )
     .expect("register terminal interceptor");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -6787,6 +6804,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     crate::tool_turn::start_pending_tool_ownership_probe("call-staged");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -8210,6 +8228,7 @@ fn unavailable_tool_is_reported_without_crashing() {
     );
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -8746,6 +8765,7 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -8871,6 +8891,7 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
     unregister_shell(&mut h);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,

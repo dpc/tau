@@ -544,6 +544,122 @@ fn websocket_enqueue_rejects_cancellation_before_serialization() {
     assert_eq!(enqueued, None);
 }
 
+/// The final serialized envelope, including escaping and request controls, owns
+/// byte admission. Over-cap requests must publish no dispatch and enqueue no
+/// text; equality is admitted and the preceding fitting request grants no
+/// exemption.
+#[test]
+fn websocket_preflight_limits_exact_selected_envelope_bytes() {
+    for offset in [-1_isize, 0, 1] {
+        let mut envelope = serde_json::json!({
+            "type": "response.create",
+            "tools": [{"type": "function", "name": "quoted\"tool"}],
+            "input": [
+                {"role": "user", "content": "é\n\""},
+                {"type": "compaction_trigger"}
+            ],
+            "padding": "",
+        });
+        let overhead = serde_json::to_string(&envelope).expect("JSON").len();
+        let target = MAX_ENCODED_REQUEST_BYTES
+            .checked_add_signed(offset)
+            .expect("size");
+        envelope["padding"] = serde_json::Value::String("x".repeat(target - overhead));
+        let mut abort = FlagAbort {
+            aborted: Arc::new(AtomicBool::new(false)),
+        };
+        let mut dispatched = false;
+        let mut enqueued = None;
+        let result = serialize_and_enqueue_envelope(
+            &envelope,
+            &mut abort,
+            &mut |_| dispatched = true,
+            |text| {
+                enqueued = Some(text.len());
+                Ok(())
+            },
+        );
+        if 0 < offset {
+            let error = result.expect_err("oversized envelope");
+            assert!(
+                matches!(error, LlmError::EncodedMessageTooLarge { bytes, limit }
+                if bytes == target && limit == MAX_ENCODED_REQUEST_BYTES)
+            );
+            assert_eq!(
+                error.failure_kind(),
+                Some(tau_proto::ProviderFailureKind::EncodedMessageTooLarge)
+            );
+            assert!(error.retry_decision().is_none());
+            assert!(!dispatched);
+            assert_eq!(enqueued, None);
+        } else {
+            result.expect("admitted envelope");
+            assert!(dispatched);
+            assert_eq!(enqueued, Some(target));
+        }
+    }
+}
+
+/// A healthy anchor admits only its actual small delta. When repair selects
+/// full replay, that different envelope is checked independently before a
+/// second send.
+#[test]
+fn websocket_preflight_admits_delta_but_rejects_oversized_full_fallback() {
+    let message = |text: String| {
+        tau_proto::ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::User,
+            content: vec![tau_proto::ContentPart::Text { text }],
+            phase: None,
+            responses_raw_json: None,
+        })
+    };
+    let history = message("x".repeat(MAX_ENCODED_REQUEST_BYTES));
+    let anchor = CachedResponseAnchor::new("resp-old".to_owned(), std::slice::from_ref(&history))
+        .expect("anchor");
+    let mut fixture = PromptFixture::new();
+    fixture.context.blocks = vec![
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![history],
+        }),
+        tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+            provider_response_id: Some("resp-old".to_owned()),
+            backend: None,
+            output_items: vec![],
+            usage: None,
+        }),
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![message("small delta".to_owned())],
+        }),
+    ];
+    let config = test_responses_config();
+    let request = fixture.payload();
+    let delta = build_ws_envelope(&config, &request, Some(&anchor), None);
+    let full = build_ws_envelope(&config, &request, None, None);
+    assert_eq!(
+        serde_json::to_value(&delta).expect("delta")["previous_response_id"],
+        "resp-old"
+    );
+    let mut dispatches = 0;
+    let mut sends = 0;
+    serialize_and_enqueue_envelope(&delta, &mut NeverAbort, &mut |_| dispatches += 1, |_| {
+        sends += 1;
+        Ok(())
+    })
+    .expect("small selected delta");
+    let error =
+        serialize_and_enqueue_envelope(&full, &mut NeverAbort, &mut |_| dispatches += 1, |_| {
+            sends += 1;
+            Ok(())
+        })
+        .expect_err("selected full fallback");
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::EncodedMessageTooLarge)
+    );
+    assert_eq!(dispatches, 1, "earlier dispatch evidence remains");
+    assert_eq!(sends, 1);
+}
+
 /// Cancellation published by request serialization must win at the final
 /// pre-enqueue check without changing terminal or retry classification.
 #[test]

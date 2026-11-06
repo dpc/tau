@@ -352,6 +352,12 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   fields remain absent. Accounting objects under current field names fail
   decoding, while the removed `compacted_input_tokens` alias is ignored as an
   unknown field and therefore supplies no output accounting.
+  Optional `compaction_input_bytes` records before/after sizes using the provider's
+  ordinary-input encoding for exactly the replaced prefix and replacement.
+  It excludes fixed controls and compact instructions. Strict growth stops a
+  subsequent automatic compaction when execution needs it again; the harness
+  retains this successful boundary. The comparison supplies no token usage. The
+  accepted provider report carries the same typed comparison.
   Connection ids are intentionally not
   durable. Either form invalidates any previous-response chain.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
@@ -472,6 +478,10 @@ their selected models.
   together; provider report payloads retain their prior shape. Terminal request
   rejection may carry a machine-readable `failure_kind`; notably,
   `context_window_exceeded` is independent of bounded display `error` prose.
+  Protocol 17.0 distinguishes `encoded_message_too_large` local rejection
+  and `websocket_message_too_large` peer 1009. Neither implies token overflow or
+  unchanged-request retry. Standalone failures use `message_too_large` for these
+  size sources and retain their original canonical terminal.
   Protocol 10.3 optionally carries display-only `error_category` in terminal
   reports and canonical responses. It supplies closed safe diagnostic text, not
   retry, recovery, or watch authority. Omission and unknown future categories
@@ -1086,7 +1096,9 @@ lineage retain their separate recovery rules.
 
 `provider.response_finished.recovery_disposition` is harness-authored, defaults
 to `none`, and is `reactive_compaction_planned` only for a canonical no-output
-ordinary-inference context rejection.
+ordinary-inference capacity rejection. `compaction_growth_stopped` instead records
+renewed capacity need after a strictly larger accepted replacement; the successful
+boundary and preserved suffix remain installed.
 `agent.standalone_compaction_started.trigger` is required. Explicit `manual`
 remains the direct recovery authority.
 `automatic_threshold_evidence` carries the uniquely claimed newest ancestral

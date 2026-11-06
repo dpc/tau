@@ -1242,6 +1242,7 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
         originator: PromptOriginator::User,
     });
     let finished = tau_proto::Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -3650,6 +3651,7 @@ fn deferred_large_tool_terminal_reuses_one_lightweight_projection() {
     let large_unicode = "🦀".repeat(2 * 1024 * 1024);
     let large_raw = format!("{{\"payload\":\"{large_unicode}\"}}");
     let event = tau_proto::Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -3752,6 +3754,7 @@ fn deferred_tool_ownership_routes_later_progress_after_publication() {
     ));
     renderer.handle(&tau_proto::Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -5858,6 +5861,7 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
     };
     let provider_finished = |agent_id: tau_proto::AgentId, call_id: tau_proto::ToolCallId| {
         tau_proto::Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,

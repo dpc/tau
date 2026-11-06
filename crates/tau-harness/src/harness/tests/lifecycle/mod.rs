@@ -426,6 +426,7 @@ pub(super) fn seed_restored_compaction_checkpoint(
     for event in [
         Event::AgentStandaloneCompactionStarted(started),
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id: agent_id.clone(),
@@ -819,6 +820,7 @@ pub(super) fn reasoning_only_length_response(
     response_received_tokens: u64,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,

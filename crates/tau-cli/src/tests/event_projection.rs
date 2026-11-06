@@ -1484,6 +1484,7 @@ fn standalone_compaction_replay_retires_private_progress() {
         standalone_compaction_started("ct-replay", "ap-replay"),
     ));
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),

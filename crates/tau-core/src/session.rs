@@ -1885,6 +1885,28 @@ impl AgentTree {
         })
     }
 
+    /// Whether this inference directly resumed a successful compaction whose
+    /// accepted replacement grew. The durable transaction link confines this
+    /// fact to its own model and execution; unknown historical size is not
+    /// growth.
+    #[must_use]
+    pub fn preceding_compaction_grew(&self, prompt_id: &tau_proto::AgentPromptId) -> bool {
+        let Some(dispatch) = self.inference_dispatches.get(prompt_id) else {
+            return false;
+        };
+        let Some(id) = &dispatch.checkpoint.transaction_id else {
+            return false;
+        };
+        self.compaction_transactions.get(id).is_some_and(|transaction| {
+            matches!(
+                &transaction.outcome,
+                Some(CompactionTransactionOutcome::Succeeded(compacted))
+                    if compacted.model == dispatch.checkpoint.model
+                        && compacted.compaction_input_bytes.is_some_and(tau_proto::CompactionInputBytes::grew)
+            )
+        })
+    }
+
     /// Returns recovery state for the latest durable inference checkpoint.
     #[must_use]
     pub fn inference_dispatch_recovery(&self) -> Option<InferenceDispatchRecovery> {
@@ -1911,9 +1933,13 @@ impl AgentTree {
                     ))
                 }
             }
-            (true, tau_proto::ContextRecoveryDisposition::None) => Some(
-                InferenceDispatchRecovery::CompletedThrough(checkpoint.through),
-            ),
+            (
+                true,
+                tau_proto::ContextRecoveryDisposition::None
+                | tau_proto::ContextRecoveryDisposition::CompactionGrowthStopped,
+            ) => Some(InferenceDispatchRecovery::CompletedThrough(
+                checkpoint.through,
+            )),
             (false, _) => Some(InferenceDispatchRecovery::DispatchUncertain(
                 checkpoint.clone(),
             )),
@@ -4982,6 +5008,7 @@ impl AgentTree {
             return false;
         };
         evidence.threshold > tau_proto::TokenCount::ZERO
+            && !self.preceding_compaction_grew(&evidence.provider_prompt_id)
             && evidence.provider_input_tokens >= evidence.threshold
             && Self::proactive_threshold_source_is_valid(&evidence.threshold_source)
             && self.proactive_evidence_is_unclaimed(evidence)
@@ -5370,6 +5397,7 @@ impl AgentTree {
                 if !matches!(
                     failed.reason,
                     tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+                        | tau_proto::StandaloneCompactionFailureReason::MessageTooLarge
                         | tau_proto::StandaloneCompactionFailureReason::LocalSummaryUnusable
                 ) || !plan_matches
                     || started.cut == previous.started.cut
@@ -6324,10 +6352,16 @@ impl AgentTree {
             }
         }
         let canonical_reason = match failed.reason {
-            tau_proto::StandaloneCompactionFailureReason::ContextIrreducible => {
-                Some(tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded)
-            }
+            tau_proto::StandaloneCompactionFailureReason::ContextIrreducible => Some(
+                transaction
+                    .standalone_rejection
+                    .as_ref()
+                    .and_then(tau_proto::ProviderResponseFinished::standalone_rejection_reason)
+                    .filter(|reason| reason.is_capacity_rejection())
+                    .unwrap_or(tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded),
+            ),
             tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+            | tau_proto::StandaloneCompactionFailureReason::MessageTooLarge
             | tau_proto::StandaloneCompactionFailureReason::LocalSummaryUnusable => {
                 Some(failed.reason)
             }
@@ -6374,8 +6408,7 @@ impl AgentTree {
                 } => self.reactive_compaction_target(failed_agent_prompt_id),
                 _ => Some(transaction.started.cut),
             };
-            let retreat_allowed = failed.reason
-                == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+            let retreat_allowed = failed.reason.is_capacity_rejection()
                 || (failed.reason
                     == tau_proto::StandaloneCompactionFailureReason::LocalSummaryUnusable
                     && self.local_summary_unusable_can_retreat(&failed.transaction_id));
@@ -6395,9 +6428,7 @@ impl AgentTree {
                     "standalone context-retreat plan is not an exact strict predecessor",
                 ));
             }
-        } else if failed.reason
-            == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
-        {
+        } else if failed.reason.is_capacity_rejection() {
             return Err(AgentEventValidationError::new(
                 "reducible standalone context rejection requires a durable successor plan",
             ));
@@ -6770,6 +6801,7 @@ impl AgentTree {
                     started.outer_turn_id.as_ref() == Some(&decision.outer_turn_id)
                 });
             let valid = decision.threshold > tau_proto::TokenCount::ZERO
+                && !self.preceding_compaction_grew(&response.agent_prompt_id)
                 && decision.evidence.as_ref().is_none_or(|evidence| {
                     evidence.provider_prompt_id == response.agent_prompt_id
                         && evidence.threshold == decision.threshold
@@ -6825,12 +6857,11 @@ impl AgentTree {
                 ));
             }
         }
-        // Context recovery and output-length dispositions are mutually
-        // exclusive on one response: a context-rejected reserved successor
-        // carries recovery authority only, and an output-length terminal never
-        // also plans reactive recovery. A durable fact combining both is
-        // ambiguous and must fail closed.
-        if response.recovery_disposition != tau_proto::ContextRecoveryDisposition::None
+        // Planned recovery cannot also settle or continue an output-length
+        // owner. A growth stop grants no recovery authority: its error terminal
+        // must still settle that owner under the validation below.
+        if response.recovery_disposition
+            == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
             && response.output_length_disposition != tau_proto::OutputLengthDisposition::None
         {
             return Err(AgentEventValidationError::new(
@@ -6975,9 +7006,11 @@ impl AgentTree {
                     }
                 };
                 let finish_bit_valid = !*outer_turn_finish_owed
-                    || (response.recovery_disposition
-                        == tau_proto::ContextRecoveryDisposition::None
-                        && response.stop_reason != tau_proto::ProviderStopReason::Continue
+                    || (matches!(
+                        response.recovery_disposition,
+                        tau_proto::ContextRecoveryDisposition::None
+                            | tau_proto::ContextRecoveryDisposition::CompactionGrowthStopped
+                    ) && response.stop_reason != tau_proto::ProviderStopReason::Continue
                         && (response.stop_reason != tau_proto::ProviderStopReason::ToolCalls
                             || !response
                                 .output_items
@@ -7006,8 +7039,10 @@ impl AgentTree {
                         && dispatch.checkpoint.operation == tau_proto::PromptOperation::Inference
                 });
             if !eligible_checkpoint
-                || response.failure_kind
-                    != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+                || self.preceding_compaction_grew(&response.agent_prompt_id)
+                || !response
+                    .failure_kind
+                    .is_some_and(tau_proto::ProviderFailureKind::is_capacity_rejection)
                 || response.stop_reason != tau_proto::ProviderStopReason::Error
                 || !response.output_items.is_empty()
             {
@@ -7015,6 +7050,19 @@ impl AgentTree {
                     "planned reactive compaction requires one canonical no-output inference rejection",
                 ));
             }
+        }
+        if response.recovery_disposition
+            == tau_proto::ContextRecoveryDisposition::CompactionGrowthStopped
+            && (!self.preceding_compaction_grew(&response.agent_prompt_id)
+                || !response
+                    .failure_kind
+                    .is_some_and(tau_proto::ProviderFailureKind::is_capacity_rejection)
+                || response.stop_reason != tau_proto::ProviderStopReason::Error
+                || !response.output_items.is_empty())
+        {
+            return Err(AgentEventValidationError::new(
+                "growth stop requires renewed capacity rejection after a grown replacement",
+            ));
         }
         let mut seen = HashSet::new();
         let mut requests_tool_calls = false;

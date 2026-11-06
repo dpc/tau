@@ -1,5 +1,15 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 17.0 and source SDK 0.24.0 distinguish local encoded-message rejection
+and peer WebSocket 1009 from token overflow. Standalone failures retain a distinct
+message-size reason; ordinary terminals can record a growth-stopped recovery.
+Accepted compaction reports, canonical terminals, and replacement boundaries carry
+an optional before/after ordinary-input byte comparison. Older peers cannot
+decode the new enum values, so configured extensions and UI peers must rebuild
+together.
+Older journals omit the comparison, so size remains unknown. Journal framing is
+unchanged; publication and runtime activation are separate.
+
 Protocol 16.8 adds optional canonical-only `interrupted_retry` metadata to ordinary
 Error terminals. The field defaults to false; provider reports cannot supply it.
 Older peers can ignore it and retain ordinary error behavior. This change requires

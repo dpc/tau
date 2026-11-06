@@ -37,6 +37,7 @@ impl Harness {
                 let failure = (!matches!(
                     reason,
                     StandaloneCompactionRejection::ContextWindowExceeded
+                        | StandaloneCompactionRejection::MessageTooLarge
                         | StandaloneCompactionRejection::LocalSummaryUnusable
                 ))
                 .then(|| self.prepare_standalone_failure(cid, response, reason.durable_reason()))

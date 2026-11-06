@@ -2,6 +2,88 @@
 
 use super::*;
 
+/// Actual prefix retreat stays visible in compact mode, with one succinct
+/// warning for the chain in both live delivery and cold attach reconstruction.
+#[test]
+fn compaction_size_retreat_warning_is_concise_grouped_and_replayable() {
+    for cold in [false, true] {
+        let (_term, handle, vt) = setup(100, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        if !cold {
+            renderer.switch_agent(agent_id("main"));
+        }
+        let first = standalone_compaction_started("ct-size-1", "ap-size-1");
+        let second = standalone_compaction_started("ct-size-2", "ap-size-2");
+        let third = standalone_compaction_started("ct-size-3", "ap-size-3");
+        let failed = |start: &tau_proto::AgentStandaloneCompactionStarted,
+                      next: &tau_proto::AgentStandaloneCompactionStarted| {
+            Event::AgentStandaloneCompactionFailed(AgentStandaloneCompactionFailed {
+                agent_id: start.agent_id.clone(),
+                transaction_id: start.transaction_id.clone(),
+                cut: start.cut,
+                reason: tau_proto::StandaloneCompactionFailureReason::MessageTooLarge,
+                resume_through: start.resume_through,
+                context_retreat: Some(tau_proto::ContextRetreatPlan {
+                    transaction_id: next.transaction_id.clone(),
+                    compact_prompt_id: next.compact_prompt_id.clone(),
+                    cut: next.cut,
+                    roll_through: start.cut,
+                    model: start.model.clone(),
+                    originator: start.originator.clone(),
+                    resume_through: start.resume_through,
+                }),
+                output_length_continuation: None,
+                incomplete_response: None,
+            })
+        };
+        let events = [
+            Event::AgentStandaloneCompactionStarted(first.clone()),
+            failed(&first, &second),
+            Event::AgentStandaloneCompactionStarted(second.clone()),
+            failed(&second, &third),
+        ];
+        for (index, event) in events.iter().enumerate() {
+            if cold {
+                renderer.handle_cold_attach_replay_socket_delivery(
+                    event,
+                    tau_proto::UnixMicros::new(index as u64 + 1),
+                    tau_cli_term::RendererDeliveryId::new(index as u64 + 1),
+                );
+            } else {
+                renderer.handle(event);
+            }
+        }
+        if cold {
+            renderer.handle_attach_agent_selection_socket_delivery(
+                &Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+                    main_agent_id: None,
+                    session_id: test_session_id("s1"),
+                    error: None,
+                }),
+                &agent_id("main"),
+                tau_proto::UnixMicros::new(10),
+                tau_cli_term::RendererDeliveryId::new(10),
+            );
+        }
+        sync(&handle);
+        let screen = vt.screen_text(100).join("\n");
+        assert_eq!(
+            screen
+                .matches("Compaction input too large; retrying with a smaller prefix.")
+                .count(),
+            1,
+            "{screen}"
+        );
+        assert!(!screen.contains("ct-size"), "{screen}");
+        assert!(!screen.contains("compact err:"), "{screen}");
+        eprintln!("compaction retreat (cold={cold}):\n{screen}");
+    }
+}
+
 /// Builds a UI-owned intent without manufacturing a tool invocation.
 fn requested(target: &str) -> AgentManualCompactionRequested {
     AgentManualCompactionRequested {

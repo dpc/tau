@@ -177,6 +177,7 @@ fn assert_rejected(
 /// Creates a valid replacement correlated to the supplied immutable start.
 fn success(started: &tau_proto::AgentStandaloneCompactionStarted, suffix_end: AgentHead) -> Event {
     Event::AgentCompacted(tau_proto::AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: agent_id(),

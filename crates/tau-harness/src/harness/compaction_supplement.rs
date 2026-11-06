@@ -1,6 +1,6 @@
 //! Conversion of a validated local summary into its synthetic checkpoint.
 
-use tau_proto::{ContentPart, ContextItem, ContextRole, MessageItem, ValidatedCompactionWindow};
+use tau_proto::{ContentPart, ContextItem, ValidatedCompactionWindow};
 
 /// Converts a typed local-summary envelope into the exact durable checkpoint.
 ///
@@ -20,14 +20,12 @@ pub(super) fn compose(
     let Some(narrative) = local_narrative(replacement_window)? else {
         return Ok(None);
     };
-    ValidatedCompactionWindow::new(vec![ContextItem::Message(MessageItem {
-        role: ContextRole::User,
-        content: vec![ContentPart::SyntheticCompactionSummary {
-            text: narrative.to_owned(),
-        }],
-        phase: None,
-        responses_raw_json: None,
-    })])
+    ValidatedCompactionWindow::new(vec![
+        tau_proto::LocalCompactionNarrativeItem {
+            narrative: narrative.to_owned(),
+        }
+        .replacement_item(),
+    ])
     .map(Some)
     .map_err(|_| ())
 }

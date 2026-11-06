@@ -6,6 +6,7 @@ use crate::agent::LoopCycleState;
 
 mod acceptance_teardown;
 mod checkpoint_recovery;
+mod growth_policy;
 mod inline_wait;
 mod native_publication;
 mod restore_collision;
@@ -583,6 +584,7 @@ fn ordinary_inference_rejects_private_compaction_output_before_persistence() {
         .count();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -728,6 +730,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1602,6 +1605,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
     h.publish_for_agent(
         &cid,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id: started.agent_id.clone(),
@@ -2110,6 +2114,7 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
         .insert(prompt_id.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2241,6 +2246,7 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
         .insert(prompt_id.clone(), caller_cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3297,6 +3303,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 agent_id: started.agent_id.clone(),
@@ -3566,6 +3573,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3703,6 +3711,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         )
         .expect("append standalone provider materialization");
     let compacted = tau_proto::AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
         agent_id: agent_id.clone(),
@@ -4296,6 +4305,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4879,6 +4889,7 @@ fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() 
     h.publish_for_agent(
         &target,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id: target_id.clone(),
@@ -6928,6 +6939,7 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
         h.publish_for_agent(
             &cid,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7488,6 +7500,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         }),
     );
     let planned = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -7650,6 +7663,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
     append_seed_agent_event(
         &mut store,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -8360,6 +8374,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     );
     let compact = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -8493,6 +8508,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     assert_ne!(starts[1].transaction_id, starts[0].transaction_id);
     let successor = read_nth_prompt_created(&h, 1);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -8555,6 +8571,7 @@ fn failed_ui_compaction_replay_restores_inference_pause() {
         );
         let compact = read_nth_prompt_created(&h, 0);
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -9174,6 +9191,7 @@ fn standalone_interrupted_inference_recovers_after_restart() {
             .expect("test model")
             .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -9435,6 +9453,7 @@ fn standalone_auto_compaction_includes_complete_mixed_tool_round() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -9671,6 +9690,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     append_seed_agent_event(
         &mut store,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -9726,6 +9746,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     append_seed_agent_event(
         &mut store,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
             agent_id,

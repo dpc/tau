@@ -130,7 +130,9 @@ impl Harness {
             && !requested_tool_calls
             && !projection.contains_compaction
             && !continues_for_pending_message_wake
-            && response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            && !response
+                .failure_kind
+                .is_some_and(tau_proto::ProviderFailureKind::is_capacity_rejection)
             && response.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
             && !matches!(
                 response.output_length_disposition,

@@ -44,6 +44,8 @@ pub(crate) enum StandaloneCompactionRejection {
     /// The provider canonically rejected an output-free request for context
     /// size.
     ContextWindowExceeded,
+    /// The provider rejected the selected encoded message size without output.
+    MessageTooLarge,
     /// The provider did not report a completed terminal turn.
     InvalidStop,
     /// The provider exhausted its output-token budget.
@@ -67,6 +69,7 @@ impl StandaloneCompactionRejection {
             Self::ContextWindowExceeded => {
                 tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
             }
+            Self::MessageTooLarge => tau_proto::StandaloneCompactionFailureReason::MessageTooLarge,
             Self::OutputLengthExceeded => {
                 tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
             }

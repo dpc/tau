@@ -20,6 +20,15 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Unpublished source SDK 0.24.0
+
+Proto/client 0.24.0 targets protocol 17.0. New typed size failures and
+growth-stopped compaction recovery require configured extensions and UI peers
+to rebuild together. Compaction reports and boundaries add an optional
+ordinary-input byte comparison; Rust struct literals must initialize it.
+Older journals remain readable with an unknown comparison. These source changes
+do not publish packages or activate installed binaries.
+
 ### Published SDK 0.23.0
 
 Proto/client 0.23.0 adds an opt-in shared build-script helper without changing

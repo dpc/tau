@@ -3831,6 +3831,7 @@ fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
                 .originator = originator.clone();
         }
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -4278,6 +4279,7 @@ fn output_length_eligibility_matrix_is_exact() {
                 .originator = case.originator.clone();
         }
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -4513,6 +4515,7 @@ fn output_length_successor_terminal_matrix_is_exact() {
             .expect("source response");
         let successor = read_nth_prompt_created(&h, 1);
         let terminal = ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,

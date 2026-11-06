@@ -1860,6 +1860,23 @@ pub struct LocalCompactionNarrativeItem {
     pub narrative: String,
 }
 
+impl LocalCompactionNarrativeItem {
+    /// Project an accepted narrative into the exact historical user message.
+    /// This does not validate acceptance; the harness still validates the
+    /// narrative and replacement window before committing it.
+    #[must_use]
+    pub fn replacement_item(&self) -> ContextItem {
+        ContextItem::Message(MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::SyntheticCompactionSummary {
+                text: self.narrative.clone(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })
+    }
+}
+
 /// Maximum raw UTF-8 bytes accepted from one local compaction narrative.
 pub const LOCAL_COMPACTION_NARRATIVE_MAX_BYTES: usize = 256 * 1024;
 

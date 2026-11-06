@@ -351,6 +351,7 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         tau_proto::ContextItem::UnknownProviderItem(unknown.clone()),
     ];
     let response = tau_proto::ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,

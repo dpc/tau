@@ -4688,12 +4688,20 @@ pub enum StandaloneCompactionFailureReason {
     PrefixTooLarge,
     /// The provider canonically rejected this compact request for context size.
     ContextWindowExceeded,
+    /// The selected request exceeded a local byte limit or received peer 1009.
+    MessageTooLarge,
     /// No smaller useful provider-closed prefix remains after context
     /// rejection.
     ContextIrreducible,
 }
 
 impl StandaloneCompactionFailureReason {
+    /// Whether the failure permits a smaller provider-closed input prefix.
+    #[must_use]
+    pub const fn is_capacity_rejection(self) -> bool {
+        matches!(self, Self::ContextWindowExceeded | Self::MessageTooLarge)
+    }
+
     /// Fixed human-readable failure detail, independent of provider error
     /// prose.
     #[must_use]
@@ -4710,6 +4718,7 @@ impl StandaloneCompactionFailureReason {
             Self::Interrupted => "interrupted before completion",
             Self::PrefixTooLarge => "compaction prefix too large",
             Self::ContextWindowExceeded => "provider context window exceeded",
+            Self::MessageTooLarge => "compaction input too large",
             Self::ContextIrreducible => "no smaller compaction prefix",
         }
     }
@@ -5233,6 +5242,11 @@ pub struct OutputLengthContinuationOwner {
 /// This is the sole transcript boundary for replacement-window compaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentCompacted {
+    /// Provider-measured ordinary-input encoding of the replaced and
+    /// replacement windows. Absent measurements never imply progress or
+    /// token counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_input_bytes: Option<CompactionInputBytes>,
     /// Agent transcript receiving the replacement window.
     pub agent_id: AgentId,
     /// Standalone transaction correlation.
@@ -6334,6 +6348,10 @@ pub enum ProviderFailureKind {
     /// The provider rejected the unchanged request because its context was too
     /// large.
     ContextWindowExceeded,
+    /// A peer closed the WebSocket with code 1009 before semantic output.
+    WebSocketMessageTooLarge,
+    /// The selected encoded request exceeded the adapter's local byte limit.
+    EncodedMessageTooLarge,
     /// The provider deterministically rejected the unchanged request for
     /// another reason.
     RequestRejected,
@@ -6346,6 +6364,21 @@ pub enum ProviderFailureKind {
     LocalSummaryUnusable,
     /// A terminal provider failure without a more specific safe classification.
     Unknown,
+}
+
+impl ProviderFailureKind {
+    /// Whether a no-output terminal can authorize capacity prefix retreat.
+    /// Callers must separately validate operation, ownership and semantic
+    /// progress.
+    #[must_use]
+    pub const fn is_capacity_rejection(self) -> bool {
+        matches!(
+            self,
+            Self::ContextWindowExceeded
+                | Self::WebSocketMessageTooLarge
+                | Self::EncodedMessageTooLarge
+        )
+    }
 }
 
 /// Display-only provider failure evidence, never retry or recovery authority.
@@ -6466,6 +6499,9 @@ pub enum ContextRecoveryDisposition {
     /// The matching rejected inference must be claimed by one standalone
     /// compaction transaction.
     ReactiveCompactionPlanned,
+    /// Renewed capacity need stopped recursion because the preceding accepted
+    /// replacement grew in the provider's ordinary-input byte encoding.
+    CompactionGrowthStopped,
 }
 
 /// Harness-authored disposition for an output-length terminal.
@@ -6534,6 +6570,8 @@ impl ProviderFailureKind {
             Self::TransientCompactionExhausted => "transient_compaction_exhausted",
             Self::LocalSummaryUnusable => "local_summary_unusable",
             Self::ContextWindowExceeded => "context_window_exceeded",
+            Self::WebSocketMessageTooLarge => "websocket_message_too_large",
+            Self::EncodedMessageTooLarge => "encoded_message_too_large",
             Self::RequestRejected => "request_rejected",
             Self::Unknown => "unknown",
         }
@@ -6676,6 +6714,9 @@ pub struct ProviderStandaloneExecutionAccountingCorrected {
 /// final-status decision: only the canonical response can carry that authority.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinishedReport {
+    /// Optional provider-owned measurement of an accepted compact replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_input_bytes: Option<CompactionInputBytes>,
     /// Prompt whose provider execution ended.
     pub agent_prompt_id: AgentPromptId,
     /// Reported agent, validated against the live prompt owner.
@@ -6768,6 +6809,7 @@ impl ProviderResponseFinishedReport {
             estimated_api_cost_increment: self.estimated_api_cost_increment,
             compaction_original_input_tokens: self.compaction_original_input_tokens,
             compaction_output_tokens: self.compaction_output_tokens,
+            compaction_input_bytes: self.compaction_input_bytes,
             backend: self.backend,
             provider_response_id: self.provider_response_id,
             ws_pool_delta: self.ws_pool_delta,
@@ -6796,10 +6838,31 @@ impl From<ProviderResponseFinished> for ProviderResponseFinishedReport {
             estimated_api_cost_increment: response.estimated_api_cost_increment,
             compaction_original_input_tokens: response.compaction_original_input_tokens,
             compaction_output_tokens: response.compaction_output_tokens,
+            compaction_input_bytes: response.compaction_input_bytes,
             backend: response.backend,
             provider_response_id: response.provider_response_id,
             ws_pool_delta: response.ws_pool_delta,
         }
+    }
+}
+
+/// Content-free comparison using the provider's ordinary full-history
+/// input-array encoding on both sides, excluding the compact trigger and
+/// unchanged controls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompactionInputBytes {
+    /// Encoded bytes of exactly the replaced prefix.
+    pub before: u64,
+    /// Encoded bytes of exactly the accepted replacement.
+    pub after: u64,
+}
+
+impl CompactionInputBytes {
+    /// Strict growth blocks another automatically needed compaction, not this
+    /// accepted replacement. Equality deliberately does not count as growth.
+    #[must_use]
+    pub const fn grew(self) -> bool {
+        self.after > self.before
     }
 }
 
@@ -6819,6 +6882,9 @@ pub enum FinalStatusDisposition {
 /// Harness-canonical `provider.response_finished` fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
+    /// Optional ordinary-input byte comparison for an accepted compact result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_input_bytes: Option<CompactionInputBytes>,
     /// Harness-only recovery obligation for eligible inference interrupted
     /// by restart. No provider output or accounting is inferred. The exact
     /// checkpoint remains owed until a fresh checkpoint claims its activation.
@@ -6945,6 +7011,10 @@ impl ProviderResponseFinished {
         match self.failure_kind? {
             ProviderFailureKind::ContextWindowExceeded => {
                 Some(StandaloneCompactionFailureReason::ContextWindowExceeded)
+            }
+            ProviderFailureKind::WebSocketMessageTooLarge
+            | ProviderFailureKind::EncodedMessageTooLarge => {
+                Some(StandaloneCompactionFailureReason::MessageTooLarge)
             }
             ProviderFailureKind::LocalSummaryUnusable
                 if self.backend.as_ref().is_some_and(|backend| {

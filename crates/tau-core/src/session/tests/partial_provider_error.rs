@@ -22,6 +22,7 @@ fn partial_provider_error_preserves_prose_usage_without_tool_or_length_authority
         responses_raw_json: None,
     });
     let response = tau_proto::ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,

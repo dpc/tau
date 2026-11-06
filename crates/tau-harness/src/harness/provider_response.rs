@@ -469,11 +469,26 @@ impl Harness {
         response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
             .expect("terminal attempt is one-based");
         response.context_limit_telemetry = self.prepare_finished_response_context_limit(&response);
-        let terminal_plan = if !standalone_compaction || standalone_success {
+        let mut terminal_plan = if !standalone_compaction || standalone_success {
             self.classify_reactive_context_recovery(&cid, &response, source)
         } else {
             ProviderTerminalPlan::Other
         };
+        if matches!(
+            terminal_plan,
+            ProviderTerminalPlan::ReactiveContextRecovery(_)
+        ) && self
+            .session_runtime
+            .agent_store
+            .agent(response.agent_id.as_str())
+            .is_some_and(|tree| tree.preceding_compaction_grew(&response.agent_prompt_id))
+        {
+            response.recovery_disposition =
+                tau_proto::ContextRecoveryDisposition::CompactionGrowthStopped;
+            response.error =
+                Some("Compaction increased input size; automatic recovery stopped.".to_owned());
+            terminal_plan = ProviderTerminalPlan::Other;
+        }
         let reactive_recovery = matches!(
             terminal_plan,
             ProviderTerminalPlan::ReactiveContextRecovery(_)
@@ -1175,7 +1190,9 @@ impl Harness {
         response: &ProviderResponseFinished,
         source: Option<&tau_proto::ConnectionId>,
     ) -> ProviderTerminalPlan {
-        if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+        if !response
+            .failure_kind
+            .is_some_and(tau_proto::ProviderFailureKind::is_capacity_rejection)
             || response.stop_reason != ProviderStopReason::Error
             || !response.output_items.is_empty()
             || self
@@ -1695,13 +1712,26 @@ impl Harness {
                     ),
                 );
             }
-            if response.failure_kind == Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            if response
+                .failure_kind
+                .is_some_and(tau_proto::ProviderFailureKind::is_capacity_rejection)
                 && response.stop_reason == ProviderStopReason::Error
                 && response.output_items.is_empty()
+                && !self
+                    .prompt_coordination
+                    .prompt_runtime
+                    .semantic_output
+                    .contains(&response.agent_prompt_id)
             {
                 return ProviderTerminalPlan::StandaloneCompaction(
                     StandaloneCompactionTerminalPlan::Rejected(
-                        StandaloneCompactionRejection::ContextWindowExceeded,
+                        if response.failure_kind
+                            == Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+                        {
+                            StandaloneCompactionRejection::ContextWindowExceeded
+                        } else {
+                            StandaloneCompactionRejection::MessageTooLarge
+                        },
                     ),
                 );
             }
@@ -1834,6 +1864,7 @@ impl Harness {
             agent_id.to_string(),
             parent,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                compaction_input_bytes: response.compaction_input_bytes,
                 original_input_tokens: response
                     .usage
                     .as_ref()
@@ -2035,6 +2066,7 @@ impl Harness {
         let failure = (!matches!(
             rejection,
             StandaloneCompactionRejection::ContextWindowExceeded
+                | StandaloneCompactionRejection::MessageTooLarge
                 | StandaloneCompactionRejection::LocalSummaryUnusable
         ))
         .then(|| self.prepare_standalone_failure(cid, response, rejection.durable_reason()))
@@ -2059,7 +2091,8 @@ impl Harness {
                 "provider failed standalone compaction for agent_prompt_id={}",
                 response.agent_prompt_id
             )),
-            StandaloneCompactionRejection::ContextWindowExceeded => self.emit_info(&format!(
+            StandaloneCompactionRejection::ContextWindowExceeded
+            | StandaloneCompactionRejection::MessageTooLarge => self.emit_info(&format!(
                 "provider context-rejected standalone compaction for agent_prompt_id={}",
                 response.agent_prompt_id
             )),
@@ -2079,6 +2112,7 @@ impl Harness {
         if matches!(
             rejection,
             StandaloneCompactionRejection::ContextWindowExceeded
+                | StandaloneCompactionRejection::MessageTooLarge
                 | StandaloneCompactionRejection::LocalSummaryUnusable
         ) {
             let retained_response = self.clone_finished_response_for_timing(
@@ -2150,8 +2184,7 @@ impl Harness {
                 cut,
             )
             .is_none();
-        let permits_retreat = reason
-            == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+        let permits_retreat = reason.is_capacity_rejection()
             || (reason == tau_proto::StandaloneCompactionFailureReason::LocalSummaryUnusable
                 && self
                     .session_runtime
@@ -2236,15 +2269,12 @@ impl Harness {
         let batch_parent = self
             .selected_head_for_agent(cid)
             .unwrap_or(tau_proto::AgentHead::Root);
-        let final_reason = if reason
-            == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
-            && retreat_plan.is_none()
-            && context_irreducible
-        {
-            tau_proto::StandaloneCompactionFailureReason::ContextIrreducible
-        } else {
-            reason
-        };
+        let final_reason =
+            if reason.is_capacity_rejection() && retreat_plan.is_none() && context_irreducible {
+                tau_proto::StandaloneCompactionFailureReason::ContextIrreducible
+            } else {
+                reason
+            };
         Some(prepared_standalone_failure::PreparedStandaloneFailure {
             failed: tau_proto::AgentStandaloneCompactionFailed {
                 agent_id: response.agent_id.clone(),

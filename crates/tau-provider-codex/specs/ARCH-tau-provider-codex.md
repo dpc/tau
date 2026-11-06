@@ -134,6 +134,22 @@ fresh chain, and sends the complete provider-visible window followed by one
 the model/service-tier routing hint; Tau does not claim a Codex installation or
 attestation identity.
 
+The final WebSocket serializer admits at most 16,000,000 UTF-8 JSON bytes
+(decimal 16 MB), including controls, tools and encoded media. Equality fits.
+It checks only the actual selected delta, full replay, native compact or local
+summary envelope before publishing dispatch and enqueueing the request. A fitting delta
+does not exempt a later full fallback. This conservative local limit is not a
+token limit or a claim about every server. A rejection preserves prior dispatch and
+accounting evidence if this logical attempt already reached the backend.
+
+Typed local size rejection and peer 1009 can authorize harness-owned smaller
+prefixes only without semantic progress; neither authorizes retrying identical
+work. Accepted compaction results report a before/after ordinary-input-array byte
+comparison, excluding the trigger and fixed controls. Local narratives use the
+same synthetic user replacement as the harness. The harness persists this
+comparison and stops automatic recurrence only on strict growth plus renewed
+compaction need.
+
 Every published Codex model supports the common standalone operation. Native
 capability selects implementation, not configured policy eligibility. Known
 native absence selects Tau's local-summary lowerer; definitive native absence

@@ -279,6 +279,10 @@ fn compact_fallback_is_one_attempt_only_for_definitive_native_absence() {
     }
     for outcome in [
         CompactOutcome::Finished {
+            input_bytes: tau_proto::CompactionInputBytes {
+                before: 2,
+                after: 2,
+            },
             output_items: Vec::new(),
             usage: None,
         },

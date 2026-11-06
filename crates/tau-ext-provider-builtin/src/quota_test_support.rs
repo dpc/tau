@@ -83,6 +83,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
             })]
         };
         let finished = ProviderResponseFinishedReport {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,

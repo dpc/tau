@@ -8109,6 +8109,7 @@ fn simple_finished(
     text: impl Into<String>,
 ) -> ProviderResponseFinishedReport {
     ProviderResponseFinishedReport {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -9090,17 +9091,20 @@ where
     match outcome {
         CompactOutcome::Finished {
             output_items,
+            input_bytes,
             usage,
         } => {
+            let mut finished = compact_finished_response(
+                agent_prompt_id,
+                prompt,
+                backend_descriptor(config, ProviderBackendTransport::Websocket, false),
+                output_items,
+                usage,
+                execution.logical_attempt.provider_attempt(),
+            );
+            finished.compaction_input_bytes = Some(input_bytes);
             writer.send_report(HarnessInputMessage::emit_transient(
-                Event::ProviderResponseFinishedReported(compact_finished_response(
-                    agent_prompt_id,
-                    prompt,
-                    backend_descriptor(config, ProviderBackendTransport::Websocket, false),
-                    output_items,
-                    usage,
-                    execution.logical_attempt.provider_attempt(),
-                )),
+                Event::ProviderResponseFinishedReported(finished),
             ))?;
             Ok(None)
         }
@@ -9188,6 +9192,7 @@ fn compact_finished_response(
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> ProviderResponseFinishedReport {
     ProviderResponseFinishedReport {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -9747,6 +9752,7 @@ fn finish_stream<S: ProviderReportSink>(
         stop_reason => stop_reason,
     };
     let finished = ProviderResponseFinishedReport {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -9839,6 +9845,7 @@ fn finish_error<S: ProviderReportSink>(
 ) -> Result<(), Box<dyn Error>> {
     let accounting = error.response_accounting().cloned().unwrap_or_default();
     let finished = ProviderResponseFinishedReport {
+        compaction_input_bytes: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

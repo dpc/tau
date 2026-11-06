@@ -964,6 +964,7 @@ fn finished(
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> tau_proto::ProviderResponseFinishedReport {
     tau_proto::ProviderResponseFinishedReport {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,

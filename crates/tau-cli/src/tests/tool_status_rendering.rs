@@ -1094,6 +1094,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
     // tool progress. Quota remains final, while side-conversation calls stay
     // rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1694,6 +1695,7 @@ fn watched_agent_response_finished_keeps_status_row() {
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1960,6 +1962,7 @@ fn watched_agent_provider_response_update_hides_unreported_row_after_terminal() 
     assert!(eventually_screen_contains(&vt, 100, "❓✨ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2868,6 +2871,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     assert_eq!(progress.matches("Compacting…").count(), 1, "{progress}");
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),
@@ -2937,6 +2941,7 @@ fn standalone_compaction_repaints_from_owned_continuation_usage_only() {
         standalone_compaction_started("ct-measure", "ap-compact"),
     ));
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: Some(tau_proto::TokenCount::new(149_101)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(2_549)),
         agent_id: agent_id("main"),
@@ -2993,6 +2998,7 @@ fn hidden_compaction_continuation_repaints_owning_detached_transcript() {
     started.agent_id = agent_id("worker");
     renderer.handle(&Event::AgentStandaloneCompactionStarted(started));
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: Some(tau_proto::TokenCount::new(100_158)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(2_243)),
         agent_id: agent_id("worker"),
@@ -3075,6 +3081,7 @@ fn watched_agent_provider_prompt_terminal_hides_unreported_row() {
     assert!(eventually_screen_contains(&vt, 100, "❓✨ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

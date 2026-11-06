@@ -48,6 +48,7 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
         .expect("owner")
         .reject_admissions_after_for_test(1, 1);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         // Display evidence alone cannot turn a successful terminal into failure.
         error_category: Some(tau_proto::ProviderErrorCategory::Transport),
         automatic_compaction_decision: None,

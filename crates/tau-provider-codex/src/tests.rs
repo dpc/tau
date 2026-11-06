@@ -510,6 +510,7 @@ fn compact_admission_abandoned_probe_is_reclaimed_once() {
 #[test]
 fn debug_response_producer_submits_typed_compressed_capture_job() {
     let response = tau_proto::ProviderResponseFinishedReport {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -1741,6 +1742,7 @@ fn codex_local_summary_preserves_ordinary_prefix_and_usage() {
         let CompactOutcome::Finished {
             output_items,
             usage,
+            input_bytes,
         } = runtime.compact("local-summary", &config, &request, &mut NeverAbort)
         else {
             panic!("local summary must finish");
@@ -1748,6 +1750,12 @@ fn codex_local_summary_preserves_ordinary_prefix_and_usage() {
         assert!(matches!(output_items.as_slice(),
             [tau_proto::ContextItem::LocalCompactionNarrative(item)]
                 if item.narrative == "Keep the invariant."));
+        assert_compaction_bytes_match_ordinary_inputs(
+            &config,
+            &request,
+            &output_items,
+            input_bytes,
+        );
         let usage = usage.expect("real usage");
         assert_eq!(usage.prompt_sent_tokens, 100);
         assert_eq!(usage.prompt_cached_tokens, 60);
@@ -1760,6 +1768,56 @@ fn codex_local_summary_preserves_ordinary_prefix_and_usage() {
             "Codex has no supported remote generation-cap field"
         );
     }
+}
+
+/// Compare reported measurements with independently materialized ordinary
+/// requests, including opaque native replay and local synthetic-message
+/// lowering.
+fn assert_compaction_bytes_match_ordinary_inputs(
+    config: &ResolvedConfig,
+    request: &Prompt<'_>,
+    output: &[tau_proto::ContextItem],
+    measured: tau_proto::CompactionInputBytes,
+) {
+    let mut before = request.context.clone();
+    let trigger = before.blocks.pop().expect("trailing trigger");
+    assert!(matches!(trigger, tau_proto::ContextBlock::UserInput(block)
+        if block.items == [tau_proto::ContextItem::CompactionTrigger]));
+    let after = tau_proto::PromptContext {
+        blocks: vec![tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: output
+                    .iter()
+                    .map(|item| match item {
+                        tau_proto::ContextItem::LocalCompactionNarrative(narrative) => {
+                            narrative.replacement_item()
+                        }
+                        item => item.clone(),
+                    })
+                    .collect(),
+            },
+        )],
+    };
+    let input_bytes = |context: &tau_proto::PromptContext| {
+        let mut ordinary = test_prompt_payload(request.session_id, request.agent_id, context);
+        ordinary.system_prompt = "fixed overhead must not enter the comparison";
+        let envelope = serde_json::to_value(responses::build_ws_envelope(
+            config.wire(),
+            &ordinary,
+            None,
+            None,
+        ))
+        .expect("ordinary request");
+        serde_json::to_vec(&envelope["input"])
+            .expect("input array")
+            .len() as u64
+    };
+    assert_eq!(measured.before, input_bytes(&before));
+    assert_eq!(measured.after, input_bytes(&after));
+    assert!(
+        measured.after > 2,
+        "replacement must not lower to an empty array"
+    );
 }
 
 /// Construct exact reasoning bytes shared by the loopback peer and replay
@@ -1986,6 +2044,7 @@ fn compact_exact_success_returns_one_item() {
     let CompactOutcome::Finished {
         output_items,
         usage,
+        input_bytes,
     } = outcome
     else {
         panic!("exact native compact response must finish");
@@ -1995,6 +2054,7 @@ fn compact_exact_success_returns_one_item() {
         [tau_proto::ContextItem::Compaction(_)]
     ));
     assert!(usage.is_some(), "provider usage survives exact success");
+    assert_compaction_bytes_match_ordinary_inputs(&config, &request, &output_items, input_bytes);
     let trace =
         String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
     assert_eq!(
@@ -2107,6 +2167,7 @@ fn astra_native_compaction_returns_one_opaque_item() {
     let CompactOutcome::Finished {
         output_items,
         usage,
+        ..
     } = runtime.compact("ap-astra-compact", &config, &request, &mut NeverAbort)
     else {
         panic!("Astra native compact response must finish");
@@ -3606,12 +3667,24 @@ fn websocket_message_size_close_never_redispatches_or_retries() {
                 assert_eq!(error.retry_decision(), None);
                 assert_eq!(
                     error.failure_kind(),
-                    Some(tau_proto::ProviderFailureKind::RequestRejected)
+                    Some(if operation != 0 && semantic {
+                        tau_proto::ProviderFailureKind::Unknown
+                    } else {
+                        tau_proto::ProviderFailureKind::WebSocketMessageTooLarge
+                    })
                 );
-                assert_eq!(
-                    error.to_string(),
-                    "provider WebSocket closed with code 1009 (message too big); unchanged request will not be retried"
-                );
+                if operation != 0 && semantic {
+                    assert!(
+                        !error
+                            .failure_kind()
+                            .is_some_and(tau_proto::ProviderFailureKind::is_capacity_rejection)
+                    );
+                } else {
+                    assert_eq!(
+                        error.to_string(),
+                        "provider WebSocket closed with code 1009 (message too big); unchanged request will not be retried"
+                    );
+                }
                 let expected = if repair { 2 } else { 1 };
                 assert_eq!(
                     server.counts.requests.lock().expect("requests").len(),
@@ -3633,6 +3706,65 @@ fn websocket_message_size_close_never_redispatches_or_retries() {
                 );
             }
         }
+    }
+}
+
+/// Fresh oversized inference, native compact, and local-summary requests stop
+/// before dispatch with no backend attribution or invented accounting.
+#[test]
+fn local_preflight_rejection_has_no_dispatch_or_usage() {
+    let oversized = "x".repeat(16_000_000);
+    for operation in 0..3 {
+        let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
+        let config = ResolvedConfig {
+            inner: if operation == 1 {
+                native_compact_test_config(server.base_url())
+            } else {
+                test_config(server.base_url())
+            },
+        };
+        let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+        let session = tau_proto::SessionId::parse("local-size").expect("session");
+        let agent = tau_proto::AgentId::parse("local-size").expect("agent");
+        let context = compact_trigger_context();
+        let mut request = test_prompt_payload(&session, &agent, &context);
+        request.system_prompt = &oversized;
+        let error = if operation == 0 {
+            let AttemptOutcome::Terminal {
+                error,
+                progress,
+                backend_reached,
+            } = runtime.run_attempt(
+                "local-size",
+                &config,
+                &request,
+                &mut NeverAbort,
+                &mut |_| {},
+            )
+            else {
+                panic!("local inference rejection");
+            };
+            assert!(!backend_reached);
+            assert_eq!(progress, SemanticProgress::None);
+            error
+        } else {
+            let CompactOutcome::Terminal {
+                error,
+                backend_reached,
+            } = runtime.compact("local-size", &config, &request, &mut NeverAbort)
+            else {
+                panic!("local compact rejection");
+            };
+            assert!(!backend_reached);
+            error
+        };
+        assert_eq!(
+            error.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::EncodedMessageTooLarge)
+        );
+        assert!(error.response_accounting().is_none());
+        assert!(error.retry_decision().is_none());
+        assert!(server.counts.requests.lock().expect("requests").is_empty());
     }
 }
 

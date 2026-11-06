@@ -796,6 +796,7 @@ fn interrupted_post_tool_fixture_with_compaction(
         append_seed_agent_event(
             &mut store,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                compaction_input_bytes: None,
                 agent_id: crate::parse_agent_id("main"),
                 transaction_id,
                 compact_prompt_id: compact_prompt_id.clone(),

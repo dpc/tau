@@ -451,6 +451,7 @@ fn try_append_trace_provider_terminal(
         None,
         tau_core::AgentEventParent::InheritHead,
         Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             agent_prompt_id: prompt_id
@@ -502,6 +503,7 @@ fn append_background_tool_calls(
             agent_id.as_str(),
             None,
             Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 agent_prompt_id: "prompt-background"
@@ -1764,6 +1766,7 @@ fn append_context_boundary(
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                compaction_input_bytes: None,
                 agent_id: agent_id.clone(),
                 transaction_id: tau_proto::CompactionTransactionId::parse(transaction)
                     .expect("transaction"),

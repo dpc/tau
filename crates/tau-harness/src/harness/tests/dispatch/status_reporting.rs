@@ -1769,6 +1769,7 @@ fn unsuccessful_working_terminal_bypasses_reminders() {
         .agents
         .insert(prompt_id.clone(), cid.clone());
     let response = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

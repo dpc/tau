@@ -20,6 +20,7 @@ fn history_response(agent_id: &AgentId, prompt: &str) -> Event {
     let mut other = call.clone();
     other.call_id = tau_proto::ToolCallId::new("other-call");
     Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         agent_prompt_id: prompt.parse().expect("prompt id"),
         agent_id: agent_id.clone(),

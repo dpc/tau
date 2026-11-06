@@ -162,14 +162,20 @@ including OpenAI's `context_length_exceeded` and llama.cpp's
 provider prose remain ordinary request rejection rather than recovery
 authority.
 
-## Reactive context-overflow recovery
+## Reactive capacity recovery
 
-An ordinary inference that receives a canonical, no-output context-window
+An ordinary inference that receives a canonical, no-output capacity
 rejection may authorize standalone compaction when the captured model still
 matches, advertises standalone support, and role policy permits compaction.
 This includes inference resumed after an earlier successful compaction. Its
 canonical terminal and recovery disposition commit before a uniquely correlated
 start, preserving the owed activation without submitting it a second time.
+
+Token-window rejection, a peer WebSocket 1009 close, and provider-local rejection
+of the actual encoded request provide distinct typed evidence. Size failures do
+not claim token overflow or invent usage. Accepted semantic output revokes recovery
+authority, including private compact output discarded before terminal delivery.
+Neither local size rejection nor 1009 authorizes an unchanged-request retry.
 
 UI, self, cross-agent, and automatic standalone compaction share prefix fitting.
 Each new request considers the whole current eligible provider window: installed
@@ -189,7 +195,7 @@ The first successful prefix summary completes the request and preserves all
 unsummarized suffix material. It does not authorize another summary merely
 because a suffix remains or new input arrived. Ordinary execution supplies the
 outer loop: fresh provider input usage can trigger the configured threshold,
-and a fresh canonical no-output overflow can authorize another compaction.
+and a fresh canonical no-output capacity rejection can authorize another compaction.
 Pre-summary usage is invalidated; unknown post-summary size is not inferred from
 JSON bytes or asserted to fit. Native backend summarization remains preferred,
 with the existing built-in local summary implementation otherwise.
@@ -204,6 +210,21 @@ A viable configuration assumes useful shrinking prefixes exist; fixed overhead
 or an indivisible smallest prefix that the backend rejects terminates as
 irreducible. There is no arbitrary successful-pass count or serialized-byte
 progress rank.
+
+A provider may record the encoded ordinary-input bytes of exactly the replaced
+prefix and accepted replacement, using the same lowering on both sides and
+excluding compact instructions and unchanged controls. The harness persists this
+comparison with the successful boundary. If the replacement is strictly larger
+and resumed execution needs compaction again, the harness stops automatic
+recursion while retaining that replacement and the exact suffix. Growth alone
+does not reject a usable result; equality and shrinkage remain eligible. Missing
+measurements are unknown. Byte growth may stop a genuine token-triggered
+recurrence but never establishes token need. The comparison follows the durable
+transaction/checkpoint and usage-evidence lineage, not a global agent latch.
+
+Actual capacity-driven prefix retreat produces one concise warning in the owning
+UI transcript. Repeated retreats in the same chain share that warning, including
+manual requests, local preflight rejection, and cold reconstruction.
 
 ## Manual compaction
 

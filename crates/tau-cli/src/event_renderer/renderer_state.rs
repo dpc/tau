@@ -184,6 +184,9 @@ pub(super) struct TranscriptRuntimeState {
     /// Standalone compaction prompt correlations.
     pub(super) standalone_compaction_transactions:
         HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,
+    /// Successor transactions whose prefix-retreat chain already showed its
+    /// warning. Reconstructed from the same durable failures on cold attach.
+    pub(super) warned_compaction_retreats: HashSet<tau_proto::CompactionTransactionId>,
     /// Completed compaction rows awaiting exact continuation request usage.
     pub(super) completed_compactions:
         HashMap<tau_proto::CompactionTransactionId, CompletedCompactionPresentation>,

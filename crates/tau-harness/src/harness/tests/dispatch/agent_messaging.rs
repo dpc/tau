@@ -196,6 +196,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
         "conn-wrong",
         TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ProviderResponseFinished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -248,6 +249,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4364,6 +4366,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         },
     );
     let terminal = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6111,6 +6114,7 @@ fn side_agent_error_response_propagates_error_result() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6226,6 +6230,7 @@ fn side_agent_output_length_never_completes_successfully() {
             })
             .expect("side prompt id");
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             agent_prompt_id: side_spid,

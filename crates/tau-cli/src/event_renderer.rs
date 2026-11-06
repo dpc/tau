@@ -9488,6 +9488,10 @@ impl EventRenderer {
                 true
             }
             Event::AgentCompacted(compacted) => {
+                self.transcript
+                    .runtime
+                    .warned_compaction_retreats
+                    .remove(&compacted.transaction_id);
                 self.transcript.history.turn_stats_predecessor = None;
                 let prompt_id = compacted.compact_prompt_id.clone();
                 self.transcript
@@ -9567,6 +9571,29 @@ impl EventRenderer {
                 true
             }
             Event::AgentStandaloneCompactionFailed(failed) => {
+                let already_warned = self
+                    .transcript
+                    .runtime
+                    .warned_compaction_retreats
+                    .remove(&failed.transaction_id);
+                if failed.reason.is_capacity_rejection()
+                    && let Some(retreat) = &failed.context_retreat
+                {
+                    self.transcript
+                        .runtime
+                        .warned_compaction_retreats
+                        .insert(retreat.transaction_id.clone());
+                    if !already_warned {
+                        self.retain_harness_notice(
+                            "compaction-input-too-large",
+                            tau_proto::HarnessNotice::alert(
+                                tau_proto::notice_kind::HARNESS_NOTICE,
+                                "Compaction input too large; retrying with a smaller prefix.",
+                                tau_proto::NoticeLevel::Warning,
+                            ),
+                        );
+                    }
+                }
                 if failed.reason
                     == tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
                 {
@@ -9589,7 +9616,13 @@ impl EventRenderer {
                 {
                     self.complete_standalone_compaction_prompt(
                         &prompt_id,
-                        if failed.output_length_continuation.is_some() {
+                        if failed.reason.is_capacity_rejection() && failed.context_retreat.is_some()
+                        {
+                            // The grouped warning describes this still-running
+                            // request; do not append an error row for every
+                            // cut.
+                            None
+                        } else if failed.output_length_continuation.is_some() {
                             Some(("continuing", CompactionStatus::Progress))
                         } else {
                             Some((failed.reason.description(), CompactionStatus::Failure))

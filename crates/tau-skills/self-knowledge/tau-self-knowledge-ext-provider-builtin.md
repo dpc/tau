@@ -286,6 +286,15 @@ Terminal failures pause inference until explicit `:compact` or authorized
 compaction. Clean empty/reasoning-only local summaries may retreat to a smaller
 complete prefix, at most four successors; exhaustion needs explicit recovery.
 
+Codex locally rejects actual outgoing WebSocket envelopes above 16,000,000 bytes.
+It checks the chosen delta or full request, not a hypothetical full replay.
+Local size rejection and peer 1009 do not authorize retrying identical work.
+Without semantic output, the harness can use smaller-prefix compaction. The CLI
+shows one concise warning per retreat chain. Successful compaction resumes
+ordinary inference with the exact suffix. Fresh capacity need can compact again
+unless the previous accepted replacement grew in ordinary-input encoded bytes. Equality is not growth, and
+byte counts never supply token usage or establish token thresholds.
+
 Chat Completions/OpenRouter/public Responses advertise local-summary compaction
 when context is nonzero. `local_summary_compaction` accepts optional
 `max_input_bytes`, `max_output_tokens`, `max_output_bytes`; `{}` keeps defaults:

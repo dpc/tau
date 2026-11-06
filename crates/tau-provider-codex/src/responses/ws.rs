@@ -1636,6 +1636,10 @@ fn serialize_and_enqueue_envelope(
     serialize_and_enqueue_envelope_observed(envelope, abort, on_dispatched, &mut None, enqueue)
 }
 
+/// Conservative decimal 16 MB admission limit for the actual selected envelope.
+/// This is local policy, not an inferred universal server or token limit.
+const MAX_ENCODED_REQUEST_BYTES: usize = 16_000_000;
+
 /// Observed serializer/enqueue path used only by the private stage trace.
 fn serialize_and_enqueue_envelope_observed(
     envelope: &impl serde::Serialize,
@@ -1654,6 +1658,12 @@ fn serialize_and_enqueue_envelope_observed(
     }
     if abort.is_aborted() {
         return Err(LlmError::Canceled);
+    }
+    if text.len() > MAX_ENCODED_REQUEST_BYTES {
+        return Err(LlmError::EncodedMessageTooLarge {
+            bytes: text.len(),
+            limit: MAX_ENCODED_REQUEST_BYTES,
+        });
     }
     on_dispatched(Instant::now());
     if abort.is_aborted() {

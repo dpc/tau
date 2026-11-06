@@ -163,6 +163,21 @@ capacity/length chains and restart; it is separate from transport retries, not
 a five-paid-call total. Exhaustion requires explicit recovery. Draft reasoning
 stays private. The rule covers Chat Completions, public Responses, and Codex's
 local fallback, not native opaque compaction or malformed/tool-bearing output.
+
+Codex checks the actual outgoing WebSocket JSON against a conservative
+16,000,000-byte limit before sending it. A fitting chained delta remains usable.
+Codex checks an oversized full fallback separately. A local size rejection or peer
+1009 close never authorizes retrying the unchanged request. Without semantic
+output, the harness can use the existing smaller-prefix compaction recovery. The
+CLI groups repeated retreats under one warning:
+“Compaction input too large; retrying with a smaller prefix.”
+
+After success, ordinary inference resumes with the replacement and untouched
+suffix. A fresh capacity rejection can compact again. Automatic recursion stops
+only if the preceding replacement grew in ordinary-input encoded bytes and
+compaction is needed again; the harness retains a usable result despite growth.
+Equality remains eligible. Byte size never substitutes for token usage or
+establishes a token threshold.
 Grok's unary native compactor uses the same burst scheduler for proven
 request/body transport and absolute-deadline failures before
 accepting its complete opaque item. Unknown HTTP/status/output failures remain

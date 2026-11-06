@@ -421,6 +421,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

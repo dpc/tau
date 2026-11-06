@@ -8,6 +8,16 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 17.0 and source SDK 0.24.0 add local encoded-message and peer WebSocket
+1009 failure variants, a standalone message-size failure reason, and a
+growth-stopped recovery disposition. Compaction reports, canonical terminals,
+and accepted boundaries also carry optional ordinary-input byte comparisons.
+Configured extensions and UI peers must rebuild against these enum additions.
+Existing journals decode with an unknown comparison when the field is absent.
+Journal framing is unchanged; old binaries cannot decode newly emitted enum
+values. These source changes do not publish the SDK or activate running
+installations.
+
 Protocol 16.8 adds optional harness-canonical `interrupted_retry` metadata to an
 ordinary Error terminal. Provider reports cannot author it. Older readers ignore
 the field and see an ordinary failed request; older harnesses may stop at that

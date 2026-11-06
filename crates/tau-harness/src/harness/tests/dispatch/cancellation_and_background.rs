@@ -399,6 +399,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         .agents
         .insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -526,6 +527,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
         .agents
         .insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -733,6 +735,7 @@ fn cancel_publishes_tool_cancel_request() {
         .agents
         .insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1046,6 +1049,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     let bg_call_id: ToolCallId = "live-bg-sibling".into();
     let fg_call_id: ToolCallId = "live-fg-sibling".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1212,6 +1216,7 @@ fn backgrounded_tool_progress_is_not_published() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1315,6 +1320,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
     assert!(notice_pos < user_pos);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1391,6 +1397,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
         .agents
         .insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1528,6 +1535,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         .agents
         .insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1745,6 +1753,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         .count();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1848,6 +1857,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3499,6 +3509,7 @@ fn current_generation_exact_waits_restore_released_generation_notice() {
             &cid,
             old_call_ref.declaration,
             Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 estimated_api_cost_rates: None,
@@ -3945,6 +3956,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3997,6 +4009,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4087,6 +4100,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side follow-up prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4445,6 +4459,7 @@ fn background_error_clears_actual_running_call() {
         .agents
         .insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4582,6 +4597,7 @@ fn background_cancel_clears_actual_running_call() {
         .agents
         .insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4979,6 +4995,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
         .estimated_cost_rates
         .insert(spid.clone(), tau_proto::ESTIMATED_API_COST_FALLBACK);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5213,6 +5230,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         .insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5331,6 +5349,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         .insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "live-builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5776,6 +5795,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5828,6 +5848,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         .clone()
         .expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6676,6 +6697,7 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
     .expect("submit first resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6752,6 +6774,7 @@ fn resumed_completed_background_result_preserves_exact_wait_correlation() {
     .expect("submit resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -7042,6 +7065,7 @@ fn scheduler_plural_wait_retains_ordered_durable_correlation() {
         .agents
         .insert(prompt_id.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

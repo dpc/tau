@@ -53,7 +53,7 @@ fn local_summary_validates_complete_private_output() {
     let text = "  Preserve these exact bytes.  ";
     assert!(matches!(
         validate_narrative(state(vec![message(text.to_owned())])),
-        Ok(tau_proto::ContextItem::LocalCompactionNarrative(item)) if item.narrative == text
+        Ok(item) if item.narrative == text
     ));
     for items in [
         vec![],

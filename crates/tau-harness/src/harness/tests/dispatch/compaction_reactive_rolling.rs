@@ -346,6 +346,30 @@ fn reactive_context_overflow_without_byte_budget_dispatches_whole_context() {
 /// pass. Stop with useful original suffix retained once inference fits.
 #[test]
 fn reactive_capacity_oracle_repeats_only_after_fresh_inference_rejection() {
+    recursive_capacity_oracle(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+}
+
+/// Exact local byte rejection must use the same recursive closed-prefix
+/// recovery as token capacity, without manufacturing token telemetry.
+#[test]
+fn recursive_local_message_size_recovery_preserves_suffix() {
+    recursive_capacity_oracle(tau_proto::ProviderFailureKind::EncodedMessageTooLarge);
+}
+
+/// Qualified peer 1009 retreats rather than retrying an identical request and
+/// permits another successful pass only after a fresh ordinary rejection.
+#[test]
+fn recursive_peer_message_size_recovery_preserves_suffix() {
+    recursive_capacity_oracle(tau_proto::ProviderFailureKind::WebSocketMessageTooLarge);
+}
+
+/// Exercise a converging recovery through three accepted replacements.
+fn recursive_capacity_oracle(kind: tau_proto::ProviderFailureKind) {
+    let rejection = |prompt: &tau_proto::AgentPromptCreated| {
+        let mut response = context_overflow_response(prompt);
+        response.failure_kind = Some(kind);
+        response
+    };
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_backend_capacity_compaction(&mut h);
@@ -397,12 +421,12 @@ fn reactive_capacity_oracle_repeats_only_after_fresh_inference_rejection() {
             }
             tau_proto::PromptOperation::Inference => {
                 ordinary_rejections += 1;
-                h.handle_provider_response_finished(context_overflow_response(&prompt))
+                h.handle_provider_response_finished(rejection(&prompt))
                     .expect("fresh inference overflow");
             }
             tau_proto::PromptOperation::StandaloneCompaction if 4 < units => {
                 compact_rejections += 1;
-                h.handle_provider_response_finished(context_overflow_response(&prompt))
+                h.handle_provider_response_finished(rejection(&prompt))
                     .expect("smaller prefix");
             }
             tau_proto::PromptOperation::StandaloneCompaction => {
@@ -436,10 +460,108 @@ fn reactive_capacity_oracle_repeats_only_after_fresh_inference_rejection() {
     h.shutdown().expect("shutdown");
 }
 
+/// Growth alone never rejects a successful replacement. Only renewed capacity
+/// need stops the recursive path, and equality deliberately remains eligible.
+#[test]
+fn recursive_compaction_growth_stop_requires_strict_growth_and_renewed_need() {
+    for (after, renewed_need, stopped) in [
+        (101, true, true),
+        (101, false, false),
+        (100, true, false),
+        (99, true, false),
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        enable_backend_capacity_compaction(&mut h);
+        let cid = ensure_test_user_agent(&mut h);
+        append_capacity_history(&mut h, &cid, "growth input");
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("growth activation".to_owned()))
+            .expect("inference");
+        let first = read_nth_prompt_created(&h, 0);
+        let mut rejection = context_overflow_response(&first);
+        rejection.failure_kind = Some(tau_proto::ProviderFailureKind::EncodedMessageTooLarge);
+        h.handle_provider_response_finished(rejection)
+            .expect("recovery");
+        let compact = read_nth_prompt_created(&h, 1);
+        let mut summary = provider_text_response(
+            &compact.agent_prompt_id,
+            compact.agent_id.clone(),
+            "accepted summary",
+        );
+        summary.compaction_input_bytes =
+            Some(tau_proto::CompactionInputBytes { before: 100, after });
+        h.handle_provider_response_finished(summary)
+            .expect("accepted replacement");
+        let resumed = read_nth_prompt_created(&h, 2);
+        assert_eq!(resumed.operation, tau_proto::PromptOperation::Inference);
+        let response = if renewed_need {
+            // Genuine token rejection can supply renewed need; byte growth does
+            // not claim the token context grew or manufacture a token
+            // threshold.
+            context_overflow_response(&resumed)
+        } else {
+            provider_text_response(&resumed.agent_prompt_id, resumed.agent_id.clone(), "done")
+        };
+        h.handle_provider_response_finished(response)
+            .expect("ordinary terminal");
+        let events = event_log_events(&h);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentCompacted(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+                .count(),
+            if renewed_need && !stopped { 4 } else { 3 },
+        );
+        assert_eq!(events.iter().any(|event| matches!(event,
+            Event::ProviderResponseFinished(response)
+                if response.recovery_disposition == tau_proto::ContextRecoveryDisposition::CompactionGrowthStopped
+        )), stopped);
+        let tree = h
+            .session_runtime
+            .agent_store
+            .agent(resumed.agent_id.as_str())
+            .expect("tree");
+        assert_eq!(
+            tree.preceding_compaction_grew(&resumed.agent_prompt_id),
+            after > 100
+        );
+        assert!(
+            serde_json::to_string(&resumed.context)
+                .expect("context")
+                .contains("accepted summary")
+        );
+        h.shutdown().expect("shutdown");
+    }
+}
+
 /// Rejection after restart repairs exactly one planned smaller-prefix attempt;
 /// ambiguous provider work is not resent and retained input is still present.
 #[test]
 fn canonical_standalone_rejection_restart_repairs_retreat_once() {
+    rejection_restart_oracle(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+}
+
+/// Both size rejection sources retain canonical retreat authority across the
+/// terminal-before-failure crash cut without duplicating the successor.
+#[test]
+fn message_size_rejection_restart_repairs_retreat_once() {
+    for kind in [
+        tau_proto::ProviderFailureKind::EncodedMessageTooLarge,
+        tau_proto::ProviderFailureKind::WebSocketMessageTooLarge,
+    ] {
+        rejection_restart_oracle(kind);
+    }
+}
+
+/// Reopen the durable terminal-before-failure cut for one capacity source.
+fn rejection_restart_oracle(kind: tau_proto::ProviderFailureKind) {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let (agent_id, rejected, rejected_transaction);
@@ -471,12 +593,14 @@ fn canonical_standalone_rejection_restart_repairs_retreat_once() {
     }
     wait_for_session_unlock(&state, "s1");
     let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("store");
+    let mut terminal = context_overflow_response(&rejected);
+    terminal.failure_kind = Some(kind);
     store
         .append_agent_event_at(
             agent_id.as_str(),
             None,
             tau_core::AgentEventParent::InheritHead,
-            Event::ProviderResponseFinished(context_overflow_response(&rejected)),
+            Event::ProviderResponseFinished(terminal),
             tau_proto::UnixMicros::now(),
         )
         .expect("canonical rejection crash cut");
@@ -507,6 +631,19 @@ fn canonical_standalone_rejection_restart_repairs_retreat_once() {
 /// to the summary alone without dropping or resending its preserved suffix.
 #[test]
 fn partial_compaction_restart_and_replacement_only_retreat_preserve_suffix() {
+    partial_restart_oracle(false);
+}
+
+/// A stored byte-growth comparison survives restart before the owed checkpoint
+/// and stops a fresh local size rejection without rolling back replacement or
+/// suffix.
+#[test]
+fn compaction_growth_stop_survives_restart_before_checkpoint() {
+    partial_restart_oracle(true);
+}
+
+/// Reconstruct one partial success before resuming its exact suffix.
+fn partial_restart_oracle(grew: bool) {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let (agent_id, started, suffix_end);
@@ -562,6 +699,10 @@ fn partial_compaction_restart_and_replacement_only_retreat_preserve_suffix() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                compaction_input_bytes: Some(tau_proto::CompactionInputBytes {
+                    before: 100,
+                    after: if grew { 101 } else { 99 },
+                }),
                 agent_id: agent_id.clone(),
                 transaction_id: started.transaction_id,
                 compact_prompt_id: started.compact_prompt_id.clone(),
@@ -596,8 +737,26 @@ fn partial_compaction_restart_and_replacement_only_retreat_preserve_suffix() {
     for marker in ["large summary", "retained-B", "retained activation"] {
         assert_eq!(text.matches(marker).count(), 1, "{marker}");
     }
-    h.handle_provider_response_finished(context_overflow_response(&inference))
+    let mut rejection = context_overflow_response(&inference);
+    rejection.failure_kind = Some(tau_proto::ProviderFailureKind::EncodedMessageTooLarge);
+    h.handle_provider_response_finished(rejection)
         .expect("fresh overflow");
+    if grew {
+        let events = event_log_events(&h);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(event,
+            Event::ProviderResponseFinished(response)
+                if response.recovery_disposition == tau_proto::ContextRecoveryDisposition::CompactionGrowthStopped
+        )));
+        h.shutdown().expect("shutdown");
+        return;
+    }
     let mut index = 1;
     loop {
         let compact = read_nth_prompt_created(&h, index);

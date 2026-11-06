@@ -335,6 +335,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         };
 
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: (label == "provider error")
                 .then_some(tau_proto::ProviderErrorCategory::Transport),
             automatic_compaction_decision: None,

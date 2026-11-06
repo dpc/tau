@@ -110,6 +110,13 @@ pub enum LlmError {
     /// WebSocket close metadata retained without exposing raw reason text to
     /// captures.
     WsClosed(crate::attempt_failure::WsTermination),
+    /// Final selected WebSocket envelope rejected locally before dispatch.
+    EncodedMessageTooLarge {
+        /// Exact serialized UTF-8 JSON size.
+        bytes: usize,
+        /// Inclusive local admission limit in bytes.
+        limit: usize,
+    },
     /// Prompt cancellation observed from Tau's trusted local abort source.
     Canceled,
     /// Mutable URL, credential, or account configuration could not build a
@@ -145,6 +152,12 @@ impl std::fmt::Display for LlmError {
             Self::HttpStatusRetryAfter(code, body, _) => write!(f, "HTTP {code}: {body}"),
             Self::StreamError { body, .. } => write!(f, "HTTP 0: {body}"),
             Self::WsClosed(termination) => write!(f, "WebSocket closed ({termination:?})"),
+            Self::EncodedMessageTooLarge { bytes, limit } => {
+                write!(
+                    f,
+                    "encoded request is too large ({bytes} bytes; limit {limit})"
+                )
+            }
             Self::Canceled => write!(f, "cancelled by harness"),
             Self::ReloadableConfig(error) => write!(f, "local request construction: {error}"),
             Self::InvalidResponse(error) => write!(f, "invalid provider response: {error}"),
@@ -180,6 +193,7 @@ impl std::error::Error for LlmError {
             | Self::HttpStatusRetryAfter(_, _, _)
             | Self::StreamError { .. }
             | Self::WsClosed(_) => None,
+            Self::EncodedMessageTooLarge { .. } => None,
         }
     }
 }
@@ -296,6 +310,7 @@ impl LlmError {
             | Self::RepetitionDetected(_)
             | Self::WsUpgradeRequired
             | Self::ProviderFailure(_, _)
+            | Self::EncodedMessageTooLarge { .. }
             | Self::RequestRejected { .. }
             | Self::Canceled => None,
             Self::ReloadableConfig(_) => Some(RetryDecision::new(RetryClass::Auth)),
@@ -330,11 +345,14 @@ impl LlmError {
     #[must_use]
     pub fn failure_kind(&self) -> Option<ProviderFailureKind> {
         if self.is_ws_message_too_big() {
-            return Some(ProviderFailureKind::RequestRejected);
+            return Some(ProviderFailureKind::WebSocketMessageTooLarge);
         }
         match self {
             Self::Observed { source, .. } => source.failure_kind(),
             Self::WsUpgradeRequired => Some(ProviderFailureKind::RequestRejected),
+            Self::EncodedMessageTooLarge { .. } => {
+                Some(ProviderFailureKind::EncodedMessageTooLarge)
+            }
             Self::RequestRejected { .. } => Some(ProviderFailureKind::RequestRejected),
             Self::ProviderFailure(kind, _) => Some(*kind),
             Self::HttpStatus(status, body) | Self::HttpStatusRetryAfter(status, body, _) => {
@@ -367,7 +385,9 @@ impl LlmError {
             },
             Self::WsClosed(_) if self.is_ws_message_too_big() => Category::RequestRejected,
             Self::WsClosed(_) => Category::Transport,
-            Self::WsUpgradeRequired | Self::RequestRejected { .. } => Category::RequestRejected,
+            Self::WsUpgradeRequired
+            | Self::EncodedMessageTooLarge { .. }
+            | Self::RequestRejected { .. } => Category::RequestRejected,
             _ if self.failure_kind() == Some(ProviderFailureKind::RequestRejected) => {
                 Category::RequestRejected
             }

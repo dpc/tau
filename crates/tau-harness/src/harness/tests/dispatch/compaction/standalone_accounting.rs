@@ -90,6 +90,7 @@ fn standalone_failure_terminalizes_warm_provider_watch_status() {
         ));
 
         h.handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -443,6 +444,7 @@ fn manual_standalone_compact_installs_one_boundary() {
             })
     );
     let response = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

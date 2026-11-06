@@ -1051,6 +1051,7 @@ impl Harness {
                     )
                 });
             let response = ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision,
                 agent_prompt_id: canceled_prompt_id.clone(),

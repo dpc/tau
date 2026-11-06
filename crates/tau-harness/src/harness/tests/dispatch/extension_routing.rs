@@ -138,6 +138,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -209,6 +210,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     assert!(serialized.contains("please include this"));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -606,6 +608,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1000,6 +1003,7 @@ fn exact_text_edit_alias_preserves_canonical_and_extension_lifecycle_names() {
     let dispatch_response =
         |h: &mut Harness, prompt_id: AgentPromptId, call_id: &str, arguments: CborValue| {
             h.handle_provider_response_finished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,

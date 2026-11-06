@@ -6,6 +6,143 @@ use super::super::dispatch::{
 };
 use super::*;
 
+/// A growth stop is terminal metadata, not a second recovery owner. A resumed
+/// output-length lineage must still commit its failed terminal, accounting and
+/// outer finish exactly once, including cold replay of that completed history.
+#[test]
+fn output_length_compaction_growth_stop_settles_owner_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("model")
+        .supports_standalone_compaction = true;
+    h.submit_user_prompt(test_session_id("s1"), "growth continuation".to_owned())
+        .expect("submit");
+    let source = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(reasoning_only_length_response(&source, 5))
+        .expect("source");
+    let successor = read_nth_prompt_created(&h, 1);
+    h.handle_provider_response_finished(context_overflow_response(&successor))
+        .expect("compact");
+    let compact = read_nth_prompt_created(&h, 2);
+    let mut summary = provider_text_response(
+        &compact.agent_prompt_id,
+        compact.agent_id.clone(),
+        "grown replacement",
+    );
+    summary.compaction_input_bytes = Some(tau_proto::CompactionInputBytes {
+        before: 100,
+        after: 101,
+    });
+    h.handle_provider_response_finished(summary)
+        .expect("success");
+    let resumed = read_nth_prompt_created(&h, 3);
+    let mut terminal = context_overflow_response(&resumed);
+    terminal.failure_kind = Some(tau_proto::ProviderFailureKind::EncodedMessageTooLarge);
+    h.handle_provider_response_finished(terminal)
+        .expect("growth stop");
+    h.retry_pending_agent_publications();
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
+        .expect("records");
+    let terminal_index = records
+        .iter()
+        .position(|record| {
+            matches!(&record.event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == resumed.agent_prompt_id
+            )
+        })
+        .expect("growth-stop terminal committed");
+    let Event::ProviderResponseFinished(terminal) = &records[terminal_index].event else {
+        unreachable!("matched terminal");
+    };
+    assert_eq!(
+        terminal.recovery_disposition,
+        tau_proto::ContextRecoveryDisposition::CompactionGrowthStopped
+    );
+    assert!(matches!(
+        terminal.output_length_disposition,
+        tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+            outer_turn_finish_owed: true,
+            ..
+        }
+    ));
+    assert_eq!(records.iter().filter(|record| matches!(&record.event,
+        Event::ProviderResponseFinished(response) if response.agent_prompt_id == resumed.agent_prompt_id
+    )).count(), 1);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentOuterTurnFinished(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    let cold_before =
+        tau_core::AgentTree::from_events(source.agent_id.clone(), &records[..terminal_index]);
+    assert!(
+        cold_before
+            .validate_event(&records[terminal_index].event)
+            .is_ok()
+    );
+    let mut invalid = terminal.clone();
+    let source_plan = records
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == source.agent_prompt_id =>
+            {
+                Some(response.output_length_disposition.clone())
+            }
+            _ => None,
+        })
+        .expect("source plan");
+    invalid.output_length_disposition = source_plan;
+    assert!(
+        cold_before
+            .validate_event(&Event::ProviderResponseFinished(invalid))
+            .is_err(),
+        "growth stop cannot plan another output-length successor"
+    );
+    let cold = tau_core::AgentTree::from_events(source.agent_id.clone(), &records);
+    assert!(matches!(
+        cold.inference_dispatch_recovery(),
+        Some(tau_core::InferenceDispatchRecovery::CompletedThrough(_))
+    ));
+    h.shutdown().expect("shutdown");
+    drop(h);
+    wait_for_session_unlock(td.path(), "s1");
+    let mut restored =
+        quiet_provider_harness_with_start_reason(td.path(), tau_proto::SessionStartReason::Resume)
+            .expect("cold completed restore");
+    assert!(
+        !event_log_events(&restored)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_))),
+        "completed growth stop must not sample again on restart"
+    );
+    restored.shutdown().expect("shutdown");
+}
+
 /// A standalone prompt whose captured route disappears before delivery releases
 /// every prompt-local snapshot without rolling back unrelated ordinary usage.
 #[test]

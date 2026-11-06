@@ -508,6 +508,7 @@ fn tool_turn_dispatches_provider_emitted_siblings_without_global_locking() {
         ),
     ]);
     let response = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -660,6 +661,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         ])
     };
     let response = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -830,6 +832,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         ),
     ]);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1061,6 +1064,7 @@ fn watch_notification_folded_by_tool_terminal_starts_continuation() {
         1
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1310,6 +1314,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
         .expect("submit");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1391,6 +1396,7 @@ fn tools_drift_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1534,6 +1540,7 @@ fn peer_auto_start_handover_dispatches_tool_without_human_ui_prompt() {
     assert!(h.agent_runtime.agent_registry.agents.contains_key(&cid));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1784,6 +1791,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
             None,
             parent,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1832,6 +1840,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
         .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
         .count();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2016,6 +2025,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
             None,
             parent,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2075,6 +2085,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         .filter(|event| matches!(event, Event::HarnessAgentContextUsageChanged(_)))
         .count();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2504,6 +2515,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         .insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2625,6 +2637,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
         .agents
         .insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2753,6 +2766,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     );
     let delegate_args = CborValue::Map(Vec::new());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2870,6 +2884,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         .expect("prompt B");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2907,6 +2922,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     })
     .expect("side response A");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3272,6 +3288,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3347,6 +3364,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3427,6 +3445,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         })
         .expect("nested side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3600,6 +3619,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3669,6 +3689,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3810,6 +3831,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3881,6 +3903,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4013,6 +4036,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     }
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4207,6 +4231,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4310,6 +4335,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4731,6 +4757,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4885,6 +4912,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5067,6 +5095,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     let main_prompt = read_nth_prompt_created(&h, 0);
     let main_spid = main_prompt.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5209,6 +5238,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5455,6 +5485,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5529,6 +5560,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6406,6 +6438,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         .insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6550,6 +6583,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         .insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6666,6 +6700,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         .insert(spid.clone(), cid);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6999,6 +7034,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         .insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -7202,6 +7238,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         .record_tool_call_prompt("registered-not-snapshot".into(), spid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -7312,6 +7349,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

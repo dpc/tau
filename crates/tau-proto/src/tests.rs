@@ -1778,6 +1778,7 @@ fn representative_events() -> Vec<Event> {
             resume_inference: false,
         }),
         Event::AgentCompacted(AgentCompacted {
+            compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
             compact_prompt_id: test_agent_prompt_id("ap-compacted"),
@@ -1951,6 +1952,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -4537,7 +4539,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 8})
+        serde_json::json!({"major": 17, "minor": 0})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4648,7 +4650,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 16, "minor": 8})
+        serde_json::json!({"major": 17, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4741,7 +4743,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 8})
+        serde_json::json!({"major": 17, "minor": 0})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -5163,6 +5165,7 @@ fn execution_events_use_provider_wire_family() {
         ),
         (
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 estimated_api_cost_rates: None,
@@ -5227,6 +5230,7 @@ fn provider_execution_reports_use_distinct_transient_wires() {
         ),
         (
             Event::ProviderResponseFinishedReported(ProviderResponseFinishedReport {
+                compaction_input_bytes: None,
                 error_category: None,
                 automatic_compaction_decision: None,
                 estimated_api_cost_rates: None,
@@ -7368,6 +7372,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
     );
 
     let mut value = serde_json::to_value(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -7957,6 +7962,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     }
 
     let boundary = AgentCompacted {
+        compaction_input_bytes: None,
         agent_id: started.agent_id.clone(),
         transaction_id: started.transaction_id.clone(),
         compact_prompt_id: started.compact_prompt_id.clone(),
@@ -8009,6 +8015,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     }
 
     let mut response = ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,

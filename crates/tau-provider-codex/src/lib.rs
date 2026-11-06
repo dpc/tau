@@ -455,7 +455,9 @@ impl CodexError {
     /// pass through this error-only boundary.
     fn compact_terminal(error: common::LlmError, progress: SemanticProgress) -> Self {
         if progress != SemanticProgress::None
-            && error.failure_kind() == Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            && error
+                .failure_kind()
+                .is_some_and(tau_proto::ProviderFailureKind::is_capacity_rejection)
         {
             let replacement = common::LlmError::ProviderFailure(
                 tau_proto::ProviderFailureKind::Unknown,
@@ -521,6 +523,10 @@ impl std::fmt::Display for CodexError {
                 "provider WebSocket closed with code 1009 (message too big); unchanged request will not be retried",
             ),
             common::LlmError::WsClosed(_) => formatter.write_str("provider WebSocket closed"),
+            common::LlmError::EncodedMessageTooLarge { bytes, limit } => write!(
+                formatter,
+                "encoded request is too large ({bytes} bytes; limit {limit})"
+            ),
             common::LlmError::Canceled => formatter.write_str("request canceled"),
             common::LlmError::ReloadableConfig(_) => {
                 formatter.write_str("provider configuration must be reloaded")
@@ -611,6 +617,8 @@ pub enum CompactOutcome {
     Finished {
         /// Provider-native replacement window.
         output_items: Vec<tau_proto::ContextItem>,
+        /// Same ordinary-input encoding on both sides of the replacement.
+        input_bytes: tau_proto::CompactionInputBytes,
         /// Provider-reported usage for this compaction call, including cache
         /// reads and writes when present.
         usage: Option<tau_proto::ProviderTokenUsage>,
@@ -1652,8 +1660,19 @@ impl CodexRuntime {
         if abort.is_aborted() {
             CompactOutcome::Canceled { backend_reached }
         } else {
+            let input_bytes =
+                match responses::compaction_input_bytes(config.wire(), request, &output) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return CompactOutcome::Terminal {
+                            error: CodexError::compact_terminal(error, SemanticProgress::Parsed),
+                            backend_reached,
+                        };
+                    }
+                };
             CompactOutcome::Finished {
                 output_items: output,
+                input_bytes,
                 usage,
             }
         }

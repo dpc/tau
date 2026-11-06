@@ -36,3 +36,8 @@ notice or correlation identifier. Start, pre-start failure, or satisfaction by
 automatic compaction removes that marker in the owning target transcript,
 including hidden-agent and attach reconstruction. Pre-start and transaction
 failures retain error presentation.
+
+The CLI renders a warning alert for actual capacity-driven compaction retreat,
+even in compact mode. It uses durable successor identity to group repeated
+retreats into one concise warning per chain. Cold attach reconstructs the same
+warning without provider error prose.

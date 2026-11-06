@@ -417,6 +417,7 @@ fn canceled_terminal_skips_terminal_output_projection() {
 
     harness
         .handle_provider_response_finished(ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -1446,6 +1447,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         crate::test_connection_id("provider"),
     );
     let response = tau_proto::ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1865,6 +1867,7 @@ fn provider_terminal_benchmark_response(
             response
         }
         ProviderTerminalBenchmarkShape::ToolCall => tau_proto::ProviderResponseFinished {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2178,6 +2181,7 @@ fn assert_finished_report_live_delivery_clears_image_payload(referenced: bool) {
         )
         .expect("subscribe observer");
     let mut response = tau_proto::ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

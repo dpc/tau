@@ -3179,6 +3179,32 @@ fn provider_default_compaction_threshold(
     tau_proto::TokenCount::new((raw_context_window.get() * 9 / 10).max(1000))
 }
 
+/// Compare only historical input and replacement using ordinary request
+/// lowering. The trailing native trigger (or local summary instruction) is not
+/// history.
+pub(crate) fn compaction_input_bytes(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    replacement: &[ContextItem],
+) -> Result<tau_proto::CompactionInputBytes, LlmError> {
+    let before = build_input_items(
+        config,
+        borrowed_context_items(request.context).filter(|item| !item.is_compaction_trigger()),
+        config.mode.is_lite_compatibility(),
+        false,
+    );
+    let after = build_input_items(
+        config,
+        replacement.iter().map(BorrowedContextItem::Context),
+        config.mode.is_lite_compatibility(),
+        false,
+    );
+    Ok(tau_proto::CompactionInputBytes {
+        before: serde_json::to_vec(&before).map_err(LlmError::Json)?.len() as u64,
+        after: serde_json::to_vec(&after).map_err(LlmError::Json)?.len() as u64,
+    })
+}
+
 fn build_input_items<'a>(
     config: &ResponsesConfig,
     input_items: impl Clone + Iterator<Item = BorrowedContextItem<'a>>,

@@ -300,6 +300,7 @@ fn provider_execution_reports_never_enter_semantic_history() {
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinishedReported(tau_proto::ProviderResponseFinishedReport {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,

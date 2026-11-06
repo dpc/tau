@@ -115,6 +115,7 @@ fn compacted_json_bytes(value: serde_json::Value) -> Vec<u8> {
 
 fn debug_provider_finished(output_items: Vec<tau_proto::ContextItem>) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -202,6 +203,7 @@ fn debug_binary_events(data: Vec<u8>) -> Vec<Event> {
         originator: PromptOriginator::User,
     };
     let compacted = tau_proto::AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
         compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),
@@ -566,6 +568,7 @@ fn published_line_preserves_enriched_token_usage() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
     let event = Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -1487,6 +1490,7 @@ fn provider_debug_captures_are_not_logged() {
 fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
     let event =
         Event::ProviderResponseFinishedReported(tau_proto::ProviderResponseFinishedReport {
+            compaction_input_bytes: None,
             error_category: None,
             automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
@@ -1559,6 +1563,7 @@ fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
 #[test]
 fn compacted_window_image_debug_projection_matches_legacy_json() {
     let message = HarnessInputMessage::emit(Event::AgentCompacted(tau_proto::AgentCompacted {
+        compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
         compact_prompt_id: tau_proto::AgentPromptId::parse("ap-required").expect("prompt id"),

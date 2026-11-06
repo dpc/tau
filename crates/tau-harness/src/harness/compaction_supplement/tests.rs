@@ -1,3 +1,5 @@
+use tau_proto::{ContextRole, MessageItem};
+
 use super::*;
 
 fn narrative(text: &str) -> Vec<ContextItem> {

@@ -1628,6 +1628,14 @@ impl Harness {
         let Some(threshold) = matches.iter().map(|(_, threshold)| *threshold).min() else {
             return prepared;
         };
+        if self
+            .session_runtime
+            .agent_store
+            .agent(agent_id)
+            .is_some_and(|tree| tree.preceding_compaction_grew(&provider_prompt_id))
+        {
+            return prepared;
+        }
         let matched_policy_names = matches
             .iter()
             .map(|(name, _)| *name)
@@ -1900,6 +1908,14 @@ impl Harness {
         let Some(provider_prompt_id) = conv.execution.context_usage_prompt_id.clone() else {
             return false;
         };
+        if self
+            .session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .is_some_and(|tree| tree.preceding_compaction_grew(&provider_prompt_id))
+        {
+            return false;
+        }
         let threshold_source = if role.is_some_and(|role| !role.compactions.is_empty()) {
             let names = role
                 .into_iter()

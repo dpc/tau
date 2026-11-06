@@ -139,10 +139,29 @@ impl CodexRuntime {
                 Ok(dispatch) => {
                     let usage = dispatch.state.usage();
                     match validate_narrative(dispatch.state) {
-                        Ok(item) => CompactOutcome::Finished {
-                            output_items: vec![item],
-                            usage,
-                        },
+                        Ok(narrative) => {
+                            let replacement = [narrative.replacement_item()];
+                            let output_items =
+                                vec![tau_proto::ContextItem::LocalCompactionNarrative(narrative)];
+                            match crate::responses::compaction_input_bytes(
+                                config.wire(),
+                                request,
+                                &replacement,
+                            ) {
+                                Ok(input_bytes) => CompactOutcome::Finished {
+                                    output_items,
+                                    input_bytes,
+                                    usage,
+                                },
+                                Err(error) => CompactOutcome::Terminal {
+                                    error: CodexError::compact_terminal(
+                                        error,
+                                        crate::SemanticProgress::Parsed,
+                                    ),
+                                    backend_reached,
+                                },
+                            }
+                        }
                         Err(error) => invalid_output(error, backend_reached),
                     }
                 }
@@ -262,7 +281,9 @@ fn finish_local_timing(
 /// Reject raw tool/unknown slots too, including incomplete calls that ordinary
 /// inference intentionally drops. Reasoning is bounded and discarded, never
 /// incorporated in the accepted narrative.
-fn validate_narrative(state: StreamState) -> Result<tau_proto::ContextItem, LlmError> {
+fn validate_narrative(
+    state: StreamState,
+) -> Result<tau_proto::LocalCompactionNarrativeItem, LlmError> {
     let limit = tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES;
     let mut reasoning_bytes = state.thinking.as_ref().map_or(0, String::len);
     if limit < reasoning_bytes {
@@ -309,9 +330,7 @@ fn validate_narrative(state: StreamState) -> Result<tau_proto::ContextItem, LlmE
             "summary compactor output is empty".to_owned(),
         ));
     }
-    Ok(tau_proto::ContextItem::LocalCompactionNarrative(
-        tau_proto::LocalCompactionNarrativeItem { narrative },
-    ))
+    Ok(tau_proto::LocalCompactionNarrativeItem { narrative })
 }
 
 /// Construct a content-free terminal validation failure.

@@ -3502,6 +3502,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3555,6 +3556,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let prompt2 = read_nth_prompt_created(&h, 1);
     let spid2 = prompt2.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3690,6 +3692,7 @@ fn finish_materialized_turn(
     responses_metadata: bool,
 ) {
     h.handle_provider_response_finished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

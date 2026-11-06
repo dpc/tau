@@ -47,6 +47,7 @@ pub(super) fn finished(
     stop_reason: ProviderStopReason,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,

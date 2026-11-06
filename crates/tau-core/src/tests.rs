@@ -334,6 +334,7 @@ fn session_loaded(session_id: &str, agent_id: &str, ephemeral: bool) -> Event {
 
 fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
     Event::ProviderResponseFinished(ProviderResponseFinished {
+        compaction_input_bytes: None,
         error_category: None,
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
