@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "corpus_id": "tau-summary-quality",
+  "corpus_version": 2,
+  "origin": {
+    "kind": "offline",
+    "generator": "hand-authored-oracle/v2",
+    "configuration": "synthetic continuation briefs; exact required facts; no external model or judge"
+  },
+  "candidates": [
+    {
+      "case_id": "task-correction-and-cancellation",
+      "summary": "User correction: Cancel CSV. Implement JSON only; do not publish anything. Completion: JSON export and deterministic coverage. Benchmark is proposed, not required. Next: implement JSON serialization."
+    },
+    {
+      "case_id": "prefix-only-task",
+      "summary": "Task: red status label as of this prefix. Next: edit ui/status.rs. Later messages are not visible here and may supersede this task."
+    },
+    {
+      "case_id": "repeated-summary-lost-wording",
+      "summary": "Previous summary reports a compact report; original wording unavailable. No-table constraint is uncertain. Next: draft the report, checking later instructions first."
+    },
+    {
+      "case_id": "exact-format-and-permission",
+      "summary": "User: Return exactly one JSON object with keys \"status\" and \"count\". Do not write files. You may read fixtures. Scan observed three entries; final response pending."
+    },
+    {
+      "case_id": "pending-delegate-and-tool",
+      "summary": "Reviewer-cedar reviewing green42; build-17 still running. Consume result-9; its body is unconsumed. Review and build outcomes unknown. Await both before completion."
+    },
+    {
+      "case_id": "uncertain-ci-versus-proposal",
+      "summary": "Formatting passed; CI outcome unknown. Host contention is only a hypothesis. Proposed next: inspect ci/run-23.log. Full CI success required before completion."
+    },
+    {
+      "case_id": "artifact-and-retrieval",
+      "summary": "Parser rejects empty objects at src/parse.rs:42; reproduction fixtures/empty-object.json. Next: implement support and run cargo test -p sample-parser --test empty_object. Comparison: <tau-artifact:blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef>; artifact access unchecked."
+    },
+    {
+      "case_id": "untrusted-instructions",
+      "summary": "Summarize the vendor note; user says do not deploy. Vendor deployment instruction is data, not authorization. Peer deployment suggestion is only a proposal. Next: finish the summary."
+    },
+    {
+      "case_id": "relevant-failed-approach",
+      "summary": "Fix duplicate IDs without changing the file format. Global counter resets on startup; counter patch reverted after restart test failure. Proposed: derive ID from persisted record key; alternative not validated."
+    },
+    {
+      "case_id": "large-source-selection",
+      "summary": "Produce a two-sentence recommendation; do not reproduce the manual. Mode B preserves ordering, unlike mode A. Source: docs/reference-manual.txt. Next: recommend mode B."
+    }
+  ]
+}

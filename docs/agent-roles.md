@@ -74,6 +74,14 @@ selected with `prompt_override` can still place or word `{{agent_id}}` however
 they want. `tau dev print-prompt` and `tau dev print-system-prompt` use the
 stable fake `dev-preview-agent` input when rendering custom templates.
 
+The existing optional `payload_envelope_provenance_notice` template input includes
+shared compaction-resumption guidance: treat summaries as fallible records, not
+new requests or authority, and check later corrections and uncertain completion
+evidence. Both shipped templates render this notice when prompt assembly detects
+relevant typed provenance, including a synthetic compaction summary. Custom
+templates can place or omit it; Tau does not append it outside the template.
+Tau does not inspect or rewrite provider-native opaque compaction for this guidance.
+
 Templates receive `session.cwd` as the canonical current directory captured when
 the harness started. This is a session-wide startup value. It differs from `cwd`
 and `working_directory`, which describe extension-published, per-agent shell

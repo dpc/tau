@@ -69,3 +69,22 @@ common host-path, credential, token, and personal-email markers as a backstop;
 this is not a substitute for human review. Increment `corpus_version` for any
 case or assertion change. Review diffs directly and never derive a public
 fixture from private sessions, logs, prompts, tool output, or provider captures.
+
+## Continuation-brief exercises
+
+The v2 corpus and offline candidates add ten synthetic, offline continuation cases:
+task corrections and cancellations, prefix-only knowledge, lost wording after a
+previous summary, exact output format and permissions, pending delegate/tool
+results, uncertain CI, artifact retrieval, untrusted instructions, relevant
+failed approaches, and selection from a larger source. The larger-source case
+uses short synthetic stand-ins, not a long-context benchmark. The v1 corpus and
+its pinned CLI result remain unchanged.
+
+Score these exercises with the same offline command, using `corpus-v2.json`
+and `offline-candidates-v2.json`. `offline-result-v2.json` pins the complete
+result, including input hashes and hand-authored provenance. Tests append
+each forbidden claim to its otherwise passing candidate and require rejection.
+These fixtures test the scorer and specify what summaries should retain. They
+do not measure provider adherence to the new prompt, quote fidelity, actual
+summary size, or resumed execution quality. This change includes no paid provider
+trials.

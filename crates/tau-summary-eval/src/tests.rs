@@ -14,6 +14,43 @@ fn checked_in_offline_oracle_passes_every_fact_and_case() {
     assert_eq!(result.matched_required_facts, result.total_required_facts);
 }
 
+/// Continuation-brief fixtures exercise corrections, partial-prefix knowledge,
+/// drift, trust, and evidence without treating hand-written text as model
+/// output. Each forbidden claim must independently turn its otherwise passing
+/// case red.
+#[test]
+fn continuation_brief_oracle_retains_facts_and_rejects_unsupported_claims() {
+    let corpus_bytes = include_bytes!("../fixtures/corpus-v2.json");
+    let candidate_bytes = include_bytes!("../fixtures/offline-candidates-v2.json");
+    let corpus: Corpus = serde_json::from_slice(corpus_bytes).expect("v2 corpus");
+    let result = evaluate(corpus_bytes, candidate_bytes).expect("v2 score");
+    let expected: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../fixtures/offline-result-v2.json"))
+            .expect("v2 result");
+    assert_eq!(
+        serde_json::to_value(&result).expect("v2 result JSON"),
+        expected
+    );
+    assert_eq!(result.coverage_basis_points, 10_000);
+    assert_eq!(result.passing_cases, corpus.cases.len());
+    for (index, case) in corpus.cases.iter().enumerate() {
+        for claim in &case.forbidden_claims {
+            let mut candidates: CandidateSet =
+                serde_json::from_slice(candidate_bytes).expect("v2 candidates");
+            candidates.candidates[index].summary.push_str(". ");
+            candidates.candidates[index].summary.push_str(claim);
+            let changed = serde_json::to_vec(&candidates).expect("changed candidates");
+            let failed = evaluate(corpus_bytes, &changed).expect("score forbidden claim");
+            assert!(!failed.cases[index].passed, "{}: {claim}", case.id);
+            assert!(
+                failed.cases[index].matched_forbidden_claims.contains(claim),
+                "{}: {claim}",
+                case.id
+            );
+        }
+    }
+}
+
 /// Matching corpus and candidate identifiers may use the existing bounded
 /// identifier domain even when they contain a secret-marker substring.
 #[test]

@@ -438,6 +438,20 @@ fn custom_system_template_receives_payload_envelope_provenance_notice() {
         PromptCapabilities::default(),
     );
     assert_eq!(prompt, "NONE");
+
+    // Custom templates retain control: even supplied guidance cannot bypass
+    // a template that chooses not to render the optional notice.
+    let prompt = build_system_prompt_with_tool_template_context(
+        "CUSTOM",
+        &path_std_collections::HashMap::new(),
+        &[],
+        &[],
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer")
+            .with_payload_envelope_provenance_notice(Some(rule)),
+        PromptCapabilities::default(),
+    );
+    assert_eq!(prompt, "CUSTOM");
 }
 
 /// Retired custom-template keys remain absent, so strict templates fail rather

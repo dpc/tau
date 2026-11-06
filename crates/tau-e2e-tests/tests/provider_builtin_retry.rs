@@ -357,7 +357,7 @@ fn run_compaction_recovery(continue_summary: bool) -> Result<(), Box<dyn std::er
     assert!(full_wire.contains("history A"));
     assert!(full_wire.contains("history B"));
     assert_eq!(full_wire.matches("overflow activation").count(), 1);
-    assert!(full_wire.contains("The context window is being compacted"));
+    assert!(full_wire.contains("Stop work and write only a concise continuation brief."));
 
     let smaller_wire = wire(&smaller_compact);
     assert!(smaller_wire.contains("history A"));

@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "scorer": "tau-summary-eval/0.1.0",
+  "scoring_contract": "literal-normalized-facts-v1",
+  "corpus_id": "tau-summary-quality",
+  "corpus_version": 2,
+  "corpus_sha256": "9cab6d4f949b31f5ee6d11e245cae82df6f0fd52afb35d8314eeca05d3f29255",
+  "candidates_sha256": "f673b0856f7fb22bb546fed83e3e10b3db346370cd9952165ecda4ef08348f93",
+  "origin": {
+    "kind": "offline",
+    "generator": "hand-authored-oracle/v2",
+    "configuration": "synthetic continuation briefs; exact required facts; no external model or judge"
+  },
+  "matched_required_facts": 43,
+  "total_required_facts": 43,
+  "coverage_basis_points": 10000,
+  "passing_cases": 10,
+  "total_cases": 10,
+  "cases": [
+    {
+      "case_id": "task-correction-and-cancellation",
+      "matched_fact_ids": [
+        "active-task",
+        "canceled-work",
+        "publication-prohibited",
+        "completion",
+        "proposed-not-required"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "prefix-only-task",
+      "matched_fact_ids": [
+        "task-as-of-prefix",
+        "next-action",
+        "limited-knowledge"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "repeated-summary-lost-wording",
+      "matched_fact_ids": [
+        "source",
+        "lost-wording",
+        "uncertainty",
+        "next-action"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "exact-format-and-permission",
+      "matched_fact_ids": [
+        "output-format",
+        "prohibition",
+        "permission",
+        "observed-value"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "pending-delegate-and-tool",
+      "matched_fact_ids": [
+        "delegate",
+        "tool-pending",
+        "unconsumed",
+        "unknown-outcome"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "uncertain-ci-versus-proposal",
+      "matched_fact_ids": [
+        "observed",
+        "unknown",
+        "assumption",
+        "next-action",
+        "completion"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "artifact-and-retrieval",
+      "matched_fact_ids": [
+        "source",
+        "fixture",
+        "command",
+        "artifact",
+        "unverified-access"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "untrusted-instructions",
+      "matched_fact_ids": [
+        "user-task",
+        "prohibition",
+        "untrusted-source",
+        "peer-proposal"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "relevant-failed-approach",
+      "matched_fact_ids": [
+        "constraint",
+        "failed-approach",
+        "reverted",
+        "proposed-next",
+        "validation"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "large-source-selection",
+      "matched_fact_ids": [
+        "output-bound",
+        "task-constraint",
+        "evidence",
+        "pointer"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    }
+  ]
+}
