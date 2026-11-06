@@ -6313,6 +6313,92 @@ fn provider_tool_alias_labels_lifecycle_while_stray_starts_fall_back_to_internal
     assert!(vt.screen_contains(100, "codex_image_2 0s pending"));
 }
 
+/// Extension-owned image request metadata uses the generic compact/verbose
+/// projection, retaining terminal history and fitting narrow tool headers.
+#[test]
+fn image_request_metadata_renders_compact_and_expanded_without_tool_special_cases() {
+    for width in [32, 48, 100] {
+        let (_term, handle, vt) = setup(width, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.apply_setting("show-tools", "compact");
+        let started_at = unix_time_millis().saturating_sub(19_000) * 1_000;
+        renderer.handle_recorded_at(
+            &tool_started("image-call", "generate_image", CborValue::Null),
+            tau_proto::UnixMicros::new(started_at),
+        );
+        let prompt = "Paint a quiet alpine lake at sunrise.\nKeep the mist soft, with a small green boat 🌿 near the shore and no visible lettering.";
+        assert_eq!(prompt.len(), 127);
+        let mut display = tau_proto::ToolUseState {
+            stats: tau_proto::ToolUseStats {
+                bytes: Some(prompt.len() as u64),
+                ..Default::default()
+            },
+            progress_counters: vec![tau_proto::ProgressCounter {
+                label: Some("att".into()),
+                unit: tau_proto::ProgressUnit::Count,
+                complete: Some(2),
+                total: None,
+            }],
+            status: tau_proto::ToolUseStatus::InProgress,
+            status_text: "pending".into(),
+            payload: Some(tau_proto::ToolUsePayload::Text {
+                text: format!(
+                    "Prompt:\n{prompt}\n\nAttachments:\n1. <tau-artifact:blake3:{}>\n2. <tau-artifact:blake3:{}>",
+                    "a".repeat(64),
+                    "b".repeat(64)
+                ),
+            }),
+            ..Default::default()
+        };
+        renderer.handle_recorded_at(
+            &Event::ToolProgress(tau_proto::ToolProgress {
+                call_id: "image-call".into(),
+                tool_name: tau_proto::ToolName::new("generate_image"),
+                message: None,
+                progress: None,
+                display: Some(display.clone()),
+            }),
+            tau_proto::UnixMicros::new(started_at + 19_000_000),
+        );
+        sync(&handle);
+        if 48 <= width {
+            assert!(vt.screen_contains(width, "generate_image"));
+        }
+        assert!(vt.screen_contains(width, "pending"));
+        assert!(!vt.screen_contains(width, "Paint a quiet"));
+        assert!(vt.screen_contains(width, "127B"));
+        assert!(vt.screen_contains(width, "att: 2"));
+
+        renderer.apply_setting("show-tools", "full");
+        sync(&handle);
+        assert!(vt.screen_contains(width, "Paint a quiet"));
+        assert!(vt.screen_contains(width, "Attachments:"));
+        display.status = tau_proto::ToolUseStatus::Success;
+        display.status_text = "ok".into();
+        renderer.handle_recorded_at(
+            &Event::ToolResult(ToolResult {
+                call_id: "image-call".into(),
+                tool_name: tau_proto::ToolName::new("generate_image"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Null,
+                presentation: Default::default(),
+                provider_content: Vec::new(),
+                kind: Default::default(),
+                display: Some(display),
+                originator: Default::default(),
+            }),
+            tau_proto::UnixMicros::new(started_at + 20_000_000),
+        );
+        sync(&handle);
+        assert!(vt.screen_contains(width, "Paint a quiet"));
+        assert!(vt.screen_contains(width, "20s ok"));
+    }
+}
+
 /// A late provider terminal must replace an already-rendered internal fallback
 /// name with its durable public alias.
 #[test]

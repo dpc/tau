@@ -1,6 +1,7 @@
 //! Selected-account image production and main-loop-owned artifact publication.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -202,6 +203,13 @@ impl ImageTools {
         {
             return report_error(&started, "image generation capacity is busy", handle);
         }
+        handle.report_tool_progress(tau_proto::ToolProgress {
+            call_id: started.call_id.clone(),
+            tool_name: started.tool_name.clone(),
+            message: None,
+            progress: None,
+            display: request_display(&started, tau_proto::ToolUseStatus::InProgress, "pending"),
+        })?;
         let request = ArtifactClient::new(handle.clone())
             .start_request(session.clone(), ArtifactOp::Available)?;
         self.requests.insert(request, started.call_id.clone());
@@ -259,6 +267,7 @@ impl ImageTools {
             unreachable!("upload phase");
         };
         if let Some(descriptor) = upload.descriptor() {
+            let display = request_display(&call.started, tau_proto::ToolUseStatus::Success, "ok");
             return handle.report_tool_result(tau_proto::ToolResult {
                 call_id: call.started.call_id,
                 tool_name: call.started.tool_name,
@@ -280,7 +289,7 @@ impl ImageTools {
                 presentation: Default::default(),
                 provider_content: Vec::new(),
                 kind: Default::default(),
-                display: None,
+                display,
                 originator: call.started.originator,
             });
         }
@@ -300,12 +309,17 @@ impl ImageTools {
         self.requests.retain(|_, owner| owner != id);
         call.cancel.cancel();
         abort_transfers(&call, handle);
+        let display = request_display(
+            &call.started,
+            tau_proto::ToolUseStatus::Warning,
+            "cancelled",
+        );
         handle.report_tool_cancelled(tau_proto::ToolCancelled {
             call_id: call.started.call_id,
             tool_name: call.started.tool_name,
             tool_type: tau_proto::ToolType::Function,
             presentation: Default::default(),
-            display: None,
+            display,
         })
     }
 
@@ -602,6 +616,49 @@ fn parse_arguments(arguments: &CborValue) -> Option<(String, Vec<ArtifactKey>)> 
     Some((prompt?, attachments.unwrap_or_default()))
 }
 
+/// Projects only validated public request fields, never image bytes or worker
+/// state. Read the original arguments because resolution consumes attachments.
+fn request_display(
+    started: &ToolStarted,
+    status: tau_proto::ToolUseStatus,
+    status_text: &str,
+) -> Option<tau_proto::ToolUseState> {
+    let (prompt, attachments) = parse_arguments(&started.arguments)?;
+    let count = attachments.len();
+    let mut text = format!("Prompt:\n{prompt}");
+    if !attachments.is_empty() {
+        text.push_str("\n\nAttachments:");
+        for (index, key) in attachments.iter().enumerate() {
+            let _ = write!(
+                &mut text,
+                "\n{}. {}",
+                index + 1,
+                tau_proto::artifact_reference(key)
+            );
+        }
+    }
+    Some(tau_proto::ToolUseState {
+        stats: tau_proto::ToolUseStats {
+            bytes: Some(prompt.len() as u64),
+            ..Default::default()
+        },
+        progress_counters: if count == 0 {
+            Vec::new()
+        } else {
+            vec![tau_proto::ProgressCounter {
+                label: Some("att".into()),
+                unit: tau_proto::ProgressUnit::Count,
+                complete: Some(count as u64),
+                total: None,
+            }]
+        },
+        status,
+        status_text: status_text.to_owned(),
+        payload: Some(tau_proto::ToolUsePayload::Text { text }),
+        ..Default::default()
+    })
+}
+
 /// Releases any owned input read or output upload without retrying paid work.
 fn abort_transfers(call: &ImageCall, handle: &ClientHandle) {
     if let Phase::Resolving(inputs) = &call.phase
@@ -639,7 +696,7 @@ fn report_error(started: &ToolStarted, message: &str, handle: &ClientHandle) -> 
         message: message.to_owned(),
         details: None,
         presentation: Default::default(),
-        display: None,
+        display: request_display(started, tau_proto::ToolUseStatus::Error, message),
         originator: started.originator.clone(),
     })
 }

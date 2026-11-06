@@ -159,6 +159,102 @@ fn images() -> ImageTools {
     }
 }
 
+/// Real progress and terminal reports retain the full prompt and ordered input
+/// occurrences, including duplicates, without exposing private image contents.
+#[test]
+fn image_request_display_survives_pending_and_terminal_reports() {
+    let prompt = "  描いて 🌿\nKeep every line and trailing space.  ";
+    let reference = format!("<tau-artifact:blake3:{}>", "a".repeat(64));
+    for count in 0..=2 {
+        for fail in [false, true] {
+            let frames = with_handle(|handle| {
+                let mut tools = images();
+                let mut started = started();
+                started.arguments = CborValue::Map(vec![
+                    (
+                        CborValue::Text("prompt".into()),
+                        CborValue::Text(prompt.into()),
+                    ),
+                    (
+                        CborValue::Text("attachments".into()),
+                        CborValue::Array(vec![CborValue::Text(reference.clone()); count]),
+                    ),
+                ]);
+                tools.start(started.clone(), handle).expect("start");
+                if fail {
+                    tools.timeout(&started.call_id, handle).expect("timeout");
+                } else {
+                    tools.cancel(&started.call_id, handle).expect("cancel");
+                }
+            });
+            let displays: Vec<_> = frames
+                .iter()
+                .filter_map(|frame| {
+                    let HarnessInputMessage::Emit(emit) = frame else {
+                        return None;
+                    };
+                    match emit.event.as_ref() {
+                        tau_proto::Event::ToolProgressReported(event) => event.display.as_ref(),
+                        tau_proto::Event::ToolErrorReported(event) => event.display.as_ref(),
+                        tau_proto::Event::ToolCancelledReported(event) => event.display.as_ref(),
+                        _ => None,
+                    }
+                })
+                .collect();
+            assert_eq!(displays.len(), 2);
+            assert_eq!(displays[0].status, tau_proto::ToolUseStatus::InProgress);
+            assert_eq!(displays[0].status_text, "pending");
+            assert_eq!(
+                displays[1].status,
+                if fail {
+                    tau_proto::ToolUseStatus::Error
+                } else {
+                    tau_proto::ToolUseStatus::Warning
+                }
+            );
+            for display in displays {
+                assert!(display.args.is_empty());
+                assert_eq!(display.stats.bytes, Some(prompt.len() as u64));
+                assert_eq!(display.progress_counters.len(), usize::from(count != 0));
+                if count != 0 {
+                    assert_eq!(
+                        display.progress_counters[0],
+                        tau_proto::ProgressCounter {
+                            label: Some("att".into()),
+                            unit: tau_proto::ProgressUnit::Count,
+                            complete: Some(count as u64),
+                            total: None,
+                        }
+                    );
+                }
+                let Some(tau_proto::ToolUsePayload::Text { text }) = &display.payload else {
+                    panic!("full request payload");
+                };
+                assert!(text.starts_with(&format!("Prompt:\n{prompt}")));
+                assert_eq!(text.matches(&reference).count(), count);
+            }
+        }
+    }
+}
+
+/// Malformed requests must not echo arbitrary unknown fields or inline image
+/// blobs into the display while reporting validation failure.
+#[test]
+fn image_invalid_request_has_no_display_payload() {
+    let frames = with_handle(|handle| {
+        let mut tools = images();
+        let mut started = started();
+        started.arguments = CborValue::Text("private malformed request".into());
+        tools.start(started, handle).expect("validation error");
+    });
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), tau_proto::Event::ToolErrorReported(error)
+                if error.display.is_none())
+    )));
+}
+
 fn call(phase: Phase) -> ImageCall {
     ImageCall {
         started: started(),
@@ -911,6 +1007,18 @@ fn image_original_upload_returns_reference_without_path_or_inline_bytes() {
         .collect();
     assert_eq!(results.len(), 1);
     assert!(results[0].provider_content.is_empty());
+    let display = results[0].display.as_ref().expect("success display");
+    assert!(display.args.is_empty());
+    assert_eq!(display.stats.bytes, Some(18));
+    assert!(display.progress_counters.is_empty());
+    assert_eq!(display.status, tau_proto::ToolUseStatus::Success);
+    assert_eq!(display.status_text, "ok");
+    assert_eq!(
+        display.payload,
+        Some(tau_proto::ToolUsePayload::Text {
+            text: "Prompt:\na transparent leaf".into(),
+        })
+    );
     let CborValue::Map(fields) = &results[0].result else {
         panic!("result map");
     };
