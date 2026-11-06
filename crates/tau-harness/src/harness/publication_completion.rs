@@ -4854,7 +4854,7 @@ impl Harness {
                     .agent_id
                     .as_deref()
                     .and_then(|id| self.session_runtime.agent_store.agent(id))
-                    .and_then(tau_core::AgentTree::pending_response_continuation)
+                    .and_then(tau_core::AgentTree::pending_inference_continuation)
                     .map(|source| source.model.clone())
             })
             .or_else(|| self.model_for_agent_role(agent))

@@ -4650,7 +4650,7 @@ impl Harness {
         // a final-status challenge, watcher final, or side-conversation result.
         // Publication/cancellation arbitration has already fixed this terminal.
         if response.stop_reason == ProviderStopReason::Continue && !requested_tool_calls {
-            self.continue_after_explicit_response(cid);
+            self.continue_after_committed_response(cid);
             return;
         }
         let assistant_text = assistant_text_from_output_items(&response.output_items);

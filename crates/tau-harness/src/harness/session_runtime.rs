@@ -1245,7 +1245,7 @@ impl Harness {
         }
         let mut count = 0;
         for cid in self.restored_agent_ids(session_id) {
-            let calls: Vec<ToolCallItem> = self
+            let (calls, outer_turn): (Vec<ToolCallItem>, _) = self
                 .agent_runtime
                 .agent_registry
                 .agents
@@ -1253,12 +1253,32 @@ impl Harness {
                 .and_then(|conv| conv.identity.agent_id.as_deref())
                 .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                 .map(|tree| {
-                    tree.unresolved_foreground_tool_calls()
-                        .into_iter()
-                        .cloned()
-                        .collect()
+                    (
+                        tree.unresolved_foreground_tool_calls()
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                        tree.interrupted_tool_round_outer_turn(),
+                    )
                 })
                 .unwrap_or_default();
+            if let Some(outer_turn) = outer_turn
+                && !calls.is_empty()
+                && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
+                && matches!(agent.turn.turn_state, AgentTurnState::Idle)
+            {
+                // Canonical terminals may remain intercepted or admission-
+                // blocked after startup. Restore their existing completion seam
+                // rather than treating any later live Idle as recovery debt.
+                agent.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(outer_turn);
+                agent.turn.turn_state = AgentTurnState::ToolsRunning {
+                    remaining_calls: calls
+                        .iter()
+                        .map(|call| call.call_id.clone())
+                        .collect::<Vec<_>>()
+                        .into(),
+                };
+            }
             for call in calls {
                 if self.is_pending_manual_compaction_call(&call.call_id) {
                     continue;
@@ -3274,7 +3294,7 @@ impl Harness {
             ) && !compaction_blocks_ordinary_inference
             {
                 self.resume_interrupted_inference(&cid);
-                self.continue_after_explicit_response(&cid);
+                self.continue_after_committed_response(&cid);
             }
         }
         for (child_cid, parent_agent_id) in restored_parent_edges {

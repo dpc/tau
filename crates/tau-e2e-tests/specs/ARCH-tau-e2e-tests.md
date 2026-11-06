@@ -38,10 +38,9 @@ S6 separately gives only the worker the supervised test dummy in exact
 `hold_until_success_release` mode; main retains only `agent_start`. The fixture
 never sends the authenticated release, so elapsed time cannot terminalize its
 crash cut. Its oracle requires the worker's durable request/start pair plus
-canonical readiness. The
-strict fake observes the eager nonsemantic/durable repair order and validates the
-next explicit continuation's exact balanced error context without authorizing a
-tool redispatch.
+canonical readiness. The strict fake observes the eager nonsemantic/durable repair
+order and validates the automatic inference continuation's exact balanced error
+context without authorizing tool redispatch.
 S7 composes both interruption classes with a completed production worker. The
 main retains the existing two-start surface for the quiescent and uncertain
 children; one fixed durable `UiCreateAgent` request creates the repair child so

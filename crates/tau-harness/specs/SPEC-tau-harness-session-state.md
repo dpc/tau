@@ -352,6 +352,14 @@ context and makes later cold resumes idempotent; an already repaired call
 receives no second pair. Canonical terminal publication follows
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 
+Once the selected round closes, including through these repair errors, its
+original open outer turn owes fresh inference over the committed results without
+new external activation. A committed successor checkpoint consumes that
+obligation; cancellation or a finished turn must not reopen it. Recovery preserves
+the captured model and branch and never redispatches completed or interrupted
+tools, as required by the resumed-progress contract in
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
+
 New durable agents commit `AgentStarted` as journal sequence zero before the
 harness publishes their route or session membership. Loading an existing agent
 into another session publishes membership but never appends a second creation

@@ -1949,10 +1949,11 @@ impl AgentTree {
 
     /// Returns the proven open turn of an interrupted checkpoint, including a
     /// fresh retry checkpoint whose prompt-start fact has not committed yet.
-    /// Consecutive canonical retry obligations retain the same model/cut. A
-    /// succeeded compaction may also retain its immediately preceding completed
-    /// tool round or reactive-overflow source. Both edges require ancestral
-    /// context rather than an unrelated currently open turn.
+    /// Consecutive canonical retries and completed tool rounds retain their
+    /// original turn. A succeeded compaction may also retain its immediately
+    /// preceding completed tool round or reactive-overflow source. These edges
+    /// require ancestral context rather than an unrelated currently open
+    /// turn.
     #[must_use]
     pub fn interrupted_inference_outer_turn(
         &self,
@@ -1992,7 +1993,13 @@ impl AgentTree {
                 && previous.response_node.map_or(reactive, |node| {
                     self.is_ancestor_head(AgentHead::Node(node), checkpoint.through)
                 });
-            if !(retry_link || compaction_link)
+            let tool_link = previous.finished
+                && self.response_continuation_dispatch_is_selected(previous)
+                && self.inference_checkpoint_allows_interrupted_retry(&previous.checkpoint)
+                && self
+                    .completed_tool_round_head(previous)
+                    .is_some_and(|head| self.is_ancestor_head(head, checkpoint.through));
+            if !(retry_link || compaction_link || tool_link)
                 || previous.checkpoint.model != checkpoint.model
                 || !self.is_ancestor_head(previous.checkpoint.through, checkpoint.through)
             {

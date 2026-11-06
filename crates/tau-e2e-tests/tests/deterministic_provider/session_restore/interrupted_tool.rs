@@ -17,7 +17,7 @@ use super::{
 /// Exact provider-authored foreground tool identity.
 const TOOL_CALL_ID: &str = "s6-interrupted-tool";
 /// Exact compact JSON size of the reviewed S6 scenario grammar.
-const SCENARIO_BYTES: usize = 1_085;
+const SCENARIO_BYTES: usize = 1_267;
 
 /// Proves a worker's acknowledged but unterminated foreground tool is repaired
 /// once on resume and remains balanced across a second cold resume.
@@ -85,29 +85,15 @@ fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std:
         &diagnostic,
     )?;
     interruption::assert_no_live_tool_restart(&observer_b.events, &identities.worker)?;
-    assert_provider_turn_counts(
-        &observer_b.events,
-        &identities,
-        ProviderTurnCounts { main: 0, worker: 0 },
-    )?;
-
-    let repair_start = observer_b.events.len();
-    observer_b.submit(
-        &identities.worker,
-        "s6-worker-repair",
-        "continue the repaired tool round",
-    )?;
+    let repair_start = 0;
     observer_b.wait_for_agent_marker(
         &identities.worker,
         "interrupted worker tool repaired",
         repair_start,
     )?;
     observer_b.wait_for_agent_idle_after(&identities.worker, repair_start)?;
-    assert_provider_turn_counts(
-        &observer_b.events,
-        &identities,
-        ProviderTurnCounts { main: 0, worker: 1 },
-    )?;
+    // Automatic recovery can finish before socket attachment. Its exact fake
+    // action count and durable prompt starts below own the execution budget.
     if matched_action_count(&fixture)? != 4 {
         return Err("S6 Boot B repair did not consume exactly one fake action".into());
     }
@@ -240,7 +226,7 @@ fn interrupted_tool_scenario(diagnostic: &str) -> ScenarioV2 {
                         call_id: TOOL_CALL_ID.into(),
                     },
                     ScenarioActionV2::DummyToolRepair {
-                        user_text: "continue the repaired tool round".to_owned(),
+                        user_text: WORKER_PROVIDER_INITIAL.to_owned(),
                         call_id: TOOL_CALL_ID.into(),
                         diagnostic: diagnostic.to_owned(),
                         response: "interrupted worker tool repaired".to_owned(),
@@ -313,6 +299,25 @@ fn assert_boot_b_durable_state(
         || other_terminals.count() != 0
     {
         return Err("S6 durable repair was not one worker-owned provider.tool_error".into());
+    }
+    let starts = worker_events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [first, successor] = starts.as_slice() else {
+        return Err("S6 expected exactly one original and one recovery prompt".into());
+    };
+    if first.outer_turn_id.is_none()
+        || first.outer_turn_id != successor.outer_turn_id
+        || first.model != successor.model
+        || suffix
+            .iter()
+            .any(|record| matches!(record.event, Event::AgentPromptSubmitted(_)))
+    {
+        return Err("S6 repair changed turn/model or invented activating input".into());
     }
     Ok(())
 }

@@ -33,15 +33,13 @@ const UNCERTAIN_PROVIDER_INITIAL: &str = concat!(
     "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
     "Complete the dispatch-uncertain deterministic instruction."
 );
-const REPAIR_CONTINUATION: &str = "Continue the mixed-state repaired tool round.";
 const REPAIR_MARKER: &str = "mixed-state interrupted tool repaired";
 const HOLD_TIMEOUT_MS: u64 = 10_000;
 const TOOL_CALL_ID: &str = "s7-interrupted-tool";
 const BOOT_A_CURSORS: [usize; 4] = [5, 1, 1, 1];
-const RECOVERED_CURSORS: [usize; 4] = [5, 1, 2, 1];
-const COMPLETE_CURSORS: [usize; 4] = [5, 1, 2, 2];
+const RECOVERED_CURSORS: [usize; 4] = [5, 1, 2, 2];
 const RECOVERY_MARKER: &str = "mixed-state interrupted inference recovered";
-const SCENARIO_BYTES: usize = 2_492;
+const SCENARIO_BYTES: usize = 2_500;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// Decoded fake-provider checkpoint used to prove all four immutable lane
@@ -229,6 +227,8 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     assert_owned_uncertain_warning(&observer_b.events, &identities)?;
     observer_b.wait_for_agent_marker(&identities.uncertain, RECOVERY_MARKER, 0)?;
     observer_b.wait_for_agent_idle_after(&identities.uncertain, 0)?;
+    observer_b.wait_for_agent_marker(&identities.repair, REPAIR_MARKER, 0)?;
+    observer_b.wait_for_agent_idle_after(&identities.repair, 0)?;
     interruption::assert_boot_b_repair_pair(
         &fixture,
         &observer_b.events,
@@ -242,8 +242,8 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     // Recovery may finish before socket attachment; exact fake action cursors
     // and the durable failure/successor chain below own that acceptance proof.
     assert_lane_matches(&fixture, RECOVERED_CURSORS)?;
-    if matched_action_count(&fixture)? != 9 {
-        return Err("S7 Boot B did not recover exactly the interrupted inference".into());
+    if matched_action_count(&fixture)? != 10 {
+        return Err("S7 Boot B did not recover exactly the two owed inferences".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, RECOVERED_CURSORS)?;
     let current_b = roster_by_id(observer_b.roster(&session_id, SessionAgentListScope::Current)?)?;
@@ -278,7 +278,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         &observer_c.events,
         &provider_budget(&identities, S7ProviderTurnCounts::ZERO),
     )?;
-    if matched_action_count(&fixture)? != 9 {
+    if matched_action_count(&fixture)? != 10 {
         return Err("S7 Boot C consumed fake work without user input".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, RECOVERED_CURSORS)?;
@@ -316,42 +316,18 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     };
     interruption::assert_recovered_worker_dispatch(&snapshot_c, &identities.uncertain, &dispatch)?;
 
-    let continuation_start = observer_c.events.len();
-    observer_c.submit(
-        &identities.repair,
-        "s7-repair-continuation",
-        REPAIR_CONTINUATION,
-    )?;
-    observer_c.wait_for_agent_marker(&identities.repair, REPAIR_MARKER, continuation_start)?;
-    observer_c.wait_for_agent_idle_after(&identities.repair, continuation_start)?;
-    assert_provider_turn_counts_by_agent(
-        &observer_c.events,
-        &provider_budget(
-            &identities,
-            S7ProviderTurnCounts {
-                repair: 1,
-                ..S7ProviderTurnCounts::ZERO
-            },
-        ),
-    )?;
-    if matched_action_count(&fixture)? != 10 {
-        return Err("S7 repair continuation did not consume exactly its own final action".into());
-    }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, COMPLETE_CURSORS)?;
-    assert_lane_matches(&fixture, COMPLETE_CURSORS)?;
-    let current_after =
-        roster_by_id(observer_c.roster(&session_id, SessionAgentListScope::Current)?)?;
-    let history_after =
-        roster_by_id(observer_c.roster(&session_id, SessionAgentListScope::History)?)?;
-    if current_after != current_b || history_after != history_b {
-        return Err("S7 explicit repair continuation changed durable membership".into());
-    }
+    assert_lane_matches(&fixture, RECOVERED_CURSORS)?;
     disconnect_ui(&mut observer_c.peer)?;
     daemon_c.finish()?;
     assert_no_uncertain_termination(&fixture, &identities, &dispatch)?;
 
     let snapshot_after = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
-    assert_owned_continuation(&snapshot_c, &snapshot_after, &identities)?;
+    if snapshot_after.agent_events != snapshot_c.agent_events
+        || snapshot_after.session_events != snapshot_c.session_events
+        || snapshot_after.restore_events != snapshot_c.restore_events
+    {
+        return Err("S7 settled Boot C appended work during shutdown".into());
+    }
     interruption::assert_recovered_worker_dispatch(
         &snapshot_after,
         &identities.uncertain,
@@ -428,7 +404,7 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
                         call_id: TOOL_CALL_ID.into(),
                     },
                     ScenarioActionV2::DummyToolRepair {
-                        user_text: REPAIR_CONTINUATION.to_owned(),
+                        user_text: REPAIR_PROMPT.to_owned(),
                         call_id: TOOL_CALL_ID.into(),
                         diagnostic: diagnostic.to_owned(),
                         response: REPAIR_MARKER.to_owned(),
@@ -447,7 +423,7 @@ fn assert_scenario_budget(scenario: &ScenarioV2) -> Result<(), Box<dyn std::erro
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded = serde_json::to_vec(scenario)?;
-    if actions != COMPLETE_CURSORS || encoded.len() != SCENARIO_BYTES {
+    if actions != RECOVERED_CURSORS || encoded.len() != SCENARIO_BYTES {
         return Err(format!(
             "S7 scenario budget changed: lanes={}, actions={actions:?}, bytes={}",
             scenario.lanes.len(),
@@ -660,8 +636,8 @@ fn assert_boot_a_durable_state(
     Ok(())
 }
 
-/// Requires Boot B to preserve every non-repair journal and append one exact
-/// provider error only to the repair worker.
+/// Requires Boot B to preserve settled journals and append one exact repair,
+/// followed by fresh reasoning in the repaired worker's original outer turn.
 fn assert_boot_b_durable_repair(
     before: &DurableSessionSnapshot,
     after: &DurableSessionSnapshot,
@@ -680,7 +656,7 @@ fn assert_boot_b_durable_repair(
         }
     }
     let suffix = super::suffix_after_initialization(before, after, &identities.repair)?;
-    let [classification, record] = suffix else {
+    let [classification, record, continuation @ ..] = suffix else {
         return Err(format!("S7 repair suffix contained {} records", suffix.len()).into());
     };
     if !matches!(
@@ -699,6 +675,46 @@ fn assert_boot_b_durable_repair(
                 && value.cause == tau_proto::ToolTerminalCause::RestartRepair
     ) {
         return Err("S7 repair suffix lacked the exact restart-repair classification".into());
+    }
+    if count_prompt(continuation, &identities.repair, REPAIR_PROMPT) != 0
+        || count_response(continuation, &identities.repair, REPAIR_MARKER) != 1
+        || continuation.iter().any(|record| {
+            matches!(
+                record.event,
+                Event::ProviderToolError(_) | Event::ToolError(_) | Event::ToolStarted(_)
+            )
+        })
+    {
+        return Err(
+            "S7 repair did not continue once without synthetic input or tool replay".into(),
+        );
+    }
+    let original = tau_core::AgentTree::try_from_events(
+        identities.repair.clone(),
+        &before.agent_events[&identities.repair],
+    )?;
+    let recovered = tau_core::AgentTree::try_from_events(
+        identities.repair.clone(),
+        &after.agent_events[&identities.repair],
+    )?;
+    let starts = after.agent_events[&identities.repair]
+        .iter()
+        .filter_map(|r| match &r.event {
+            Event::AgentPromptStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [first, next] = starts.as_slice() else {
+        return Err("S7 repair must have exactly two prompt starts".into());
+    };
+    if first.outer_turn_id != next.outer_turn_id
+        || !first
+            .outer_turn_id
+            .as_ref()
+            .is_some_and(|turn| original.outer_turn_is_open(turn))
+        || recovered.pending_tool_round_continuation().is_some()
+    {
+        return Err("S7 repair lost or duplicated its original outer turn".into());
     }
     Ok(())
 }
@@ -766,8 +782,8 @@ fn assert_no_restored_worker_watch(
     Ok(())
 }
 
-/// Requires a no-input restore generation to create no fresh inference dispatch
-/// for any S7 agent.
+/// Allows only the two canonically owed recoveries on Boot B and no work on
+/// the subsequent settled no-input restore.
 fn assert_no_live_restore_dispatch(
     events: &[Observed],
     identities: &S7Identities,
@@ -784,7 +800,9 @@ fn assert_no_live_restore_dispatch(
                 &observed.event,
                 Event::AgentInferenceDispatchStarted(dispatch)
                     if agents.contains(&dispatch.agent_id)
-                        && !(recovering_inference && dispatch.agent_id == identities.uncertain)
+                        && !(recovering_inference
+                            && (dispatch.agent_id == identities.uncertain
+                                || dispatch.agent_id == identities.repair))
             )
     }) {
         return Err("S7 no-input resume created a fresh agent inference dispatch".into());
@@ -974,40 +992,6 @@ fn assert_lane_matches(
                 return Err(format!("S7 lane `{lane}` action {action} match count changed").into());
             }
         }
-    }
-    Ok(())
-}
-
-/// Requires the post-Boot-C explicit continuation to append only to the repair
-/// worker and to contain its own exact prompt/response pair.
-fn assert_owned_continuation(
-    before: &DurableSessionSnapshot,
-    after: &DurableSessionSnapshot,
-    identities: &S7Identities,
-) -> Result<(), Box<dyn std::error::Error>> {
-    after.require_prefix(before)?;
-    if after.session_events != before.session_events
-        || after.restore_events != before.restore_events
-    {
-        return Err("S7 repair continuation changed session-owned durable streams".into());
-    }
-    for agent_id in [&identities.main, &identities.quiescent] {
-        if after.agent_events[agent_id] != before.agent_events[agent_id] {
-            return Err(format!("S7 repair continuation leaked into {agent_id}").into());
-        }
-    }
-    let suffix =
-        &after.agent_events[&identities.repair][before.agent_events[&identities.repair].len()..];
-    if count_prompt(suffix, &identities.repair, REPAIR_CONTINUATION) != 1
-        || count_response(suffix, &identities.repair, REPAIR_MARKER) != 1
-        || suffix.iter().any(|record| {
-            matches!(
-                record.event,
-                Event::ProviderToolError(_) | Event::ToolError(_) | Event::ToolStarted(_)
-            )
-        })
-    {
-        return Err("S7 repair continuation suffix was not solely repair-worker-owned".into());
     }
     Ok(())
 }

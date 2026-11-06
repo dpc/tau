@@ -346,25 +346,25 @@ The fixture never sends the authenticated release, so the existing release
 arbitration keeps the invocation live until process teardown rather than racing
 the crash cut against an elapsed terminal deadline. After SIGKILL, the fixture
 removes the dead generation's private release socket before starting Boot B.
-Its compact 1,085-byte scenario JSON contains two main actions and two worker
+Its compact 1,267-byte scenario JSON contains two main actions and two worker
 actions.
 Boot A requires exactly one correlated worker `tool.request` followed by canonical
 `tool.started` in the typed execution-restore stream and one live readiness fact
 before the process-group kill. Boot B requires one durable
 `provider.tool_error` with the full restart/possible-side-effect diagnostic,
 followed by one derived live nonsemantic `tool.error`, no live dummy redispatch,
-and one explicit worker continuation whose
+and one automatic worker continuation without new input. That continuation's
 complete tool-result context is exactly that balanced error. Boot C receives no
 input and must add no repair; its current/history membership, execution restore,
 current-agent journals, and separately loaded worker journal equal Boot B.
 
-S7 uses four lanes and 2,492-byte compact scenario JSON: five main actions, one
+S7 uses four lanes and 2,500-byte compact scenario JSON: five main actions, one
 quiescent-worker action, a held inference plus its recovery, and the two-action
 dummy repair pair. Boot A consumes eight of ten actions with cursors
-`[5, 1, 1, 1]`. Boot B retries only the interrupted inference, reaching
-`[5, 1, 2, 1]`, while the ambiguous tool receives only its existing repair error.
-The no-input Boot C adds no provider action or duplicate terminal/repair. A final
-explicit repair-worker continuation advances only its cursor to `[5, 1, 2, 2]`.
+`[5, 1, 1, 1]`. Boot B recovers the interrupted inference and runs fresh inference
+over the ambiguous tool's canonical repair error, reaching `[5, 1, 2, 2]` without
+new input or tool replay. The repaired round retains its original outer turn.
+The no-input Boot C adds no provider action or duplicate terminal/repair.
 
 Daemon acceptance uses the normal local socket protocol and real supervised
 subprocess. Its `ServeOptions` explicitly bypass ambient startup override
@@ -449,14 +449,14 @@ worker action and two watch notifications. Boot C consumes none. Exact old and
 new prompt identities, canonical terminals, retained outer-turn identity, and
 fake cursor bindings prove recovery without replaying the old request.
 
-S6 uses two lanes and compact 1,085-byte scenario JSON: two main actions and two
+S6 uses two lanes and compact 1,267-byte scenario JSON: two main actions and two
 worker actions. Boot A consumes two main turns and one worker turn before three
 matched actions; Boot B consumes one worker turn; Boot C consumes none. Extra
 repair events, terminals, starts, provider prompts, or actions fail closed.
-S7 consumes eight actions before its crash, one ordinary inference recovery on
-Boot B, and one explicit repair-worker continuation after Boot C's no-input
-idempotence assertions. Exact per-agent journals and provider budgets reject
-cross-agent repair, lane rebinding, repeated recovery, or ambiguous tool replay.
+S7 consumes eight actions before its crash and two owed inference continuations
+on Boot B; Boot C verifies no-input idempotence. Exact per-agent journals and
+provider budgets reject cross-agent repair, lane rebinding, repeated recovery, or
+ambiguous tool replay.
 
 S8 uses two lanes and five scenario actions. Headless Boot A consumes three main
 actions across exactly four main provider turns and one worker action/turn.

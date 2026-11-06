@@ -25,8 +25,18 @@ fn resume_with_changed_model(state: &Path) -> Harness {
 
 /// Replaces a stopped fixture's journal with an exact pre-shutdown crash cut.
 fn install_crash_cut(state: &Path, records: &[tau_core::PersistedAgentEvent]) {
+    install_agent_crash_cut(state, "main", records);
+}
+
+/// Installs an exact cut for a normally created durable test agent.
+fn install_agent_crash_cut(
+    state: &Path,
+    agent_id: &str,
+    records: &[tau_core::PersistedAgentEvent],
+) {
     wait_for_session_unlock(state, "s1");
-    let mut journal = File::create(state.join("agents/main/events.cbor")).expect("journal");
+    let mut journal =
+        File::create(state.join("agents").join(agent_id).join("events.cbor")).expect("journal");
     for record in records {
         let mut encoded = Vec::new();
         ciborium::into_writer(record, &mut encoded).expect("encode");
@@ -36,6 +46,717 @@ fn install_crash_cut(state: &Path, records: &[tau_core::PersistedAgentEvent]) {
         journal.write_all(&encoded).expect("record");
     }
     journal.sync_all().expect("sync");
+}
+
+/// Captures a real completed round before its successor checkpoint, without
+/// injecting activation or manually dispatching after restart.
+fn completed_tool_round_cut(
+    state: &Path,
+) -> (AgentPromptCreated, Vec<tau_core::PersistedAgentEvent>) {
+    let mut h = quiet_provider_harness(state).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("answer".to_owned()))
+        .expect("dispatch");
+    let source = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_tool_response(
+        &source,
+        "completed-before-crash",
+        "self_info",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("tool response");
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
+        .expect("records")
+        .to_vec();
+    let end = records
+        .iter()
+        .position(|record| match &record.event {
+            Event::ProviderToolResult(result) => {
+                result.call_id.as_str() == "completed-before-crash"
+            }
+            Event::ProviderToolError(error) => error.call_id.as_str() == "completed-before-crash",
+            _ => false,
+        })
+        .expect("last tool terminal")
+        + 1;
+    let cut = records[..end].to_vec();
+    assert_eq!(
+        cut.iter()
+            .filter(|record| matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        1,
+        "the cut precedes the successor checkpoint"
+    );
+    h.shutdown().expect("shutdown");
+    install_agent_crash_cut(state, source.agent_id.as_str(), &cut);
+    (source, cut)
+}
+
+/// A committed last tool result owes fresh inference even when no successor
+/// checkpoint or new input exists. Cold restore must not replay the tool.
+#[test]
+fn completed_tool_round_before_successor_recovers_without_new_input() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (source, cut) = completed_tool_round_cut(&state);
+    let tree = tau_core::AgentTree::try_from_events(source.agent_id.clone(), &cut).expect("replay");
+    let turn = tree
+        .prompt_started(&source.agent_prompt_id)
+        .expect("start")
+        .outer_turn_id
+        .clone();
+    assert_eq!(
+        tree.pending_tool_round_continuation()
+            .expect("debt")
+            .agent_prompt_id,
+        source.agent_prompt_id
+    );
+    let mut h = resume_with_changed_model(&state);
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        1,
+        "closed tool round must resume without external activation"
+    );
+    let successor = read_nth_prompt_created(&h, 0);
+    assert_eq!(successor.model, source.model);
+    assert_ne!(successor.agent_prompt_id, source.agent_prompt_id);
+    assert_eq!(
+        successor
+            .context
+            .flatten_iter()
+            .filter(|item| matches!(
+                item, ContextItem::ToolResult(result)
+                    if result.call_id.as_str() == "completed-before-crash"
+            ))
+            .count(),
+        1
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(_) | Event::ToolStarted(_)
+    )));
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent(source.agent_id.as_str())
+            .expect("tree")
+            .prompt_started(&successor.agent_prompt_id)
+            .expect("start")
+            .outer_turn_id,
+        turn
+    );
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
+        .expect("records")
+        .to_vec();
+    assert!(
+        tau_core::AgentTree::try_from_events(source.agent_id.clone(), &records)
+            .expect("replay")
+            .pending_tool_round_continuation()
+            .is_none()
+    );
+    h.shutdown().expect("shutdown");
+    // The new owner, not the tool round, owns another crash. Exercise the
+    // independently durable checkpoint before its prompt-start fact as well.
+    let checkpoint = records
+        .iter()
+        .rposition(|r| matches!(r.event, Event::AgentInferenceDispatchStarted(_)))
+        .expect("successor checkpoint");
+    install_agent_crash_cut(&state, source.agent_id.as_str(), &records[..=checkpoint]);
+    let mut h = resume_with_changed_model(&state);
+    let next = read_nth_prompt_created(&h, 0);
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(source.agent_id.as_str())
+        .expect("tree");
+    assert_eq!(
+        tree.prompt_started(&next.agent_prompt_id)
+            .expect("start")
+            .outer_turn_id,
+        turn
+    );
+    assert_eq!(next.model, source.model);
+    assert!(tree.pending_tool_round_continuation().is_none());
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(_) | Event::ToolStarted(_)
+    )));
+    h.handle_provider_response_finished(provider_text_response(
+        &next.agent_prompt_id,
+        next.agent_id.clone(),
+        "done",
+    ))
+    .expect("final");
+    h.shutdown().expect("shutdown");
+    let mut h = resume_with_changed_model(&state);
+    assert!(
+        !event_log_contains_any_source(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
+        "a settled successor cannot reopen its historical tool round"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Canonical restart repair supplies an uncertain-effect error, not permission
+/// to rerun the interrupted tool, and owes the same original outer turn.
+#[test]
+fn repaired_tool_round_recovers_without_new_input_or_tool_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (source, mut cut) = completed_tool_round_cut(&state);
+    cut.pop().expect("remove last terminal");
+    let tree = tau_core::AgentTree::try_from_events(source.agent_id.clone(), &cut).expect("replay");
+    assert!(tree.has_open_foreground_tool_round());
+    assert!(tree.pending_tool_round_continuation().is_none());
+    let turn = tree
+        .prompt_started(&source.agent_prompt_id)
+        .expect("start")
+        .outer_turn_id
+        .clone();
+    install_agent_crash_cut(&state, source.agent_id.as_str(), &cut);
+    let mut h = resume_with_changed_model(&state);
+    let successor = read_nth_prompt_created(&h, 0);
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(source.agent_id.as_str())
+        .expect("tree");
+    assert_eq!(
+        tree.prompt_started(&successor.agent_prompt_id)
+            .expect("start")
+            .outer_turn_id,
+        turn
+    );
+    assert_eq!(successor.model, source.model);
+    let results = successor
+        .context
+        .flatten_iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result)
+                if result.call_id.as_str() == "completed-before-crash" =>
+            {
+                Some(result)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0]
+            .render_provider_text()
+            .contains("Side effects may have occurred")
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(_) | Event::ToolStarted(_)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A parallel round with one committed result and one restart repair must join
+/// once, including already accepted input, without replaying either tool.
+#[test]
+fn partially_completed_tool_round_coalesces_queued_input() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("answer".to_owned()))
+        .expect("dispatch");
+    let source = read_nth_prompt_created(&h, 0);
+    h.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::parse("test-bridge").expect("publisher"),
+            tau_proto::MessageAgentTarget::new(source.agent_id.as_str()),
+            tau_proto::MessageFactId::new("queued-during-tools"),
+            tau_proto::MessageParty {
+                stable_id: "external".to_owned(),
+                display_name: None,
+                sender_auth: None,
+                sender_trust: None,
+            },
+            None,
+            "queued before tools finished",
+        )),
+    );
+    let mut response = provider_tool_response(
+        &source,
+        "parallel-first",
+        "self_info",
+        CborValue::Map(Vec::new()),
+    );
+    response.output_items.extend(
+        provider_tool_response(
+            &source,
+            "parallel-second",
+            "self_info",
+            CborValue::Map(Vec::new()),
+        )
+        .output_items,
+    );
+    h.handle_provider_response_finished(response)
+        .expect("tools");
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
+        .expect("records")
+        .to_vec();
+    let first = records
+        .iter()
+        .position(|record| match &record.event {
+            Event::ProviderToolResult(result) => result.call_id.as_str() == "parallel-first",
+            Event::ProviderToolError(error) => error.call_id.as_str() == "parallel-first",
+            _ => false,
+        })
+        .expect("first result");
+    let cut = &records[..=first];
+    let tree = tau_core::AgentTree::try_from_events(source.agent_id.clone(), cut).expect("replay");
+    assert!(tree.has_open_foreground_tool_round());
+    assert!(
+        tree.pending_terminal_tool_result(&"parallel-first".into())
+            .is_some()
+    );
+    let turn = tree
+        .prompt_started(&source.agent_prompt_id)
+        .expect("start")
+        .outer_turn_id
+        .clone();
+    h.shutdown().expect("shutdown");
+    install_agent_crash_cut(&state, source.agent_id.as_str(), cut);
+    let mut h = resume_with_changed_model(&state);
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        1
+    );
+    let successor = read_nth_prompt_created(&h, 0);
+    assert_eq!(successor.model, source.model);
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(source.agent_id.as_str())
+        .expect("tree");
+    assert_eq!(
+        tree.prompt_started(&successor.agent_prompt_id)
+            .expect("start")
+            .outer_turn_id,
+        turn
+    );
+    let context = serde_json::to_string(&successor.context).expect("context");
+    assert_eq!(context.matches("queued before tools finished").count(), 1);
+    for id in ["parallel-first", "parallel-second"] {
+        assert_eq!(
+            successor
+                .context
+                .flatten_iter()
+                .filter(|item| matches!(
+                    item, ContextItem::ToolResult(result) if result.call_id.as_str() == id
+                ))
+                .count(),
+            1
+        );
+    }
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(_) | Event::ToolStarted(_)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Finished outer turns and unselected tool aggregates cannot supply execution
+/// authority, even though their results remain durably available.
+#[test]
+fn completed_tool_round_respects_finish_and_selected_branch() {
+    for finished in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        let (source, cut) = completed_tool_round_cut(&state);
+        let tree =
+            tau_core::AgentTree::try_from_events(source.agent_id.clone(), &cut).expect("replay");
+        let turn = tree
+            .prompt_started(&source.agent_prompt_id)
+            .expect("start")
+            .outer_turn_id
+            .clone()
+            .expect("turn");
+        let event = if finished {
+            Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+                agent_id: source.agent_id.clone(),
+                session_id: test_session_id("s1"),
+                outer_turn_id: turn,
+                disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+                automatic_compaction_decision: None,
+            })
+        } else {
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: source.agent_id.clone(),
+                head: tau_proto::AgentHead::Root,
+            })
+        };
+        let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("store");
+        store
+            .append_agent_event_at(
+                source.agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                event,
+                tau_proto::UnixMicros::now(),
+            )
+            .expect("finish/move");
+        drop(store);
+        let mut h = resume_with_changed_model(&state);
+        assert!(!event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentPromptCreated(_)
+        )));
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// Cancellation terminals precede the outer-turn finish. A crash in that gap
+/// must not reopen the canceled turn, including when another parallel call
+/// still needs a conservative restart repair.
+#[test]
+fn canceled_tool_terminal_before_turn_finish_never_resumes() {
+    for partial in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        let mut h = quiet_provider_harness(&state).expect("harness");
+        connect_test_tool(&mut h, "cancel-owner");
+        h.tool_routing.registry.register(
+            &crate::test_connection_id("cancel-owner"),
+            shared_test_tool_spec("held_tool"),
+        );
+        let cid = ensure_test_user_agent(&mut h);
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("do work".to_owned()))
+            .expect("dispatch");
+        let source = read_nth_prompt_created(&h, 0);
+        let mut response = provider_tool_response(
+            &source,
+            "cancel-first",
+            "held_tool",
+            CborValue::Map(Vec::new()),
+        );
+        response.output_items.extend(
+            provider_tool_response(
+                &source,
+                "cancel-second",
+                "held_tool",
+                CborValue::Map(Vec::new()),
+            )
+            .output_items,
+        );
+        h.handle_provider_response_finished(response)
+            .expect("tools");
+        assert!(
+            h.session_runtime
+                .agent_store
+                .agent(source.agent_id.as_str())
+                .expect("tree")
+                .has_open_foreground_tool_round()
+        );
+        h.handle_cancel_prompt(
+            crate::harness::harness_connection_id(),
+            &tau_proto::UiCancelPrompt {
+                session_id: test_session_id("s1"),
+                target_agent_id: Some(source.agent_id.clone()),
+                agent_prompt_id: None,
+            },
+        );
+        let records = h
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(source.agent_id.as_str())
+            .expect("records")
+            .to_vec();
+        let terminals = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                matches!(record.event, Event::ToolCancelled(_)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminals.len(), 2);
+        let cut = &records[..=terminals[usize::from(!partial)]];
+        assert!(
+            !cut.iter()
+                .any(|r| matches!(r.event, Event::AgentOuterTurnFinished(_)))
+        );
+        h.shutdown().expect("shutdown");
+        install_agent_crash_cut(&state, source.agent_id.as_str(), cut);
+        for _ in 0..2 {
+            let mut h = resume_with_changed_model(&state);
+            assert!(!event_log_contains_any_source(&h, |event| matches!(
+                event,
+                Event::AgentPromptCreated(_) | Event::ToolRequest(_) | Event::ToolStarted(_)
+            )));
+            let tree = h
+                .session_runtime
+                .agent_store
+                .agent(source.agent_id.as_str())
+                .expect("tree");
+            assert!(!tree.has_open_foreground_tool_round());
+            assert!(tree.pending_tool_round_continuation().is_none());
+            assert!(tree.interrupted_tool_round_outer_turn().is_none());
+            h.shutdown().expect("shutdown");
+        }
+    }
+}
+
+/// An input wait loses its runtime timer on restart, but its canonical repair
+/// must lead to a fresh decision rather than leave the bot silently idle.
+#[test]
+fn interrupted_input_wait_resumes_after_canonical_repair() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("wait for work".to_owned()))
+        .expect("dispatch");
+    let source = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_input_wait_response(
+        &source,
+        "interrupted-input-wait",
+        60,
+    ))
+    .expect("wait");
+    let cut = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
+        .expect("cut")
+        .to_vec();
+    let tree = tau_core::AgentTree::try_from_events(source.agent_id.clone(), &cut).expect("replay");
+    assert!(tree.has_open_foreground_tool_round());
+    let turn = tree
+        .prompt_started(&source.agent_prompt_id)
+        .expect("start")
+        .outer_turn_id
+        .clone();
+    h.shutdown().expect("shutdown");
+    install_agent_crash_cut(&state, source.agent_id.as_str(), &cut);
+    let mut h = resume_with_changed_model(&state);
+    let successor = read_nth_prompt_created(&h, 0);
+    assert_eq!(successor.model, source.model);
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(source.agent_id.as_str())
+        .expect("tree");
+    assert_eq!(
+        tree.prompt_started(&successor.agent_prompt_id)
+            .expect("start")
+            .outer_turn_id,
+        turn
+    );
+    assert_eq!(successor.context.flatten_iter().filter(|item| matches!(
+        item, ContextItem::ToolResult(result) if result.call_id.as_str() == "interrupted-input-wait"
+    )).count(), 1);
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(_) | Event::ToolStarted(_)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold tool ownership survives a terminal parked past startup and rejected
+/// admission, so the normal completion seam resumes exactly once on commit.
+#[test]
+fn restored_tool_projection_waits_for_retained_terminal_commit() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (source, mut cut) = completed_tool_round_cut(&state);
+    cut.pop().expect("last terminal");
+    install_agent_crash_cut(&state, source.agent_id.as_str(), &cut);
+    let mut h = quiet_provider_harness_for_with_start_reason_storage_mode_and_hook(
+        "s1",
+        &state,
+        tau_proto::SessionStartReason::Resume,
+        crate::HarnessStorageMode::Durable,
+        Some(Box::new(|h| {
+            connect_test_tool(h, "repair-interceptor");
+            h.handle_extension_event(
+                "repair-interceptor",
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(
+                        tau_proto::EventName::PROVIDER_TOOL_ERROR,
+                    )],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("intercept");
+        })),
+    )
+    .expect("resume");
+    let cid = h
+        .runtime_agent_id_for_target_agent(Some(source.agent_id.as_str()))
+        .expect("agent");
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptCreated(_)
+    )));
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "repair-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject");
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+    for _ in 0..2 {
+        h.session_runtime
+            .persistence_owner
+            .as_ref()
+            .expect("owner")
+            .signal_capacity_ready_for_test();
+        let mut served = 0;
+        h.handle_runtime_event(
+            HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+            &mut served,
+        )
+        .expect("retry");
+    }
+    h.drain_publish_idle_dispatches();
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        1
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(_) | Event::ToolStarted(_)
+    )));
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(source.agent_id.as_str())
+        .expect("records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| matches!(r.event, Event::ProviderToolError(_)))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A rejected successor does not consume canonical tool-round debt. Retrying
+/// admission preserves one turn, while cancellation settles it without work.
+#[test]
+fn closed_tool_successor_retries_admission_and_respects_cancellation() {
+    for cancel in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        let (source, _) = completed_tool_round_cut(&state);
+        let mut h = quiet_provider_harness_for_with_start_reason_storage_mode_and_hook(
+            "s1",
+            &state,
+            tau_proto::SessionStartReason::Resume,
+            crate::HarnessStorageMode::Durable,
+            Some(Box::new(|h| {
+                connect_test_tool(h, "closed-round-interceptor");
+                h.handle_extension_event(
+                    "closed-round-interceptor",
+                    TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                        selectors: vec![EventSelector::Exact(
+                            tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+                        )],
+                        priority: InterceptionPriority::new(0),
+                    })),
+                )
+                .expect("intercept");
+            })),
+        )
+        .expect("resume");
+        let cid = h
+            .runtime_agent_id_for_target_agent(Some(source.agent_id.as_str()))
+            .expect("agent");
+        assert!(h.runtime_io.publication.pending_intercept.is_some());
+        reject_next_semantic_admission(&h);
+        h.handle_extension_event(
+            "closed-round-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("reject admission");
+        assert!(
+            h.session_runtime
+                .agent_store
+                .agent(source.agent_id.as_str())
+                .expect("tree")
+                .pending_tool_round_continuation()
+                .is_some()
+        );
+        if cancel {
+            h.handle_cancel_prompt(
+                crate::harness::harness_connection_id(),
+                &tau_proto::UiCancelPrompt {
+                    session_id: test_session_id("s1"),
+                    target_agent_id: Some(source.agent_id.clone()),
+                    agent_prompt_id: None,
+                },
+            );
+        } else {
+            h.session_runtime
+                .persistence_owner
+                .as_ref()
+                .expect("owner")
+                .signal_capacity_ready_for_test();
+            let mut served = 0;
+            h.handle_runtime_event(
+                HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+                &mut served,
+            )
+            .expect("retry");
+        }
+        while h.runtime_io.publication.pending_intercept.is_some() {
+            h.handle_extension_event(
+                "closed-round-interceptor",
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("release");
+        }
+        h.drain_publish_idle_dispatches();
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|e| matches!(e, Event::AgentPromptCreated(_)))
+                .count(),
+            usize::from(!cancel)
+        );
+        assert!(!h.has_pending_response_continuation(&cid));
+        assert!(!event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::ToolRequest(_) | Event::ToolStarted(_)
+        )));
+        h.shutdown().expect("shutdown");
+    }
 }
 
 /// Seeds a closed send-tool round, then interrupts the next ordinary sampling.

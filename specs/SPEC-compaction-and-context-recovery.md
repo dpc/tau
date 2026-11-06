@@ -92,6 +92,17 @@ recovery requirement; directing the user to an unavailable retry path does not
 satisfy this requirement. This liveness requirement does not authorize replay of
 completed tool effects or ambiguous standalone provider work.
 
+A selected foreground tool round whose canonical results are complete still owes
+one fresh inference until a successor checkpoint claims it. During cold recovery,
+Tau retains the source checkpoint's model, activation cut, and open outer turn;
+it must not require another user message to discover this obligation. Canonical
+restart errors also close a round. Tau preserves the possible-side-effect warning
+for fresh reasoning without replaying interrupted tools or recreating waits.
+Finished turns, off-branch results, and existing standalone or output-length
+recovery owners do not grant ordinary continuation authority. Pending results and
+input wakes must settle through the ordinary dispatch pipeline, not create
+duplicate successors.
+
 For explicit ordinary provider response continuation, the harness retains the same
 outer turn without inserting input. After committing the response, it runs ordinary
 activation preflight, allowing standalone compaction before the successor

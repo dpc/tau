@@ -1,4 +1,4 @@
-//! Bounded explicit provider continuation using ordinary durable dispatch.
+//! Canonical response and closed-tool continuation using ordinary dispatch.
 
 use super::*;
 
@@ -38,9 +38,10 @@ impl Harness {
         }
     }
 
-    /// Continue only from a committed selected response. Reuse the ordinary
-    /// preflight/compaction/checkpoint pipeline without inventing an input.
-    pub(super) fn continue_after_explicit_response(&mut self, cid: &AgentId) {
+    /// Continue only from a committed selected response or closed tool round.
+    /// Reuse the ordinary preflight/compaction/checkpoint pipeline without
+    /// inventing an input.
+    pub(super) fn continue_after_committed_response(&mut self, cid: &AgentId) {
         let source = self
             .agent_runtime
             .agent_registry
@@ -48,10 +49,17 @@ impl Harness {
             .get(cid)
             .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|id| self.session_runtime.agent_store.agent(id))
-            .and_then(tau_core::AgentTree::pending_response_continuation)
-            .cloned();
-        let Some(source) = source else { return };
+            .and_then(|tree| {
+                let source = tree.pending_inference_continuation()?.clone();
+                let turn = tree
+                    .prompt_started(&source.agent_prompt_id)?
+                    .outer_turn_id
+                    .clone()?;
+                tree.outer_turn_is_open(&turn).then_some((source, turn))
+            });
+        let Some((source, turn)) = source else { return };
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+            agent.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(turn);
             // An inner-round boundary, not the outer-turn Idle transition.
             agent.turn.turn_state = AgentTurnState::Idle;
             agent.turn.terminal_notice_eligible = false;
@@ -64,7 +72,8 @@ impl Harness {
         self.drain_publish_idle_dispatches();
     }
 
-    /// Whether an unclaimed explicit response still owns cancellable work.
+    /// Whether an unclaimed response or closed tool round owns cancellable
+    /// work.
     pub(super) fn has_pending_response_continuation(&self, cid: &AgentId) -> bool {
         self.agent_runtime
             .agent_registry
@@ -72,7 +81,7 @@ impl Harness {
             .get(cid)
             .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|id| self.session_runtime.agent_store.agent(id))
-            .and_then(tau_core::AgentTree::pending_response_continuation)
+            .and_then(tau_core::AgentTree::pending_inference_continuation)
             .is_some()
     }
 }
