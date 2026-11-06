@@ -6819,7 +6819,7 @@ pub enum FinalStatusDisposition {
 /// Harness-canonical `provider.response_finished` fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
-    /// Harness-only recovery obligation for an ordinary inference interrupted
+    /// Harness-only recovery obligation for eligible inference interrupted
     /// by restart. No provider output or accounting is inferred. The exact
     /// checkpoint remains owed until a fresh checkpoint claims its activation.
     #[serde(default, skip_serializing_if = "is_false")]

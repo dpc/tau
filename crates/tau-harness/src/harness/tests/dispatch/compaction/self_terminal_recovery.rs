@@ -20,7 +20,8 @@ fn cold_self_terminal_and_checkpoint_retry_on_owning_branch() {
 }
 
 /// Missing-background, correct-branch and already-delivered prefixes resume
-/// once, while an already committed checkpoint stays dispatch-uncertain.
+/// once, while an interrupted committed checkpoint gets a fresh inference
+/// without repeating the delivered self-compaction terminal.
 #[test]
 fn cold_self_terminal_safe_prefix_controls() {
     for mode in ["background", "correct", "delivered", "checkpoint"] {
@@ -300,7 +301,7 @@ fn reproduce(mode: &str) {
                     if prompt.operation == tau_proto::PromptOperation::Inference
             ))
             .count(),
-        1
+        1 + usize::from(mode == "checkpoint")
     );
     let terminal = records.iter().find(|record|
         matches!(&record.event, Event::AgentPromptSteered(s) if s.self_compaction_terminal.is_some()))
@@ -338,8 +339,8 @@ fn reproduce(mode: &str) {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(prompts.len(), usize::from(mode != "checkpoint"));
-    if mode != "checkpoint" {
+    assert_eq!(prompts.len(), 1);
+    {
         validate_closed_tool_timeline(&prompts[0].context).expect("closed resumed tool context");
         let context = serde_json::to_string(&prompts[0].context).expect("context");
         assert!(context.contains("strict fake replacement"));
@@ -351,14 +352,10 @@ fn reproduce(mode: &str) {
         );
         assert_eq!(context.matches("Self compact terminal:").count(), 1);
         assert!(!context.contains("input on the unrelated branch"));
-    } else {
-        assert!(matches!(
-            resumed.agent_runtime.agent_registry.agents[&cid]
-                .dispatch
-                .activation_dispatch,
-            crate::agent::ActivationDispatchState::DispatchUncertain { .. }
-        ));
     }
+    assert_eq!(records.iter().filter(|record| matches!(
+        &record.event, Event::ProviderResponseFinished(response) if response.interrupted_retry
+    )).count(), usize::from(mode == "checkpoint"));
 }
 
 /// Hold one semantic publication so a one-shot Full targets that exact phase.

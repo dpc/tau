@@ -256,7 +256,7 @@ impl Harness {
         );
     }
 
-    /// Installs one retained, output-free failure for an ordinary cold owner.
+    /// Installs one retained, output-free failure for an eligible cold owner.
     /// Publication uses the same arbitration and admission retry as HumanUI
     /// supersession, but the canonical error retains a durable retry
     /// obligation.
@@ -265,12 +265,6 @@ impl Harness {
         cid: &AgentId,
         checkpoint: &tau_proto::AgentInferenceDispatchStarted,
     ) -> bool {
-        if checkpoint.transaction_id.is_some()
-            || checkpoint.output_length_continuation.is_some()
-            || checkpoint.operation != tau_proto::PromptOperation::Inference
-        {
-            return false;
-        }
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
@@ -279,11 +273,12 @@ impl Harness {
             .agent_store
             .agent(checkpoint.agent_id.as_str())
             .is_some_and(|tree| {
-                tree.is_ancestor_head(
-                    checkpoint.through,
-                    tree.head()
-                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                )
+                tree.inference_checkpoint_allows_interrupted_retry(checkpoint)
+                    && tree.is_ancestor_head(
+                        checkpoint.through,
+                        tree.head()
+                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    )
             })
         {
             return false;
@@ -2585,8 +2580,7 @@ impl Harness {
                             )) => checkpoint,
                             _ => tree.pending_interrupted_inference()?,
                         };
-                        if checkpoint.transaction_id.is_some()
-                            || checkpoint.output_length_continuation.is_some()
+                        if !tree.inference_checkpoint_allows_interrupted_retry(checkpoint)
                             || !tree.is_ancestor_head(
                                 checkpoint.through,
                                 tree.head()
@@ -2595,11 +2589,7 @@ impl Harness {
                         {
                             return None;
                         }
-                        tree.prompt_started(&checkpoint.agent_prompt_id)?
-                            .outer_turn_id
-                            .as_ref()
-                            .filter(|turn| tree.outer_turn_is_open(turn))
-                            .cloned()
+                        tree.interrupted_inference_outer_turn(checkpoint)
                     })
                 });
             let restored_output_length = self
@@ -2952,6 +2942,7 @@ impl Harness {
                     }
                 }
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
+                    let retry_interrupted = self.stage_interrupted_inference(&cid, &checkpoint);
                     let status_prompt_id = checkpoint.agent_prompt_id.clone();
                     self.prompt_coordination
                         .prompt_runtime
@@ -3015,9 +3006,15 @@ impl Harness {
                             category: tau_proto::AgentWatchProviderCategory::Compaction,
                         },
                     );
-                    self.emit_info_important(&format!(
-                        "inference dispatch for restored agent `{cid}` is uncertain; retry explicitly"
-                    ));
+                    if retry_interrupted {
+                        self.emit_info_important(&format!(
+                            "post-compaction inference for restored agent `{cid}` was interrupted; recovering automatically from committed context"
+                        ));
+                    } else {
+                        self.emit_info_important(&format!(
+                            "inference dispatch for restored agent `{cid}` is uncertain; retry explicitly"
+                        ));
+                    }
                 }
                 Some(tau_core::StandaloneCompactionRecovery::Interrupted(_)) | None => {}
                 Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. }) => {}

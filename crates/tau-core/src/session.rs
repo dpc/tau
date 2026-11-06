@@ -1920,7 +1920,89 @@ impl AgentTree {
         }
     }
 
-    /// Returns the last interrupted ordinary checkpoint while its activation
+    /// Whether this exact checkpoint permits fresh inference after
+    /// interruption. A committed compaction is reusable, but output-length
+    /// lineage retains its separate recovery boundary even when routed
+    /// through compaction.
+    #[must_use]
+    pub fn inference_checkpoint_allows_interrupted_retry(
+        &self,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) -> bool {
+        checkpoint.operation == tau_proto::PromptOperation::Inference
+            && checkpoint.output_length_continuation.is_none()
+            && self
+                .output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
+                .is_none()
+            && checkpoint.transaction_id.as_ref().is_none_or(|id| {
+                self.compaction_transactions
+                    .get(id)
+                    .is_some_and(|transaction| {
+                        transaction.checkpoint.as_ref() == Some(checkpoint)
+                            && matches!(
+                                transaction.outcome,
+                                Some(CompactionTransactionOutcome::Succeeded(_))
+                            )
+                    })
+            })
+    }
+
+    /// Returns the proven open turn of an interrupted checkpoint, including a
+    /// fresh retry checkpoint whose prompt-start fact has not committed yet.
+    /// Consecutive canonical retry obligations retain the same model/cut. A
+    /// succeeded compaction may also retain its immediately preceding completed
+    /// tool round or reactive-overflow source. Both edges require ancestral
+    /// context rather than an unrelated currently open turn.
+    #[must_use]
+    pub fn interrupted_inference_outer_turn(
+        &self,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) -> Option<tau_proto::AgentOuterTurnId> {
+        let mut checkpoints = self
+            .inference_dispatch_order
+            .iter()
+            .rev()
+            .skip_while(|id| *id != &checkpoint.agent_prompt_id);
+        let current = self.inference_dispatches.get(checkpoints.next()?)?;
+        if &current.checkpoint != checkpoint {
+            return None;
+        }
+        let mut checkpoint = checkpoint;
+        loop {
+            let turn = self
+                .prompt_started(&checkpoint.agent_prompt_id)
+                .and_then(|started| started.outer_turn_id.clone())
+                .unwrap_or_else(|| {
+                    tau_proto::AgentOuterTurnId::for_prompt(&checkpoint.agent_prompt_id)
+                });
+            if self.outer_turn_is_open(&turn) {
+                return Some(turn);
+            }
+            let previous = self.inference_dispatches.get(checkpoints.next()?)?;
+            let retry_link = previous.interrupted_retry
+                && previous.checkpoint.activation_cut == checkpoint.activation_cut;
+            let reactive = previous.recovery_disposition
+                == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+            let compaction_link = checkpoint.transaction_id.is_some()
+                && self.inference_checkpoint_allows_interrupted_retry(checkpoint)
+                && previous.finished
+                && (previous.provider_stop_reason
+                    == Some(tau_proto::ProviderStopReason::ToolCalls)
+                    || reactive)
+                && previous.response_node.map_or(reactive, |node| {
+                    self.is_ancestor_head(AgentHead::Node(node), checkpoint.through)
+                });
+            if !(retry_link || compaction_link)
+                || previous.checkpoint.model != checkpoint.model
+                || !self.is_ancestor_head(previous.checkpoint.through, checkpoint.through)
+            {
+                return None;
+            }
+            checkpoint = &previous.checkpoint;
+        }
+    }
+
+    /// Returns the last interrupted inference checkpoint while its activation
     /// remains on the selected branch and no successor has claimed it.
     #[must_use]
     pub fn pending_interrupted_inference(
@@ -6630,9 +6712,7 @@ impl AgentTree {
             let ordinary_owner = self.inference_dispatches.get(&response.agent_prompt_id);
             if !ordinary_owner.is_some_and(|dispatch| {
                 !dispatch.finished
-                    && dispatch.checkpoint.transaction_id.is_none()
-                    && dispatch.checkpoint.output_length_continuation.is_none()
-                    && dispatch.checkpoint.operation == tau_proto::PromptOperation::Inference
+                    && self.inference_checkpoint_allows_interrupted_retry(&dispatch.checkpoint)
             }) || response.stop_reason != tau_proto::ProviderStopReason::Error
                 || !response.output_items.is_empty()
                 || response.usage.is_some()
@@ -6649,7 +6729,7 @@ impl AgentTree {
                 || response.final_status_disposition != tau_proto::FinalStatusDisposition::Accepted
             {
                 return Err(AgentEventValidationError::new(
-                    "interrupted retry requires one unresolved ordinary checkpoint and an output-free unaccounted error",
+                    "interrupted retry requires one eligible unresolved inference checkpoint and an output-free unaccounted error",
                 ));
             }
         }

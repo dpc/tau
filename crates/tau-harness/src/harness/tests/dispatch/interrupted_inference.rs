@@ -43,8 +43,56 @@ fn install_crash_cut(state: &Path, records: &[tau_core::PersistedAgentEvent]) {
 fn interrupted_post_tool_fixture(
     state: &Path,
 ) -> (tau_proto::AgentPromptId, Vec<tau_core::PersistedAgentEvent>) {
+    interrupted_post_tool_fixture_with_compaction(state, false)
+}
+
+/// Optionally commits a replacement before the closed tool round so the first
+/// interrupted sampling belongs to that successful standalone transaction.
+fn interrupted_post_tool_fixture_with_compaction(
+    state: &Path,
+    compacted: bool,
+) -> (tau_proto::AgentPromptId, Vec<tau_core::PersistedAgentEvent>) {
     seed_main_agent_loaded(state);
     let mut store = tau_core::AgentStore::open_fixture(state.join("agents")).expect("store");
+    if compacted {
+        let transaction_id = tau_proto::CompactionTransactionId::parse("ct-interrupted").unwrap();
+        let compact_prompt_id = test_agent_prompt_id("ap-interrupted-compact");
+        append_seed_agent_event(
+            &mut store,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: crate::parse_agent_id("main"),
+                transaction_id: transaction_id.clone(),
+                compact_prompt_id: compact_prompt_id.clone(),
+                cut: tau_proto::AgentHead::Root,
+                resume_through: Some(tau_proto::AgentHead::Root),
+                model: "test/model".into(),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: tau_proto::PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+            }),
+        );
+        append_seed_agent_event(
+            &mut store,
+            Event::AgentCompacted(tau_proto::AgentCompacted {
+                agent_id: crate::parse_agent_id("main"),
+                transaction_id,
+                compact_prompt_id: compact_prompt_id.clone(),
+                cut: tau_proto::AgentHead::Root,
+                suffix_end: tau_proto::AgentHead::Root,
+                model: "test/model".into(),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                replacement_window: provider_text_response(
+                    &compact_prompt_id,
+                    crate::parse_agent_id("main"),
+                    "committed replacement",
+                )
+                .output_items,
+                original_input_tokens: None,
+                compaction_output_tokens: None,
+            }),
+        );
+    }
     let mut response = provider_text_response(
         &test_agent_prompt_id("ap-prior-send"),
         crate::parse_agent_id("main"),
@@ -81,7 +129,9 @@ fn interrupted_post_tool_fixture(
     let cid = h
         .runtime_agent_id_for_target_agent(Some("main"))
         .expect("main");
-    h.dispatch_prompt_after_publish_idle(&cid);
+    if !compacted {
+        h.dispatch_prompt_after_publish_idle(&cid);
+    }
     let old = read_nth_prompt_created(&h, 0).agent_prompt_id;
     let provider = h.provider_runtime.pending_prompts[&old].clone();
     h.handle_extension_event(
@@ -142,9 +192,22 @@ fn interrupted_post_tool_fixture(
 /// and the completed tool result, and never redispatch the send.
 #[test]
 fn interrupted_post_tool_restart_recovers_without_human_input_or_tool_replay() {
+    assert_interrupted_post_tool_restart(false);
+}
+
+/// Reproduces a succeeded compaction followed by a completed tool and an
+/// interrupted transaction-owned inference, including later idle restore facts.
+#[test]
+fn interrupted_post_compaction_restart_recovers_without_tool_or_summary_replay() {
+    assert_interrupted_post_tool_restart(true);
+}
+
+/// Both eligible checkpoint owners must preserve closed effects and turn
+/// identity through repeated fresh-identity recovery.
+fn assert_interrupted_post_tool_restart(compacted: bool) {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
-    let (mut old, _) = interrupted_post_tool_fixture(&state);
+    let (mut old, _) = interrupted_post_tool_fixture_with_compaction(&state, compacted);
     for _ in 0..3 {
         let mut h = resume_with_changed_model(&state);
         let records = h
@@ -170,6 +233,24 @@ fn interrupted_post_tool_restart_recovers_without_human_input_or_tool_replay() {
         assert_ne!(successor.agent_prompt_id, old);
         assert_eq!(successor.model, tau_proto::ModelId::from("test/model"));
         let context = serde_json::to_string(&successor.context).expect("context");
+        assert_eq!(
+            context.matches("committed replacement").count(),
+            usize::from(compacted)
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.event, Event::AgentCompacted(_)))
+                .count(),
+            usize::from(compacted)
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.event, Event::AgentStandaloneCompactionStarted(_)))
+                .count(),
+            usize::from(compacted)
+        );
         assert_eq!(successor.context.flatten_iter().filter(|item| matches!(
             item, ContextItem::ToolResult(result)
                 if result.call_id.as_str() == "prior-send"
@@ -235,12 +316,263 @@ fn interrupted_post_tool_restart_recovers_without_human_input_or_tool_replay() {
 /// must preserve the retry obligation, without writing a second old terminal.
 #[test]
 fn interrupted_terminal_before_successor_survives_restart() {
+    assert_interrupted_terminal_before_successor(false, false);
+}
+
+/// A second crash after the post-compaction interrupted terminal preserves the
+/// fresh-inference obligation and original outer turn, not the compaction
+/// owner.
+#[test]
+fn interrupted_post_compaction_terminal_before_successor_survives_restart() {
+    assert_interrupted_terminal_before_successor(true, false);
+}
+
+/// The outer-turn start is independently durable before prompt admission.
+/// Neither that crash nor another after repair may strand its open turn.
+#[test]
+fn interrupted_outer_turn_start_before_prompt_start_preserves_one_turn() {
+    for compacted in [false, true] {
+        assert_interrupted_terminal_before_successor(compacted, true);
+    }
+}
+
+/// A crash after the transaction-owned checkpoint but before prompt admission
+/// must recover under a fresh identity, never reconstruct the old request.
+#[test]
+fn interrupted_post_compaction_checkpoint_before_prompt_start_recovers() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
-    let (old, _) = interrupted_post_tool_fixture(&state);
+    let (old, mut cut) = interrupted_post_tool_fixture_with_compaction(&state, true);
+    let owner = cut
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event, Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.agent_prompt_id == old
+            )
+        })
+        .expect("checkpoint");
+    cut.truncate(owner + 1);
+    install_crash_cut(&state, &cut);
+    let mut h = resume_with_changed_model(&state);
+    let fresh = read_nth_prompt_created(&h, 0);
+    assert_ne!(fresh.agent_prompt_id, old);
+    assert_eq!(fresh.model, tau_proto::ModelId::from("test/model"));
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test("main")
+        .expect("records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event, Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == old && response.interrupted_retry
+            ))
+            .count(),
+        1
+    );
+    assert!(!records.iter().any(|record| matches!(
+        &record.event, Event::AgentPromptStarted(started) if started.agent_prompt_id == old
+    )));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentCompacted(_)))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Compaction between a real completed tool round and its next inference must
+/// preserve the original turn even if the new checkpoint has no prompt start.
+#[test]
+fn interrupted_post_tool_compaction_checkpoint_retains_inherited_turn() {
+    for reactive in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        seed_main_agent_loaded(&state);
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(if reactive {
+            u64::MAX
+        } else {
+            900
+        }));
+        let cid = h
+            .runtime_agent_id_for_target_agent(Some("main"))
+            .expect("main");
+        h.dispatch_prompt_for_agent(
+            &cid,
+            PendingPrompt::user("run a tool then continue".to_owned()),
+        )
+        .expect("dispatch");
+        let initial = read_nth_prompt_created(&h, 0);
+        let original_turn = tau_proto::AgentOuterTurnId::for_prompt(&initial.agent_prompt_id);
+        let mut response =
+            provider_text_response(&initial.agent_prompt_id, crate::parse_agent_id("main"), "");
+        response.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+        response.output_items = vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "closed-missing-tool".into(),
+            name: ToolName::new("missing_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })];
+        response.usage = Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 900,
+            ..Default::default()
+        });
+        h.handle_provider_response_finished(response)
+            .expect("tool response");
+        h.drain_publish_idle_dispatches();
+        let next = read_nth_prompt_created(&h, 1);
+        let compact = if reactive {
+            h.handle_provider_response_finished(context_overflow_response(&next))
+                .expect("overflow");
+            read_nth_prompt_created(&h, 2)
+        } else {
+            next
+        };
+        assert_eq!(
+            compact.operation,
+            tau_proto::PromptOperation::StandaloneCompaction
+        );
+        h.handle_provider_response_finished(
+            strict_fake_compact_response(&compact).expect("closed tool round"),
+        )
+        .expect("compact success");
+        let post = read_nth_prompt_created(&h, if reactive { 3 } else { 2 });
+        let mut cut = h
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test("main")
+            .expect("records")
+            .to_vec();
+        let checkpoint = cut.iter().position(|record| matches!(
+            &record.event, Event::AgentInferenceDispatchStarted(checkpoint) if checkpoint.agent_prompt_id == post.agent_prompt_id
+        )).expect("post-compaction checkpoint");
+        cut.truncate(checkpoint + 1);
+        assert_eq!(
+            cut.iter()
+                .filter(|record| matches!(record.event, Event::AgentOuterTurnStarted(_)))
+                .count(),
+            1
+        );
+        h.shutdown().expect("shutdown");
+        install_crash_cut(&state, &cut);
+        let mut restored = resume_with_changed_model(&state);
+        let fresh = read_nth_prompt_created(&restored, 0);
+        let tree = restored
+            .session_runtime
+            .agent_store
+            .agent("main")
+            .expect("tree");
+        assert_eq!(
+            tree.prompt_started(&fresh.agent_prompt_id)
+                .expect("fresh start")
+                .outer_turn_id
+                .as_ref(),
+            Some(&original_turn)
+        );
+        restored
+            .handle_provider_response_finished(provider_text_response(
+                &fresh.agent_prompt_id,
+                crate::parse_agent_id("main"),
+                "finished tool continuation",
+            ))
+            .expect("finish");
+        let records = restored
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test("main")
+            .expect("records");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.event, Event::AgentOuterTurnStarted(_)))
+                .count(),
+            1
+        );
+        assert_eq!(records.iter().filter(|record| matches!(
+            &record.event, Event::AgentOuterTurnFinished(finished) if finished.outer_turn_id == original_turn
+        )).count(), 1);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.event, Event::AgentCompacted(_)))
+                .count(),
+            1
+        );
+        assert!(
+            !event_log_events(&restored)
+                .iter()
+                .any(|event| matches!(event, Event::ToolRequest(_) | Event::ToolStarted(_)))
+        );
+        restored.shutdown().expect("shutdown");
+    }
+}
+
+/// The canonical terminal is independently sufficient to recover both eligible
+/// owner types without publishing the old terminal twice.
+fn assert_interrupted_terminal_before_successor(compacted: bool, before_prompt_start: bool) {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (old, mut original) = interrupted_post_tool_fixture_with_compaction(&state, compacted);
+    if before_prompt_start {
+        let start = original.iter().position(|record| matches!(
+            &record.event, Event::AgentOuterTurnStarted(started) if started.agent_prompt_id == old
+        )).expect("outer turn start");
+        original.truncate(start + 1);
+        install_crash_cut(&state, &original);
+    }
     let mut first =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("first recovery");
+    let mut terminal_prompt = old.clone();
+    if before_prompt_start {
+        for _ in 0..2 {
+            let successor = read_nth_prompt_created(&first, 0).agent_prompt_id;
+            let mut cut = first
+                .session_runtime
+                .agent_store
+                .snapshot_agent_events_for_test("main")
+                .expect("successor records")
+                .to_vec();
+            assert_eq!(
+                cut.iter()
+                    .filter(|record| matches!(record.event, Event::AgentOuterTurnStarted(_)))
+                    .count(),
+                1
+            );
+            let owner = cut
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event, Event::AgentInferenceDispatchStarted(checkpoint)
+                            if checkpoint.agent_prompt_id == successor
+                    )
+                })
+                .expect("successor checkpoint");
+            cut.truncate(owner + 1);
+            first.shutdown().expect("close successor cut");
+            install_crash_cut(&state, &cut);
+            first = resume_with_changed_model(&state);
+            terminal_prompt = successor;
+        }
+    }
     let mut cut = first
         .session_runtime
         .agent_store
@@ -252,10 +584,17 @@ fn interrupted_terminal_before_successor_survives_restart() {
         .position(|record| {
             matches!(
                 &record.event, Event::ProviderResponseFinished(response)
-                    if response.agent_prompt_id == old && response.interrupted_retry
+                    if response.agent_prompt_id == terminal_prompt && response.interrupted_retry
             )
         })
         .expect("interrupted terminal");
+    assert_eq!(
+        cut.iter()
+            .filter(|record| matches!(record.event, Event::AgentOuterTurnStarted(_)))
+            .count(),
+        1,
+        "first repair retains the existing open turn even without prompt admission"
+    );
     cut.truncate(terminal_index + 1);
     let replay = tau_core::AgentTree::try_from_events(crate::parse_agent_id("main"), &cut)
         .expect("terminal-only replay");
@@ -264,7 +603,7 @@ fn interrupted_terminal_before_successor_survives_restart() {
             .pending_interrupted_inference()
             .expect("owed")
             .agent_prompt_id,
-        old
+        terminal_prompt
     );
     first.shutdown().expect("shutdown");
     install_crash_cut(&state, &cut);
@@ -277,12 +616,7 @@ fn interrupted_terminal_before_successor_survives_restart() {
         .agent_store
         .agent("main")
         .expect("tree");
-    let original_turn = tree
-        .prompt_started(&old)
-        .expect("old start")
-        .outer_turn_id
-        .clone()
-        .expect("turn");
+    let original_turn = tau_proto::AgentOuterTurnId::for_prompt(&old);
     assert_eq!(
         tree.prompt_started(&successor.agent_prompt_id)
             .expect("new start")
@@ -320,6 +654,21 @@ fn interrupted_terminal_before_successor_survives_restart() {
             .expect("tree")
             .outer_turn_is_open(&original_turn)
     );
+    let records = restored
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test("main")
+        .expect("completed records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentOuterTurnStarted(_)))
+            .count(),
+        1
+    );
+    assert_eq!(records.iter().filter(|record| matches!(
+        &record.event, Event::AgentOuterTurnFinished(finished) if finished.outer_turn_id == original_turn
+    )).count(), 1);
     restored.shutdown().expect("shutdown");
 }
 
@@ -328,9 +677,21 @@ fn interrupted_terminal_before_successor_survives_restart() {
 /// turn arbitrary failures into fresh paid work.
 #[test]
 fn interrupted_retry_requires_exact_owner_and_cannot_be_authored_by_provider_report() {
+    assert_interrupted_retry_requires_exact_owner(false);
+}
+
+/// Transaction ownership cannot grant provider-authored retry authority or
+/// permit synthetic output/accounting on the repair terminal.
+#[test]
+fn interrupted_post_compaction_retry_validates_exact_owner_and_empty_terminal() {
+    assert_interrupted_retry_requires_exact_owner(true);
+}
+
+/// Exercise core validation against each eligible cold checkpoint owner.
+fn assert_interrupted_retry_requires_exact_owner(compacted: bool) {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
-    let (old, cut) = interrupted_post_tool_fixture(&state);
+    let (old, cut) = interrupted_post_tool_fixture_with_compaction(&state, compacted);
     let tree = tau_core::AgentTree::try_from_events(crate::parse_agent_id("main"), &cut)
         .expect("old owner");
     let mut h =
@@ -438,6 +799,111 @@ fn interrupted_terminal_does_not_detach_delegated_worker_on_replay() {
     assert!(
         !Harness::journal_proves_completed_start_agent_worker(&records, creation, &originator),
         "retry debt is not a completed parent-owned request"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A post-compaction cold terminal remains owned through interception and
+/// rejected admission; capacity wakes must publish it once before dispatch.
+#[test]
+fn interrupted_post_compaction_terminal_retries_rejected_admission_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (old, _) = interrupted_post_tool_fixture_with_compaction(&state, true);
+    let mut h = quiet_provider_harness_for_with_start_reason_storage_mode_and_hook(
+        "s1",
+        &state,
+        tau_proto::SessionStartReason::Resume,
+        crate::HarnessStorageMode::Durable,
+        Some(Box::new(|h| {
+            connect_test_tool(h, "cold-interceptor");
+            h.handle_extension_event(
+                "cold-interceptor",
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(
+                        tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+                    )],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("intercept cold error");
+        })),
+    )
+    .expect("restore");
+    let cid = h
+        .runtime_agent_id_for_target_agent(Some("main"))
+        .expect("main");
+    let held = h
+        .runtime_io
+        .publication
+        .pending_intercept
+        .as_ref()
+        .expect("held")
+        .event
+        .clone();
+    assert!(matches!(&held, Event::ProviderResponseFinished(response)
+        if response.agent_prompt_id == old && response.interrupted_retry));
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "cold-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release");
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
+    for _ in 0..2 {
+        h.session_runtime
+            .persistence_owner
+            .as_ref()
+            .expect("persistence")
+            .signal_capacity_ready_for_test();
+        let mut served_clients = 0;
+        h.handle_runtime_event(
+            HarnessEvent::Command(HarnessCommand::SemanticPersistenceProgress),
+            &mut served_clients,
+        )
+        .expect("capacity wake");
+    }
+    h.drain_publish_idle_dispatches();
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test("main")
+        .expect("records");
+    assert_eq!(
+        records.iter().filter(|record| record.event == held).count(),
+        1
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        1
+    );
+    assert_ne!(read_nth_prompt_created(&h, 0).agent_prompt_id, old);
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .is_empty()
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
     );
     h.shutdown().expect("shutdown");
 }

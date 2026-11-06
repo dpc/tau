@@ -4095,8 +4095,12 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("second reopened records");
     assert!(second_records.starts_with(&first_records));
-    let [initialization] = &second_records[first_records.len()..] else {
-        panic!("cold reopen must append exactly one initialization replacement");
+    let initializations = second_records[first_records.len()..]
+        .iter()
+        .filter(|record| matches!(record.event, Event::AgentInitializationContextSet(_)))
+        .collect::<Vec<_>>();
+    let [initialization] = initializations.as_slice() else {
+        panic!("cold reopen must append one initialization replacement alongside recovery");
     };
     let previous = first_records
         .iter()
@@ -4153,6 +4157,8 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             .iter()
             .filter(|record| is_correlation(&record.event))
             .count()
+            + 1,
+        "only the fresh inference start joins the existing compaction correlation"
     );
     assert_eq!(
         second_records
@@ -4198,45 +4204,31 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             .count(),
         1
     );
-    assert!(
-        !event_log_events(&second)
+    let fresh = read_nth_prompt_created(&second, 0);
+    assert_ne!(fresh.agent_prompt_id, durable_checkpoint.agent_prompt_id);
+    assert_eq!(fresh.operation, tau_proto::PromptOperation::Inference);
+    assert_eq!(fresh.model, model);
+    assert_eq!(
+        second_records
             .iter()
-            .any(|event| matches!(event, Event::AgentPromptCreated(_))),
-        "a response-less second reopen must not send any provider prompt"
+            .filter(|record| matches!(
+                &record.event, Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == durable_checkpoint.agent_prompt_id
+                        && response.interrupted_retry && response.output_items.is_empty()
+                        && response.usage.is_none()
+            ))
+            .count(),
+        1,
+        "the old inference closes once without repeating the completed compact tool"
     );
-    assert!(matches!(
+    assert!(
         second
-            .session_runtime.agent_store
+            .session_runtime
+            .agent_store
             .agent(agent_id.as_str())
-            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
-        Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(
-            ref durable
-        )) if durable == &durable_checkpoint
-    ));
-    let second_cid = second.agent_runtime.agent_registry.agent_routes[agent_id.as_str()].clone();
-    assert!(matches!(
-        second.agent_runtime.agent_registry.agents[&second_cid].dispatch.activation_dispatch,
-        crate::agent::ActivationDispatchState::DispatchUncertain {
-            owner: crate::agent::InferenceCheckpointOwner::Standalone { ref id },
-            ref agent_prompt_id,
-            through,
-            model: Some(ref durable_model),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(cut),
-        } if id == &transaction_id
-            && agent_prompt_id == &durable_checkpoint.agent_prompt_id
-            && through == durable_checkpoint.through
-            && durable_model == &model
-            && cut == compact_cut
-    ));
-    let status = &second.agent_runtime.agent_watch.provider_status[agent_id.as_str()];
-    assert_eq!(status.agent_prompt_id, durable_checkpoint.agent_prompt_id);
-    assert!(matches!(
-        status.state,
-        tau_proto::AgentWatchProviderState::DispatchUncertain {
-            category: tau_proto::AgentWatchProviderCategory::Compaction
-        }
-    ));
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery)
+            .is_none()
+    );
     second.shutdown().expect("second shutdown");
 }
 
@@ -9113,10 +9105,10 @@ fn rewind_discards_off_branch_usage_before_tiny_and_new_agent_activations() {
     h.shutdown().expect("shutdown");
 }
 
-/// Cold replay projects inference owed by a successful standalone compaction as
-/// compaction-owned uncertainty with the exact checkpoint prompt.
+/// Cold replay repairs a successful compaction's interrupted inference without
+/// replaying the compact request or granting HumanUI ordinary Stale authority.
 #[test]
-fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
+fn standalone_interrupted_inference_recovers_after_restart() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let (agent_id, inference_prompt_id);
@@ -9223,18 +9215,14 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
     let mut resumed =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    let status = &resumed.agent_runtime.agent_watch.provider_status[agent_id.as_str()];
-    assert_eq!(status.agent_prompt_id, inference_prompt_id);
-    assert!(matches!(
-        status.state,
-        tau_proto::AgentWatchProviderState::DispatchUncertain {
-            category: tau_proto::AgentWatchProviderCategory::Compaction
-        }
-    ));
+    let fresh = read_nth_prompt_created(&resumed, 0);
+    assert_ne!(fresh.agent_prompt_id, inference_prompt_id);
+    assert_eq!(fresh.operation, tau_proto::PromptOperation::Inference);
+    assert_eq!(context_text_count(&fresh, "summary"), 1);
     submit_authenticated_ui_prompt(
         &mut resumed,
         crate::parse_agent_id(&agent_id),
-        "must wait behind compaction-owned uncertainty",
+        "work arriving after recovery",
         tau_proto::PromptMessageClass::User,
     )
     .expect("submit authenticated UI prompt");
@@ -9244,7 +9232,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             .prompt_runtime
             .pending_uncertain_supersessions
             .is_empty(),
-        "HumanUI cannot claim transaction-owned inference"
+        "cold recovery has released its retained terminal"
     );
     assert!(
         resumed

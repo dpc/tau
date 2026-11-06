@@ -70,22 +70,30 @@ publication, tool, compaction, output-length, and outer-finish authority wins
 until that Stale commits and folds. Only that commit releases the old owner and
 permits dispatch under a new prompt id. Live disconnect uncertainty without
 qualifying HumanUI input remains blocked. After cold restart, Tau instead closes
-an ordinary checkpoint with an output-free canonical
+an eligible inference checkpoint with an output-free canonical
 `provider.response_finished` Error and harness-only `interrupted_retry=true`.
-This terminal records a durable obligation to run fresh inference from committed
-context, including completed tools and queued inputs; it never authorizes replay
-of the old request or tool effects. The successor uses a fresh prompt identity and
-the captured model. The obligation survives a crash between terminal and
-successor. Tau does not promote provisional streamed output to canonical history,
-even if a subscriber already displayed it. Tau invents no usage, provider response
-identity, backend observation, or price.
+Through this terminal, Tau records a durable obligation to run fresh inference
+from committed context, including completed tools and queued inputs. It does not
+authorize replay of the old request or tool effects. The successor uses a fresh
+prompt identity and the captured model. The obligation survives a crash between
+terminal and successor. Tau does not promote provisional streamed output to
+canonical history, even if a subscriber already displayed it. Tau invents no
+usage, provider response identity, backend observation, or price.
 
 Cold recovery adds no finite retry budget: subsequent ordinary network failures
 retain their established unbounded backoff policy. Tau repairs each unresolved
 checkpoint once, without repeating the repair in the same process.
-Standalone-transaction and output-length-owned checkpoints retain their separate
-explicit recovery boundaries. Queued prompt text and recently admitted terminals
-remain subject to the existing process-local and asynchronous crash-tail loss.
+Tau applies the same recovery to an inference checkpoint owned by a successfully
+committed standalone compaction. It preserves the replacement and closes only
+the interrupted inference; it does not repeat the compaction. The fresh successor
+retains the open outer turn, which finishes through its normal terminal path.
+Tau also applies this recovery to journals that an older runtime restored and
+left idle.
+Running or failed standalone operations and output-length-owned inference,
+including its post-compaction descendants, retain their separate explicit
+recovery boundaries. HumanUI Stale supersession remains ordinary-inference-only.
+Queued prompt text and recently admitted terminals remain subject to the existing
+process-local and asynchronous crash-tail loss.
 
 An output-length continuation follows the same owner and prompt-start authority.
 Its embedded response plan may repair only the missing internal steer and missing

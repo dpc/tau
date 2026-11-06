@@ -7401,6 +7401,10 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         tree.output_length_lineage_owner_for_prompt(&descendant_prompt_id),
         Some(continuation.clone())
     );
+    assert!(
+        !tree.inference_checkpoint_allows_interrupted_retry(&descendant),
+        "successful compaction must not erase protected output-length lineage"
+    );
     let descendant_started = tau_proto::AgentPromptStarted {
         agent_prompt_id: descendant_prompt_id.clone(),
         agent_id: fixture.agent_id().clone(),

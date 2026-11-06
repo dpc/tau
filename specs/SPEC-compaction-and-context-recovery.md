@@ -84,6 +84,14 @@ cancellation, and timeout/retry classification remain unchanged.
 
 ## Recovery authority
 
+On agent or session resume, Tau must continue owed execution rather than leave
+the agent silently idle behind an unrecoverable checkpoint. Tau must make
+automatic forward progress when recovery is safe. When the operation's contract
+prevents safe recovery, Tau must expose the blocking reason and an actionable
+recovery requirement; directing the user to an unavailable retry path does not
+satisfy this requirement. This liveness requirement does not authorize replay of
+completed tool effects or ambiguous standalone provider work.
+
 For explicit ordinary provider response continuation, the harness retains the same
 outer turn without inserting input. After committing the response, it runs ordinary
 activation preflight, allowing standalone compaction before the successor
@@ -95,9 +103,12 @@ additional samplings. After restart, Tau records a canonical failure for an
 interrupted ordinary checkpoint and retries with a fresh identity and committed
 context, as specified by
 [SPEC-provider-prompt-materialization-authority](SPEC-provider-prompt-materialization-authority.md).
-Standalone and output-length-owned checkpoints retain their protected recovery
-boundaries. This behavior is independent of message phase and does not give
-standalone compact responses continuation authority.
+Tau uses the same interrupted retry for inference after a committed standalone
+success.
+Running or failed standalone operations and output-length-owned checkpoints
+retain their protected recovery boundaries. This behavior is independent of
+message phase and does not give standalone compact responses continuation
+authority.
 
 The CLI `:compact` command is human/UI authority. The model-callable `compact`
 tool is a separate, enabled-by-default self-compaction authority, while
@@ -435,8 +446,11 @@ canonical agent-message wakes governed by
 [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md), through the
 watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint initially restores as dispatch-uncertain.
-Ordinary cold owners then commit an explicit interrupted failure before fresh
-dispatch; transaction and output-length owners remain protected.
+For ordinary cold owners and inference owned by a succeeded standalone
+transaction, Tau then commits an explicit interrupted failure before fresh
+dispatch. Tau keeps the committed replacement authoritative and does not
+recompute it during this repair.
+Running or failed standalone operations and output-length lineage remain protected.
 This materialization gate is governed by
 [SPEC-provider-prompt-materialization-authority](SPEC-provider-prompt-materialization-authority.md).
 
@@ -476,12 +490,17 @@ prompt text or peer input—decides the bit: active work is true, while passive
 background and restore context is false. Interceptors may rewrite sanctioned
 text but cannot change the bit. Missing legacy fields deserialize false.
 Replay considers only true facts after the last completed checkpoint; an
-uncompleted checkpoint is never resent. Cold ordinary inference is failed and
-retried with a fresh checkpoint; standalone and output-length owners remain uncertain.
+uncompleted checkpoint is never resent. Tau records a failure for cold ordinary
+inference and retries with a fresh checkpoint. It applies the same repair to
+inference owned by a succeeded standalone transaction, retaining the captured
+model and open outer turn. Output-length lineage remains uncertain, including
+post-compaction descendants.
 Authenticated HumanUI supersession applies only to ordinary inference-owned
 uncertainty. A standalone-compaction transaction-owned checkpoint remains
-blocked under its transaction and cannot be closed by the ordinary Stale
-supersession path.
+excluded from the ordinary Stale supersession path; cold recovery instead closes
+its inference with the canonical interrupted-error obligation. A crash after that
+terminal and before its fresh successor retains the obligation without duplicating
+the old terminal, outer turn, compaction, or completed tools.
 
 Committed compaction replacement windows contain the provider items that the
 compacting request actually consumed. Replay does not reinterpret or rewrite

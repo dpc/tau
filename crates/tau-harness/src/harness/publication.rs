@@ -2043,14 +2043,19 @@ impl Harness {
                 .deferred
                 .iter()
                 .any(|pending| compaction_publication_targets_agent(pending.event()));
-        let eligible = matches!(
-            &agent.dispatch.activation_dispatch,
-            ActivationDispatchState::DispatchUncertain {
-                owner: InferenceCheckpointOwner::Inference,
-                agent_prompt_id: owner,
-                ..
-            } if owner == agent_prompt_id
-        ) && agent.dispatch.in_flight_prompt.is_none()
+        // Only the retained cold-recovery terminal may release a successful
+        // compaction's inference owner. HumanUI Stale authority stays ordinary.
+        let interrupted_recovery = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .get(cid)
+            .is_some_and(|pending| {
+                matches!(&pending.terminal, UncertainInferenceTerminal::Interrupted(response)
+                    if &response.agent_prompt_id == agent_prompt_id)
+            });
+        let eligible = self.uncertain_supersession_owner_exists(cid, agent_prompt_id)
+            && agent.dispatch.in_flight_prompt.is_none()
             && agent.dispatch.pending_cancel.is_none()
             && !matches!(
                 agent.turn.outer_turn,
@@ -2108,8 +2113,64 @@ impl Harness {
             .agent_id
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-            .and_then(|tree| tree.marked_inference_through(agent_prompt_id))
-            .is_some()
+            .is_some_and(|tree| {
+                if interrupted_recovery {
+                    matches!(
+                        tree.inference_dispatch_recovery(),
+                        Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint))
+                            if &checkpoint.agent_prompt_id == agent_prompt_id
+                                && tree.is_ancestor_head(
+                                    checkpoint.through,
+                                    tree.head().map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                                )
+                    )
+                } else {
+                    true
+                }
+            })
+    }
+
+    /// Whether the exact unresolved owner still needs its retained terminal,
+    /// independently of temporary publication, branch, or tool competition.
+    fn uncertain_supersession_owner_exists(
+        &self,
+        cid: &AgentId,
+        agent_prompt_id: &AgentPromptId,
+    ) -> bool {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return false;
+        };
+        let interrupted = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .get(cid)
+            .is_some_and(|pending| {
+                matches!(
+                    &pending.terminal, UncertainInferenceTerminal::Interrupted(response)
+                        if &response.agent_prompt_id == agent_prompt_id
+                )
+            });
+        matches!(
+            &agent.dispatch.activation_dispatch,
+            ActivationDispatchState::DispatchUncertain { owner, agent_prompt_id: prompt_id, .. }
+                if prompt_id == agent_prompt_id
+                    && (matches!(owner, InferenceCheckpointOwner::Inference) || interrupted)
+        ) && agent
+            .identity
+            .agent_id
+            .as_deref()
+            .and_then(|id| self.session_runtime.agent_store.agent(id))
+            .is_some_and(|tree| {
+                if interrupted {
+                    matches!(tree.inference_dispatch_recovery(),
+                        Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint))
+                            if &checkpoint.agent_prompt_id == agent_prompt_id
+                                && tree.inference_checkpoint_allows_interrupted_retry(&checkpoint))
+                } else {
+                    tree.marked_inference_through(agent_prompt_id).is_some()
+                }
+            })
     }
 
     /// Drive HumanUI supersessions accepted during initialization immediately
@@ -2497,27 +2558,7 @@ impl Harness {
                 .is_some_and(|pending| event == pending.terminal.event());
             !exact_event || !self.uncertain_supersession_is_eligible(&cid, &agent_prompt_id)
         } {
-            let old_owner_exists = self
-                .agent_runtime
-                .agent_registry
-                .agents
-                .get(&cid)
-                .is_some_and(|agent| {
-                    matches!(
-                        &agent.dispatch.activation_dispatch,
-                        ActivationDispatchState::DispatchUncertain {
-                            owner: InferenceCheckpointOwner::Inference,
-                            agent_prompt_id: owner,
-                            ..
-                        } if owner == &agent_prompt_id
-                    ) && agent
-                        .identity
-                        .agent_id
-                        .as_deref()
-                        .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-                        .and_then(|tree| tree.marked_inference_through(&agent_prompt_id))
-                        .is_some()
-                });
+            let old_owner_exists = self.uncertain_supersession_owner_exists(&cid, &agent_prompt_id);
             if !old_owner_exists {
                 self.prompt_coordination
                     .prompt_runtime

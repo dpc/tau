@@ -32,14 +32,17 @@ first. Only canonical Stale commit and fold releases uncertainty and lets FIFO
 dispatch mint a new prompt id; Tau never resends the old request. Transaction-
 owned compaction uncertainty is excluded.
 
-After cold restart, Tau instead resolves ordinary uncertainty by committing an
-output-free Error terminal with harness-owned `interrupted_retry` authority before
-fresh dispatch.
-The retained publication follows the same exact-owner arbitration and admission
-retry as HumanUI supersession. The durable retry obligation survives a crash before
-the successor checkpoint. Tau does not replay completed tool effects. Provider
-reports cannot author this bit. Standalone-transaction and output-length owners
-remain outside this recovery path.
+After cold restart, Tau instead resolves eligible inference uncertainty by
+committing an output-free Error terminal with harness-owned `interrupted_retry`
+authority before fresh dispatch. The retained publication follows the same
+exact-owner arbitration and admission retry as HumanUI supersession. The durable
+retry obligation survives a crash before the successor checkpoint. Tau does not
+replay completed tool effects. Provider reports cannot author this bit. Tau uses
+the same recovery for inference owned by a succeeded standalone transaction,
+without repeating its committed compaction. It preserves the existing open outer
+turn even when the crash precedes prompt-start admission. Running or failed
+standalone operations and output-length lineage, including post-compaction
+descendants, remain outside this recovery path.
 
 ## Prompt capability snapshot
 
