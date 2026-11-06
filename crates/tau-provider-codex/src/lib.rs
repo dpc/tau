@@ -517,6 +517,9 @@ impl std::fmt::Display for CodexError {
             common::LlmError::StreamError { .. } => {
                 formatter.write_str("provider WebSocket stream failed")
             }
+            common::LlmError::WsClosed(_) if self.0.is_ws_message_too_big() => formatter.write_str(
+                "provider WebSocket closed with code 1009 (message too big); unchanged request will not be retried",
+            ),
             common::LlmError::WsClosed(_) => formatter.write_str("provider WebSocket closed"),
             common::LlmError::Canceled => formatter.write_str("request canceled"),
             common::LlmError::ReloadableConfig(_) => {

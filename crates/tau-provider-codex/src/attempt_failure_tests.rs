@@ -322,33 +322,35 @@ fn compact_capture_uses_exact_attempt_dispatch_and_observed_provider_projection(
 /// the provider-controlled reason and respecting capture eligibility.
 #[test]
 fn close_capture_preserves_facts_and_omits_reason_text() {
-    let evidence = AttemptFailureEvidence::transport(
-        TransportPhase::ResponseStream,
-        true,
-        TransportFailureKind::WebSocketTermination(WsTermination::CloseFrame {
-            code: Some(1011),
-            reason: Some("loaded-secret keepalive detail".to_owned()),
-        }),
-    );
-    let record = capture_record(&evidence, true, 2, true).expect("capture");
-    assert_eq!(record["provider"], Value::Null);
-    assert_eq!(
-        record["transport"],
-        json!({
-            "phase": "response_stream",
-            "kind": "websocket_close",
-            "ws_close_code": 1011,
-            "ws_close_reason": {
-                "present": true,
-                "utf8_bytes": 30,
-                "unicode_scalars": 30,
-            },
-            "clean_eof": false,
-            "frame_bytes": null,
-        })
-    );
-    assert!(!record.to_string().contains("keepalive detail"));
-    assert!(capture_record(&evidence, false, 2, true).is_none());
+    for code in [1009, 1011] {
+        let evidence = AttemptFailureEvidence::transport(
+            TransportPhase::ResponseStream,
+            true,
+            TransportFailureKind::WebSocketTermination(WsTermination::CloseFrame {
+                code: Some(code),
+                reason: Some("loaded-secret keepalive detail".to_owned()),
+            }),
+        );
+        let record = capture_record(&evidence, true, 2, true).expect("capture");
+        assert_eq!(record["provider"], Value::Null);
+        assert_eq!(
+            record["transport"],
+            json!({
+                "phase": "response_stream",
+                "kind": "websocket_close",
+                "ws_close_code": code,
+                "ws_close_reason": {
+                    "present": true,
+                    "utf8_bytes": 30,
+                    "unicode_scalars": 30,
+                },
+                "clean_eof": false,
+                "frame_bytes": null,
+            })
+        );
+        assert!(!record.to_string().contains("keepalive detail"));
+        assert!(capture_record(&evidence, false, 2, true).is_none());
+    }
 }
 
 /// Regression: upgrade failures have no fabricated failing dispatch index;

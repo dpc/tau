@@ -1623,6 +1623,9 @@ pub(crate) fn run_prewarm_through_shared_pool_observed(
 /// classifier as a typed Transport retry without extending this attempt by a
 /// second idle window.
 fn is_recoverable_ws_error(err: &LlmError) -> bool {
+    if err.is_ws_message_too_big() {
+        return false;
+    }
     if matches!(err.root_error(), LlmError::WsClosed(_)) {
         return true;
     }

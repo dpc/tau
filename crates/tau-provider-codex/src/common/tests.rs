@@ -1,5 +1,54 @@
 use super::*;
 
+/// Only the typed 1009 close stops unchanged work; prose, other closes and EOF
+/// retain transient policy even through nested diagnostic wrappers.
+#[test]
+fn message_size_close_is_terminal_without_token_overflow_authority() {
+    use crate::attempt_failure::{
+        AttemptFailureEvidence, TransportFailureKind, TransportPhase, WsTermination,
+    };
+
+    for code in [None, Some(1000), Some(1009), Some(1011), Some(4009)] {
+        for wrappers in 0..=2 {
+            let termination = WsTermination::CloseFrame {
+                code,
+                reason: Some("secret context_length_exceeded message too big 1009".to_owned()),
+            };
+            let mut error = LlmError::WsClosed(termination.clone());
+            for _ in 0..wrappers {
+                error = error.observed(AttemptFailureEvidence::transport(
+                    TransportPhase::ResponseStream,
+                    true,
+                    TransportFailureKind::WebSocketTermination(termination.clone()),
+                ));
+            }
+            let too_big = code == Some(1009);
+            assert_eq!(error.retry_decision().is_none(), too_big);
+            assert_eq!(
+                error.failure_kind(),
+                too_big.then_some(ProviderFailureKind::RequestRejected)
+            );
+            assert_eq!(
+                error.error_category(),
+                if too_big {
+                    tau_proto::ProviderErrorCategory::RequestRejected
+                } else {
+                    tau_proto::ProviderErrorCategory::Transport
+                }
+            );
+            let public = crate::CodexError(error).to_string();
+            assert!(!public.contains("secret"));
+            assert!(!public.contains("context_length_exceeded"));
+            assert_eq!(public.contains("1009 (message too big)"), too_big);
+        }
+    }
+    assert!(
+        LlmError::WsClosed(WsTermination::CleanEof)
+            .retry_decision()
+            .is_some()
+    );
+}
+
 /// Display categories must use typed evidence, distinguish protocol from
 /// network failure, and leave the existing retry and recovery classifiers
 /// unchanged.

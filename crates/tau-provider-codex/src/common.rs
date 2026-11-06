@@ -185,6 +185,18 @@ impl std::error::Error for LlmError {
 }
 
 impl LlmError {
+    /// Recognize the peer's typed message-size close without inferring a token
+    /// limit, which component rejected it, or which direction exceeded a limit.
+    pub(crate) fn is_ws_message_too_big(&self) -> bool {
+        matches!(
+            self.root_error(),
+            Self::WsClosed(crate::attempt_failure::WsTermination::CloseFrame {
+                code: Some(1009),
+                ..
+            })
+        )
+    }
+
     /// Returns whether the canonical HTTP status rejected the presented bearer.
     #[must_use]
     pub(crate) fn is_canonical_unauthorized(&self) -> bool {
@@ -271,6 +283,9 @@ impl LlmError {
     /// evidence that repeating the unchanged operation is futile are terminal.
     #[must_use]
     pub fn retry_decision(&self) -> Option<RetryDecision> {
+        if self.is_ws_message_too_big() {
+            return None;
+        }
         match self {
             Self::Observed { source, .. } => source.retry_decision(),
             Self::Outbound(error) => Some(RetryDecision::new(outbound_retry_class(error.kind()))),
@@ -314,6 +329,9 @@ impl LlmError {
     /// Return the typed terminal provider category, when one was proven.
     #[must_use]
     pub fn failure_kind(&self) -> Option<ProviderFailureKind> {
+        if self.is_ws_message_too_big() {
+            return Some(ProviderFailureKind::RequestRejected);
+        }
         match self {
             Self::Observed { source, .. } => source.failure_kind(),
             Self::WsUpgradeRequired => Some(ProviderFailureKind::RequestRejected),
@@ -347,6 +365,7 @@ impl LlmError {
                 tau_provider::OutboundErrorKind::Protocol => Category::InvalidResponse,
                 tau_provider::OutboundErrorKind::InvalidConfiguration => Category::Unknown,
             },
+            Self::WsClosed(_) if self.is_ws_message_too_big() => Category::RequestRejected,
             Self::WsClosed(_) => Category::Transport,
             Self::WsUpgradeRequired | Self::RequestRejected { .. } => Category::RequestRejected,
             _ if self.failure_kind() == Some(ProviderFailureKind::RequestRejected) => {

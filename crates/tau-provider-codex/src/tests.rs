@@ -1,6 +1,8 @@
 use std::sync::{Arc, atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 use std::{io as path_std_io, net as path_std_net, sync as path_std_sync, time as path_std_time};
 
+use tungstenite::protocol::frame::coding::CloseCode;
+
 use super::*;
 use crate::cache_diagnostic::tests as cache_capture_tests;
 
@@ -785,6 +787,15 @@ impl Drop for WsLoopbackServer {
 
 #[derive(Clone, Copy)]
 enum LoopbackResponseMode {
+    /// A typed size close, optionally after one transient repair and output.
+    MessageSizeClose {
+        /// Fail the initial socket transiently before closing its replacement.
+        repair: bool,
+        /// Emit accepted semantic output before the size close.
+        semantic: bool,
+        /// Use a native compaction item rather than assistant text.
+        native: bool,
+    },
     OrdinarySuccess,
     RepairThenSuccess,
     RepairThenUpgradeFailure,
@@ -868,6 +879,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
             if matches!(
                 mode,
                 LoopbackResponseMode::OrdinarySuccess
+                    | LoopbackResponseMode::MessageSizeClose { .. }
                     | LoopbackResponseMode::RepairThenSuccess
                     | LoopbackResponseMode::RepairThenUpgradeFailure
                     | LoopbackResponseMode::ContextWindowExceeded
@@ -898,6 +910,42 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                         .lock()
                         .expect("requests")
                         .push(serde_json::from_str(&request).expect("synthetic request JSON"));
+                }
+                if let LoopbackResponseMode::MessageSizeClose {
+                    repair,
+                    semantic,
+                    native,
+                } = mode
+                {
+                    let initial_transient = repair && request_index == 0;
+                    if semantic && !initial_transient {
+                        let item = if native {
+                            serde_json::json!({
+                                "type": "compaction", "id": "cmp_size", "encrypted_content": "sealed"
+                            })
+                        } else {
+                            serde_json::json!({
+                                "type": "message", "role": "assistant",
+                                "content": [{"type": "output_text", "text": "uncommitted draft"}]
+                            })
+                        };
+                        socket.send(tungstenite::Message::Text(
+                            serde_json::json!({
+                                "type": "response.output_item.done", "output_index": 0, "item": item
+                            }).to_string().into()
+                        )).expect("semantic prelude");
+                    }
+                    let _ = socket.send(tungstenite::Message::Close(Some(
+                        tungstenite::protocol::CloseFrame {
+                            code: if initial_transient {
+                                CloseCode::Error
+                            } else {
+                                CloseCode::Size
+                            },
+                            reason: "secret context_length_exceeded".into(),
+                        },
+                    )));
+                    continue;
                 }
                 if let LoopbackResponseMode::CompactOutputThenCapacity { local } = mode {
                     let item = if local {
@@ -1233,6 +1281,7 @@ fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
                 }
                 LoopbackResponseMode::CloseWithoutResponse => {}
                 LoopbackResponseMode::ContextWindowExceeded
+                | LoopbackResponseMode::MessageSizeClose { .. }
                 | LoopbackResponseMode::OrdinarySuccess
                 | LoopbackResponseMode::RepairThenSuccess
                 | LoopbackResponseMode::RepairThenUpgradeFailure
@@ -3490,6 +3539,101 @@ fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
     assert!(older.supports_compaction);
     assert!(!lite_sol.supports_parallel_tool_calls);
     assert!(older_info.supports_parallel_tool_calls);
+}
+
+/// A size close must stop at the backend terminal boundary for ordinary,
+/// native compact, and local-summary requests, including on the repair socket
+/// and after semantic output. No threshold or token-overflow authority follows.
+#[test]
+fn websocket_message_size_close_never_redispatches_or_retries() {
+    for operation in 0..3 {
+        for repair in [false, true] {
+            // Local summaries already prohibit transparent socket repair.
+            if operation == 2 && repair {
+                continue;
+            }
+            for semantic in [false, true] {
+                let server = spawn_loopback_server(LoopbackResponseMode::MessageSizeClose {
+                    repair,
+                    semantic,
+                    native: operation == 1,
+                });
+                let config = ResolvedConfig {
+                    inner: if operation == 1 {
+                        native_compact_test_config(server.base_url())
+                    } else {
+                        test_config(server.base_url())
+                    },
+                };
+                let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+                let session = tau_proto::SessionId::parse("size-close").expect("session");
+                let agent = tau_proto::AgentId::parse("size-close").expect("agent");
+                let context = if operation == 0 {
+                    tau_proto::PromptContext::default()
+                } else {
+                    compact_trigger_context()
+                };
+                let request = test_prompt_payload(&session, &agent, &context);
+                let error = if operation == 0 {
+                    let AttemptOutcome::Terminal {
+                        error,
+                        progress,
+                        backend_reached: true,
+                    } = runtime.run_attempt(
+                        "ap-size-close",
+                        &config,
+                        &request,
+                        &mut NeverAbort,
+                        &mut |_| {},
+                    )
+                    else {
+                        panic!("size close must terminalize ordinary inference");
+                    };
+                    assert_eq!(progress == SemanticProgress::None, !semantic);
+                    error
+                } else {
+                    let CompactOutcome::Terminal {
+                        error,
+                        backend_reached: true,
+                    } = runtime.compact("ap-size-close", &config, &request, &mut NeverAbort)
+                    else {
+                        panic!(
+                            "size close must terminalize compaction: operation={operation}, repair={repair}, semantic={semantic}"
+                        );
+                    };
+                    error
+                };
+                assert_eq!(error.retry_decision(), None);
+                assert_eq!(
+                    error.failure_kind(),
+                    Some(tau_proto::ProviderFailureKind::RequestRejected)
+                );
+                assert_eq!(
+                    error.to_string(),
+                    "provider WebSocket closed with code 1009 (message too big); unchanged request will not be retried"
+                );
+                let expected = if repair { 2 } else { 1 };
+                assert_eq!(
+                    server.counts.requests.lock().expect("requests").len(),
+                    expected
+                );
+                assert_eq!(
+                    server
+                        .counts
+                        .ws_upgrade_requests
+                        .load(path_std_sync_atomic::Ordering::SeqCst),
+                    expected
+                );
+                assert_eq!(
+                    server
+                        .counts
+                        .http_post_requests
+                        .load(path_std_sync_atomic::Ordering::SeqCst),
+                    0
+                );
+            }
+        }
+    }
 }
 
 /// A streaming request rejection must leave the finite attempt as a typed
