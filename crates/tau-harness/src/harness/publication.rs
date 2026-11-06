@@ -7,7 +7,9 @@ use tau_proto::ToolResultStatus;
 
 use super::prompt_acceptance_timing::{PromptAcceptanceTerminal, PromptAcceptanceTiming};
 use super::prompt_materialization_timing::MaterializationStage;
-use super::prompt_runtime_state::{PendingUncertainSupersession, UncertainSupersessionPhase};
+use super::prompt_runtime_state::{
+    PendingUncertainSupersession, UncertainInferenceTerminal, UncertainSupersessionPhase,
+};
 use super::start_coordinator::StartPhase;
 use super::*;
 use crate::debug_log::DebugEventSensitivity;
@@ -1904,7 +1906,7 @@ impl Harness {
                 .insert(
                     cid.clone(),
                     PendingUncertainSupersession {
-                        terminal,
+                        terminal: UncertainInferenceTerminal::Superseded(Box::new(terminal)),
                         phase: UncertainSupersessionPhase::Ready,
                     },
                 );
@@ -1928,13 +1930,15 @@ impl Harness {
             .insert(
                 cid.clone(),
                 PendingUncertainSupersession {
-                    terminal: AgentPromptTerminated {
-                        automatic_compaction_decision: None,
-                        agent_id: durable_agent_id,
-                        agent_prompt_id,
-                        reason: AgentPromptTerminationReason::Stale,
-                        originator,
-                    },
+                    terminal: UncertainInferenceTerminal::Superseded(Box::new(
+                        AgentPromptTerminated {
+                            automatic_compaction_decision: None,
+                            agent_id: durable_agent_id,
+                            agent_prompt_id,
+                            reason: AgentPromptTerminationReason::Stale,
+                            originator,
+                        },
+                    )),
                     phase: UncertainSupersessionPhase::Ready,
                 },
             );
@@ -1959,8 +1963,18 @@ impl Harness {
         else {
             return;
         };
+        if matches!(pending.terminal, UncertainInferenceTerminal::Interrupted(_))
+            && self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .is_none_or(|agent| !self.session_initialized(&agent.identity.session_id))
+        {
+            return;
+        }
         if pending.phase != UncertainSupersessionPhase::Ready
-            || !self.uncertain_supersession_is_eligible(cid, &pending.terminal.agent_prompt_id)
+            || !self.uncertain_supersession_is_eligible(cid, pending.terminal.agent_prompt_id())
         {
             return;
         }
@@ -1972,11 +1986,11 @@ impl Harness {
         {
             owner.phase = UncertainSupersessionPhase::PublicationPending;
         }
-        let agent_prompt_id = pending.terminal.agent_prompt_id.clone();
+        let agent_prompt_id = pending.terminal.agent_prompt_id().clone();
         self.publish_event_for_agent_with_completion(
             cid,
             None,
-            Event::AgentPromptTerminated(pending.terminal),
+            pending.terminal.event(),
             Some(AgentPublishCompletion::UncertainSupersession {
                 agent_prompt_id,
                 owned_publication: None,
@@ -2128,7 +2142,7 @@ impl Harness {
             .prompt_runtime
             .pending_uncertain_supersessions
             .get(cid)
-            .is_some_and(|pending| &pending.terminal.agent_prompt_id == agent_prompt_id)
+            .is_some_and(|pending| pending.terminal.agent_prompt_id() == agent_prompt_id)
         {
             return;
         }
@@ -2480,9 +2494,7 @@ impl Harness {
                 .prompt_runtime
                 .pending_uncertain_supersessions
                 .get(&cid)
-                .is_some_and(|pending| {
-                    event == Event::AgentPromptTerminated(pending.terminal.clone())
-                });
+                .is_some_and(|pending| event == pending.terminal.event());
             !exact_event || !self.uncertain_supersession_is_eligible(&cid, &agent_prompt_id)
         } {
             let old_owner_exists = self

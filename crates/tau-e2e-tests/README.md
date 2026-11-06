@@ -86,11 +86,10 @@ watch, explicit post-resume watch recreation with exact new-subscription
 notifications, loaded/unloaded/ephemeral membership composition, two-worker
 restore with reverse-creation activation, live `active` publication/retention,
 input-free cold recomputation of delegated `active_auto`, and ID-keyed
-ordering/isolation, a
-synchronized held-worker crash followed by two dispatch-uncertain fail-closed
-resumes, an acknowledged interrupted worker foreground tool repaired exactly
-once across two cold resumes, and startup rejection of invalid
-scenario config.
+ordering/isolation, a synchronized held-worker crash followed by automatic
+recovery on the first resume and no provider work on the next, an acknowledged
+interrupted worker foreground tool repaired exactly once across two cold resumes,
+and startup rejection of invalid scenario config.
 
 The Unix core-shell test binary also contains one closed sibling-concurrency
 oracle. It preflights the exact Cargo-built `tau-e2e-shell-probe` executable
@@ -198,12 +197,12 @@ recomputes both delegated workers as `active_auto`.
 A fifth fixture reuses the exact two-role `agent_start`/`agent_watch` surface. It
 correlates one held worker prompt across the durable dispatch checkpoint, decoded
 fake cursor, and live `hold_ready` trace before killing the private process
-group. Boot B and Boot C require both routes, the mandatory dispatch-uncertain
-warning, and zero automatic worker submission; only Boot B creates a fresh watch
-whose initial typed provider status identifies the checkpointed prompt. This
-proves a conservative harness response at the synchronized cut, not backend
-acknowledgement, exactly-once work, transactional cursor/journal persistence, or
-retry, abandonment, or recovery behavior.
+group. Boot B commits one interrupted Error and dispatches a fresh successful
+inference under the captured model and original outer turn, without restoring
+the old watch. It also tests fresh watch recreation and a separate explicit
+worker round. Boot C consumes no completed work again. This does not establish
+backend acknowledgement, exactly-once external work, or transactional storage.
+
 A sixth fixture gives only the worker the closed no-side-effect dummy tool. Its
 existing authenticated-release mode receives no release, so scheduler time
 cannot terminalize the crash cut. It kills after one durable request/start pair
@@ -214,13 +213,12 @@ receives no further input and must preserve the exact Boot B membership,
 execution-restore, and agent streams without another repair pair. This is a
 conservative foreground-tool repair oracle, not evidence of exactly-once effects
 or a general recovery operation.
-A seventh fixture composes a quiescent main and completed worker with one held
-dispatch-uncertain worker and one interrupted-tool repair worker. The first
-resume emits only the uncertain worker's warning and the repair worker's sole
-durable error; the second receives no input, emits no provider work, and must
-preserve every durable stream and ID-keyed current/history roster. One explicit
-repair-worker continuation after those assertions consumes only its retained
-fake lane. The uncertain worker remains fail-closed and unterminated.
+A seventh fixture combines a quiescent main and completed worker with one held
+inference and one interrupted tool. The first resume retries only the inference
+and repairs only the tool; the second adds no provider work or duplicate repair.
+A final explicit repair-worker continuation consumes only its retained lane.
+Durable streams and ID-keyed rosters prove ownership and repeated-resume safety.
+
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

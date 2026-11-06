@@ -38,8 +38,10 @@ const REPAIR_MARKER: &str = "mixed-state interrupted tool repaired";
 const HOLD_TIMEOUT_MS: u64 = 10_000;
 const TOOL_CALL_ID: &str = "s7-interrupted-tool";
 const BOOT_A_CURSORS: [usize; 4] = [5, 1, 1, 1];
-const COMPLETE_CURSORS: [usize; 4] = [5, 1, 1, 2];
-const SCENARIO_BYTES: usize = 2_178;
+const RECOVERED_CURSORS: [usize; 4] = [5, 1, 2, 1];
+const COMPLETE_CURSORS: [usize; 4] = [5, 1, 2, 2];
+const RECOVERY_MARKER: &str = "mixed-state interrupted inference recovered";
+const SCENARIO_BYTES: usize = 2_492;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// Decoded fake-provider checkpoint used to prove all four immutable lane
@@ -224,7 +226,9 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
     assert_resume_boundaries(&observer_b.events, &identities.all(), &session_id)?;
-    let warning_b = assert_owned_uncertain_warning(&observer_b.events, &identities)?;
+    assert_owned_uncertain_warning(&observer_b.events, &identities)?;
+    observer_b.wait_for_agent_marker(&identities.uncertain, RECOVERY_MARKER, 0)?;
+    observer_b.wait_for_agent_idle_after(&identities.uncertain, 0)?;
     interruption::assert_boot_b_repair_pair(
         &fixture,
         &observer_b.events,
@@ -233,16 +237,15 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         &diagnostic,
     )?;
     interruption::assert_no_live_tool_restart(&observer_b.events, &identities.repair)?;
-    assert_no_live_restore_dispatch(&observer_b.events, &identities)?;
+    assert_no_live_restore_dispatch(&observer_b.events, &identities, true)?;
     assert_no_restored_worker_watch(&observer_b.events, &identities)?;
-    assert_provider_turn_counts_by_agent(
-        &observer_b.events,
-        &provider_budget(&identities, S7ProviderTurnCounts::ZERO),
-    )?;
-    if matched_action_count(&fixture)? != 8 {
-        return Err("S7 Boot B consumed fake work while restoring mixed state".into());
+    // Recovery may finish before socket attachment; exact fake action cursors
+    // and the durable failure/successor chain below own that acceptance proof.
+    assert_lane_matches(&fixture, RECOVERED_CURSORS)?;
+    if matched_action_count(&fixture)? != 9 {
+        return Err("S7 Boot B did not recover exactly the interrupted inference".into());
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, BOOT_A_CURSORS)?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, RECOVERED_CURSORS)?;
     let current_b = roster_by_id(observer_b.roster(&session_id, SessionAgentListScope::Current)?)?;
     let history_b = roster_by_id(observer_b.roster(&session_id, SessionAgentListScope::History)?)?;
     assert_mixed_roster(&current_b, &identities)?;
@@ -255,7 +258,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
 
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     assert_boot_b_durable_repair(&snapshot_a, &snapshot_b, &identities, &diagnostic)?;
-    interruption::assert_unfinished_worker_dispatch(&snapshot_b, &identities.uncertain, &dispatch)?;
+    interruption::assert_recovered_worker_dispatch(&snapshot_b, &identities.uncertain, &dispatch)?;
 
     let socket_c = fixture.socket_path("s7-boot-c");
     let daemon_c = spawn_daemon(
@@ -266,23 +269,19 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     let mut observer_c = SessionRestoreObserver::connect(&socket_c)?;
     observer_c.wait_for_session_boundary(&session_id)?;
     assert_resume_boundaries(&observer_c.events, &identities.all(), &session_id)?;
-    let warning_c = assert_owned_uncertain_warning(&observer_c.events, &identities)?;
-    if warning_c <= warning_b {
-        return Err("S7 Boot C did not publish a fresh uncertain-worker warning".into());
-    }
     interruption::assert_no_duplicate_repair(&observer_c.events, &identities.repair, TOOL_CALL_ID)?;
     interruption::assert_single_repair_trace(&fixture, TOOL_CALL_ID)?;
     interruption::assert_no_live_tool_restart(&observer_c.events, &identities.repair)?;
-    assert_no_live_restore_dispatch(&observer_c.events, &identities)?;
+    assert_no_live_restore_dispatch(&observer_c.events, &identities, false)?;
     assert_no_restored_worker_watch(&observer_c.events, &identities)?;
     assert_provider_turn_counts_by_agent(
         &observer_c.events,
         &provider_budget(&identities, S7ProviderTurnCounts::ZERO),
     )?;
-    if matched_action_count(&fixture)? != 8 {
+    if matched_action_count(&fixture)? != 9 {
         return Err("S7 Boot C consumed fake work without user input".into());
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, BOOT_A_CURSORS)?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, RECOVERED_CURSORS)?;
     let current_c = roster_by_id(observer_c.roster(&session_id, SessionAgentListScope::Current)?)?;
     let history_c = roster_by_id(observer_c.roster(&session_id, SessionAgentListScope::History)?)?;
     if current_c != current_b || history_c != history_b {
@@ -315,7 +314,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         }
         std::thread::yield_now();
     };
-    interruption::assert_unfinished_worker_dispatch(&snapshot_c, &identities.uncertain, &dispatch)?;
+    interruption::assert_recovered_worker_dispatch(&snapshot_c, &identities.uncertain, &dispatch)?;
 
     let continuation_start = observer_c.events.len();
     observer_c.submit(
@@ -335,7 +334,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
             },
         ),
     )?;
-    if matched_action_count(&fixture)? != 9 {
+    if matched_action_count(&fixture)? != 10 {
         return Err("S7 repair continuation did not consume exactly its own final action".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, COMPLETE_CURSORS)?;
@@ -353,7 +352,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
 
     let snapshot_after = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     assert_owned_continuation(&snapshot_c, &snapshot_after, &identities)?;
-    interruption::assert_unfinished_worker_dispatch(
+    interruption::assert_recovered_worker_dispatch(
         &snapshot_after,
         &identities.uncertain,
         &dispatch,
@@ -410,10 +409,16 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
             },
             ScenarioLaneV2 {
                 ctx_id: "s7-uncertain".to_owned(),
-                actions: vec![ScenarioActionV2::HoldUntilCancel {
-                    user_text: UNCERTAIN_PROVIDER_INITIAL.to_owned(),
-                    timeout_ms: HOLD_TIMEOUT_MS,
-                }],
+                actions: vec![
+                    ScenarioActionV2::HoldUntilCancel {
+                        user_text: UNCERTAIN_PROVIDER_INITIAL.to_owned(),
+                        timeout_ms: HOLD_TIMEOUT_MS,
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: UNCERTAIN_PROVIDER_INITIAL.to_owned(),
+                        response: RECOVERY_MARKER.to_owned(),
+                    },
+                ],
             },
             ScenarioLaneV2 {
                 ctx_id: "s7-repair".to_owned(),
@@ -669,11 +674,7 @@ fn assert_boot_b_durable_repair(
     {
         return Err("S7 Boot B changed membership or execution-restore streams".into());
     }
-    for agent_id in [
-        &identities.main,
-        &identities.quiescent,
-        &identities.uncertain,
-    ] {
+    for agent_id in [&identities.main, &identities.quiescent] {
         if !super::suffix_after_initialization(before, after, agent_id)?.is_empty() {
             return Err(format!("S7 Boot B appended repair state to {agent_id}").into());
         }
@@ -708,14 +709,12 @@ fn assert_owned_uncertain_warning(
     events: &[Observed],
     identities: &S7Identities,
 ) -> Result<tau_proto::UnixMicros, Box<dyn std::error::Error>> {
-    let recorded = interruption::assert_dispatch_uncertain_notice(events, &identities.uncertain)?;
+    let recorded = interruption::assert_interrupted_recovery_notice(events, &identities.uncertain)?;
     let restore_warnings = events
         .iter()
         .filter_map(|observed| match &observed.event {
             Event::HarnessNotice(notice)
-                if notice
-                    .message
-                    .starts_with("inference dispatch for restored agent `") =>
+                if notice.message.starts_with("inference for restored agent `") =>
             {
                 Some(notice.message.as_str())
             }
@@ -723,7 +722,7 @@ fn assert_owned_uncertain_warning(
         })
         .collect::<Vec<_>>();
     let expected = format!(
-        "inference dispatch for restored agent `{}` is uncertain; retry explicitly",
+        "inference for restored agent `{}` was interrupted; recovering automatically from committed context",
         identities.uncertain
     );
     if restore_warnings != [expected.as_str()] {
@@ -772,6 +771,7 @@ fn assert_no_restored_worker_watch(
 fn assert_no_live_restore_dispatch(
     events: &[Observed],
     identities: &S7Identities,
+    recovering_inference: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let agents = identities
         .all()
@@ -784,6 +784,7 @@ fn assert_no_live_restore_dispatch(
                 &observed.event,
                 Event::AgentInferenceDispatchStarted(dispatch)
                     if agents.contains(&dispatch.agent_id)
+                        && !(recovering_inference && dispatch.agent_id == identities.uncertain)
             )
     }) {
         return Err("S7 no-input resume created a fresh agent inference dispatch".into());
@@ -990,11 +991,7 @@ fn assert_owned_continuation(
     {
         return Err("S7 repair continuation changed session-owned durable streams".into());
     }
-    for agent_id in [
-        &identities.main,
-        &identities.quiescent,
-        &identities.uncertain,
-    ] {
+    for agent_id in [&identities.main, &identities.quiescent] {
         if after.agent_events[agent_id] != before.agent_events[agent_id] {
             return Err(format!("S7 repair continuation leaked into {agent_id}").into());
         }

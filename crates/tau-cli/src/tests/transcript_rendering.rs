@@ -4560,6 +4560,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {

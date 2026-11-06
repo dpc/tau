@@ -58,6 +58,7 @@ pub(super) fn finished(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,

@@ -68,8 +68,23 @@ FIFO, then owns one exact old-prompt `agent.prompt_terminated(stale)` through
 interception and semantic-admission retry. Provider-terminal, retained
 publication, tool, compaction, output-length, and outer-finish authority wins
 until that Stale commits and folds. Only that commit releases the old owner and
-permits dispatch under a new prompt id. With no qualifying HumanUI input,
-uncertainty remains blocked; queued prompt text and recently admitted Stale
+permits dispatch under a new prompt id. Live disconnect uncertainty without
+qualifying HumanUI input remains blocked. After cold restart, Tau instead closes
+an ordinary checkpoint with an output-free canonical
+`provider.response_finished` Error and harness-only `interrupted_retry=true`.
+This terminal records a durable obligation to run fresh inference from committed
+context, including completed tools and queued inputs; it never authorizes replay
+of the old request or tool effects. The successor uses a fresh prompt identity and
+the captured model. The obligation survives a crash between terminal and
+successor. Tau does not promote provisional streamed output to canonical history,
+even if a subscriber already displayed it. Tau invents no usage, provider response
+identity, backend observation, or price.
+
+Cold recovery adds no finite retry budget: subsequent ordinary network failures
+retain their established unbounded backoff policy. Tau repairs each unresolved
+checkpoint once, without repeating the repair in the same process.
+Standalone-transaction and output-length-owned checkpoints retain their separate
+explicit recovery boundaries. Queued prompt text and recently admitted terminals
 remain subject to the existing process-local and asynchronous crash-tail loss.
 
 An output-length continuation follows the same owner and prompt-start authority.

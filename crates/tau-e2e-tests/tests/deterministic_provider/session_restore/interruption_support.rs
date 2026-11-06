@@ -1,4 +1,4 @@
-//! Shared fail-closed oracles for interrupted inference and foreground tools.
+//! Shared recovery oracles for interrupted inference and foreground tools.
 
 use std::time::{Duration, Instant};
 
@@ -205,13 +205,79 @@ pub(super) fn assert_unfinished_worker_dispatch(
     Ok(())
 }
 
-/// Requires the exact mandatory fail-closed restore warning.
-pub(super) fn assert_dispatch_uncertain_notice(
+/// Proves one interrupted error precedes one fresh successful recovery,
+/// retaining the captured model and original outer turn without redispatching
+/// the old ID.
+pub(super) fn assert_recovered_worker_dispatch(
+    snapshot: &DurableSessionSnapshot,
+    worker: &AgentId,
+    old: &AgentInferenceDispatchStarted,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let records = snapshot
+        .agent_events
+        .get(worker)
+        .ok_or("missing worker journal")?;
+    let errors = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == old.agent_prompt_id =>
+            {
+                Some((index, response))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(terminal_index, error)] = errors.as_slice() else {
+        return Err("interrupted request must have exactly one terminal".into());
+    };
+    if !error.interrupted_retry
+        || error.stop_reason != tau_proto::ProviderStopReason::Error
+        || !error.output_items.is_empty()
+        || error.usage.is_some()
+    {
+        return Err("interrupted request did not retain an output-free runtime Error".into());
+    }
+    let successor = records[terminal_index + 1..]
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentInferenceDispatchStarted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .ok_or("missing recovery checkpoint")?;
+    if successor.agent_prompt_id == old.agent_prompt_id || successor.model != old.model {
+        return Err("recovery did not capture a fresh ID and the original model".into());
+    }
+    let tree = tau_core::AgentTree::try_from_events(worker.clone(), records)?;
+    let original_turn = tree
+        .prompt_started(&old.agent_prompt_id)
+        .and_then(|started| started.outer_turn_id.as_ref())
+        .ok_or("missing original turn")?;
+    if tree.prompt_started(&successor.agent_prompt_id)
+        .and_then(|started| started.outer_turn_id.as_ref()) != Some(original_turn)
+        || tree.outer_turn_is_open(original_turn)
+        || records.iter().filter(|record| matches!(&record.event,
+            Event::AgentPromptStarted(started) if started.agent_prompt_id == old.agent_prompt_id)).count() != 1
+        || records.iter().filter(|record| matches!(&record.event,
+            Event::AgentOuterTurnFinished(finished) if &finished.outer_turn_id == original_turn)).count() != 1
+        || records.iter().filter(|record| matches!(&record.event,
+            Event::ProviderResponseFinished(response) if response.agent_prompt_id == successor.agent_prompt_id
+                && !response.interrupted_retry && response.stop_reason == tau_proto::ProviderStopReason::EndTurn)).count() != 1
+    {
+        return Err("recovery repeated or lost its prompt/outer-turn completion".into());
+    }
+    Ok(())
+}
+
+/// Requires the exact ordinary interrupted-inference recovery notice.
+pub(super) fn assert_interrupted_recovery_notice(
     events: &[Observed],
     worker: &AgentId,
 ) -> Result<tau_proto::UnixMicros, Box<dyn std::error::Error>> {
-    let expected =
-        format!("inference dispatch for restored agent `{worker}` is uncertain; retry explicitly");
+    let expected = format!(
+        "inference for restored agent `{worker}` was interrupted; recovering automatically from committed context"
+    );
     let notices = events
         .iter()
         .filter(|observed| {
@@ -227,15 +293,15 @@ pub(super) fn assert_dispatch_uncertain_notice(
         .collect::<Vec<_>>();
     let [notice] = notices.as_slice() else {
         return Err(
-            format!("dispatch-uncertain restore warning delivery changed: {notices:?}").into(),
+            format!("interrupted-inference recovery notice delivery changed: {notices:?}").into(),
         );
     };
     if !notice.replay {
-        return Err("dispatch-uncertain warning bypassed mandatory catch-up replay".into());
+        return Err("interrupted-inference notice bypassed mandatory catch-up replay".into());
     }
     notice
         .recorded_at
-        .ok_or_else(|| "dispatch-uncertain warning lacked its publication timestamp".into())
+        .ok_or_else(|| "interrupted-inference notice lacked its publication timestamp".into())
 }
 
 /// Waits for one exact canonical live dummy-hold readiness progress event.

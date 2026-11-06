@@ -132,10 +132,12 @@ bounded counterpart for two sequentially started workers, including retained lan
 and journal ownership under
 reverse-creation activation. S2 proves explicit recreation creates one new subscription
 and admits only its exact bounded live notifications; the initial snapshot
-cannot activate the provider. S5 proves only fail-closed dispatch-uncertain
-restoration after a synchronized interrupted worker dispatch. It does not prove
-watch persistence, exactly-once external work, crash-exact provider/harness
-checkpoint coordination, or any retry, abandonment, or recovery operation.
+cannot activate the provider. S5 proves cold ordinary-inference recovery with a
+canonical interrupted Error and fresh request identity, followed by no duplicate
+work on a second resume. It does not prove watch persistence, exactly-once external
+effects, or crash-transactional provider/harness checkpoint coordination. S7 keeps ordinary
+inference retry distinct from ambiguous-tool repair; no tool is redispatched.
+
 
 The S6 dummy hold is closed no-side-effect fixture code. It accepts no tool
 arguments, performs no network or child-process operation, and allows only one
@@ -152,12 +154,11 @@ session lock before resume. Its repair-aware provider grammar accepts only the
 fixed call ID, error status, and full restart/possible-side-effect diagnostic.
 S7 combines that cut with S5's independently synchronized provider hold. Its
 decoded checkpoint must contain exactly four immutable lane bindings and two
-contiguous main-owned production child associations. Boot B and the no-input
-portion of Boot C admit no provider prompt; only the uncertain worker is named
-by the per-generation restore warning, and only the repair worker may receive
-the sole durable repair suffix. Boot C must equal Boot B before a final explicit
-repair continuation.
-No retry, abandonment, or terminal outcome is requested for the uncertain worker.
+contiguous main-owned production child associations. Boot B retries only the
+interrupted inference with fresh identity; only the repair worker receives the
+ambiguous-tool repair. The no-input portion of Boot C repeats neither provider
+work nor repair, before a final explicit repair continuation.
+
 
 Mismatch, startup, or exact-consumption errors retain the private root and print
 its path. Successful roots are deleted unless `TAU_E2E_KEEP_ARTIFACTS=1`.

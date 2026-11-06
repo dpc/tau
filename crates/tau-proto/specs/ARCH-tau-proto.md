@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 16.8 adds optional canonical-only `interrupted_retry` metadata to ordinary
+Error terminals. The field defaults to false; provider reports cannot supply it.
+Older peers can ignore it and retain ordinary error behavior. This change requires
+no new terminal enum or coordinated extension rebuild. Cold retry authority follows
+[SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
+
 Protocol 16.7 / source SDK 0.22.0 adds optional diagnostic `BuildIdentity` to
 Hello. Missing metadata remains unknown; older readers may ignore it. This adds
 no events, replay requirements, or admission authorities.

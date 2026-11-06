@@ -287,6 +287,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,

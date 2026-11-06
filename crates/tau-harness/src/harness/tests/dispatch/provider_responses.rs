@@ -1355,12 +1355,14 @@ fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
             records.starts_with(&cut_records),
             "cold replay must preserve the exact written prefix"
         );
-        assert!(
-            records[cut_records.len()..]
-                .iter()
-                .all(|record| matches!(record.event, Event::AgentInitializationContextSet(_))),
-            "resume may append only its initialization replacement"
-        );
+        if retain_stale {
+            assert!(
+                records[cut_records.len()..]
+                    .iter()
+                    .all(|record| matches!(record.event, Event::AgentInitializationContextSet(_))),
+                "resume may append only its initialization replacement"
+            );
+        }
         let stale_count = records
             .iter()
             .filter(|record| {
@@ -1381,7 +1383,7 @@ fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
                 .agent(&durable_agent_id)
                 .and_then(|tree| tree.marked_inference_through(&old_prompt_id))
                 .is_some(),
-            !retain_stale
+            false
         );
         assert_eq!(
             matches!(
@@ -1394,8 +1396,8 @@ fn human_ui_supersession_crash_tail_respects_written_stale_prefix() {
                     ..
                 } if agent_prompt_id == &old_prompt_id
             ),
-            !retain_stale,
-            "only the prefix without written Stale restores the exact old owner"
+            false,
+            "a missing Stale is now closed by an interrupted Error before fresh dispatch"
         );
         if retain_stale {
             assert!(matches!(
@@ -1532,24 +1534,10 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
             .contains_key(&background_call),
         "completed background work must not remain an active supersession guard"
     );
-    assert!(matches!(
-        restored.agent_runtime.agent_registry.agents[&cid]
-            .dispatch
-            .activation_dispatch,
-        crate::agent::ActivationDispatchState::DispatchUncertain {
-            owner: crate::agent::InferenceCheckpointOwner::Inference,
-            ref agent_prompt_id,
-            ..
-        } if agent_prompt_id == &old_prompt_id
-    ));
-
-    submit_authenticated_ui_prompt(
-        &mut restored,
-        durable_agent_id.clone(),
-        "recover after cold restore",
-        tau_proto::PromptMessageClass::User,
-    )
-    .expect("submit HumanUI recovery prompt");
+    assert_ne!(
+        read_nth_prompt_created(&restored, 0).agent_prompt_id,
+        old_prompt_id
+    );
 
     let records = restored
         .session_runtime
@@ -1561,13 +1549,12 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
             .iter()
             .filter(|record| matches!(
                 &record.event,
-                Event::AgentPromptTerminated(terminated)
-                    if terminated.agent_prompt_id == old_prompt_id
-                        && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == old_prompt_id && response.interrupted_retry
             ))
             .count(),
         1,
-        "the uncertain owner must close through one canonical Stale"
+        "the uncertain owner must close through one canonical interrupted Error"
     );
     assert_eq!(
         records
@@ -1591,7 +1578,7 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
             ))
             .count(),
         0,
-        "Stale recovery must not invent a finish for the pre-crash outer turn"
+        "Interrupted recovery must not invent a finish for the pre-crash outer turn"
     );
     let successor_checkpoints = records
         .iter()
@@ -1607,7 +1594,7 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
     assert_eq!(
         successor_checkpoints.len(),
         1,
-        "HumanUI recovery must mint exactly one successor dispatch"
+        "automatic recovery must mint exactly one successor dispatch"
     );
     let successor_prompt_id = &successor_checkpoints[0].agent_prompt_id;
     assert_eq!(
@@ -1619,8 +1606,8 @@ fn restored_background_completion_does_not_block_human_ui_uncertain_supersession
                     if started.agent_prompt_id == *successor_prompt_id
             ))
             .count(),
-        1,
-        "the successor dispatch must own one outer-turn start"
+        0,
+        "the successor dispatch retains the original outer turn"
     );
     assert!(
         restored
@@ -1801,9 +1788,8 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
         .filter(|record| {
             matches!(
                 &record.event,
-                Event::AgentPromptTerminated(terminated)
-                    if terminated.agent_prompt_id == old_prompt_id
-                        && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == old_prompt_id && response.interrupted_retry
             )
         })
         .count();
@@ -1822,8 +1808,8 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
         "the second restore must close the uncertain owner before HumanUI input"
     );
     assert_eq!(
-        successor_count, 1,
-        "replayed messages must mint one successor before HumanUI input"
+        successor_count, 2,
+        "each interrupted restore mints one fresh successor before HumanUI input"
     );
     assert!(
         second_restore
@@ -1865,13 +1851,12 @@ fn replayed_external_messages_supersede_uncertain_owner_after_completed_backgrou
             .iter()
             .filter(|record| matches!(
                 &record.event,
-                Event::AgentPromptTerminated(terminated)
-                    if terminated.agent_prompt_id == old_prompt_id
-                        && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == old_prompt_id && response.interrupted_retry
             ))
             .count(),
         stale_count,
-        "HumanUI follow-up must not duplicate the replay Stale"
+        "HumanUI follow-up must not duplicate the replay interrupted Error"
     );
     assert_eq!(
         records
@@ -2091,14 +2076,12 @@ fn blocked_compaction_history_does_not_mask_uncertain_inference_replay() {
             .iter()
             .filter(|record| matches!(
                 &record.event,
-                Event::AgentPromptTerminated(terminated)
-                    if terminated.agent_prompt_id == old_prompt_id
-                        && terminated.reason
-                            == tau_proto::AgentPromptTerminationReason::Stale
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == old_prompt_id && response.interrupted_retry
             ))
             .count(),
         1,
-        "blocked compaction history must not suppress the uncertain owner's Stale terminal"
+        "blocked compaction history must not suppress the uncertain owner's interrupted Error"
     );
     assert_eq!(
         replay_records
@@ -3542,6 +3525,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
@@ -3594,6 +3578,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
@@ -3679,8 +3664,17 @@ fn updated_role_effort_preserves_complete_materialized_history() {
     h.shutdown().expect("shutdown");
 }
 
-fn add_routed_test_model(h: &mut Harness, model: &str) {
-    let source = tau_proto::ModelId::from("echo/model");
+/// Adds an alternate model backed by the fixture's existing provider route.
+pub(super) fn add_routed_test_model(h: &mut Harness, model: &str) {
+    let source = if h
+        .provider_runtime
+        .model_info
+        .contains_key(&"echo/model".into())
+    {
+        tau_proto::ModelId::from("echo/model")
+    } else {
+        tau_proto::ModelId::from("test/model")
+    };
     let target = tau_proto::ModelId::from(model);
     let mut info = h.provider_runtime.model_info[&source].clone();
     info.id = target.clone();
@@ -3708,6 +3702,7 @@ fn finish_materialized_turn(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

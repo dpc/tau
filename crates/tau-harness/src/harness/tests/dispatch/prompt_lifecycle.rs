@@ -70,6 +70,7 @@ fn seed_sensitive_tool_context(h: &mut Harness, cid: &AgentId) {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1184,6 +1185,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1263,6 +1265,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1371,6 +1374,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1898,6 +1902,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1966,6 +1971,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -4378,6 +4384,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

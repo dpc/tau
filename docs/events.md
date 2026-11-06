@@ -1074,6 +1074,14 @@ the closed reason `unexpected_unload` or `restored_delegation_route_lost`.
 `agent.inference_dispatch_started` requires the provider-qualified `model`,
 `operation`, and immutable pre-activation `activation_cut`; its transaction id
 remains optional for ordinary inference. Missing ownership fields fail decoding.
+`provider.response_finished.interrupted_retry` defaults to false and is
+harness-only retry authority, not a provider report field. An output-free Error
+with this bit closes an ordinary request interrupted by restart and records a
+durable obligation to run fresh inference from committed context. Tau fabricates
+no usage or provider observations and does not replay completed tool effects.
+Standalone and output-length-owned checkpoints retain their separate recovery
+rules.
+
 `provider.response_finished.recovery_disposition` is harness-authored, defaults
 to `none`, and is `reactive_compaction_planned` only for a canonical no-output
 ordinary-inference context rejection.

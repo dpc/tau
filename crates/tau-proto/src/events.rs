@@ -6748,6 +6748,7 @@ impl ProviderResponseFinishedReport {
         final_status_disposition: FinalStatusDisposition,
     ) -> ProviderResponseFinished {
         ProviderResponseFinished {
+            interrupted_retry: false,
             final_status_disposition,
             agent_prompt_id: self.agent_prompt_id,
             agent_id: self.agent_id,
@@ -6818,6 +6819,11 @@ pub enum FinalStatusDisposition {
 /// Harness-canonical `provider.response_finished` fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
+    /// Harness-only recovery obligation for an ordinary inference interrupted
+    /// by restart. No provider output or accounting is inferred. The exact
+    /// checkpoint remains owed until a fresh checkpoint claims its activation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interrupted_retry: bool,
     /// Harness-authored status-guard decision fixed before canonical
     /// publication. Required even on historical records: missing authority
     /// is not recoverable from status reports, current tools, or later

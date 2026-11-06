@@ -106,6 +106,7 @@ fn response_with_originator(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: Default::default(),
         output_length_disposition: Default::default(),

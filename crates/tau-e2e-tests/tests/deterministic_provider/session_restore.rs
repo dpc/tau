@@ -888,15 +888,16 @@ fn production_message_tool_delivers_one_canonical_inbound_wrapper()
 }
 
 /// A crash after durable typed receipt but before the held provider response
-/// restores as one Stale owner closure and one message-driven successor.
+/// restores as one interrupted Error and one successor covering the queued
+/// receipt.
 #[test]
-fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
+fn crash_with_deferred_typed_receipt_recovers_owner_and_dispatches_once()
 -> Result<(), Box<dyn std::error::Error>> {
     const H: &str = "hold crash target response";
     const BODY: &str = "typed receipt before crash";
     let session_id = SessionId::parse(SESSION).expect("session id");
     let fixture = DeterministicFixture::new_session_message(
-        "crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once",
+        "crash_with_deferred_typed_receipt_recovers_owner_and_dispatches_once",
         &ScenarioV2::new(
             "crash-deferred-typed-receipt",
             vec![
@@ -1014,7 +1015,31 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
     barrier_b.wait(&mut daemon_b)?;
     let terminated = daemon_b.kill_ungracefully()?;
     terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
+    let terminal_cut = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    assert!(
+        terminal_cut.agent_events[&target]
+            .iter()
+            .any(|record| matches!(
+                &record.event, Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == owner_prompt_id && response.interrupted_retry
+            ))
+    );
+    let socket_c = fixture.socket_path("typed-crash-c");
+    let reached_c = fixture.socket_path("typed-receipt-recovery-terminal-barrier");
+    let barrier_c =
+        PersistenceBarrier::bind(&reached_c, OutputLengthCrashCut::NextProviderResponse)?;
+    let mut daemon_c = spawn_daemon_at_output_length_cut(
+        &fixture,
+        &socket_c,
+        tau_harness::SessionLaunchStatus::Resumed,
+        OutputLengthCrashCut::NextProviderResponse,
+        &reached_c,
+    );
+    barrier_c.wait(&mut daemon_c)?;
+    let terminated = daemon_c.kill_ungracefully()?;
+    terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    snapshot_b.require_prefix(&terminal_cut)?;
     let target_records = &snapshot_b.agent_events[&target];
     let receipts = target_records
         .iter()
@@ -1025,19 +1050,19 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
         })
         .collect::<Vec<_>>();
     assert_eq!(receipts.len(), 1);
-    let stales = target_records
+    let interruptions = target_records
         .iter()
         .enumerate()
         .filter(|(_, record)| {
-            matches!(&record.event, Event::AgentPromptTerminated(value)
+            matches!(&record.event, Event::ProviderResponseFinished(value)
             if value.agent_prompt_id == owner_prompt_id
-                && value.reason == tau_proto::AgentPromptTerminationReason::Stale)
+                && value.interrupted_retry)
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        stales.len(),
+        interruptions.len(),
         1,
-        "expected stale owner in {:?}",
+        "expected interrupted owner in {:?}",
         target_records
             .iter()
             .map(|record| (record.seq, record.event.name()))
@@ -1047,11 +1072,12 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
         .iter()
         .enumerate()
         .filter(|(index, record)| {
-            stales[0].0 < *index && matches!(record.event, Event::AgentInferenceDispatchStarted(_))
+            interruptions[0].0 < *index
+                && matches!(record.event, Event::AgentInferenceDispatchStarted(_))
         })
         .collect::<Vec<_>>();
     assert_eq!(successor_checkpoints.len(), 1);
-    assert!(receipts[0].0 < stales[0].0);
+    assert!(receipts[0].0 < interruptions[0].0);
     let tree = tau_core::AgentTree::try_from_events(target.clone(), target_records)
         .expect("restored target fold");
     let receipt_node = tree
@@ -1063,9 +1089,16 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
     assert_eq!(successor.through, tau_proto::AgentHead::Node(receipt_node));
     assert_eq!(
         successor.activation_cut,
-        tree.node(receipt_node)
-            .and_then(|node| node.parent_id)
-            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+        target_before_crash
+            .iter()
+            .find_map(|record| match &record.event {
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.agent_prompt_id == owner_prompt_id =>
+                    Some(checkpoint.activation_cut),
+                _ => None,
+            })
+            .expect("original activation cut"),
+        "interrupted retry retains the original activation cut, covering the queued receipt"
     );
     assert!(
         target_records

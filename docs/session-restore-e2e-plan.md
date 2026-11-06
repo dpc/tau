@@ -49,8 +49,9 @@ membership fact. Each restored agent gets a non-replay
 `agent.replay_complete`; buffered live traffic follows the non-replay
 `session.replay_complete`.
 
-An inference dispatch checkpoint with no durable terminal response is
-dispatch-uncertain and is not resent automatically. An unresolved foreground
+An ordinary inference checkpoint without a terminal is closed with an interrupted
+Error before fresh inference is dispatched from committed context. Standalone
+and output-length-owned checkpoints retain separate protected recovery. An unresolved foreground
 tool call is closed conservatively with a durable synthetic error and is not
 rerun. These are distinct recovery cases.
 
@@ -77,8 +78,8 @@ restart. S4 restores two distinct durable workers, activates them in reverse
 creation order, and proves that lane ownership, transcript suffixes, and ID-keyed
 rosters do not depend on completion or RPC row order. S5 synchronizes a held
 worker's durable dispatch checkpoint, decoded fake cursor, and live readiness
-before a process-group kill, then proves two resumes remain dispatch-uncertain
-without automatic worker submission or old-watch restoration. S6 kills after a
+before a process-group kill, then proves one automatic fresh recovery followed
+by a quiescent resume, without old-watch restoration. S6 kills after a
 worker's exact durable foreground-tool request/start pair and closed dummy
 readiness, proves one conservative repair and balanced explicit continuation,
 then proves the next cold resume adds no duplicate. S7 composes quiescent,
@@ -218,13 +219,13 @@ totaling six main and two turns per worker. Roster queries and replay consume no
 fake-provider action. Boot C receives no input and consumes no provider action
 while proving cold restore recomputes both delegated workers as `active_auto`.
 
-S5 uses two lanes and compact 1,470-byte scenario JSON: exactly six main
+S5 uses two lanes and compact 1,752-byte scenario JSON: exactly six main
 actions (the Boot A start pair, Boot B's explicit watch call/result pair, and
-two resulting watch-notification responses) and two worker actions (the held
-dispatch and fresh HumanUI successor), below the 16 KiB ceiling. Boot A spends
-two main and one worker provider turn. Boot B spends four main turns and one
-fresh worker turn; Boot C spends zero provider turns. The initial
-dispatch-uncertain watch snapshot, roster queries, replay, and synchronized
+two resulting watch-notification responses) and three worker actions (the held
+dispatch, automatic recovery, and fresh HumanUI successor), below the 16 KiB
+ceiling. Boot A spends two main and one worker provider turn. Boot B spends four
+main turns and two fresh worker turns; Boot C spends zero provider turns. The
+initial work-status watch snapshot, roster queries, replay, and synchronized
 crash cut consume no additional fake-provider action.
 
 S6 uses two lanes and compact 1,085-byte scenario JSON: exactly two main
@@ -235,16 +236,16 @@ matched. Boot B spends one worker turn after the eager repair pair; Boot C spend
 zero provider turns. Roster queries, typed store reads, the crash cut, and repair
 observation consume no additional fake-provider action.
 
-S7 uses four lanes and compact 2,178-byte scenario JSON: five main actions, one
-quiescent-worker action, one dispatch-uncertain hold action, and two repair-worker
+S7 uses four lanes and compact 2,492-byte scenario JSON: five main actions, one
+quiescent-worker action, an interrupted hold plus recovery, and two repair-worker
 actions. The main uses the existing two-start maximum for the quiescent and
 uncertain workers; the fixture creates the durable repair child through one exact
 `UiCreateAgent` request so the main lane remains below the existing eight-action
 limit. Boot A spends five main turns and one turn per worker before eight actions
-have matched. Boot B and the no-input portion of Boot C spend zero provider turns;
-only an explicit post-Boot-C repair continuation spends the repair worker's final
-turn. Roster queries, replay, repair/warning observation, and typed store reads
-consume no fake-provider action.
+have matched. Boot B spends one interrupted-inference recovery turn. The no-input
+portion of Boot C spends none; only an explicit post-Boot-C repair continuation
+spends the repair worker's final turn. Roster queries, replay, repair/warning
+observation, and typed store reads consume no fake-provider action.
 
 Every new fake action, binding, or release primitive updates
 `SPEC-tau-e2e-deterministic-provider.md`, `crates/tau-e2e-tests/SECURITY.md`,
@@ -402,44 +403,27 @@ cold resume, ID-keyed durable and RPC assertions, live `active` snapshots and
 retained roster modes after the accepted worker prompts, and an input-free second
 cold resume that recomputes `active_auto` without provider work.
 
-### S5 — Worker inference is dispatch-uncertain
+### S5 — Interrupted ordinary inference recovery
 
-Use a held worker provider action. In Boot A, wait until the worker's durable
-`agent.inference_dispatch_started` checkpoint, the fake's decoded
-`scenario-cursor.json` lane/action checkpoint, and provider hold readiness for
-the same prompt are all observable, then kill the private daemon process group
-without graceful shutdown. Provider readiness is a synchronized live
-observation, not a durable backend acknowledgement.
+Use a held worker provider action. Boot A correlates the durable inference
+checkpoint, fake cursor, and live hold readiness before killing the private
+daemon process group. Readiness does not prove backend acknowledgement.
 
-In Boot B, assert that both main and worker routes restore, the worker exposes
-the mandatory dispatch-uncertain `harness.notice`, and does not automatically
-submit provider work. Recreate a fresh main-to-worker watch using S2's closed
-action and require its initial provider snapshot to contain
-`AgentWatchProviderState::DispatchUncertain` for the checkpointed
-`agent_prompt_id`; restoring the old watch is not allowed. Then submit one
-authenticated non-internal HumanUI inference prompt directly to the worker.
-Require one exact old-prompt Stale, one fresh worker turn under a new prompt id,
-and no old request resend. Boot C receives no input and proves the written
-terminal and fresh turn replay without duplication or provider work.
-
-This proves conservative harness behavior after a synchronized cut. It does not
-prove whether an external backend performed work exactly once, and it must not
-be used to claim crash-transactional fake-provider cursor recovery.
+Boot B restores both routes, commits one output-free interrupted Error, and runs
+a request with a fresh identity, the captured model, and the original outer turn.
+The harness replays neither the old request nor completed tool effects. It
+recreates a fresh watch without restoring the old edge, then exercises a separate
+HumanUI worker round and its live watch notifications. Boot C receives no input and
+repeats no completed provider work.
+The socket observer may attach after startup provider work has completed; the
+exact fake cursor and durable journal establish the provider-work count.
 
 Implemented by
-`session_restore::dispatch_uncertain::cold_resume_fails_closed_for_dispatch_uncertain_worker`
-using the prompt-correlated three-way crash cut, a no-input fail-closed Boot B
-prefix, explicit HumanUI supersession, and a no-input Boot C replay.
-
-The approved authority is the authenticated non-internal HumanUI inference
-activation. It first enters the runtime FIFO and may close only an exact ordinary
-inference-owned uncertain checkpoint when no competing terminal, retained
-completion, tool/background, compaction, output-length, or outer-finish owner
-exists. Tau retains one exact Stale through interception and admission retry;
-provider terminal authority wins until Stale commits. Canonical Stale fold
-releases the old owner and the queued prompt dispatches under a new prompt id.
-Current `:retry` remains unrelated because it transfers a live provider-owned
-retry job.
+`session_restore::dispatch_uncertain::cold_resume_recovers_interrupted_worker_with_fresh_identity`.
+The user-approved ordinary restart policy owns the retry; standalone-compaction
+and output-length checkpoints retain separate protected boundaries. Live HumanUI
+Stale supersession and provider-owned `:retry` remain distinct paths. The fixture
+does not establish exactly-once backend work or transactional fake cursor recovery.
 
 ### S6 — Interrupted worker foreground tool
 
@@ -487,23 +471,17 @@ Combine one quiescent main, one quiescent worker, one dispatch-uncertain worker,
 and one worker with a repaired interrupted tool. Resume twice, making no user
 input between the first and second resumes.
 
-Assert that every repair or warning is agent-owned and idempotent, no agent
-consumes another agent's restore notice or fake lane, the second generation
-adds no second repair suffix, the uncertain worker stays fail-closed without
-dispatch, and current/history roster results remain stable. Do not require a
-terminal outcome from the uncertain worker unless S5's separately gated
-recovery question has been answered. This is the broadest headless regression
-and should land only after S0-S6 localize failures well.
+Assert that ordinary inference recovery and ambiguous-tool repair are agent-owned.
+Boot B closes the interrupted inference with one canonical Error and completes a
+fresh request; the tool owner receives only its established repair error. Boot C
+receives no input and repeats neither provider work nor repair. Current/history
+rosters remain stable. A final explicit repair-worker prompt consumes only its
+retained balanced-error lane. S5 covers the user-approved ordinary-inference
+recovery policy; neither fixture authorizes replay of ambiguous tool effects.
 
-The checked-in fixture keeps the existing fake bounds. The main production-starts
-the completed quiescent worker and held uncertain worker, while an exact durable
-UI creation adds the repair-role child with its fixed lane correlation. Boot A
-requires both synchronized crash cuts at once. Boot B owns the sole repair suffix
-and one uncertain-worker warning. Boot C receives no input, repeats only the
-worker-owned warning, and must equal Boot B in every typed durable stream and
-ID-keyed roster. An explicit repair-worker prompt after those assertions consumes
-the final closed continuation and proves the retained lane/error context still
-belongs to that worker; the uncertain worker remains unfinished and undispatched.
+The fixture keeps four lanes and exact bounded action/byte counts. Boot A requires
+both synchronized crash cuts. Boot B reaches `[5, 1, 2, 1]`, Boot C preserves that
+checkpoint, and the explicit repair continuation finishes at `[5, 1, 2, 2]`.
 
 ### S8 — Public terminal and manual tmux acceptance
 
@@ -600,9 +578,9 @@ ownership semantics.
 Stop and request explicit user or maintainer confirmation before implementing a
 test whose expected result would require any of the following:
 
-- automatically resending a dispatch-uncertain inference;
+- automatically resending a protected standalone or output-length-owned dispatch;
 - terminalizing or recovering a cold-restored dispatch-uncertain inference
-  without a confirmed explicit operation;
+  outside the confirmed ordinary interrupted-inference retry policy;
 - persisting or recreating watch edges or explicit navigation overrides;
 - treating an `agent.started` fact as current session membership;
 - cold-restoring ephemeral membership;

@@ -584,7 +584,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
         .in_flight_prompt
         .clone()
         .expect("completed prompt");
-    let completed_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&completed_prompt_id);
+    let completed_turn_id = expected_turn_id.clone();
     second
         .handle_provider_response_finished(provider_text_response(
             &completed_prompt_id,
@@ -622,9 +622,9 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
         .collect::<Vec<_>>();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[0].outer_turn_id, expected_turn_id);
-    assert_eq!(
-        starts[1].outer_turn_id,
-        tau_proto::AgentOuterTurnId::for_prompt(&completed_prompt_id)
+    assert_ne!(
+        starts[1].agent_prompt_id, completed_prompt_id,
+        "the queued fresh user prompt starts only after the interrupted turn finishes"
     );
     assert_ne!(starts[0].runtime_id, starts[1].runtime_id);
     assert!(records.iter().any(|record| matches!(
@@ -1614,8 +1614,8 @@ fn restore_looking_user_text_remains_an_activation() {
 
 /// A completed checkpoint consumes every true activation through its head,
 /// leaves a later true node pending once, and an uncompleted replacement
-/// checkpoint restores as uncertain without redispatch. This guards
-/// `SPEC-compaction-and-context-recovery`.
+/// checkpoint restores through an interrupted failure and fresh dispatch. This
+/// guards `SPEC-compaction-and-context-recovery`.
 #[test]
 fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     let td = TempDir::new().expect("tempdir");
@@ -1708,33 +1708,6 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     let mut h =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("uncertain resume");
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptCreated(_) | Event::AgentInferenceDispatchStarted(_)
-    )));
-    let uncertain = h
-        .agent_runtime
-        .agent_watch
-        .provider_status
-        .get("main")
-        .expect("restored uncertain watcher snapshot");
-    assert!(matches!(
-        uncertain.state,
-        tau_proto::AgentWatchProviderState::DispatchUncertain {
-            category: tau_proto::AgentWatchProviderCategory::Unknown
-        }
-    ));
-    assert_eq!(uncertain.agent_prompt_id, uncertain_prompt_id);
-    let cid = h
-        .runtime_agent_id_for_target_agent(Some("main"))
-        .expect("restored main route");
-    submit_authenticated_ui_prompt(
-        &mut h,
-        crate::parse_agent_id("main"),
-        "fresh HumanUI activation",
-        tau_proto::PromptMessageClass::User,
-    )
-    .expect("submit authenticated UI prompt");
     let records = h
         .session_runtime
         .agent_store
@@ -1745,24 +1718,18 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
             .iter()
             .filter(|record| matches!(
                 &record.event,
-                Event::AgentPromptTerminated(terminated)
-                    if terminated.agent_prompt_id == uncertain_prompt_id
-                        && terminated.reason
-                            == tau_proto::AgentPromptTerminationReason::Stale
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == uncertain_prompt_id
+                        && response.interrupted_retry
             ))
             .count(),
         1,
-        "cold HumanUI activation closes the exact old owner once"
+        "cold recovery closes the exact old owner once without HumanUI input"
     );
     let successor = read_nth_prompt_created(&h, 0);
     assert_ne!(successor.agent_prompt_id, uncertain_prompt_id);
-    assert!(
-        h.agent_runtime.agent_registry.agents[&cid]
-            .dispatch
-            .pending_prompts
-            .is_empty(),
-        "canonical Stale releases the queued HumanUI prompt"
-    );
+    let context = serde_json::to_string(&successor.context).expect("context");
+    assert_eq!(context.matches("activation C").count(), 1);
     h.shutdown().expect("shutdown");
 }
 

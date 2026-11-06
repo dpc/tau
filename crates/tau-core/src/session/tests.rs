@@ -332,6 +332,7 @@ fn hosted_search_citations_and_opaque_call_survive_live_cold_restart() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1259,6 +1260,7 @@ fn provider_response_rejects_input_side_tool_result_items() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1917,6 +1919,7 @@ fn install_provider_evidence(
     tree.inference_dispatches.insert(
         prompt_id.clone(),
         InferenceDispatchFold {
+            interrupted_retry: false,
             durable_event_seq: PersistedAgentEventSeq::new(0),
             cancelled_terminal_head: None,
             checkpoint: tau_proto::AgentInferenceDispatchStarted {
@@ -2385,6 +2388,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2497,6 +2501,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2954,6 +2959,7 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3003,6 +3009,7 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
         error: Some("bounded display error".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3078,6 +3085,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         error: Some("bounded".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3189,6 +3197,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         tree.inference_dispatches.insert(
             checkpoint.agent_prompt_id.clone(),
             InferenceDispatchFold {
+                interrupted_retry: false,
                 durable_event_seq: PersistedAgentEventSeq::new(0),
                 cancelled_terminal_head: None,
                 head_move_generation: HeadMoveGeneration::default(),
@@ -4326,6 +4335,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 error: None,
                 failure_kind: None,
                 context_limit_telemetry: None,
+                interrupted_retry: false,
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6112,6 +6122,7 @@ fn tool_calling_response(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6914,6 +6925,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationPlanned {
@@ -6981,6 +6993,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -7191,6 +7204,7 @@ fn output_length_rearm_boundary_rejects_non_action_responses() {
     tree.inference_dispatches.insert(
         off_branch_checkpoint.agent_prompt_id.clone(),
         InferenceDispatchFold {
+            interrupted_retry: false,
             durable_event_seq: PersistedAgentEventSeq::new(0),
             cancelled_terminal_head: None,
             checkpoint: off_branch_checkpoint,
@@ -7306,6 +7320,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         error: Some("context overflow".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -7410,6 +7425,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -7880,6 +7896,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
         error: Some("output-length continuation branch was deselected".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -8031,6 +8048,7 @@ fn output_length_terminal_incomplete_does_not_cross_newer_selected_dispatch() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -9421,6 +9439,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
             error: Some("bounded".to_owned()),
             failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,

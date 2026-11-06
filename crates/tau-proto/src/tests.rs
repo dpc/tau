@@ -1970,6 +1970,7 @@ fn representative_events() -> Vec<Event> {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: FinalStatusDisposition::Accepted,
             recovery_disposition: ContextRecoveryDisposition::None,
             output_length_disposition: OutputLengthDisposition::None,
@@ -4536,7 +4537,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 7})
+        serde_json::json!({"major": 16, "minor": 8})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4647,7 +4648,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 16, "minor": 7})
+        serde_json::json!({"major": 16, "minor": 8})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4740,7 +4741,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 16, "minor": 7})
+        serde_json::json!({"major": 16, "minor": 8})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -5173,6 +5174,7 @@ fn execution_events_use_provider_wire_family() {
                 error: None,
                 failure_kind: None,
                 context_limit_telemetry: None,
+                interrupted_retry: false,
                 final_status_disposition: FinalStatusDisposition::Accepted,
                 recovery_disposition: ContextRecoveryDisposition::None,
                 output_length_disposition: OutputLengthDisposition::None,
@@ -7378,6 +7380,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         error: Some("bounded detail".to_owned()),
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
@@ -8018,6 +8021,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         error: Some("safe error".to_owned()),
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
@@ -8109,6 +8113,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     );
     let none_event = Event::ProviderResponseFinished(ProviderResponseFinished {
         automatic_compaction_decision: None,
+        interrupted_retry: false,
         final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,

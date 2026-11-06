@@ -1664,7 +1664,7 @@ fn assert_delegated_final_status_cold_cuts(working: bool, harness_owned: bool) {
         (records.len(), true),
     ] {
         rewrite_agent_records(&state, &agent_id, &records[..cut]);
-        for resume_index in 0..2 {
+        for _resume_index in 0..2 {
             let captured = Arc::new(Mutex::new(None));
             let destination = captured.clone();
             let restored_id = agent_id.clone();
@@ -1688,6 +1688,7 @@ fn assert_delegated_final_status_cold_cuts(working: bool, harness_owned: bool) {
                 .expect("capture")
                 .take()
                 .expect("startup fold");
+            let resumed_work = harness_owned && (cut == reminder + 1 || cut == checkpoint + 1);
             assert_eq!(runtime.originator.is_user(), completed, "cut={cut}");
             assert_eq!(runtime.parent_agent.is_none(), completed, "cut={cut}");
             assert_eq!(runtime.resumable, completed || harness_owned, "cut={cut}");
@@ -1718,7 +1719,7 @@ fn assert_delegated_final_status_cold_cuts(working: bool, harness_owned: bool) {
                 .collect::<Vec<_>>();
             // The durable reminder owns one new activation only when
             // its successor checkpoint had not survived.
-            let resumes_reminder = harness_owned && cut == reminder + 1 && resume_index == 0;
+            let resumes_reminder = resumed_work;
             assert_eq!(new_prompts.len(), usize::from(resumes_reminder));
             for prompt in new_prompts {
                 assert!(!records[..cut].iter().any(|record| matches!(
@@ -1780,6 +1781,7 @@ fn unsuccessful_working_terminal_bypasses_reminders() {
         error: Some("provider failed".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

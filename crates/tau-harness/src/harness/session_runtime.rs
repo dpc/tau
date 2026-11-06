@@ -4,6 +4,9 @@
 //! Session-generation and replay cuts remain unchanged; compaction pipelines
 //! remain outside this owner.
 
+use super::prompt_runtime_state::{
+    PendingUncertainSupersession, UncertainInferenceTerminal, UncertainSupersessionPhase,
+};
 use super::*;
 use crate::agent::DeliverySchedule;
 
@@ -230,6 +233,99 @@ pub(super) fn agent_initialization_id(
 }
 
 impl Harness {
+    /// Queues the durable activation owed by a committed restart failure.
+    /// A later checkpoint consumes it; recreating this obligation after another
+    /// crash never recreates the old provider request or its tool effects.
+    pub(super) fn resume_interrupted_inference(&mut self, cid: &AgentId) {
+        let checkpoint = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.identity.agent_id.as_deref())
+            .and_then(|id| self.session_runtime.agent_store.agent(id))
+            .and_then(tau_core::AgentTree::pending_interrupted_inference)
+            .cloned();
+        let Some(checkpoint) = checkpoint else {
+            return;
+        };
+        self.enqueue_committed_activation_dispatch(
+            cid.clone(),
+            Some(checkpoint.activation_cut),
+            self.selected_head_for_agent(cid),
+        );
+    }
+
+    /// Installs one retained, output-free failure for an ordinary cold owner.
+    /// Publication uses the same arbitration and admission retry as HumanUI
+    /// supersession, but the canonical error retains a durable retry
+    /// obligation.
+    pub(super) fn stage_interrupted_inference(
+        &mut self,
+        cid: &AgentId,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) -> bool {
+        if checkpoint.transaction_id.is_some()
+            || checkpoint.output_length_continuation.is_some()
+            || checkpoint.operation != tau_proto::PromptOperation::Inference
+        {
+            return false;
+        }
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return false;
+        };
+        if !self
+            .session_runtime
+            .agent_store
+            .agent(checkpoint.agent_id.as_str())
+            .is_some_and(|tree| {
+                tree.is_ancestor_head(
+                    checkpoint.through,
+                    tree.head()
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                )
+            })
+        {
+            return false;
+        }
+        let response = ProviderResponseFinished {
+            interrupted_retry: true,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
+            agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+            agent_id: checkpoint.agent_id.clone(),
+            output_items: Vec::new(),
+            stop_reason: ProviderStopReason::Error,
+            error: Some("Inference was interrupted by session restart; retrying from committed context. Partial streamed output is not a completed response.".to_owned()),
+            failure_kind: None,
+            error_category: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            provider_attempt: tau_proto::ProviderAttempt::default(),
+            automatic_compaction_decision: None,
+            originator: agent.identity.originator.clone(),
+            usage: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        };
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_uncertain_supersessions
+            .insert(
+                cid.clone(),
+                PendingUncertainSupersession {
+                    terminal: UncertainInferenceTerminal::Interrupted(Box::new(response)),
+                    phase: UncertainSupersessionPhase::Ready,
+                },
+            );
+        true
+    }
+
     #[cfg(test)]
     pub(super) fn submit_user_prompt(
         &mut self,
@@ -2481,7 +2577,31 @@ impl Harness {
                 .session_runtime
                 .agent_store
                 .agent(agent_id.as_str())
-                .and_then(tau_core::AgentTree::response_continuation_outer_turn);
+                .and_then(|tree| {
+                    tree.response_continuation_outer_turn().or_else(|| {
+                        let checkpoint = match &restored_inference {
+                            Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(
+                                checkpoint,
+                            )) => checkpoint,
+                            _ => tree.pending_interrupted_inference()?,
+                        };
+                        if checkpoint.transaction_id.is_some()
+                            || checkpoint.output_length_continuation.is_some()
+                            || !tree.is_ancestor_head(
+                                checkpoint.through,
+                                tree.head()
+                                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                            )
+                        {
+                            return None;
+                        }
+                        tree.prompt_started(&checkpoint.agent_prompt_id)?
+                            .outer_turn_id
+                            .as_ref()
+                            .filter(|turn| tree.outer_turn_is_open(turn))
+                            .cloned()
+                    })
+                });
             let restored_output_length = self
                 .session_runtime
                 .agent_store
@@ -2951,6 +3071,7 @@ impl Harness {
                 && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
                     restored_inference.clone()
             {
+                let retry_interrupted = self.stage_interrupted_inference(&cid, &checkpoint);
                 let status_prompt_id = checkpoint.agent_prompt_id.clone();
                 if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                     conv.dispatch.activation_dispatch =
@@ -2975,9 +3096,15 @@ impl Harness {
                         category: tau_proto::AgentWatchProviderCategory::Unknown,
                     },
                 );
-                self.emit_info_important(&format!(
-                    "inference dispatch for restored agent `{cid}` is uncertain; retry explicitly"
-                ));
+                if retry_interrupted {
+                    self.emit_info_important(&format!(
+                        "inference for restored agent `{cid}` was interrupted; recovering automatically from committed context"
+                    ));
+                } else {
+                    self.emit_info_important(&format!(
+                        "inference dispatch for restored agent `{cid}` is uncertain; retry explicitly"
+                    ));
+                }
             }
             let derive_activations = !matches!(
                 restored_compaction,
@@ -3031,6 +3158,11 @@ impl Harness {
                                 .any(|wake| wake.node_id.is_none())
                         }));
             if uncertain_with_deferred_activation
+                && !self
+                    .prompt_coordination
+                    .prompt_runtime
+                    .pending_uncertain_supersessions
+                    .contains_key(&cid)
                 && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
                     restored_inference.clone()
                 && let Some(originator) = self
@@ -3144,6 +3276,7 @@ impl Harness {
                 None | Some(tau_core::InferenceDispatchRecovery::CompletedThrough(_))
             ) && !compaction_blocks_ordinary_inference
             {
+                self.resume_interrupted_inference(&cid);
                 self.continue_after_explicit_response(&cid);
             }
         }
@@ -3618,6 +3751,7 @@ impl Harness {
                 }
                 Event::ProviderResponseFinished(finished)
                     if finished.originator == *historical_originator
+                        && !finished.interrupted_retry
                         && finished.final_status_disposition
                             == tau_proto::FinalStatusDisposition::Accepted
                         && finished.recovery_disposition

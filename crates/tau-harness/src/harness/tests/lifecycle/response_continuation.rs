@@ -307,7 +307,7 @@ fn explicit_response_continuation_waits_for_commit_and_cancellation() {
 }
 
 /// Restart may dispatch a committed but unclaimed response once. A second
-/// restart pauses at its durable successor checkpoint instead of paying again;
+/// restart fails its interrupted successor and recovers with fresh identity;
 /// a committed cancellation/finish suppresses the source permanently.
 #[test]
 fn explicit_response_continuation_restart_claims_once_and_respects_finish() {
@@ -366,7 +366,7 @@ fn explicit_response_continuation_restart_claims_once_and_respects_finish() {
                 .expect("cancel finish");
         }
         drop(store);
-        for restart in 0..2 {
+        for _restart in 0..2 {
             let mut resumed = quiet_provider_harness_with_start_reason(
                 &state,
                 tau_proto::SessionStartReason::Resume,
@@ -374,7 +374,7 @@ fn explicit_response_continuation_restart_claims_once_and_respects_finish() {
             .expect("resume");
             assert_eq!(
                 event_log_count(&resumed, |e| matches!(e, Event::AgentPromptCreated(_))),
-                usize::from(!cancelled && restart == 0)
+                usize::from(!cancelled)
             );
             let tree = resumed
                 .session_runtime

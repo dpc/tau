@@ -3924,7 +3924,7 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
                 transaction_id: None,
                 agent_prompt_id: owner.clone(),
                 through: tau_proto::AgentHead::Node(through),
-                model: "echo/model".into(),
+                model: "test/model".into(),
                 operation: tau_proto::PromptOperation::Inference,
                 activation_cut: tau_proto::AgentHead::Root,
             }),
@@ -3984,10 +3984,8 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
                 .iter()
                 .filter(|event| matches!(
                     event,
-                    Event::AgentPromptTerminated(terminated)
-                        if terminated.agent_prompt_id == owner
-                            && terminated.reason
-                                == tau_proto::AgentPromptTerminationReason::Stale
+                    Event::ProviderResponseFinished(response)
+                        if response.agent_prompt_id == owner && response.interrupted_retry
                 ))
                 .count(),
             1,

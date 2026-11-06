@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 16.8 adds optional harness-canonical `interrupted_retry` metadata to an
+ordinary Error terminal. Provider reports cannot author it. Older readers ignore
+the field and see an ordinary failed request; older harnesses may stop at that
+error rather than resume the owed inference. This safe degraded behavior does not
+require a coordinated extension rebuild. Source consumers constructing
+`ProviderResponseFinished` literals must initialize the new field; SDK publication
+and runtime activation remain separate.
+
 Protocol 16.7 adds optional package release and source revision metadata to Hello.
 Older 16.x peers may omit or ignore it; admission is unchanged. Proto/client
 source SDK 0.22.0 exposes the new field and caller-owned build helper. The

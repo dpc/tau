@@ -3,8 +3,7 @@
 use serde::Deserialize;
 use tau_e2e_tests::{AgentWatchResultExpectationV2, WatchNotificationV2};
 use tau_proto::{
-    AgentId, AgentMessageKind, AgentPromptId, AgentWatchProviderCategory, AgentWatchProviderState,
-    AgentWatchUpdateCause, Event, SessionAgentListScope, SessionId,
+    AgentId, AgentMessageKind, AgentWatchUpdateCause, Event, SessionAgentListScope, SessionId,
 };
 
 use super::super::daemon_support::{disconnect_ui, spawn_daemon};
@@ -17,7 +16,8 @@ use super::{
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
-const SCENARIO_BYTES: usize = 1_470;
+const SCENARIO_BYTES: usize = 1_752;
+const RECOVERY_MARKER: &str = "interrupted worker automatically recovered";
 /// Existing bounded hold deadline used only to keep the provider prompt in
 /// flight until the synchronized process-group kill.
 const HOLD_TIMEOUT_MS: u64 = 10_000;
@@ -60,16 +60,17 @@ struct ChildAgentCheckpoint {
     child_agent_id: AgentId,
 }
 
-/// Proves a synchronized worker crash restores as dispatch-uncertain without
-/// automatically resubmitting provider work across two cold resumes.
+/// Proves cold recovery fails the interrupted request, samples with fresh
+/// identity, and leaves completed recovery quiescent across a second cold
+/// resume.
 #[test]
-fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dyn std::error::Error>>
-{
+fn cold_resume_recovers_interrupted_worker_with_fresh_identity()
+-> Result<(), Box<dyn std::error::Error>> {
     let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let scenario = dispatch_uncertain_scenario();
     assert_scenario_budget(&scenario)?;
     let fixture = DeterministicFixture::new_session_restore_watch(
-        "cold_resume_fails_closed_for_dispatch_uncertain_worker",
+        "cold_resume_recovers_interrupted_worker_with_fresh_identity",
         &scenario,
         FAKE_PROVIDER,
     )?;
@@ -119,15 +120,15 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
     assert_resume_boundaries(&observer_b.events, &identities.all(), &session_id)?;
-    interruption::assert_dispatch_uncertain_notice(&observer_b.events, &identities.worker)?;
+    interruption::assert_interrupted_recovery_notice(&observer_b.events, &identities.worker)?;
+    observer_b.wait_for_agent_marker(&identities.worker, RECOVERY_MARKER, 0)?;
+    observer_b.wait_for_agent_idle_after(&identities.worker, 0)?;
     assert_no_restored_watch(&observer_b.events, &identities)?;
-    assert_provider_turn_counts(
-        &observer_b.events,
-        &identities,
-        ProviderTurnCounts { main: 0, worker: 0 },
-    )?;
-    if matched_action_count(&fixture)? != 3 {
-        return Err("S5 Boot B replay automatically consumed provider work".into());
+    // Automatic recovery can finish before socket subscription. Its exact
+    // acceptance is proved by the fake cursor here and durable ownership below.
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [2, 2])?;
+    if matched_action_count(&fixture)? != 4 {
+        return Err("S5 Boot B did not consume exactly one interrupted retry".into());
     }
     let roster_b = observer_b.roster(&session_id, SessionAgentListScope::Current)?;
     assert_restored_roster(&roster_b, &identities)?;
@@ -144,22 +145,21 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         watch_start,
     )?;
     observer_b.wait_for_agent_idle_after(&identities.main, watch_start)?;
-    assert_dispatch_uncertain_watch(
+    assert_recovered_worker_watch(
         &observer_b.events[watch_start..],
         &identities,
         &session_id,
         &boot_a_subscription_id,
-        &dispatch.agent_prompt_id,
     )?;
     assert_provider_turn_counts(
-        &observer_b.events,
+        &observer_b.events[watch_start..],
         &identities,
         ProviderTurnCounts { main: 2, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 5 {
+    if matched_action_count(&fixture)? != 6 {
         return Err("S5 Boot B explicit watch exceeded its two-action main budget".into());
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, [4, 1])?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [4, 2])?;
     let worker_start = observer_b.events.len();
     observer_b.submit(
         &identities.worker,
@@ -179,22 +179,22 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     )?;
     observer_b.wait_for_agent_idle_after(&identities.main, worker_start)?;
     assert_provider_turn_counts(
-        &observer_b.events,
+        &observer_b.events[watch_start..],
         &identities,
         ProviderTurnCounts { main: 4, worker: 1 },
     )?;
-    if matched_action_count(&fixture)? != 8 {
+    if matched_action_count(&fixture)? != 9 {
         return Err(
             "S5 Boot B HumanUI supersession did not consume fresh worker/watch actions".into(),
         );
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, [6, 2])?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [6, 3])?;
     disconnect_ui(&mut observer_b.peer)?;
     daemon_b.finish()?;
 
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     snapshot_b.require_prefix(&snapshot_a)?;
-    interruption::assert_unfinished_worker_dispatch(&snapshot_b, &identities.worker, &dispatch)?;
+    interruption::assert_recovered_worker_dispatch(&snapshot_b, &identities.worker, &dispatch)?;
     let main_suffix =
         super::suffix_after_initialization(&snapshot_a, &snapshot_b, &identities.main)?;
     if count_prompt(
@@ -212,149 +212,6 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     }
     let worker_suffix =
         super::suffix_after_initialization(&snapshot_a, &snapshot_b, &identities.worker)?;
-    let successor_ids = worker_suffix
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::AgentInferenceDispatchStarted(started) => Some(started.agent_prompt_id.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if successor_ids.len() != 1 || successor_ids[0] == dispatch.agent_prompt_id {
-        return Err(format!(
-            "S5 successor checkpoint did not use one fresh prompt id: {successor_ids:?}"
-        )
-        .into());
-    }
-    let successor_id = &successor_ids[0];
-    let old_outer_turn = tau_proto::AgentOuterTurnId::for_prompt(&dispatch.agent_prompt_id);
-    let successor_outer_turn = tau_proto::AgentOuterTurnId::for_prompt(successor_id);
-    let old_redispatches = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentInferenceDispatchStarted(started)
-                    if started.agent_prompt_id == dispatch.agent_prompt_id
-            ) || matches!(
-                &record.event,
-                Event::AgentPromptStarted(started)
-                    if started.agent_prompt_id == dispatch.agent_prompt_id
-            ) || matches!(
-                &record.event,
-                Event::AgentPromptCreated(created)
-                    if created.agent_prompt_id == dispatch.agent_prompt_id
-            )
-        })
-        .count();
-    let successor_starts = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentPromptStarted(started)
-                    if &started.agent_prompt_id == successor_id
-            )
-        })
-        .count();
-    let successor_prompt_start_bindings = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentPromptStarted(started)
-                    if &started.agent_prompt_id == successor_id
-                        && started.agent_id == identities.worker
-                        && started.session_id == session_id
-                        && started.outer_turn_id.as_ref() == Some(&successor_outer_turn)
-            )
-        })
-        .count();
-    let successor_creates = observer_b.events[worker_start..]
-        .iter()
-        .filter(|observed| {
-            matches!(
-                &observed.event,
-                Event::AgentPromptCreated(created)
-                    if &created.agent_prompt_id == successor_id
-            )
-        })
-        .count();
-    let successor_responses = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::ProviderResponseFinished(response)
-                    if &response.agent_prompt_id == successor_id
-            )
-        })
-        .count();
-    let old_outer_starts = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentOuterTurnStarted(started)
-                    if started.outer_turn_id == old_outer_turn
-            )
-        })
-        .count();
-    let old_outer_starts_total = snapshot_b.agent_events[&identities.worker]
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentOuterTurnStarted(started)
-                    if started.outer_turn_id == old_outer_turn
-                        && started.agent_prompt_id == dispatch.agent_prompt_id
-                        && started.agent_id == identities.worker
-                        && started.session_id == session_id
-            )
-        })
-        .count();
-    let successor_prompt_outer_starts_total = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentOuterTurnStarted(started)
-                    if &started.agent_prompt_id == successor_id
-            )
-        })
-        .count();
-    let successor_outer_starts = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentOuterTurnStarted(started)
-                    if started.outer_turn_id == successor_outer_turn
-                        && &started.agent_prompt_id == successor_id
-                        && started.agent_id == identities.worker
-                        && started.session_id == session_id
-            )
-        })
-        .count();
-    let old_finishes = snapshot_b.agent_events[&identities.worker]
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentOuterTurnFinished(finished)
-                    if finished.outer_turn_id == old_outer_turn
-            )
-        })
-        .count();
-    let successor_finishes = worker_suffix
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentOuterTurnFinished(finished)
-                    if finished.outer_turn_id == successor_outer_turn
-            )
-        })
-        .count();
     if count_prompt(
         worker_suffix,
         &identities.worker,
@@ -367,40 +224,21 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         ) != 1
         || worker_suffix
             .iter()
-            .filter(|record| {
-                matches!(
-                    &record.event,
-                    Event::AgentPromptTerminated(terminated)
-                        if terminated.agent_prompt_id == dispatch.agent_prompt_id
-                            && terminated.reason
-                                == tau_proto::AgentPromptTerminationReason::Stale
-                )
+            .filter(|record| matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+            .count()
+            != 2
+        || observer_b.events[worker_start..]
+            .iter()
+            .filter(|observed| {
+                matches!(&observed.event,
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == identities.worker)
             })
             .count()
             != 1
-        || old_redispatches != 0
-        || successor_starts != 1
-        || successor_prompt_start_bindings != 1
-        || successor_creates != 1
-        || successor_responses != 1
-        || old_outer_starts != 0
-        || old_outer_starts_total != 1
-        || successor_prompt_outer_starts_total != 1
-        || successor_outer_starts != 1
-        || old_finishes != 0
-        || successor_finishes != 1
     {
-        return Err(format!(
-            "S5 Boot B worker authority mismatch: old_redispatches={old_redispatches}, \
-             successor_starts={successor_starts}, \
-             successor_prompt_start_bindings={successor_prompt_start_bindings}, \
-             successor_creates={successor_creates}, successor_responses={successor_responses}, \
-             old_outer_starts={old_outer_starts}, old_outer_starts_total={old_outer_starts_total}, \
-             successor_prompt_outer_starts_total={successor_prompt_outer_starts_total}, \
-             successor_outer_starts={successor_outer_starts}, \
-             old_finishes={old_finishes}, successor_finishes={successor_finishes}"
-        )
-        .into());
+        return Err(
+            "S5 recovery and later HumanUI work did not each claim one fresh request".into(),
+        );
     }
 
     let socket_c = fixture.socket_path("s5-boot-c");
@@ -418,10 +256,10 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         &identities,
         ProviderTurnCounts { main: 0, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 8 {
+    if matched_action_count(&fixture)? != 9 {
         return Err("S5 Boot C automatically consumed provider work".into());
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, [6, 2])?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [6, 3])?;
     let roster_c = observer_c.roster(&session_id, SessionAgentListScope::Current)?;
     assert_restored_roster(&roster_c, &identities)?;
     disconnect_ui(&mut observer_c.peer)?;
@@ -459,7 +297,7 @@ fn dispatch_uncertain_scenario() -> ScenarioV2 {
                     ScenarioActionV2::AgentWatchResult {
                         user_text: "recreate uncertain worker watch".to_owned(),
                         call_id: "s5-agent-watch".into(),
-                        expectation: AgentWatchResultExpectationV2::DispatchUncertainUnknown,
+                        expectation: AgentWatchResultExpectationV2::Enabled,
                         response: "uncertain worker watch recreated".to_owned(),
                     },
                     ScenarioActionV2::WatchNotifications {
@@ -484,6 +322,10 @@ fn dispatch_uncertain_scenario() -> ScenarioV2 {
                         timeout_ms: HOLD_TIMEOUT_MS,
                     },
                     ScenarioActionV2::Text {
+                        user_text: WORKER_PROVIDER_INITIAL.to_owned(),
+                        response: RECOVERY_MARKER.to_owned(),
+                    },
+                    ScenarioActionV2::Text {
                         user_text: "fresh worker after uncertainty".to_owned(),
                         response: "fresh worker after uncertainty complete".to_owned(),
                     },
@@ -501,7 +343,7 @@ fn assert_scenario_budget(scenario: &ScenarioV2) -> Result<(), Box<dyn std::erro
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded = serde_json::to_vec(scenario)?;
-    if actions != [6, 2] || encoded.len() != SCENARIO_BYTES {
+    if actions != [6, 3] || encoded.len() != SCENARIO_BYTES {
         return Err(format!(
             "S5 scenario budget changed: lanes={}, actions={actions:?}, bytes={}",
             scenario.lanes.len(),
@@ -596,13 +438,12 @@ fn assert_no_restored_watch(
 }
 
 /// Requires one fresh explicit watch and its exact non-model-visible initial
-/// dispatch-uncertain provider snapshot.
-fn assert_dispatch_uncertain_watch(
+/// work-status snapshot after automatic recovery.
+fn assert_recovered_worker_watch(
     events: &[Observed],
     identities: &BootIdentities,
     session_id: &SessionId,
     old_subscription_id: &str,
-    prompt_id: &AgentPromptId,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subscription_id = initial_live_watch_subscription_id(events, identities, session_id)?;
     if subscription_id == old_subscription_id {
@@ -653,7 +494,7 @@ fn assert_dispatch_uncertain_watch(
     {
         return Err(format!("explicit S5 watch topology changed: {update:?}").into());
     }
-    let [work_message, status_message] = watch_messages.as_slice() else {
+    let [work_message] = watch_messages.as_slice() else {
         return Err(format!(
             "explicit S5 watch emitted {} worker-to-main snapshots",
             watch_messages.len()
@@ -663,24 +504,12 @@ fn assert_dispatch_uncertain_watch(
     let Some(work) = work_message.watch_work_status.as_ref() else {
         return Err("explicit S5 watch did not publish its work-status snapshot first".into());
     };
-    let Some(status) = status_message.watch_provider_status.as_ref() else {
-        return Err("explicit S5 watch did not publish its provider snapshot second".into());
-    };
     if work_message.kind != AgentMessageKind::WatchWorkStatus
         || work_message.watch_provider_status.is_some()
         || !work.initial
         || &work.session_id != session_id
         || work.subscription_id != subscription_id
         || work.phase != tau_proto::AgentWorkStatusPhase::Unreported
-        || status_message.kind != AgentMessageKind::WatchProviderStatus
-        || !status.initial
-        || &status.session_id != session_id
-        || status.subscription_id != subscription_id
-        || &status.agent_prompt_id != prompt_id
-        || status.state
-            != (AgentWatchProviderState::DispatchUncertain {
-                category: AgentWatchProviderCategory::Unknown,
-            })
     {
         return Err("explicit S5 watch initial snapshot payload or ordering changed".into());
     }

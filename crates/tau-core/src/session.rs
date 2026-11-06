@@ -614,6 +614,8 @@ struct InferenceDispatchFold {
     /// Selected-head generation in which this owner was opened.
     head_move_generation: HeadMoveGeneration,
     finished: bool,
+    /// A canonical restart failure still owes a fresh ordinary inference.
+    interrupted_retry: bool,
     recovery_disposition: tau_proto::ContextRecoveryDisposition,
     /// Output-length terminal or plan recorded by this exact response owner.
     output_length_disposition: tau_proto::OutputLengthDisposition,
@@ -1916,6 +1918,23 @@ impl AgentTree {
                 checkpoint.clone(),
             )),
         }
+    }
+
+    /// Returns the last interrupted ordinary checkpoint while its activation
+    /// remains on the selected branch and no successor has claimed it.
+    #[must_use]
+    pub fn pending_interrupted_inference(
+        &self,
+    ) -> Option<&tau_proto::AgentInferenceDispatchStarted> {
+        let dispatch = self
+            .inference_dispatches
+            .get(self.inference_dispatch_order.last()?)?;
+        (dispatch.interrupted_retry
+            && self.is_ancestor_head(
+                dispatch.checkpoint.through,
+                self.head.map_or(AgentHead::Root, AgentHead::Node),
+            ))
+        .then_some(&dispatch.checkpoint)
     }
 
     /// Returns the agent identifier.
@@ -3518,6 +3537,7 @@ impl AgentTree {
                         fold_semantics,
                         head_move_generation: self.head_move_generation,
                         finished: false,
+                        interrupted_retry: false,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         output_length_disposition: tau_proto::OutputLengthDisposition::None,
                         provider_attempt: None,
@@ -3549,6 +3569,7 @@ impl AgentTree {
                 if let Some(dispatch) = self.inference_dispatches.get_mut(&response.agent_prompt_id)
                 {
                     dispatch.finished = true;
+                    dispatch.interrupted_retry = response.interrupted_retry;
                     dispatch.recovery_disposition = response.recovery_disposition;
                     dispatch.output_length_disposition = response.output_length_disposition.clone();
                     dispatch.provider_attempt = Some(response.provider_attempt);
@@ -6605,6 +6626,33 @@ impl AgentTree {
         &self,
         response: &tau_proto::ProviderResponseFinished,
     ) -> Result<(), AgentEventValidationError> {
+        if response.interrupted_retry {
+            let ordinary_owner = self.inference_dispatches.get(&response.agent_prompt_id);
+            if !ordinary_owner.is_some_and(|dispatch| {
+                !dispatch.finished
+                    && dispatch.checkpoint.transaction_id.is_none()
+                    && dispatch.checkpoint.output_length_continuation.is_none()
+                    && dispatch.checkpoint.operation == tau_proto::PromptOperation::Inference
+            }) || response.stop_reason != tau_proto::ProviderStopReason::Error
+                || !response.output_items.is_empty()
+                || response.usage.is_some()
+                || response.estimated_api_cost_rates.is_some()
+                || response.estimated_api_cost_increment.is_some()
+                || response.backend.is_some()
+                || response.provider_response_id.is_some()
+                || response.ws_pool_delta.is_some()
+                || response.compaction_original_input_tokens.is_some()
+                || response.compaction_output_tokens.is_some()
+                || response.automatic_compaction_decision.is_some()
+                || response.recovery_disposition != tau_proto::ContextRecoveryDisposition::None
+                || response.output_length_disposition != tau_proto::OutputLengthDisposition::None
+                || response.final_status_disposition != tau_proto::FinalStatusDisposition::Accepted
+            {
+                return Err(AgentEventValidationError::new(
+                    "interrupted retry requires one unresolved ordinary checkpoint and an output-free unaccounted error",
+                ));
+            }
+        }
         if response.stop_reason == tau_proto::ProviderStopReason::Continue
             && (response.error.is_some()
                 || response.failure_kind.is_some()

@@ -293,11 +293,12 @@ leave the completed workers `active` for that daemon lifetime; an input-free
 second cold resume must recompute their delegated `active_auto` defaults without
 provider work. S5 correlates one held worker prompt across its durable dispatch
 checkpoint, decoded fake cursor, and live readiness trace before process-group
-`SIGKILL`. Two resumed boots require dispatch-uncertain warnings and zero
-automatic worker provider turns; Boot B alone creates a fresh watch whose initial
-typed status names the checkpointed prompt. This is a conservative recovery
-oracle, not backend acknowledgement, exactly-once work, transactional checkpoint
-coordination, or retry/abandon/recovery coverage.
+`SIGKILL`. The first resume commits one interrupted Error and runs one inference
+with a fresh identity, retaining the captured model and original outer turn. The
+second resume makes no provider calls. Boot B also recreates a fresh watch and
+exercises a separate explicit worker round. This is not backend acknowledgement,
+exactly-once external work, or transactional checkpoint coordination.
+
 S6 enables only the closed authenticated-release dummy hold for the worker and
 deliberately never releases it, so elapsed time cannot terminalize the crash cut.
 It kills after the durable request/start pair and canonical readiness, and observes
@@ -306,13 +307,12 @@ renderer projection, without redispatch. One explicit worker continuation
 validates the exact balanced error round. A second resume consumes no input or provider action and must preserve
 current/history membership, execution restore, and agent journals without a
 second repair pair.
-S7 combines a completed worker, a dispatch-uncertain worker, and an interrupted
-dummy-tool worker below one quiescent main. Boot B and Boot C receive no input
-between them and must spend zero provider turns, preserve exact lane ownership,
-keep the uncertain worker undispatched, and add only Boot B's repair-worker
-suffix. ID-keyed current/history rosters remain stable. A final explicit
-repair-worker continuation after the second-resume assertions consumes only its
-balanced error lane; it does not resolve the uncertain worker.
+S7 combines a completed worker, an interrupted inference, and an ambiguous dummy
+tool below one quiescent main. Boot B retries only the interrupted inference and
+repairs only the tool-owning worker. Boot C receives no input and repeats neither
+provider work nor repair. ID-keyed rosters remain stable. A final explicit
+repair-worker continuation consumes only its balanced error lane.
+
 Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
 gate. Panics, `run_turn` failures, and daemon exits before exact-consumption

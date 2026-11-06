@@ -21,10 +21,37 @@ pub(crate) enum UncertainSupersessionPhase {
 /// Runtime-only owner for one exact uncertain ordinary inference supersession.
 #[derive(Clone)]
 pub(crate) struct PendingUncertainSupersession {
-    /// Exact durable Stale terminal that may release the old marked owner.
-    pub(crate) terminal: AgentPromptTerminated,
+    /// Exact durable terminal that may release the old marked owner.
+    pub(crate) terminal: UncertainInferenceTerminal,
     /// Current publication phase for de-duplication and retry arbitration.
     pub(crate) phase: UncertainSupersessionPhase,
+}
+
+/// Distinguishes live human supersession from cold interrupted-work recovery.
+#[derive(Clone)]
+pub(crate) enum UncertainInferenceTerminal {
+    /// An authenticated human activation supersedes a live uncertain request.
+    Superseded(Box<AgentPromptTerminated>),
+    /// Restart failed the old request and owes fresh inference.
+    Interrupted(Box<ProviderResponseFinished>),
+}
+
+impl UncertainInferenceTerminal {
+    /// Returns the exact old request this terminal closes.
+    pub(crate) fn agent_prompt_id(&self) -> &AgentPromptId {
+        match self {
+            Self::Superseded(terminal) => &terminal.agent_prompt_id,
+            Self::Interrupted(response) => &response.agent_prompt_id,
+        }
+    }
+
+    /// Produces the retained canonical terminal without changing its authority.
+    pub(crate) fn event(&self) -> Event {
+        match self {
+            Self::Superseded(terminal) => Event::AgentPromptTerminated((**terminal).clone()),
+            Self::Interrupted(response) => Event::ProviderResponseFinished((**response).clone()),
+        }
+    }
 }
 
 /// Runtime-only state associated with provider prompts and their continuations.

@@ -218,6 +218,7 @@ fn declaration(agent: &str, byte: u8, seq: u64, call_id: &str) -> Fact {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,

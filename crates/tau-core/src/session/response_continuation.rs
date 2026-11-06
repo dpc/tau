@@ -74,6 +74,7 @@ impl AgentTree {
             .then_some(dispatch)
         })?;
         (latest.finished
+            && !latest.interrupted_retry
             && !latest.final_status_challenged
             && (latest.cancelled_terminal_head.is_some()
                 || matches!(

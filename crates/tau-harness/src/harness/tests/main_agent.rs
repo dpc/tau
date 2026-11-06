@@ -435,10 +435,12 @@ fn peer_review_release_preserves_original_facts_and_receipt_idempotency() {
             .has_peer_review_receipt(&source)
             == false
     );
-    assert!(event_log_events(&h).iter().all(|event| !matches!(
-        event,
-        Event::AgentPromptCreated(_) | Event::AgentMessageReceived(_)
-    )));
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentMessageReceived(_))),
+        "restart recovery cannot release retained peer-review content"
+    );
     let main_cid = h.agent_runtime.agent_registry.agent_routes[&main].clone();
     let call_id: tau_proto::ToolCallId = "main-release".into();
     h.tool_routing

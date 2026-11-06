@@ -90,22 +90,21 @@ membership, route, or replay boundary. S4 restores a three-member durable
 session, validates roster and replay facts by identity, activates the two
 workers in reverse creation order, and rejects lane rebinding or cross-agent
 transcript suffixes. Its bounded two-start checkpoint semantics remain
-fixture-local and make no crash-exact coordination claim. S5 cold-restores the
-interrupted worker twice, requires the mandatory dispatch-uncertain warning and
-zero automatic worker submission on each boot, rejects the old watch, and allows
-only a fresh Boot B watch whose initial typed status names the checkpointed
-prompt. Its synchronized cut does not establish transactional checkpointing,
-exactly-once external work, retry, abandonment, or recovery behavior. S6
+fixture-local and make no crash-exact coordination claim. S5 cold-restores an
+interrupted worker and requires one canonical interrupted Error followed by fresh
+inference under the captured model and original outer turn. It then tests fresh
+watch recreation and a separate explicit worker round without restoring the old
+watch. A second cold resume consumes no provider work. The synchronized cut does
+not establish transactional checkpointing or exactly-once external work. S6
 cold-restores an acknowledged foreground dummy call, requires one
 restart/possible-side-effect repair pair and no second live start, then compares
 the next cold resume's membership, execution restore, and agent streams exactly
 against the repaired generation. It does not claim safe retries, exactly-once
 side effects, or recovery ownership for an interrupted start-agent request.
-S7 requires the first resume's warning and repair to remain owned by their
-distinct workers, then requires the second generation to add no provider work
-or durable suffix. A post-assertion repair continuation proves only the repair
-worker retained that fake lane; the uncertain worker remains fail-closed without
-a terminal outcome.
+S7 requires ordinary inference recovery and ambiguous-tool repair to remain
+owned by their distinct workers. The second cold resume adds neither provider
+work nor another repair. A final explicit repair-worker continuation proves
+that worker retained its lane and balanced error context.
 It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal

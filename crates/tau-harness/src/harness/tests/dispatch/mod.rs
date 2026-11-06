@@ -205,6 +205,7 @@ fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: 
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: None,
@@ -400,6 +401,7 @@ pub(super) fn provider_text_response(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -431,6 +433,7 @@ fn provider_repetition_response(
         error: Some("provider stream repetition detected".to_owned()),
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -748,6 +751,7 @@ fn seed_background_placeholder_for_agent(
                 error: None,
                 failure_kind: None,
                 context_limit_telemetry: None,
+                interrupted_retry: false,
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
@@ -1046,6 +1050,7 @@ pub(super) fn setup_routed_test_tool_calls_with_background(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1181,6 +1186,7 @@ pub(super) fn provider_tool_response(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1449,6 +1455,7 @@ pub(super) fn context_overflow_response(
         error: Some("bounded context rejection".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: prompt.originator.clone(),
@@ -1508,6 +1515,7 @@ pub(super) fn standalone_compaction_success_response(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: prompt.originator.clone(),
@@ -1726,6 +1734,7 @@ fn seed_historical_open_prefix_failure(
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: None,
@@ -1895,6 +1904,7 @@ fn provider_compact_call(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2204,7 +2214,8 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
         assert!(
             !event_log_events(&resumed)
                 .iter()
-                .any(|event| matches!(event, Event::AgentPromptCreated(_))),
+                .any(|event| matches!(event, Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction)),
             "cold replay must not automatically retry the failed transaction"
         );
         (resumed, resumed_caller, resumed_target)
@@ -2471,6 +2482,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2903,6 +2915,7 @@ mod configuration;
 mod delayed_user_prompt;
 mod extension_routing;
 mod internal_tool_dispatch;
+mod interrupted_inference;
 mod loop_guard;
 mod prompt_lifecycle;
 mod provider_accounting_preparation;

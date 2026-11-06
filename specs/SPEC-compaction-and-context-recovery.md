@@ -91,10 +91,13 @@ checkpoint. It does not create a settled-final eager compaction decision. Direct
 successor dispatch retains the source activation cut and captured model. If
 standalone compaction interleaves, its established transaction-owned cut and resume
 semantics remain authoritative. Compaction does not reset the durable bound of 16
-additional samplings. A committed checkpoint remains uncertain after
-restart rather than authorizing duplicate paid work. This behavior is independent
-of message phase and does not give standalone compact responses continuation
-authority.
+additional samplings. After restart, Tau records a canonical failure for an
+interrupted ordinary checkpoint and retries with a fresh identity and committed
+context, as specified by
+[SPEC-provider-prompt-materialization-authority](SPEC-provider-prompt-materialization-authority.md).
+Standalone and output-length-owned checkpoints retain their protected recovery
+boundaries. This behavior is independent of message phase and does not give
+standalone compact responses continuation authority.
 
 The CLI `:compact` command is human/UI authority. The model-callable `compact`
 tool is a separate, enabled-by-default self-compaction authority, while
@@ -256,7 +259,7 @@ remain lower bounds. Other retry classes exhaust at the fifth total attempt
 (or immediately when encountered after a transport burst).
 The delayed scheduler releases worker capacity, supports cancellation and
 explicit `:retry`, and does not depend on agent timers or new inference.
-Backoff ownership is process-local. After restart, Tau pauses interrupted work
+Backoff ownership is process-local. After restart, Tau pauses interrupted standalone work
 and requires explicit recovery; it does not reclassify historical failures.
 A same-event error processed before content is accepted remains
 pre-progress. Except for clean completed unusable local summaries, after
@@ -431,8 +434,9 @@ only materialized typed-message wakes on that branch, including sequence-keyed
 canonical agent-message wakes governed by
 [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md), through the
 watermark. Replay folds transaction outcomes and inference
-responses in core; an uncompleted checkpoint restores as dispatch-uncertain
-rather than being silently duplicated.
+responses in core; an uncompleted checkpoint initially restores as dispatch-uncertain.
+Ordinary cold owners then commit an explicit interrupted failure before fresh
+dispatch; transaction and output-length owners remain protected.
 This materialization gate is governed by
 [SPEC-provider-prompt-materialization-authority](SPEC-provider-prompt-materialization-authority.md).
 
@@ -472,7 +476,8 @@ prompt text or peer input—decides the bit: active work is true, while passive
 background and restore context is false. Interceptors may rewrite sanctioned
 text but cannot change the bit. Missing legacy fields deserialize false.
 Replay considers only true facts after the last completed checkpoint; an
-uncompleted checkpoint remains uncertain and is never automatically resent.
+uncompleted checkpoint is never resent. Cold ordinary inference is failed and
+retried with a fresh checkpoint; standalone and output-length owners remain uncertain.
 Authenticated HumanUI supersession applies only to ordinary inference-owned
 uncertainty. A standalone-compaction transaction-owned checkpoint remains
 blocked under its transaction and cannot be closed by the ordinary Stale

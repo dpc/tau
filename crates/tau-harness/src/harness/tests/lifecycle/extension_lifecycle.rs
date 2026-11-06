@@ -373,6 +373,7 @@ fn disconnected_tool_completes_pending_call() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -567,6 +568,7 @@ fn disconnected_tool_is_removed_cleanly() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -804,6 +806,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -900,6 +903,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1043,6 +1047,7 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1146,6 +1151,7 @@ fn duplicate_tool_call_id_becomes_model_visible_tool_error() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1228,6 +1234,7 @@ fn reused_prior_tool_call_id_becomes_model_visible_tool_error() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1326,6 +1333,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1418,6 +1426,7 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2416,6 +2425,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2606,6 +2616,7 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
             error: None,
             failure_kind: None,
             context_limit_telemetry: None,
+            interrupted_retry: false,
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2625,11 +2636,11 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
     let cid = test_user_agent(&h);
-    seed_agent_thinking(&mut h, &cid, "sp-new");
-    h.prompt_coordination
-        .prompt_runtime
-        .agents
-        .insert(test_agent_prompt_id("sp-new"), cid.clone());
+    let new_prompt_id = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("automatic interrupted recovery");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         error_category: None,
@@ -2637,7 +2648,7 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: test_agent_prompt_id("sp-new"),
+        agent_prompt_id: new_prompt_id.clone(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "historical-call".into(),
@@ -2651,6 +2662,7 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2692,9 +2704,12 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
     assert!(
         assistant_call_ids
             .iter()
-            .any(|id| id == "invalid_tool_call_sp-new_1")
+            .any(|id| id == &format!("invalid_tool_call_{new_prompt_id}_1"))
     );
-    assert_eq!(reused_error_ids, vec!["invalid_tool_call_sp-new_1"]);
+    assert_eq!(
+        reused_error_ids,
+        vec![format!("invalid_tool_call_{new_prompt_id}_1")]
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -2849,6 +2864,7 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2966,6 +2982,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3066,6 +3083,7 @@ fn length_stopped_tool_call_is_preserved_but_never_executed() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3151,6 +3169,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3414,6 +3433,7 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6796,6 +6816,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -8208,6 +8229,7 @@ fn unavailable_tool_is_reported_without_crashing() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -8743,6 +8765,7 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -8867,6 +8890,7 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
         error: None,
         failure_kind: None,
         context_limit_telemetry: None,
+        interrupted_retry: false,
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

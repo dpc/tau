@@ -589,7 +589,7 @@ impl Harness {
             matches!(
                 event,
                 Event::ProviderResponseFinished(response)
-                    if &response.agent_prompt_id == agent_prompt_id
+                    if &response.agent_prompt_id == agent_prompt_id && !response.interrupted_retry
             )
         };
         self.runtime_io
@@ -844,7 +844,7 @@ impl Harness {
                 .prompt_runtime
                 .pending_uncertain_supersessions
                 .get(cid)
-                .is_some_and(|pending| pending.terminal.agent_prompt_id == agent_prompt_id)
+                .is_some_and(|pending| pending.terminal.agent_prompt_id() == &agent_prompt_id)
             {
                 self.prompt_coordination
                     .prompt_runtime
@@ -1760,6 +1760,7 @@ impl Harness {
                         error: Some("output-length continuation branch was deselected".to_owned()),
                         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                         context_limit_telemetry: None,
+                        interrupted_retry: false,
                         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         output_length_disposition:
@@ -3107,7 +3108,9 @@ impl Harness {
                 .prompt_runtime
                 .pending_uncertain_supersessions
                 .get(&cid)
-                .is_some_and(|pending| pending.terminal.agent_prompt_id == response.agent_prompt_id)
+                .is_some_and(|pending| {
+                    pending.terminal.agent_prompt_id() == &response.agent_prompt_id
+                })
         {
             self.prompt_coordination
                 .prompt_runtime
@@ -4095,6 +4098,26 @@ impl Harness {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 agent.dispatch.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             }
+            if response.interrupted_retry {
+                if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
+                    agent.dispatch.in_flight_prompt = None;
+                    agent.dispatch.last_prompt_id = None;
+                    // Recovery still owes inference in the same outer turn.
+                    // The ordinary idle transition would settle that turn.
+                    agent.turn.turn_state = AgentTurnState::Idle;
+                }
+                self.resolve_materialized_message_wakes(&cid);
+                self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+                self.project_agent_watch_provider_state(
+                    &cid,
+                    response.agent_prompt_id.clone(),
+                    tau_proto::AgentWatchProviderState::TerminalError {
+                        failure_kind: tau_proto::ProviderFailureKind::Unknown,
+                        attempt: 1,
+                    },
+                );
+                self.resume_interrupted_inference(&cid);
+            }
             let local_route_failure = self
                 .prompt_coordination.prompt_runtime
                 .local_route_failures
@@ -4205,7 +4228,7 @@ impl Harness {
                 .pending_uncertain_supersessions
                 .get(&cid)
                 .is_some_and(|pending| {
-                    pending.terminal.agent_prompt_id == terminated.agent_prompt_id
+                    pending.terminal.agent_prompt_id() == &terminated.agent_prompt_id
                 })
             {
                 self.prompt_coordination
@@ -4799,6 +4822,15 @@ impl Harness {
         let model = output_length
             .as_ref()
             .map(|continuation| continuation.plan.dispatch.model.clone())
+            .or_else(|| {
+                agent
+                    .identity
+                    .agent_id
+                    .as_deref()
+                    .and_then(|id| self.session_runtime.agent_store.agent(id))
+                    .and_then(tau_core::AgentTree::pending_interrupted_inference)
+                    .map(|checkpoint| checkpoint.model.clone())
+            })
             .or_else(|| {
                 agent
                     .identity
