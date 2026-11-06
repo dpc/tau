@@ -710,6 +710,28 @@ paths. Review it before sharing. See the [README troubleshooting
 procedure](../README.md#troubleshooting) for the detailed
 reconnection runbook.
 
+For history and exact-message reads, the bridge reports retrieval, provider and
+policy diagnostics with bounded `stage` and `reason` labels and a next action.
+Schema validation, capacity, call-ID conflict, spawn and panic errors retain
+plain informative strings. History distinguishes preparation, history fetch,
+page validation, author verification and final disclosure. Exact reads use
+a generic message-fetch stage even for author lookup, so errors do not reveal
+whether the target exists or reached verification. `unavailable_or_policy`
+does not diagnose a permission problem. History filters messages from verified
+but disallowed authors rather than reporting an identity-verification failure.
+
+`missing_scope` means the provider reported that category at the named stage;
+ask the operator to compare installed grants with documented requirements.
+Transport, malformed-page and unverified-identity errors do not prove a scope
+problem. Do not broaden scopes or reinstall without evidence. The shared bounded
+read helper distinguishes an observed body limit (`response_too_large`) from
+an unsuccessful body read (`response_read_failed`), without raw HTTP detail.
+After the original authority or history scheduling budget expires, the bridge
+replaces any pending provider diagnosis with `lifecycle_changed` or
+`deadline_exceeded`. These errors reveal no stale provider facts. Capture the
+categorical error and call timing for debugging; do not share tokens, raw responses,
+private message text or native identifiers, and do not scan or retry blindly.
+
 For missing delivery, check the exact `message.*`/`app_mention` subscription and
 history/app-mention scope, reinstall after scope changes, verify app membership,
 and ensure app/bot tokens share one workspace installation. `missing_scope`
