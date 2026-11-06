@@ -1,5 +1,7 @@
 //! Regression coverage for bounded image preparation.
 
+use std::path::Path;
+
 use super::*;
 
 /// Ensures the artifact-facing wrapper retains source identity and original
@@ -28,12 +30,31 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
     ));
     assert_eq!(
         tau_proto::cbor_text_field(&output.result, "artifact"),
-        Some(reference)
+        Some(reference.clone())
     );
     assert_eq!(
         tau_proto::cbor_int_field(&output.result, "original_bytes"),
         Some(bytes.get_ref().len() as i128)
     );
+    assert_eq!(output.display.args, reference);
+    assert_eq!(output.display.info_chips, ["4x3"]);
+    assert!(!output.display.args.contains("patches"));
+    let Some(ToolUsePayload::Text { text }) = &output.display.payload else {
+        panic!("image facts")
+    };
+    assert!(text.contains(&reference));
+    assert!(text.contains("mode: high"));
+    assert!(text.contains("source: 4x3"));
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        std::fs::write(
+            Path::new(&directory).join("read-image.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {"case":"image-prepared", "tool_name":"read_image", "display":output.display},
+            ]))
+            .expect("serialize samples"),
+        )
+        .expect("write samples");
+    }
 }
 
 /// Ensures the public boundary accepts canonical artifact references and bare

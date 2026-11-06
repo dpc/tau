@@ -19,6 +19,11 @@ wire-version mismatch.
 
 ## Configuration and routing
 
+Tool displays show returned-item counts and relevant paging, reply, or attachment
+state without message or route previews. Expanded details explain incomplete
+history, join creation races, and unchanged local authority. Send/join errors
+marked `not confirmed` may occur after a remote side effect; do not automatically retry.
+
 Configure `site` (HTTPS in production), `bot_email_secret`, `api_key_secret`,
 a stable `identity_key_secret`, and nonempty numeric `allowed_user_ids`.
 Optional numeric `untrusted_user_ids` must be disjoint from the allowlist.

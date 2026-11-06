@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic as path_std_sync_atomic;
 use std::{
     collections as path_std_collections, net as path_std_net, sync as path_std_sync,
@@ -3695,6 +3696,44 @@ fn hosted_web_search_targets_are_escaped_and_bounded() {
     }
 }
 
+/// Multiple native queries retain the existing bounded/escaped target policy
+/// while exposing the actual query count and bounded intent, not web results.
+#[test]
+fn hosted_web_search_multiple_queries_expose_bounded_intent() {
+    let action =
+        serde_json::json!({"type":"search", "queries":["retry API", "cancel API\nrules", ""]});
+    let display = super::web_activity::display_action(&action).expect("search");
+    assert_eq!(display.args, "retry API");
+    assert_eq!(display.progress_counters[0].complete, Some(2));
+    let Some(tau_proto::ToolUsePayload::Text { text }) = &display.payload else {
+        panic!("queries")
+    };
+    assert_eq!(text, "query: retry API\nquery: cancel API\\u{000A}rules");
+    let large = serde_json::json!({"type":"search", "queries": vec!["x".repeat(200); 50]});
+    let large_display = super::web_activity::display_action(&large).expect("search");
+    let Some(tau_proto::ToolUsePayload::Text { text }) = &large_display.payload else {
+        panic!("queries")
+    };
+    assert!(text.ends_with("queries_shown: 16/50"));
+    assert!(text.len() < 3000);
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        let pending = tau_proto::ToolUseState {
+            status: tau_proto::ToolUseStatus::InProgress,
+            status_text: "pending".to_owned(),
+            ..display.clone()
+        };
+        let completed = tau_proto::ToolUseState {
+            status_text: "ok".to_owned(),
+            ..display
+        };
+        std::fs::write(Path::new(&directory).join("native-web.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {"case":"native-multiple-queries-pending", "tool_name":"web_search", "display":pending, "native":true},
+                {"case":"native-multiple-queries-complete", "tool_name":"web_search", "display":completed, "native":true},
+                {"case":"native-many-queries-bounded", "tool_name":"web_search", "display":large_display, "native":true},
+            ])).expect("serialize samples")).expect("write samples");
+    }
+}
 /// Ensures private Responses appends the newest context after its existing
 /// provider-visible context while retaining stable declarations.
 #[test]

@@ -232,6 +232,15 @@ fn peer_review_parked_release_revalidates_authority_and_preserves_retry() {
         )
         .expect("reject release");
         if failure == "rewrite" {
+            let display = event_log_events(&h)
+                .into_iter()
+                .find_map(|event| match event {
+                    Event::ToolResult(result) if result.call_id == call => result.display,
+                    _ => None,
+                })
+                .expect("release success display");
+            assert_release_ui(&display, &source, "release-committed");
+            assert_eq!(display.info_chips, ["committed"]);
             let records = h
                 .session_runtime
                 .agent_store
@@ -261,6 +270,17 @@ fn peer_review_parked_release_revalidates_authority_and_preserves_retry() {
             );
             h.shutdown().expect("shutdown");
             continue;
+        }
+        if failure == "drop" {
+            let display = event_log_events(&h)
+                .into_iter()
+                .find_map(|event| match event {
+                    Event::ToolError(error) if error.call_id == call => error.display,
+                    _ => None,
+                })
+                .expect("release error display");
+            assert_release_ui(&display, &source, "release-rejected");
+            assert_eq!(display.status, tau_proto::ToolUseStatus::Error);
         }
         assert!(
             !h.session_runtime
@@ -319,6 +339,29 @@ fn peer_review_parked_release_revalidates_authority_and_preserves_retry() {
                 .has_peer_review_receipt(&source)
         );
         h.shutdown().expect("shutdown");
+    }
+}
+
+/// Check actual deferred release terminals without retaining the reviewed body.
+fn assert_release_ui(
+    display: &tau_proto::ToolUseState,
+    source: &tau_proto::PeerMessageReviewReference,
+    case: &str,
+) {
+    assert_eq!(
+        display.args,
+        format!("@{} #{}", source.main_agent_id, source.durable_event_seq)
+    );
+    assert!(display.payload.is_none());
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        std::fs::write(
+            Path::new(&directory).join(format!("{case}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {"case":case, "tool_name":"message_release", "display":display},
+            ]))
+            .expect("serialize samples"),
+        )
+        .expect("write samples");
     }
 }
 

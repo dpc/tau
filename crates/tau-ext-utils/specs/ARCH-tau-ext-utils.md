@@ -178,3 +178,5 @@ bounded number of returned timers as the standard match counter. Schedule and
 successful cancel need no additional chip because their validated action
 arguments already identify the mutation; a static `not active` chip distinguishes
 an idempotent cancel from one that removed a timer without exposing reminder text.
+Successful schedule displays show the submitted reminder in the standard
+full-mode text payload. List and cancel displays omit reminder text.

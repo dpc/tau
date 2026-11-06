@@ -23,6 +23,12 @@ labels in foreground results and error severity in background and wait rows.
 Real filesystem `find` tests require UI match counts to equal the raw result's
 returned-record count for ordinary, limited, and empty searches; limit notices
 and sentinel matches do not increase that count.
+Native read/list/search/shell display tests also require visible limit or
+truncation qualifiers and selected recovery metadata in full mode. They check
+that displays preserve the command body without duplicating file contents or
+stdout. The generic CLI sample-catalog test renders producer-exported synthetic
+descriptors at narrow and normal widths in compact/full modes and checks the
+existing theme roles.
 
 The internal `replace` / provider-visible `edit` tests cover strict object
 shape, alias registration, snapshot-wide exact matching, all-or-nothing

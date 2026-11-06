@@ -13,7 +13,9 @@ pub(super) fn worker_compact_idle_row(agent_id: &AgentId) -> String {
 }
 
 /// Projects stable agent-owned prompt/response rows and rejects output owned
-/// exclusively by the other selected transcript.
+/// exclusively by the other selected transcript. The submitted delegation
+/// instruction belongs to the main's full tool body as well as the worker's
+/// prompt; only the worker owns its harness-authored origin prefix.
 pub(super) fn assert_transcript_rows(
     frame: &str,
     agent_id: &AgentId,
@@ -21,8 +23,14 @@ pub(super) fn assert_transcript_rows(
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let (required, forbidden) = if agent_id == &identities.main {
         (
-            [MAIN_START_RESPONSE, WORKER_RESPONSE, MAIN_FINAL_RESPONSE].as_slice(),
-            [WORKER_PROMPT].as_slice(),
+            [
+                WORKER_PROMPT,
+                MAIN_START_RESPONSE,
+                WORKER_RESPONSE,
+                MAIN_FINAL_RESPONSE,
+            ]
+            .as_slice(),
+            ["You were started by an agent `main`."].as_slice(),
         )
     } else {
         (
@@ -131,7 +139,10 @@ pub(super) fn assert_worker_size_projection(
 
 /// Checks the selected main transcript and terminal `agent_start` row.
 pub(super) fn assert_main_terminal_frame(frame: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if !frame.contains(MAIN_PROMPT) || !frame.contains("worker completion observed") {
+    if !frame.contains(MAIN_PROMPT)
+        || !frame.contains(WORKER_PROMPT)
+        || !frame.contains("worker completion observed")
+    {
         return Err(format!("S8 main transcript did not restore:\n{frame}").into());
     }
     let row = frame

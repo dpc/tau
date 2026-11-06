@@ -765,13 +765,15 @@ impl Harness {
                     );
                     return Ok(());
                 }
+                let display =
+                    crate::discovery_tool_display(&command.result, crate::DiscoveryKind::Sessions);
                 self.finish_harness_owned_tool_with_cbor_result(
                     &command.conversation_id,
                     command.call_id,
                     command.tool_name,
                     command.tool_type,
                     command.result,
-                    None,
+                    Some(display),
                 );
             }
         }

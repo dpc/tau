@@ -3365,12 +3365,11 @@ pub(super) fn wait_interrupted_reply(
     wait_tool_name: ToolName,
     source_tool_name: Option<ToolName>,
 ) -> WaitReply {
-    wait_result_reply(
+    interrupted_wait_reply(
         wait_call_id,
         wait_tool_name,
         source_tool_name,
-        interrupted_wait_result(InterruptedWaitMode::Exact),
-        None,
+        InterruptedWaitMode::Exact,
     )
 }
 
@@ -3379,12 +3378,11 @@ pub(super) fn wait_interrupted_all_reply(
     wait_call_id: ToolCallId,
     wait_tool_name: ToolName,
 ) -> WaitReply {
-    wait_result_reply(
+    interrupted_wait_reply(
         wait_call_id,
         wait_tool_name,
         None,
-        interrupted_wait_result(InterruptedWaitMode::ExactAll),
-        None,
+        InterruptedWaitMode::ExactAll,
     )
 }
 
@@ -3393,16 +3391,16 @@ pub(super) fn wait_interrupted_any_reply(
     wait_call_id: ToolCallId,
     wait_tool_name: ToolName,
 ) -> WaitReply {
-    wait_result_reply(
+    interrupted_wait_reply(
         wait_call_id,
         wait_tool_name,
         None,
-        interrupted_wait_result(InterruptedWaitMode::AnyBackground),
-        None,
+        InterruptedWaitMode::AnyBackground,
     )
 }
 
 /// Closed provider-visible mode for one interrupted background wait.
+#[derive(Clone, Copy)]
 enum InterruptedWaitMode {
     /// Wait for one explicit background tool call.
     Exact,
@@ -3410,6 +3408,39 @@ enum InterruptedWaitMode {
     ExactAll,
     /// Wait for the next background completion owned by the conversation.
     AnyBackground,
+}
+
+/// Keep activation interruption distinct from consuming a tool completion,
+/// including its mode and conditional next-action guidance in full display.
+fn interrupted_wait_reply(
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    source: Option<ToolName>,
+    mode: InterruptedWaitMode,
+) -> WaitReply {
+    let mut reply = wait_result_reply(
+        call_id,
+        tool_name,
+        source,
+        interrupted_wait_result(mode),
+        None,
+    );
+    if let WaitReplyKind::Result {
+        display: Some(display),
+        ..
+    } = &mut reply.kind
+    {
+        display.mode = mode.as_header_value().to_owned();
+        display.status_text = "interrupted".to_owned();
+        display.payload = Some(tau_proto::ToolUsePayload::Text {
+            text: format!(
+                "mode: {}\noutcome: interrupted\n{}",
+                mode.as_header_value(),
+                mode.guidance()
+            ),
+        });
+    }
+    reply
 }
 
 impl InterruptedWaitMode {

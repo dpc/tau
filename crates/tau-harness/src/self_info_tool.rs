@@ -3,7 +3,10 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use tau_proto::{AgentWorkStatusPhase, BackgroundSupport, CborValue, ToolName, ToolSpec, ToolType};
+use tau_proto::{
+    AgentWorkStatusPhase, BackgroundSupport, CborValue, ProgressCounter, ProgressUnit, ToolName,
+    ToolSpec, ToolType, ToolUsePayload, ToolUseState,
+};
 
 use crate::internal_tools::InternalSelfInfo;
 use crate::{AgentOwnedInternalToolCall, HarnessError, InternalToolHandler, InternalToolHost};
@@ -52,7 +55,7 @@ impl SelfInfoTool {
                 visible_tool_name,
                 call.tool_type,
                 CborValue::Text(result),
-                None,
+                info.as_ref().map(self_info_display),
             ),
             Err(message) => host.finish_tool_with_error(
                 &conversation_id,
@@ -66,6 +69,34 @@ impl SelfInfoTool {
     }
 }
 
+/// Project authoritative identity and model accounting without exposing config.
+fn self_info_display(info: &InternalSelfInfo) -> ToolUseState {
+    let mut display = ToolUseState {
+        status_text: "ok".to_owned(),
+        payload: Some(ToolUsePayload::Text {
+            text: format!(
+                "agent: {}\nsession: {}\ntau: {}\nmodel: {}",
+                info.agent_id,
+                info.session_id,
+                tau_version_label(),
+                info.model,
+            ),
+        }),
+        ..Default::default()
+    };
+    if info.context.input_tokens.is_some() || info.context.input_token_limit.is_some() {
+        display.progress_counters.push(ProgressCounter {
+            label: Some("ctx".to_owned()),
+            unit: ProgressUnit::Tokens,
+            complete: info.context.input_tokens.map(tau_proto::TokenCount::get),
+            total: info
+                .context
+                .input_token_limit
+                .map(tau_proto::TokenCount::get),
+        });
+    }
+    display
+}
 impl InternalToolHandler for SelfInfoTool {
     fn tool_specs(&self) -> Vec<ToolSpec> {
         vec![Self::tool_spec()]

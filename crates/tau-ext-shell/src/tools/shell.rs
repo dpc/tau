@@ -434,6 +434,7 @@ fn run_command_live_for_surface_with_authorized_cwd(
     display.mode = display_mode.to_owned();
     display.payload = display_payload;
     display.stats = text_stats(&combined);
+    crate::display::describe_output_limits(&mut display, &result);
     debug!(
         child_id,
         status_code = ?wait.status_code,

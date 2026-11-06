@@ -63,6 +63,10 @@ pub(super) fn handle_tool_call(
     visible_tool_name: ToolName,
 ) -> Result<(), HarnessError> {
     host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
+    let mut display = parse_reference(&call.arguments)
+        .ok()
+        .map(|reference| tau_harness::peer_review_release_display(&reference))
+        .unwrap_or_default();
     let result = parse_reference(&call.arguments).and_then(|source| {
         host.release_peer_review(
             conversation_id,
@@ -74,26 +78,33 @@ pub(super) fn handle_tool_call(
     });
     match result {
         Ok(false) => {}
-        Ok(true) => host.finish_tool_with_cbor_result(
-            conversation_id,
-            call.id.clone(),
-            visible_tool_name,
-            call.tool_type,
-            CborValue::Text(
-                "Already delivered: retained worker receipt exists; no new message appended"
-                    .to_owned(),
-            ),
-            None,
-        ),
-        Err(error) => host.finish_tool_with_display_error(
-            conversation_id,
-            call.id.clone(),
-            visible_tool_name,
-            call.tool_type,
-            error,
-            None,
-            None,
-        ),
+        Ok(true) => {
+            display.info_chips.push("already delivered".to_owned());
+            host.finish_tool_with_cbor_result(
+                conversation_id,
+                call.id.clone(),
+                visible_tool_name,
+                call.tool_type,
+                CborValue::Text(
+                    "Already delivered: retained worker receipt exists; no new message appended"
+                        .to_owned(),
+                ),
+                Some(display),
+            )
+        }
+        Err(error) => {
+            display.status = tau_proto::ToolUseStatus::Error;
+            display.status_text = error.lines().next().unwrap_or("err").to_owned();
+            host.finish_tool_with_display_error(
+                conversation_id,
+                call.id.clone(),
+                visible_tool_name,
+                call.tool_type,
+                error,
+                None,
+                Some(display),
+            )
+        }
     }
     Ok(())
 }

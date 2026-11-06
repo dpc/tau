@@ -9,7 +9,8 @@ use image::{
 };
 use tau_proto::{
     ArtifactKey, CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart,
-    ToolUseState, ToolUseStats, ToolUseStatus, artifact_reference, parse_artifact_reference,
+    ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus, artifact_reference,
+    parse_artifact_reference,
 };
 
 pub(crate) const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
@@ -359,9 +360,9 @@ impl ReadImageRequest {
                 prepared.region.into_value(),
             ),
         ]);
-        let display_args = format!(
-            "{display_reference}  {format}  mode={}  source={}x{}  oriented={}x{}  \
-         region={},{} {}x{}  output={}x{}  {patches} patches  {byte_count} bytes",
+        let details = format!(
+            "{display_reference}\nformat: {format}\nmode: {}\nsource: {}x{}\noriented: {}x{}\n\
+         region: {},{} {}x{}\noutput: {}x{}\npatches: {patches}",
             mode.as_str(),
             prepared.source_width,
             prepared.source_height,
@@ -375,7 +376,9 @@ impl ReadImageRequest {
             image.height
         );
         let mut display = ToolUseState {
-            args: display_args,
+            args: display_reference,
+            info_chips: vec![format!("{}x{}", image.width, image.height)],
+            payload: Some(ToolUsePayload::Text { text: details }),
             status: ToolUseStatus::Success,
             status_text: "ok".to_owned(),
             ..Default::default()

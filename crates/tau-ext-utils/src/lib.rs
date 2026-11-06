@@ -1213,14 +1213,21 @@ impl TimerRuntime {
         };
         let action = parse_action(&pending.arguments, pending.call_id.as_str())?;
         let display_args = timer_action_display_args(&action);
+        // Only scheduling exposes its submitted reminder. Listing and canceling
+        // must not copy reminder bodies from the active timer map.
+        let payload = match &action {
+            TimerAction::Schedule(args) => Some(tau_proto::ToolUsePayload::Text {
+                text: args.message.clone(),
+            }),
+            _ => None,
+        };
         let TimerActionResult { result, outcome } =
             self.apply_timer_action(&pending.agent_id, action, now, ScheduleMutationSource::Live)?;
         self.sync_timer_indicators_for(HashSet::from([pending.agent_id.clone()]))
             .map_err(|error| error.to_string())?;
-        Ok(TimerToolCompletion {
-            result,
-            display: timer_success_display(display_args, outcome),
-        })
+        let mut display = timer_success_display(display_args, outcome);
+        display.payload = payload;
+        Ok(TimerToolCompletion { result, display })
     }
 
     fn record_papercut(&self, invoke: &ToolStarted, now: UnixMicros) -> String {

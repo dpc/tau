@@ -109,5 +109,67 @@ pub(crate) fn ok_display(args: impl Into<String>) -> ToolUseState {
     }
 }
 
+/// Expose exceptional output limits and recovery facts, without copying output.
+///
+/// This consumes only the tool's own structured result metadata. Normal
+/// untruncated displays stay unchanged, and an existing command body survives.
+pub(crate) fn describe_output_limits(display: &mut ToolUseState, result: &CborValue) {
+    let is_true = |key| {
+        matches!(
+            tau_proto::cbor_field(result, key),
+            Some(CborValue::Bool(true))
+        )
+    };
+    let truncated = is_true("truncated");
+    let limited = is_true("limit_reached");
+    let invalid_utf8 = matches!(
+        tau_proto::cbor_field(result, "valid_utf8"),
+        Some(CborValue::Bool(false))
+    );
+    if !truncated && !limited && !invalid_utf8 {
+        return;
+    }
+    if truncated {
+        display.info_chips.push("truncated".to_owned());
+    } else if limited {
+        display.info_chips.push("limit reached".to_owned());
+    }
+    if invalid_utf8 {
+        display.info_chips.push("invalid UTF-8".to_owned());
+    }
+    let mut facts = Vec::new();
+    for key in [
+        "total_lines",
+        "total_bytes",
+        "full_output_path",
+        "saved_output_path",
+        "saved_output_truncated",
+        "saved_output_bytes",
+        "saved_output_unavailable",
+        "limit_reached",
+    ] {
+        let value = match tau_proto::cbor_field(result, key) {
+            Some(CborValue::Text(value)) => value.clone(),
+            Some(CborValue::Integer(value)) => i128::from(*value).to_string(),
+            Some(CborValue::Bool(value)) => value.to_string(),
+            _ => continue,
+        };
+        facts.push(format!("{key}: {value}"));
+    }
+    if facts.is_empty() {
+        return;
+    }
+    let facts = facts.join("\n");
+    match &mut display.payload {
+        Some(ToolUsePayload::Text { text }) => {
+            text.push_str("\n\n");
+            text.push_str(&facts);
+        }
+        None => display.payload = Some(ToolUsePayload::Text { text: facts }),
+        // Diff payloads own their detail presentation; never replace them.
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests;

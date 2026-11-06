@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use std::ffi::OsString;
+use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 
@@ -42,6 +43,30 @@ fn info(status: tau_proto::SessionAgentWorkStatus) -> InternalSelfInfo {
     }
 }
 
+/// Runtime self-information uses authoritative token accounting and only
+/// selected identity/model facts, not the session directory or config dump.
+#[test]
+fn self_info_ui_uses_known_context_without_private_configuration() {
+    let mut info = info(Default::default());
+    info.context.input_tokens = Some(tau_proto::TokenCount::new(32_000));
+    info.context.input_token_limit = Some(tau_proto::TokenCount::new(128_000));
+    info.session_dir = Some("/private/session".into());
+    let display = self_info_display(&info);
+    assert_eq!(display.progress_counters[0].complete, Some(32_000));
+    assert_eq!(display.progress_counters[0].total, Some(128_000));
+    let Some(ToolUsePayload::Text { text }) = &display.payload else {
+        panic!("identity detail")
+    };
+    assert!(!text.contains("/private"));
+    assert!(text.contains("provider/model"));
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        std::fs::write(Path::new(&directory).join("self-info.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {"case":"runtime-identity-and-context", "tool_name":"self_info", "display":display},
+                {"case":"runtime-unknown-context", "tool_name":"self_info", "display":self_info_display(&self::info(Default::default()))},
+            ])).expect("serialize samples")).expect("write samples");
+    }
+}
 /// Build diagnostics distinguish package versions from protocol versions and
 /// render absent metadata explicitly without permitting extra header lines.
 #[test]

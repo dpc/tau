@@ -12,9 +12,11 @@
 //! Event publication/replay and durable session behavior are specified by
 //! `SPEC-tau-harness-event-processing` and `SPEC-tau-harness-session-state`.
 
+mod discovery_tool_display;
 mod message_tool_display;
 pub mod runtime_dir;
-pub use message_tool_display::message_tool_display;
+pub use discovery_tool_display::{DiscoveryKind, discovery_tool_display};
+pub use message_tool_display::{message_tool_display, peer_review_release_display};
 
 /// Maximum bytes accepted for one extension-owned data file.
 ///

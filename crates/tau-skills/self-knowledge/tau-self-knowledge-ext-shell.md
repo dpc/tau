@@ -84,6 +84,8 @@ Truncated results include totals and a saved rendering up to 16 MiB:
 `saved_output_unavailable: true` means no private saved file could be created.
 Files expire after both 32 later relevant calls and about 15 minutes, with cleanup
 on the next relevant call; graceful shutdown removes them.
+Compact tool rows mark truncation or limits. Full tool displays add selected
+recovery paths and completeness facts without repeating captured output.
 
 ## Directory locks
 

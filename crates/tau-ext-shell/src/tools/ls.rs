@@ -135,8 +135,10 @@ fn render_listing(mut entries: Vec<LsEntry>, limit: usize, display_args: String)
             crate::shell_output_spool::append_metadata(&mut result_entries, &full_output_text);
         }
     }
+    let result = CborValue::Map(result_entries);
+    crate::display::describe_output_limits(&mut display, &result);
     ToolOutput {
-        result: CborValue::Map(result_entries),
+        result,
         provider_content: Vec::new(),
         display,
     }

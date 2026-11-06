@@ -100,8 +100,10 @@ pub(crate) fn read_file(
     }
     let mut display = ok_display(display_args);
     display.stats = text_stats(&truncated.content);
+    let result = CborValue::Map(entries);
+    crate::display::describe_output_limits(&mut display, &result);
     Ok(ToolOutput {
-        result: CborValue::Map(entries),
+        result,
         provider_content: Vec::new(),
         display,
     })

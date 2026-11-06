@@ -845,4 +845,5 @@ mod event_projection;
 mod prompt_input;
 mod renderer_update_folding;
 mod tool_status_rendering;
+mod tool_ui_catalog;
 mod transcript_rendering;

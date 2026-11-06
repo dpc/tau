@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use tau_config::settings::WaitTimeoutMinutes;
 
 use super::*;
@@ -1320,6 +1322,44 @@ fn activating_input_interruption_results_use_typed_headers() {
     );
 }
 
+/// Interrupted waits must expose their own mode/outcome and safe guidance,
+/// never an arbitrary source tool's command or payload.
+#[test]
+fn interrupted_wait_ui_distinguishes_all_modes_without_source_payload() {
+    let mut fixtures = Vec::new();
+    for mode in [
+        InterruptedWaitMode::Exact,
+        InterruptedWaitMode::ExactAll,
+        InterruptedWaitMode::AnyBackground,
+    ] {
+        let reply = interrupted_wait_reply(
+            "wait-demo".into(),
+            ToolName::new("wait"),
+            Some(ToolName::new("shell")),
+            mode,
+        );
+        let (_, display) = reply_result_with_display(reply);
+        let display = display.expect("wait display");
+        assert_eq!(display.mode, mode.as_header_value());
+        assert_eq!(display.args, "shell");
+        assert_eq!(display.status_text, "interrupted");
+        let Some(tau_proto::ToolUsePayload::Text { text }) = &display.payload else {
+            panic!("guidance")
+        };
+        assert!(text.contains(mode.guidance()));
+        fixtures.push(
+            serde_json::json!({"case":format!("wait-interrupted-{}",mode.as_header_value()),
+            "tool_name":"wait", "display":display}),
+        );
+    }
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        std::fs::write(
+            Path::new(&directory).join("wait.json"),
+            serde_json::to_vec_pretty(&fixtures).expect("serialize samples"),
+        )
+        .expect("write samples");
+    }
+}
 /// Each interrupted background-wait mode gives conditional guidance without
 /// asserting that an arbitrary reserved or background tool remains running.
 #[test]

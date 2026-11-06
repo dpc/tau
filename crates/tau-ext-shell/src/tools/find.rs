@@ -249,8 +249,10 @@ fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput 
             CborValue::Bool(true),
         ));
     }
+    let result = CborValue::Map(result_entries);
+    crate::display::describe_output_limits(&mut display, &result);
     ToolOutput {
-        result: CborValue::Map(result_entries),
+        result,
         provider_content: Vec::new(),
         display,
     }

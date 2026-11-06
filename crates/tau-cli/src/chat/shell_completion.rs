@@ -270,7 +270,7 @@ impl ShellCompletion {
                 Candidate {
                     label: candidate.value,
                     description: format!(
-                        "{} · {}",
+                        "{} {}",
                         target.instance,
                         if candidate.directory {
                             "directory"

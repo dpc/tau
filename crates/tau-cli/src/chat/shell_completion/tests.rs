@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+use std::path::Path;
 use std::sync::Condvar;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -236,7 +238,8 @@ fn remote_completion_bounds_fanout_and_invalidates_cursor_revision() {
     );
 }
 
-/// Merged results retain source labels while enforcing one shared page cap.
+/// Merged results retain source labels and meaningful theme-styled descriptions
+/// without decorative separators, while enforcing one shared page cap.
 #[test]
 fn remote_completion_merges_sources_with_one_result_bound() {
     let (cache, _receiver) = cache();
@@ -284,8 +287,72 @@ fn remote_completion_merges_sources_with_one_result_bound() {
     }
     let state = cache.state.lock().expect(MUTEX_POISONED);
     assert_eq!(state.results.len(), 100);
-    assert_eq!(state.results[0].description, "first · file");
-    assert_eq!(state.results[1].description, "second · file");
+    assert_eq!(state.results[0].description, "first file");
+    assert_eq!(state.results[1].description, "second file");
+    let view = tau_cli_term_raw::CompletionView {
+        candidates: state.results[..2].to_vec(),
+        selected: Some(0),
+    };
+    let theme = tau_themes::Theme::parse(
+        r##"{
+        styles: {
+            "completion.label": { fg: "blue" },
+            "completion.desc": { fg: "cyan" },
+            "completion.selected": { fg: "yellow" },
+        }
+    }"##,
+    )
+    .expect("completion theme");
+    let mut catalog = String::from(
+        "# Actual path-completion menu samples\n\nAfter: candidates from the production path cache. Before: the same candidates with the baseline source/type description. Both use the native completion-menu renderer. Path dots and replacements stay unchanged.\n",
+    );
+    for width in [100, 36] {
+        for before in [true, false] {
+            let mut fixture = view.clone();
+            if before {
+                for candidate in &mut fixture.candidates {
+                    candidate.description = candidate.description.replace(" file", " · file");
+                }
+            }
+            let block = tau_cli_term::completion::render_menu_block(&fixture, &theme, width, 24);
+            let rows = tau_term_screen::layout_block(&block, width);
+            let text = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| cell.ch)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !before {
+                assert!(!text.contains('·'));
+                assert!(text.contains("./file-000"));
+                let description = block
+                    .content
+                    .spans()
+                    .iter()
+                    .find(|span| span.text.contains("second file"))
+                    .expect("unselected description");
+                assert_eq!(
+                    description.style,
+                    tau_cli_term::resolve::resolve(&theme, tau_themes::names::COMPLETION_DESC)
+                );
+            }
+            write!(
+                &mut catalog,
+                "\n## {} at {width} columns\n\n```text\n{text}\n```\n",
+                if before { "Before" } else { "After" }
+            )
+            .expect("format catalog");
+        }
+    }
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        std::fs::write(Path::new(&directory).join("path-completion.md"), catalog)
+            .expect("write completion samples");
+    }
 }
 
 /// Drafts and suffixes stay local; only the decoded cursor token is
@@ -399,5 +466,5 @@ fn remote_completion_rejects_stale_correlations() {
     assert!(!cache.accept(context, target, candidates()));
     let state = cache.state.lock().expect(MUTEX_POISONED);
     assert_eq!(state.results[0].replacement, "open ./hé\\ llo tail");
-    assert_eq!(state.results[0].description, "remote · file");
+    assert_eq!(state.results[0].description, "remote file");
 }

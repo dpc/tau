@@ -485,8 +485,8 @@ fn terminal_defaults(finished: &tau_proto::ProviderResponseFinished) -> bool {
         && finished.estimated_api_cost_increment.is_none()
 }
 
-/// Verify the sole production accepted start retains the concrete child and
-/// prompt statistics without retaining prompt text in its terminal display.
+/// Verify the accepted start retains the concrete child, submitted role and
+/// prompt statistics, with the full delegation prompt in its terminal display.
 fn assert_durable_agent_start(
     snapshot: &DurableSessionSnapshot,
     identities: &Identities,
@@ -534,10 +534,10 @@ fn assert_durable_agent_start(
                             &identities.worker,
                         )
                         // Inspect the accepted-event producer, not just its
-                        // display helper: retained stats describe the fixture's
-                        // one-line prompt without exposing its body.
+                        // display helper: the completed descriptor retains
+                        // the submitted role, prompt stats and full intent.
                         && result.display.as_ref().is_some_and(|display| {
-                            display.args.is_empty()
+                            display.args == "deterministic-worker"
                                 && display.info_chips == [format!("@{}", identities.worker)]
                                 && display.stats == tau_proto::ToolUseStats {
                                     matches: None,
@@ -546,7 +546,9 @@ fn assert_durable_agent_start(
                                 }
                                 && display.status == tau_proto::ToolUseStatus::Success
                                 && display.status_text == "ok"
-                                && display.payload.is_none()
+                                && display.payload == Some(tau_proto::ToolUsePayload::Text {
+                                    text: super::WORKER_PROMPT.to_owned(),
+                                })
                         })
             )
             .then_some(index)

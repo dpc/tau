@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Cursor, Read, Write};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -1250,6 +1251,12 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     );
     assert_eq!(scheduled.display.args, "schedule standup in 10m every 1h");
     assert!(scheduled.display.info_chips.is_empty());
+    assert_eq!(
+        scheduled.display.payload,
+        Some(tau_proto::ToolUsePayload::Text {
+            text: "join the call".to_owned(),
+        })
+    );
 
     let list = started(
         "call-list",
@@ -1266,6 +1273,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     assert_eq!(listed.display.args, "list");
     assert_eq!(listed.display.stats.matches, Some(1));
     assert!(listed.display.info_chips.is_empty());
+    assert!(listed.display.payload.is_none());
 
     let cancel = started(
         "call-cancel",
@@ -1284,6 +1292,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     );
     assert_eq!(cancelled.display.args, "cancel standup");
     assert!(cancelled.display.info_chips.is_empty());
+    assert!(cancelled.display.payload.is_none());
 
     let absent = rt
         .handle_live_tool(&cancel, UnixMicros::new(0))
@@ -1299,6 +1308,14 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         .expect("empty list");
     assert_eq!(empty.result, CborValue::Text("no active timers".to_owned()));
     assert_eq!(empty.display.stats.matches, Some(0));
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        std::fs::write(Path::new(&directory).join("timer.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {"case":"timer-scheduled-reminder", "tool_name":"timer", "display":scheduled.display},
+                {"case":"timer-list-intentionally-body-free", "tool_name":"timer", "display":listed.display},
+                {"case":"timer-cancel-intentionally-body-free", "tool_name":"timer", "display":cancelled.display},
+            ])).expect("serialize samples")).expect("write samples");
+    }
 }
 
 /// Timer display args do not echo unknown actions or unsafe timer ids.

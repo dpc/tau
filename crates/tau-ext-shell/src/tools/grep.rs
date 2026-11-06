@@ -237,6 +237,28 @@ fn render_grep_output(
         ));
         crate::shell_output_spool::append_metadata(entries, &full_output_text);
     }
+    crate::display::describe_output_limits(&mut display, &result);
+    if match_limit_reached || lines_truncated {
+        if !byte_truncated.was_truncated {
+            display.info_chips.push(
+                if lines_truncated {
+                    "truncated"
+                } else {
+                    "limit reached"
+                }
+                .to_owned(),
+            );
+        }
+        let details = notices.join("\n");
+        match &mut display.payload {
+            Some(tau_proto::ToolUsePayload::Text { text }) => {
+                text.push('\n');
+                text.push_str(&details);
+            }
+            None => display.payload = Some(tau_proto::ToolUsePayload::Text { text: details }),
+            _ => {}
+        }
+    }
     ToolOutput {
         result,
         provider_content: Vec::new(),

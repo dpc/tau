@@ -2266,6 +2266,15 @@ impl Harness {
                 tool_name,
                 tool_type,
             } => {
+                let display = match &pending.expected_receive.peer_review {
+                    Some(tau_proto::PeerMessageReview::Released { source }) => {
+                        let mut display = crate::peer_review_release_display(source);
+                        display.status = tau_proto::ToolUseStatus::Error;
+                        display.status_text = error.lines().next().unwrap_or("err").to_owned();
+                        Some(display)
+                    }
+                    _ => None,
+                };
                 self.finish_harness_owned_tool_with_display_error(
                     &conversation_id,
                     call_id,
@@ -2273,7 +2282,7 @@ impl Harness {
                     tool_type,
                     error.to_owned(),
                     None,
-                    None,
+                    display,
                 );
             }
             PendingPeerReceiveCompletion::Cli { client_id } => {
@@ -2343,6 +2352,14 @@ impl Harness {
                 tool_name,
                 tool_type,
             } => {
+                let display = match &pending.expected_receive.peer_review {
+                    Some(tau_proto::PeerMessageReview::Released { source }) => {
+                        let mut display = crate::peer_review_release_display(source);
+                        display.info_chips.push("committed".to_owned());
+                        Some(display)
+                    }
+                    _ => None,
+                };
                 self.finish_harness_owned_tool_with_cbor_result(
                     &conversation_id,
                     call_id,
@@ -2352,7 +2369,7 @@ impl Harness {
                         "Original peer message committed to worker `{}`; response not guaranteed",
                         pending.recipient_id,
                     )),
-                    None,
+                    display,
                 );
             }
             PendingPeerReceiveCompletion::Cli { client_id } => {

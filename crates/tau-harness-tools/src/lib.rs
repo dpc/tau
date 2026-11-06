@@ -67,7 +67,8 @@ struct PendingDelegateAcceptance {
     tool_type: ToolType,
     self_agent_id: String,
     agent_id: String,
-    prompt_stats: ToolUseStats,
+    /// Original role and delegation intent retained through acceptance.
+    display: ToolUseState,
 }
 
 impl BuiltinState {
@@ -166,8 +167,7 @@ impl BuiltinState {
             }
             AGENT_START_TOOL_NAME => {
                 let parsed = parse_delegate_args(&call.arguments).ok()?;
-                let args = format!("+{}", parsed.role);
-                (args, tau_proto::PROGRESS_INDICATOR_TEXT, None)
+                return Some(agent_start_display(&parsed.role, &parsed.prompt));
             }
             WAIT_TOOL_NAME => (
                 self.wait_initial_display_args(&call.arguments, input_wait_timeout_minutes),
@@ -432,13 +432,15 @@ impl InternalToolHandler for BuiltinTools {
                 if let Some(pending) = pending
                     && let Some(error) = result.error.as_ref()
                 {
-                    host.finish_tool_with_error(
+                    let display = agent_start_error_display(pending.display, error);
+                    host.finish_tool_with_display_error(
                         &pending.conversation_id,
                         pending.call_id,
                         pending.tool_name,
                         pending.tool_type,
                         error.clone(),
                         None,
+                        Some(display),
                     );
                 }
                 Ok(())
@@ -473,7 +475,7 @@ impl InternalToolHandler for BuiltinTools {
                         AgentStartSuccess {
                             self_agent_id: &pending.self_agent_id,
                             agent_id: &pending.agent_id,
-                            prompt_stats: pending.prompt_stats,
+                            display: pending.display,
                         },
                     );
                 }
@@ -514,14 +516,17 @@ impl BuiltinTools {
                 return Ok(());
             }
         };
+        let display = agent_start_display(&parsed.role, &parsed.prompt);
         let Some(self_agent_id) = host.ensure_agent_id_for_agent(cid) else {
-            host.finish_tool_with_error(
+            let message = "sender conversation no longer exists";
+            host.finish_tool_with_display_error(
                 cid,
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                "sender conversation no longer exists".to_owned(),
+                message.to_owned(),
                 Some(call.arguments.clone()),
+                Some(agent_start_error_display(display, message)),
             );
             return Ok(());
         };
@@ -547,13 +552,15 @@ impl BuiltinTools {
         let agent_id = match host.enqueue_start_agent_request_without_draining(start_request) {
             Ok(agent_id) => agent_id,
             Err(message) => {
-                host.finish_tool_with_error(
+                let display = agent_start_error_display(display, &message);
+                host.finish_tool_with_display_error(
                     cid,
                     call_id,
                     visible_tool_name,
                     call.tool_type,
                     message,
                     Some(call.arguments.clone()),
+                    Some(display),
                 );
                 return Ok(());
             }
@@ -571,7 +578,7 @@ impl BuiltinTools {
                     tool_type: call.tool_type,
                     self_agent_id,
                     agent_id,
-                    prompt_stats,
+                    display,
                 },
             );
         host.drain_start_agent_requests()
@@ -804,7 +811,8 @@ impl AgentStartSuccessFinisher for InternalToolHost<'_> {
 struct AgentStartSuccess<'a> {
     self_agent_id: &'a str,
     agent_id: &'a str,
-    prompt_stats: ToolUseStats,
+    /// Submitted role and prompt; terminal descriptors replace pending ones.
+    display: ToolUseState,
 }
 
 fn finish_agent_start_success(
@@ -823,25 +831,42 @@ fn finish_agent_start_success(
         delegate_result_value(success.self_agent_id, success.agent_id),
         Some(agent_start_success_display(
             success.agent_id,
-            success.prompt_stats,
+            success.display,
         )),
     );
 }
 
-fn agent_start_success_display(agent_id: &str, prompt_stats: ToolUseStats) -> ToolUseState {
+/// Describe submitted delegation intent using the standard text payload.
+fn agent_start_display(role: &str, prompt: &str) -> ToolUseState {
     ToolUseState {
-        // Pending `agent_start` args may include `+role` while the model is
-        // still choosing/starting work. The immediate success line instead
-        // identifies the concrete spawned agent with the `@…` chip below.
-        args: String::new(),
-        stats: prompt_stats,
-        info_chips: vec![format!("@{agent_id}")],
-        status: ToolUseStatus::Success,
-        status_text: "ok".to_owned(),
+        args: role.to_owned(),
+        stats: ToolUseStats::for_text(prompt),
+        payload: Some(ToolUsePayload::Text {
+            text: prompt.to_owned(),
+        }),
+        status: ToolUseStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         ..Default::default()
     }
 }
 
+fn agent_start_success_display(agent_id: &str, mut display: ToolUseState) -> ToolUseState {
+    display.info_chips.push(format!("@{agent_id}"));
+    display.status = ToolUseStatus::Success;
+    display.status_text = "ok".to_owned();
+    display
+}
+
+/// Preserve delegation intent when startup rejects a validated request.
+fn agent_start_error_display(mut display: ToolUseState, message: &str) -> ToolUseState {
+    display.status = ToolUseStatus::Error;
+    display.status_text = message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("err")
+        .to_owned();
+    display
+}
 fn started_call(
     host: &mut InternalToolHost<'_>,
     started: &ToolStarted,
@@ -1769,13 +1794,14 @@ fn handle_agent_list_tool_call(
             CborValue::Bool(truncated),
         ),
     ]);
+    let display = tau_harness::discovery_tool_display(&result, tau_harness::DiscoveryKind::Agents);
     host.finish_tool_with_cbor_result(
         conversation_id,
         call.id.clone(),
         visible_tool_name,
         call.tool_type,
         result,
-        None,
+        Some(display),
     );
     Ok(())
 }

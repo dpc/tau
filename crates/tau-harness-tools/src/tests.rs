@@ -1451,11 +1451,7 @@ fn finish_agent_start_success_passes_informative_display() {
         AgentStartSuccess {
             self_agent_id: "engineer_parent",
             agent_id: "engineer_child",
-            prompt_stats: ToolUseStats {
-                matches: None,
-                lines: Some(2),
-                bytes: Some(12),
-            },
+            display: agent_start_display("engineer", "first\nsecond"),
         },
     );
     let call = finisher.call.expect("finish call recorded");
@@ -1473,12 +1469,61 @@ fn finish_agent_start_success_passes_informative_display() {
         cbor_map_text(&call.result, "sub_agent_id"),
         Some("engineer_child")
     );
-    assert_eq!(display.args, "");
+    assert_eq!(display.args, "engineer");
     assert_eq!(display.stats.lines, Some(2));
     assert_eq!(display.stats.bytes, Some(12));
     assert_eq!(display.info_chips, vec!["@engineer_child"]);
     assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");
+    assert_eq!(
+        display.payload,
+        Some(ToolUsePayload::Text {
+            text: "first\nsecond".to_owned()
+        })
+    );
+}
+
+/// Full-mode delegation preserves submitted intent across success and
+/// rejection; terminal messages and review releases retain their body-free
+/// policies.
+#[test]
+fn delegation_intent_and_body_free_message_ui_samples() {
+    let pending = agent_start_display("reviewer", "Review the parser.\nCheck malformed input.");
+    let success = agent_start_success_display("reviewer-demo", pending.clone());
+    let error = agent_start_error_display(pending.clone(), "role unavailable");
+    assert_eq!(success.payload, pending.payload);
+    assert_eq!(error.payload, pending.payload);
+    assert_eq!(error.args, "reviewer");
+    assert_eq!(error.status, ToolUseStatus::Error);
+    assert!(pending.info_chips.is_empty());
+    let arguments = CborValue::Map(vec![
+        (
+            CborValue::Text("recipient_id".into()),
+            CborValue::Text("reviewer-demo".to_owned()),
+        ),
+        (
+            CborValue::Text("message".into()),
+            CborValue::Text("Review the parser.".to_owned()),
+        ),
+    ]);
+    let message = tau_harness::message_tool_display(&arguments);
+    assert!(message.payload.is_none());
+    let reference = tau_proto::PeerMessageReviewReference {
+        main_agent_id: "main-demo".parse().expect("agent"),
+        durable_event_seq: 42,
+    };
+    let release = tau_harness::peer_review_release_display(&reference);
+    assert!(release.payload.is_none());
+    if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
+        std::fs::write(path_std_path::Path::new(&directory).join("harness-tools.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {"case":"delegation-pending", "tool_name":"agent_start", "display":pending},
+                {"case":"delegation-started", "tool_name":"agent_start", "display":success},
+                {"case":"delegation-rejected", "tool_name":"agent_start", "display":error},
+                {"case":"message-terminal-intentionally-unchanged", "tool_name":"message", "display":message},
+                {"case":"review-release-reference", "tool_name":"message_release", "display":release},
+            ])).expect("serialize samples")).expect("write samples");
+    }
 }
 
 /// Ensures truncated skill searches keep pagination details in structured
