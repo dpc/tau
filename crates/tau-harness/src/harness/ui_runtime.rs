@@ -727,6 +727,22 @@ impl Harness {
                     .get(cid)
                     .map(|agent| agent.turn.output_length_continuation.clone());
                 match continuation_state {
+                    Some(path_crate_agent::OutputLengthContinuationState::Active(continuation))
+                        if self.agent_runtime.agent_registry.agents.get(cid).is_some_and(|agent| {
+                            matches!(
+                                &agent.dispatch.activation_dispatch,
+                                path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                                    agent_prompt_id, ..
+                                } if *agent_prompt_id == continuation.plan.agent_prompt_id
+                            )
+                        }) =>
+                    {
+                        // Cold inference has no live thinking task, but its
+                        // exact committed output-length owner still owes one
+                        // typed terminal and the original outer-turn finish.
+                        self.finalize_canceled_in_flight_prompt(cid);
+                        return;
+                    }
                     Some(path_crate_agent::OutputLengthContinuationState::OwnerReady(_)) => {
                         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
                             agent.dispatch.pending_replay_activation = true;
@@ -907,9 +923,10 @@ impl Harness {
     /// Terminalizes one live cancellation and rejects its eventual late
     /// provider response.
     ///
-    /// Only an exact ordinary-inference `DispatchUncertain` owner is released.
-    /// Mismatched prompt ids and standalone-compaction continuations retain
-    /// their distinct durable recovery obligations.
+    /// An exact output-length owner settles through its typed terminal,
+    /// including cold direct and post-compaction inference. Other uncertain
+    /// owners release only ordinary inference; standalone work retains its
+    /// recovery obligation.
     pub(super) fn finalize_canceled_in_flight_prompt(&mut self, cid: &AgentId) {
         let Some((canceled_prompt_id, originator)) = self
             .agent_runtime

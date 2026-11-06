@@ -2984,6 +2984,7 @@ impl Harness {
                         .and_then(|tree| {
                             tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
                         });
+                    let output_length_uncertain = restored_lineage_owner.is_some();
                     if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                         if let Some(owner) = restored_lineage_owner {
                             conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
@@ -3030,6 +3031,10 @@ impl Harness {
                     if retry_interrupted {
                         self.emit_info_important(&format!(
                             "post-compaction inference for restored agent `{cid}` was interrupted; recovering automatically from committed context"
+                        ));
+                    } else if output_length_uncertain {
+                        self.emit_info_important(&format!(
+                            "output-length inference for restored agent `{cid}` is uncertain and will not be replayed; select this agent and use :cancel to cancel the current turn, then submit a new prompt"
                         ));
                     } else {
                         self.emit_info_important(&format!(
@@ -3091,7 +3096,35 @@ impl Harness {
             {
                 let retry_interrupted = self.stage_interrupted_inference(&cid, &checkpoint);
                 let status_prompt_id = checkpoint.agent_prompt_id.clone();
+                let restored_lineage_owner = self
+                    .session_runtime
+                    .agent_store
+                    .agent(agent_id.as_str())
+                    .and_then(|tree| {
+                        tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
+                    });
+                let output_length_uncertain = restored_lineage_owner.is_some();
                 if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
+                    if let Some(owner) = restored_lineage_owner {
+                        conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
+                            owner.outer_turn_id.clone(),
+                        );
+                        conv.turn.output_length_continuation =
+                            path_crate_agent::OutputLengthContinuationState::Active(
+                                path_crate_agent::OutputLengthContinuationDispatch {
+                                    plan: path_crate_agent::OutputLengthContinuationPlan {
+                                        agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+                                        owner,
+                                        dispatch: path_crate_agent::InferenceDispatchOwnership {
+                                            model: checkpoint.model.clone(),
+                                            operation: checkpoint.operation,
+                                            activation_cut: checkpoint.activation_cut,
+                                        },
+                                    },
+                                    through: checkpoint.through,
+                                },
+                            );
+                    }
                     conv.dispatch.activation_dispatch =
                         path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: match checkpoint.transaction_id {
@@ -3117,6 +3150,10 @@ impl Harness {
                 if retry_interrupted {
                     self.emit_info_important(&format!(
                         "inference for restored agent `{cid}` was interrupted; recovering automatically from committed context"
+                    ));
+                } else if output_length_uncertain {
+                    self.emit_info_important(&format!(
+                        "output-length inference for restored agent `{cid}` is uncertain and will not be replayed; select this agent and use :cancel to cancel the current turn, then submit a new prompt"
                     ));
                 } else {
                     self.emit_info_important(&format!(

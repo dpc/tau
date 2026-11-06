@@ -6,6 +6,268 @@ use super::super::dispatch::{
 };
 use super::*;
 
+/// Both durable dispatch cuts retain a cancellable output-length owner across
+/// repeated cold restores, without repeating paid work or replenishing its
+/// budget. Direct owners and reactive-compaction descendants must settle the
+/// same original outer turn exactly once through the advertised explicit
+/// cancellation action.
+#[test]
+fn cold_output_length_dispatch_cuts_remain_cancellable() {
+    use crate::agent::OutputLengthContinuationState;
+
+    for reactive in [false, true] {
+        for prompt_started in [false, true] {
+            let td = TempDir::new().expect("tempdir");
+            let mut h = quiet_provider_harness(td.path()).expect("start");
+            enable_remote_compaction_for_test_model(&mut h);
+            h.provider_runtime
+                .model_info
+                .get_mut(&"test/model".into())
+                .expect("model")
+                .supports_standalone_compaction = true;
+            h.submit_user_prompt(test_session_id("s1"), "cold length cut".to_owned())
+                .expect("submit");
+            let source = read_nth_prompt_created(&h, 0);
+            h.handle_provider_response_finished(reasoning_only_length_response(&source, 3))
+                .expect("source plan");
+            let mut successor = read_nth_prompt_created(&h, 1);
+            if reactive {
+                h.handle_provider_response_finished(context_overflow_response(&successor))
+                    .expect("reactive rejection");
+                let compact = read_nth_prompt_created(&h, 2);
+                h.handle_provider_response_finished(provider_text_response(
+                    &compact.agent_prompt_id,
+                    compact.agent_id,
+                    "compact replacement",
+                ))
+                .expect("compact");
+                successor = read_nth_prompt_created(&h, 3);
+            }
+            let records = h
+                .session_runtime
+                .agent_store
+                .snapshot_agent_events_for_test(source.agent_id.as_str())
+                .expect("records")
+                .to_vec();
+            let cut = records
+                .iter()
+                .position(|record| match &record.event {
+                    Event::AgentPromptStarted(started) if prompt_started => {
+                        started.agent_prompt_id == successor.agent_prompt_id
+                    }
+                    Event::AgentInferenceDispatchStarted(started) if !prompt_started => {
+                        started.agent_prompt_id == successor.agent_prompt_id
+                    }
+                    _ => false,
+                })
+                .expect("exact cut")
+                + 1;
+            let owner = h
+                .session_runtime
+                .agent_store
+                .agent(source.agent_id.as_str())
+                .expect("tree")
+                .output_length_lineage_owner_for_prompt(&successor.agent_prompt_id)
+                .expect("lineage");
+            h.shutdown().expect("shutdown");
+            drop(h);
+            wait_for_session_unlock(td.path(), "s1");
+            let mut journal = File::create(
+                td.path()
+                    .join("agents")
+                    .join(source.agent_id.as_str())
+                    .join("events.cbor"),
+            )
+            .expect("journal");
+            for record in &records[..cut] {
+                let mut encoded = Vec::new();
+                ciborium::into_writer(record, &mut encoded).expect("encode");
+                journal
+                    .write_all(&(encoded.len() as u64).to_le_bytes())
+                    .expect("length");
+                journal.write_all(&encoded).expect("record");
+            }
+            journal.sync_all().expect("sync");
+            drop(journal);
+
+            for restart in 0..4 {
+                let mut restored = quiet_provider_harness_with_start_reason(
+                    td.path(),
+                    tau_proto::SessionStartReason::Resume,
+                )
+                .expect("restore");
+                let cid = restored
+                    .agent_runtime
+                    .agent_registry
+                    .agent_routes
+                    .get(source.agent_id.as_str())
+                    .cloned()
+                    .expect("route");
+                if restart < 2 {
+                    let agent = &restored.agent_runtime.agent_registry.agents[&cid];
+                    let OutputLengthContinuationState::Active(active) =
+                        &agent.turn.output_length_continuation
+                    else {
+                        panic!("lost owner: reactive={reactive}, prompt_started={prompt_started}");
+                    };
+                    assert_eq!(active.plan.owner, owner);
+                    assert_eq!(active.plan.agent_prompt_id, successor.agent_prompt_id);
+                    assert!(matches!(&agent.turn.outer_turn,
+                        crate::agent::OuterTurnRuntimeState::Active(id) if *id == owner.outer_turn_id));
+                    assert!(
+                        agent.dispatch.in_flight_prompt.is_none(),
+                        "not a live retry"
+                    );
+                    let notice = restored
+                        .runtime_io
+                        .replayable_harness_notices
+                        .iter()
+                        .find(|notice| notice.message.contains("output-length inference"))
+                        .expect("replayable recovery hint");
+                    assert!(notice.message.contains(":cancel"));
+                    assert!(!notice.message.contains("retry"));
+                }
+                if restart == 1 {
+                    if !reactive {
+                        let mut prompt =
+                            PendingPrompt::user("do not supersede the reserved owner".to_owned());
+                        prompt.submission_source = tau_proto::PromptSubmissionSource::HumanUi;
+                        restored
+                            .dispatch_prompt_for_agent(&cid, prompt)
+                            .expect("queue HumanUI");
+                    }
+                    restored.handle_cancel_prompt(
+                        crate::harness::harness_connection_id(),
+                        &tau_proto::UiCancelPrompt {
+                            session_id: restored.session_runtime.current_session_id.clone(),
+                            target_agent_id: Some(source.agent_id.clone()),
+                            agent_prompt_id: Some(successor.agent_prompt_id.clone()),
+                        },
+                    );
+                    restored.retry_pending_agent_publications();
+                }
+                assert!(
+                    !event_log_events(&restored)
+                        .iter()
+                        .any(|event| matches!(event, Event::AgentPromptCreated(_))),
+                    "no provider replay: reactive={reactive}, prompt_started={prompt_started}, restart={restart}"
+                );
+                let current = restored
+                    .session_runtime
+                    .agent_store
+                    .snapshot_agent_events_for_test(source.agent_id.as_str())
+                    .expect("records");
+                assert_eq!(
+                    current
+                        .iter()
+                        .filter(|record| matches!(
+                            record.event,
+                            Event::AgentInferenceDispatchStarted(_)
+                        ))
+                        .count(),
+                    records[..cut]
+                        .iter()
+                        .filter(|record| matches!(
+                            record.event,
+                            Event::AgentInferenceDispatchStarted(_)
+                        ))
+                        .count()
+                );
+                assert_eq!(
+                    current
+                        .iter()
+                        .filter(|record| matches!(record.event, Event::AgentPromptSteered(_)))
+                        .count(),
+                    records[..cut]
+                        .iter()
+                        .filter(|record| matches!(record.event, Event::AgentPromptSteered(_)))
+                        .count()
+                );
+                assert_eq!(
+                    current
+                        .iter()
+                        .filter(|record| matches!(&record.event,
+                            Event::ProviderResponseFinished(response)
+                                if matches!(response.output_length_disposition,
+                                    tau_proto::OutputLengthDisposition::ContinuationPlanned { .. })
+                        ))
+                        .count(),
+                    1,
+                    "restart and cancellation cannot replenish the budget"
+                );
+                assert!(!current.iter().any(|record| matches!(&record.event,
+                    Event::AgentPromptTerminated(terminated)
+                        if terminated.agent_prompt_id == successor.agent_prompt_id
+                            && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
+                )), "HumanUI cannot bypass the typed reserved-owner terminal");
+                assert_eq!(
+                    current
+                        .iter()
+                        .filter(|record| matches!(&record.event,
+                            Event::ProviderResponseFinished(response)
+                                if response.agent_prompt_id == successor.agent_prompt_id
+                        ))
+                        .count(),
+                    usize::from(restart >= 1),
+                    "exactly one canonical successor terminal"
+                );
+                assert_eq!(current.iter().filter(|record| matches!(&record.event,
+                    Event::ProviderResponseFinished(response)
+                        if response.agent_prompt_id == successor.agent_prompt_id
+                        && matches!(&response.output_length_disposition,
+                            tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                                outer_turn_id, source_agent_prompt_id, ordinal,
+                                outcome: tau_proto::OutputLengthContinuationOutcome::Cancelled,
+                                outer_turn_finish_owed: true,
+                            } if *outer_turn_id == owner.outer_turn_id
+                                && *source_agent_prompt_id == owner.source_agent_prompt_id
+                                && *ordinal == owner.ordinal)
+                )).count(), usize::from(restart >= 1));
+                assert_eq!(
+                    current
+                        .iter()
+                        .filter(|record| matches!(&record.event,
+                            Event::AgentOuterTurnFinished(finished)
+                                if finished.outer_turn_id == owner.outer_turn_id
+                        ))
+                        .count(),
+                    usize::from(restart >= 1)
+                );
+                assert!(
+                    restored
+                        .prompt_coordination
+                        .prompt_runtime
+                        .pending_publish_completions
+                        .is_empty()
+                );
+                if restart == 3 {
+                    let mut prompt =
+                        PendingPrompt::user("fresh work after explicit cancellation".to_owned());
+                    prompt.submission_source = tau_proto::PromptSubmissionSource::HumanUi;
+                    restored
+                        .dispatch_prompt_for_agent(&cid, prompt)
+                        .expect("new prompt");
+                    let fresh = read_nth_prompt_created(&restored, 0);
+                    assert_ne!(fresh.agent_prompt_id, successor.agent_prompt_id);
+                    assert!(
+                        restored
+                            .session_runtime
+                            .agent_store
+                            .agent(source.agent_id.as_str())
+                            .expect("tree")
+                            .output_length_lineage_owner_for_prompt(&fresh.agent_prompt_id)
+                            .is_none(),
+                        "new work cannot reuse the cancelled lineage"
+                    );
+                }
+                restored.shutdown().expect("shutdown");
+                drop(restored);
+                wait_for_session_unlock(td.path(), "s1");
+            }
+        }
+    }
+}
+
 /// A growth stop is terminal metadata, not a second recovery owner. A resumed
 /// output-length lineage must still commit its failed terminal, accounting and
 /// outer finish exactly once, including cold replay of that completed history.
