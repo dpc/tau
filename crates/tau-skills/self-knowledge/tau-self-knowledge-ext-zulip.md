@@ -50,14 +50,23 @@ recipient; callers cannot supply recipient IDs.
 
 For one outbound DM without ingress, set `send_only: true`, omit inbound fields,
 and configure exactly one proactive-DM alias. This mode exposes only scoped
-`zulip_send`, without a group, and needs no receiver. It sends `message` to that
+`zulip_send`, in the Zulip group, and needs no receiver. It sends `message` to that
 alias, never polls or activates an agent, and remains text-only. Mode changes
 require restart.
 
 ## Tools and receive designation
 
-Ordinary tools default off. `tool_prefix` scopes names and the text group;
-reaction, profile, participant, message and attachment reads have their own grants.
+Each installed Zulip instance declares all its tools in one Zulip tool group.
+`tool_prefix` prefixes the group name once: `zulip` without a prefix,
+or `host_monitor_zulip_zulip` with `tool_prefix: host_monitor_zulip`.
+Enable the group to select all tools available in that mode, then use exact tool
+exclusions to narrow the selection. For example, use
+`enable_tool_groups: [host_monitor_zulip_zulip]` for that prefixed instance.
+Tools keep individual permission tags, disabled-by-default flags, schemas and
+runtime authorization checks. `send_only` still declares only its restricted send
+tool and adds no receive prompt guidance. Existing tool names and model-visible
+aliases are unchanged.
+
 Reactions require Tau-issued live references. Reply locators are inert addresses
 under current outbound grants; reading a message grants no writes.
 
@@ -105,7 +114,7 @@ addresses remain inert; ordinary sends check current outbound grants.
 ### Discover channels, subscribe, and read recent history
 
 These ordinary-mode tools require the current registered receiver and live queue.
-They default off and sit outside the text group. Prefix tool names for the instance.
+They default off and belong to the Zulip group. Prefix tool names for the instance.
 
 - `zulip_list_channels {"limit":10,"offset":0}` (`zulip:channels:read`)
   lists provider-visible public/subscribed channel names and descriptions,
@@ -191,7 +200,7 @@ checks still apply; reactions, attachment reads and participants retain their
 existing live source requirements.
 
 Ordinary `zulip_send` accepts `attachments: [{artifact, filename, content_type?}]`.
-The `zulip:send`, exact send and text-group grants authorize both text and uploads.
+The `zulip:send`, exact send and Zulip-group grants authorize both text and uploads.
 Review former text-only roles; remove obsolete `zulip_send_attachment` and
 `zulip:attach` grants. There is no argument-level upload permission.
 
@@ -236,7 +245,7 @@ Send-only rejects nonempty attachment lists.
 
 The installed executable must implement `zulip_list_attachments` and
 `zulip_download_attachment`. Both require ordinary registration and separate
-`zulip:attachments:read`/scoped-tool grants outside the text group.
+`zulip:attachments:read`, scoped-tool or Zulip-group grants.
 
 List using a delivered same-agent `message_ref`; the result contains up to 16
 standard Markdown attachments with untrusted names and opaque `attachment_ref`.
@@ -253,7 +262,7 @@ and restart can invalidate them. Relist rather than reusing stale selections.
 ### Room participants
 
 `zulip_list_room_participants {"message_ref":"zulip-message:…","limit":20,"offset":0}`
-requires `zulip:participants:read` (default off, outside the text group), the current
+requires a `zulip:participants:read`, scoped-tool or Zulip-group grant (default off), the current
 ordinary receiver, and a currently owned inbound source. Historical reads and
 proactive sends do not create this authority.
 
@@ -275,8 +284,8 @@ eviction, expiry or restart can invalidate them.
 
 ### User profiles and automatic avatars
 
-`zulip_get_user_profile {"user_id":"123"}` requires `zulip:profiles:read` (default
-off, outside the ordinary group), the current receiver and queue identity.
+`zulip_get_user_profile {"user_id":"123"}` requires a `zulip:profiles:read`,
+scoped-tool or Zulip-group grant (default off), the current receiver and queue identity.
 It is absent in send-only mode. Canonical nonzero decimal u64 IDs can address
 API-visible realm users/bots outside sender tiers. Opaque `zulip-sender:…` works
 for configured tiers, self and retained participant locators; unknown opaque IDs
@@ -336,7 +345,7 @@ or establish that a later build fixes the reported avatar incident.
 
 `zulip_update_self_profile` accepts `{"avatar":"<tau-artifact:blake3:…>"}` or a bare
 `blake3:…` key. `{"avatar":null}` resets to the realm default, which may not be blank.
-The separate default-off `zulip:profiles:write` grant is outside the text group.
+Enable it through its default-off `zulip:profiles:write` tag, exact tool or Zulip group.
 It requires the current ordinary receiver and is absent in send-only mode.
 Obtain authorization before changing grants or live configuration.
 
@@ -349,7 +358,7 @@ Unknown outcomes may mean the avatar changed.
 
 ### Linked messages
 
-Enable `zulip_get_message` (`zulip:messages:read`, outside the text group) and call
+Enable `zulip_get_message` through `zulip:messages:read`, its exact tool or the Zulip group and call
 `{"message_id":"<message_ref or linked ID>"}` as current ordinary receiver.
 Reads check current receive routes, author tiers and every DM participant.
 Self messages are readable. `mentions_only` limits live activation, not historical
