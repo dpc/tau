@@ -238,7 +238,7 @@ fn debug_binary_events(data: Vec<u8>) -> Vec<Event> {
 /// terminal, compaction, incoming-report, and interceptor carriers.
 #[test]
 fn referenced_images_never_expose_keys_in_debug_projections() {
-    let key = format!("blake3:{}", "ab".repeat(32));
+    let key = "ab".repeat(12);
     let content = tau_proto::ToolResultContentPart::ImageReference(tau_proto::ImageReference {
         blob: tau_proto::ArtifactDescriptor::new(
             tau_proto::ArtifactKey::parse(key.clone()).expect("key"),

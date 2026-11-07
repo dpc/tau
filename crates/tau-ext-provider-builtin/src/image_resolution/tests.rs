@@ -73,7 +73,8 @@ pub(crate) fn png() -> Vec<u8> {
 /// Captures the prepared bytes, independently of metadata used by each result.
 pub(crate) fn descriptor(bytes: &[u8]) -> ArtifactDescriptor {
     ArtifactDescriptor::new(
-        format!("blake3:{}", blake3::hash(bytes).to_hex())
+        blake3::hash(bytes).to_hex()[..24]
+            .to_owned()
             .parse()
             .expect("key"),
         bytes.len() as u64,

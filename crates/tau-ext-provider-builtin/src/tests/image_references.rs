@@ -29,11 +29,7 @@ fn referenced_context() -> tau_proto::PromptContext {
                     provider_content: vec![tau_proto::ToolResultContentPart::ImageReference(
                         tau_proto::ImageReference {
                             blob: tau_proto::ArtifactDescriptor::new(
-                                tau_proto::ArtifactKey::parse(format!(
-                                    "blake3:{}",
-                                    "ab".repeat(32)
-                                ))
-                                .expect("key"),
+                                tau_proto::ArtifactKey::from_digest(&"ab".repeat(32)).expect("key"),
                                 0,
                             )
                             .expect("descriptor"),
@@ -286,6 +282,7 @@ fn text_only_route_omits_references_without_artifact_fetch() {
     resolver_fixture::with_transport(|_, waker| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("address");
+        let key = resolver_fixture::descriptor(&resolver_fixture::png()).key;
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("request");
             stream
@@ -313,7 +310,7 @@ fn text_only_route_omits_references_without_artifact_fetch() {
             let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
             let wire = body.to_string();
             assert!(wire.contains("image omitted"));
-            assert!(!wire.contains("blake3:"));
+            assert!(!wire.contains(key.as_str()));
             assert!(!wire.contains("data:image/"));
             let response = "data: {\"choices\":[{\"delta\":{\"content\":\"text-only success\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
             write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}", response.len()).expect("response");

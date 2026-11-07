@@ -580,21 +580,16 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         provider_scope: None,
         name: tau_proto::ToolName::new(IMPORT_TOOL_NAME),
         model_visible_name: None,
-        description: Some(
-            "Import a <tau-artifact:KEY> reference into a local temporary file or directory and return its path. Pass export's filename and mime_type hints to preserve useful file names."
-                .to_owned(),
-        ),
+        description: Some("Import a <tau-artifact:KEY> reference as a local path.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "key": {
                     "type": "string",
-                    "pattern": "^(?:[0-9a-f]{24}|blake3:[0-9a-f]{64}|<tau-artifact:(?:[0-9a-f]{24}|blake3:[0-9a-f]{64})>)$",
-                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits> reference returned by export, or a bare key. Full blake3: keys are deprecated and pending removal."
-                },
-                "filename": {"type": "string", "description": "Optional per-use original filename hint returned by export; sanitized and bounded, never used as a destination path"},
-                "mime_type": {"type": "string", "description": "Optional declared MIME hint accompanying the reference; common types add an extension when filename has none, without verifying content"}
+                    "pattern": "^(?:[0-9a-f]{24}|<tau-artifact:[0-9a-f]{24}>)$",
+                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits>."
+                }
             },
             "required": ["key"],
             "additionalProperties": false
@@ -928,9 +923,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         model_visible_name: None,
         description: Some(
             "Read or change your durable workdir. Omit `path` \
-             to read the current path and availability. A provided path is resolved from the \
-             last committed workdir, validated, canonicalized, and persisted. Do not combine a \
-             workdir change with shell or filesystem calls that rely on the new directory."
+             to read the current path."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -1019,12 +1012,10 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
         description: Some(
-            "Run a shell command. The native `output` body is capped at 2000 lines / 15 KiB; \
-             small result metadata is deliberately outside that budget, which does not cap fully \
-             rendered provider text. \
-             truncated results normally provide an exact temporary path to up to 16 MiB of rendered output and mark an incomplete saved artifact honestly; private-storage failures instead report `saved_output_unavailable: true`. \
+            "Run a shell command. The native `output` body is capped. \
+             If truncated, results are saved to a temporary file when possible. \
              Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
-             trailing newlines are marked with `(no_nl)`. Byte totals and artifacts count the complete rendered UTF-8 records, including stream prefixes, flags, and separators, rather than raw process bytes. Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors. For file changes, prefer apply_patch."
+             trailing newlines are marked with `(no_nl)`. Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -1041,7 +1032,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                 },
                 "workdir": {
                     "type": "string",
-                    "description": "Optional working directory for this shell_command invocation only. Relative paths resolve from this shell instance's remembered persistent workdir; omission uses that remembered workdir. This does not change later calls; use the separate top-level workdir(path) tool in an earlier turn to change later calls."
+                    "description": "Working directory for this invocation, relative to one persisted with `workdir` tool. Default: `.`."
                 }
             },
             "required": ["command"],

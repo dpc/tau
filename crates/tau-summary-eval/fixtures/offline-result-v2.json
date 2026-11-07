@@ -4,8 +4,8 @@
   "scoring_contract": "literal-normalized-facts-v1",
   "corpus_id": "tau-summary-quality",
   "corpus_version": 2,
-  "corpus_sha256": "9cab6d4f949b31f5ee6d11e245cae82df6f0fd52afb35d8314eeca05d3f29255",
-  "candidates_sha256": "f673b0856f7fb22bb546fed83e3e10b3db346370cd9952165ecda4ef08348f93",
+  "corpus_sha256": "23d1e49460675b008464f21f64ef8d72a085a853c847f465e59254ab9e9980c7",
+  "candidates_sha256": "e2119bbc9e1a796096d850d30840565aeafcdc0e75d4ee8cecd3ad8dddcbd765",
   "origin": {
     "kind": "offline",
     "generator": "hand-authored-oracle/v2",

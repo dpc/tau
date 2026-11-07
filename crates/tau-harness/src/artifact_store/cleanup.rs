@@ -96,9 +96,7 @@ impl ArtifactStore {
         }
         let candidates = entries
             .iter()
-            .filter_map(|entry| {
-                ArtifactKey::parse(format!("blake3:{}", entry.file_name().to_string_lossy())).ok()
-            })
+            .filter_map(|entry| ArtifactKey::from_digest(&entry.file_name().to_string_lossy()).ok())
             .collect();
         // Never detach from a partial root scan. This includes malformed or
         // missing manifests and exhausted scan budgets.
@@ -113,14 +111,14 @@ impl ArtifactStore {
                 self.detach(&entry.path())?;
                 continue;
             }
-            let Ok(key) = ArtifactKey::parse(format!("blake3:{name}")) else {
+            let Ok(key) = ArtifactKey::from_digest(&name) else {
                 continue;
             };
             if retained.contains(&key) {
                 continue;
             }
             let metadata_path = entry.path().join("meta.json");
-            let metadata = match self.metadata(&key) {
+            let metadata = match self.metadata_at_digest(&name) {
                 Ok(metadata) => metadata,
                 Err(ArtifactError::Integrity) => {
                     found_corruption = true;

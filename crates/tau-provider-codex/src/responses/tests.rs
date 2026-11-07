@@ -390,6 +390,7 @@ fn audited_models_lower_typed_image_inside_function_output() {
 /// lowering, including native compaction and prewarm sizing.
 #[test]
 fn unresolved_image_reference_rejects_codex_request_admission() {
+    let key = tau_proto::ArtifactKey::from_digest(&"ab".repeat(32)).expect("key");
     let items = [ContextItem::ToolResult(ToolResultItem {
         call_id: "image".into(),
         tool_type: tau_proto::ToolType::Function,
@@ -398,12 +399,7 @@ fn unresolved_image_reference_rejects_codex_request_admission() {
         presentation: Default::default(),
         provider_content: vec![ToolResultContentPart::ImageReference(
             tau_proto::ImageReference {
-                blob: tau_proto::ArtifactDescriptor::new(
-                    tau_proto::ArtifactKey::parse(format!("blake3:{}", "ab".repeat(32)))
-                        .expect("key"),
-                    3,
-                )
-                .expect("descriptor"),
+                blob: tau_proto::ArtifactDescriptor::new(key.clone(), 3).expect("descriptor"),
                 media_type: ImageMediaType::Png,
                 width: 1,
                 height: 1,
@@ -433,7 +429,7 @@ fn unresolved_image_reference_rejects_codex_request_admission() {
     require_resolved_images(&text_only, request.context).expect("text-only projection");
     let json = serde_json::to_string(&build_request(&text_only, &request, None)).expect("request");
     assert!(json.contains("image omitted"));
-    assert!(!json.contains("blake3:"));
+    assert!(!json.contains(key.as_str()));
 }
 
 /// Ensures aggregate raw-image and expanded data-URL budgets both omit an image

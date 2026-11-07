@@ -12,7 +12,7 @@ pub(super) fn tool_spec() -> ToolSpec {
         provider_scope: None,
         name: ToolName::new(super::MESSAGE_RELEASE_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Approve immutable delivery of one retained peer review. Only this session's canonical main may call this. Copy the reference from the review; sender, intended worker, body, and notices cannot be edited. A retained worker receipt makes retries return already delivered. Success does not promise inference or a reply.".to_owned()),
+        description: Some("Approve immutable delivery of one retained peer review.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

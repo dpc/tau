@@ -73,12 +73,12 @@
     },
     {
       "id": "artifact-and-retrieval",
-      "input": "Observed: the parser rejects empty objects at src/parse.rs:42. The reproduction is fixtures/empty-object.json. Run cargo test -p sample-parser --test empty_object to reproduce. The patch is not implemented. A comparison artifact is <tau-artifact:blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef>; access has not been checked. Next: implement empty-object support and rerun that test.",
+      "input": "Observed: the parser rejects empty objects at src/parse.rs:42. The reproduction is fixtures/empty-object.json. Run cargo test -p sample-parser --test empty_object to reproduce. The patch is not implemented. A comparison artifact is <tau-artifact:0123456789abcdef01234567>; access has not been checked. Next: implement empty-object support and rerun that test.",
       "required_facts": [
         {"id": "source", "any_of": ["src/parse.rs:42"]},
         {"id": "fixture", "any_of": ["fixtures/empty-object.json"]},
         {"id": "command", "any_of": ["cargo test -p sample-parser --test empty_object"]},
-        {"id": "artifact", "any_of": ["<tau-artifact:blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef>"]},
+        {"id": "artifact", "any_of": ["<tau-artifact:0123456789abcdef01234567>"]},
         {"id": "unverified-access", "any_of": ["artifact access unchecked"]}
       ],
       "forbidden_claims": ["artifact was retrieved", "patch is implemented", "test passed"]

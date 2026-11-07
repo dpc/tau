@@ -19,7 +19,7 @@ fn directory_import_cleanup_and_type_identity() {
     let limits = tau_artifact::Limits::default();
     let bytes = tau_artifact::pack(source.path(), limits, || false).expect("encode fixture");
     let cancel = AtomicBool::new(false);
-    let temp = write_import(&bytes, &cancel, ".txt", limits).expect("import fixture");
+    let temp = write_import(&bytes, &cancel, limits).expect("import fixture");
     let path = temp.path().to_owned();
     assert!(temp.directory);
     assert_eq!(
@@ -29,14 +29,13 @@ fn directory_import_cleanup_and_type_identity() {
     drop(temp);
     assert!(!path.exists());
     cancel.store(true, Ordering::Release);
-    assert!(write_import(&bytes, &cancel, "", limits).is_err());
+    assert!(write_import(&bytes, &cancel, limits).is_err());
     cancel.store(false, Ordering::Release);
-    assert!(write_import(&bytes[..bytes.len() - 1], &cancel, ".txt", limits).is_err());
-    let ordinary =
-        write_import(b"not a directory", &cancel, ".directory", limits).expect("ordinary import");
+    assert!(write_import(&bytes[..bytes.len() - 1], &cancel, limits).is_err());
+    let ordinary = write_import(b"not a directory", &cancel, limits).expect("ordinary import");
     assert!(
         !ordinary.directory,
-        "filename/MIME cannot select extraction"
+        "only typed bundle bytes select extraction"
     );
 }
 
@@ -600,35 +599,7 @@ fn import_write_budget_rejects_bytes_above_aggregate_limit() {
 #[test]
 fn cancelled_private_temp_write_returns_no_path() {
     let cancelled = AtomicBool::new(true);
-    assert!(write_private_temp(b"original", &cancelled, ".png").is_err());
-}
-
-/// Hints must only affect a safe bounded suffix, never a destination directory;
-/// absent or unknown hints must retain the ordinary generic import behavior.
-#[test]
-fn import_hints_sanitize_names_and_use_declared_mime_without_sniffing() {
-    for (name, mime, expected) in [
-        (Some("../../some file.png"), None, "-some_file.png"),
-        (
-            Some(r"C:\unsafe\name.json"),
-            Some("image/png"),
-            "-name.json",
-        ),
-        (
-            Some("notes"),
-            Some("text/plain;charset=utf-8"),
-            "-notes.txt",
-        ),
-        (None, Some(" IMAGE/PNG "), ".png"),
-        (Some("../...\n"), Some("application/pdf"), ".pdf"),
-        (None, Some("unknown/type"), ""),
-        (None, None, ""),
-    ] {
-        assert_eq!(hints::import_suffix(name, mime), expected);
-    }
-    let long = hints::import_suffix(Some(&"x".repeat(1000)), Some("image/png"));
-    assert_eq!(long.len(), 105);
-    assert!(!long.contains(['/', '\\']));
+    assert!(write_private_temp(b"original", &cancelled).is_err());
 }
 
 /// Export can preserve an explicit declaration even when the extension differs;
@@ -654,43 +625,17 @@ fn export_artifact_media_hints_preserve_explicit_claims_and_bound_them() {
     assert!(hint.is_char_boundary(hint.len()));
 }
 
-/// Names and MIME are per-use claims: identical bytes with different hints
-/// create distinct private files while key-only imports never infer a name from
-/// content.
+/// Repeated imports of identical bytes create distinct private generic files,
+/// without recovering a filename from shared storage.
 #[test]
-fn import_temp_names_remain_unique_private_and_per_use() {
+fn import_temp_names_remain_unique_and_private() {
     let cancel = AtomicBool::new(false);
-    let a = write_private_temp(b"same", &cancel, "-first.png").expect("first");
-    let b = write_private_temp(b"same", &cancel, "-first.png").expect("second");
-    let c = write_private_temp(b"same", &cancel, "").expect("key only");
-    let d = write_private_temp(b"same", &cancel, "-different.txt").expect("other hint");
+    let a = write_private_temp(b"same", &cancel).expect("first");
+    let b = write_private_temp(b"same", &cancel).expect("second");
     let a_path = a.path.as_ref().expect("path");
     let b_path = b.path.as_ref().expect("path");
-    let c_path = c.path.as_ref().expect("path");
-    let d_path = d.path.as_ref().expect("path");
     assert_ne!(a_path, b_path);
-    assert!(
-        a_path
-            .file_name()
-            .expect("name")
-            .to_string_lossy()
-            .ends_with("-first.png")
-    );
-    assert!(
-        !c_path
-            .file_name()
-            .expect("name")
-            .to_string_lossy()
-            .contains('.')
-    );
-    assert!(
-        d_path
-            .file_name()
-            .expect("name")
-            .to_string_lossy()
-            .ends_with("-different.txt")
-    );
-    for path in [a_path, b_path, c_path, d_path] {
+    for path in [a_path, b_path] {
         assert_eq!(fs::read(path).expect("bytes"), b"same");
         #[cfg(unix)]
         {
@@ -892,8 +837,8 @@ fn correlated_download_error_closes_known_read_once() {
     let manager = runtime.state_mut();
     manager.bind_session("artifact-session".parse().expect("session id"));
     let (invoke, lifecycle, output, rx) = active_invocation("download-error", IMPORT_TOOL_NAME);
-    let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"x").to_hex()))
-        .expect("key");
+    let key =
+        tau_proto::ArtifactKey::from_digest(blake3::hash(b"x").to_hex().as_str()).expect("key");
     let descriptor = tau_proto::ArtifactDescriptor::new(key.clone(), 1).expect("descriptor");
     let mut download = ArtifactDownload::new(key);
     download

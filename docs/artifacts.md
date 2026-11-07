@@ -108,22 +108,24 @@ Model-facing text refers to an artifact with the canonical Markdown autolink
 the first 96 bits of BLAKE3, without an algorithm label. The example illustrates
 syntax, not an available artifact. Consumers share one formatter/parser;
 `import` and `read_image` also accept the bare 24-digit key.
-The old `blake3:` plus 64-hex syntax, bare or wrapped, remains accepted as
-deprecated input pending removal; no removal date is set.
-Legacy references keep full-digest verification. New references use a fixed
-96-bit identity intended for mostly trusted local development.
+Only the fixed 96-bit identity is accepted. Old algorithm-labelled full-digest
+references, bare or wrapped, are rejected. This identity targets mostly trusted
+local development.
 
 Private storage still uses full-digest paths, so existing originals and protected
 transcript objects remain accessible without renaming. Fixed-width lookup rejects
 ambiguous matches, and publication rejects different bytes sharing an identity.
 There is no arbitrary-length abbreviation lookup or hash-algorithm negotiation.
-Protocol 19.0 and source SDK 0.26.0 require peers to rebuild together; changing
-the source does not update an installed runtime or publish an SDK release.
+Protocol 20.0 and source SDK 0.28.0 require peers to rebuild together.
+Old full-key typed image/history records and upload receipts no longer decode;
+plain-text history and current short-key records are unchanged. There is no
+automatic history or receipt migration. Changing the source does not update an
+installed runtime or publish an SDK release.
 
 The shell extension registers `export(path, mime_type?)` and
-`import(key, filename?, mime_type?)` under ordinary
-tool-role policy. Export reads one local regular file or directory under the shell
-instance's remembered workdir authority, applies the configured stored-byte limit
+`import(key)` under ordinary tool-role policy. Export reads one local regular file
+or directory under the shell instance's remembered workdir authority, applies the
+configured stored-byte limit
 (32 MiB by default), and returns `artifact` and `size` output headers plus bounded
 `filename` and available `mime_type` hints. Explicit MIME wins; otherwise common
 filename extensions supply a best-effort declaration, without content sniffing.
@@ -136,26 +138,16 @@ Artifact storage without granting shell or workdir authority. None of these
 tools exposes store paths, inline original bytes, or execution.
 Tau directory bundles are automatically extracted as described below.
 
-Carry accompanying hints through the assistant workflow, for example
-`import(key="<tau-artifact:FULL_KEY>", filename="report", mime_type="application/pdf")`.
-The private unpredictable filename ends in `-report.pdf`. Names are reduced to
-their basename, sanitized to ASCII letters/digits/dot/dash/underscore, and bounded.
-An existing extension takes precedence over MIME; otherwise a common MIME type
-adds an extension. Unknown MIME types add nothing. No claim verifies media or
-makes content safe.
-
-Hints belong to each use, **not the digest**: key-only import cannot recover
-them and still creates a generic private temporary name. Identical bytes can
-carry different names/media claims without overwriting shared metadata. Preserve
-the hints beside the canonical reference when sharing it, then pass the hints
-separately to import; the reference parser still accepts only the reference/key.
+Import creates a generic private temporary name. Rename the returned local file
+if a useful name or extension is needed. Export hints are per-use claims, not
+stored digest metadata or proof of media validity.
 
 ### Directory artifacts
 
 Export packs directories in-process as versioned tar+zstd bundles. The complete
 bundle, including its identifying header, is the content-addressed original.
-Import recognizes that header even with only a key; MIME and filename hints
-never select extraction. Results include `kind: file` or `kind: directory`.
+Import recognizes that header from the bytes, not a media declaration. Results
+include `kind: file` or `kind: directory`.
 Directory exports always advertise `application/vnd.tau.directory`.
 Malformed or unsupported typed bundles fail rather than becoming regular files.
 Ordinary tar/zstd files without the Tau header remain ordinary files.

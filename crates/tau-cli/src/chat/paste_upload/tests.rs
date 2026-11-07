@@ -88,7 +88,8 @@ fn finish_original(
     );
     let finalize = read_request(reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let key: tau_proto::ArtifactKey = format!("blake3:{}", blake3::hash(bytes).to_hex())
+    let key: tau_proto::ArtifactKey = blake3::hash(bytes).to_hex()[..24]
+        .to_owned()
         .parse()
         .expect("original key");
     reply(
@@ -192,7 +193,8 @@ fn copied_files_upload_sequentially_and_retry_without_partial_prompt_insertion()
     );
     let finalize = read_request(&mut reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let second_key = format!("blake3:{}", blake3::hash(b"second").to_hex())
+    let second_key = blake3::hash(b"second").to_hex()[..24]
+        .to_owned()
         .parse()
         .expect("key");
     reply(
@@ -213,7 +215,8 @@ fn copied_files_upload_sequentially_and_retry_without_partial_prompt_insertion()
             "draft: {}\n{}",
             paste_reference_at(&first_key, &content, 0),
             paste_reference_at(
-                &format!("blake3:{}", blake3::hash(b"second").to_hex())
+                &blake3::hash(b"second").to_hex()[..24]
+                    .to_owned()
                     .parse()
                     .expect("key"),
                 &content,
@@ -307,7 +310,8 @@ fn paste_upload_version_gate() {
 /// labels.
 #[test]
 fn clipboard_artifact_reference_preserves_png_and_normalized_text_hints() {
-    let key = format!("blake3:{}", blake3::hash(b"original").to_hex())
+    let key = blake3::hash(b"original").to_hex()[..24]
+        .to_owned()
         .parse()
         .expect("key");
     let reference = tau_proto::artifact_reference(&key);
@@ -374,7 +378,8 @@ fn png_paste_uses_existing_original_byte_artifact_flow() {
     );
     let finalize = read_request(&mut reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let key = format!("blake3:{}", blake3::hash(&source).to_hex())
+    let key = blake3::hash(&source).to_hex()[..24]
+        .to_owned()
         .parse()
         .expect("original digest key");
     reply(
@@ -529,7 +534,8 @@ fn paste_upload_retry_preserves_identity_and_inserts_only_verified_reference() {
     );
     let finalize = read_request(&mut reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let key = format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
+    let key = blake3::hash(text.as_bytes()).to_hex()[..24]
+        .to_owned()
         .parse()
         .expect("digest key");
     let reference = tau_proto::artifact_reference(&key);

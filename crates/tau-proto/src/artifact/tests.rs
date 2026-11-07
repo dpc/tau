@@ -4,7 +4,7 @@ use super::*;
 /// pages.
 #[test]
 fn listing_prefix_and_page_bounds_are_closed() {
-    for prefix in ["", "b", "blake3:", "blake3:abc012"] {
+    for prefix in ["", "b", "abc012"] {
         assert!(artifact_prefix_valid(prefix));
     }
     for prefix in ["../", "BLAKE3:", "blake3:G", "blake3:a/../"] {
@@ -40,7 +40,7 @@ fn artifact_identity_and_descriptor_decode_is_checked() {
         assert!(serde_json::from_str::<ArtifactUploadId>(&json).is_err());
         assert!(serde_json::from_str::<ArtifactReadId>(&json).is_err());
     }
-    let key = format!("blake3:{}", "a".repeat(64));
+    let key = "a".repeat(24);
     for value in [
         serde_json::json!({"key": "../data", "size": 0}),
         serde_json::json!({"key": key, "size": ARTIFACT_MAX_BYTES + 1}),
@@ -62,12 +62,8 @@ fn artifact_identity_and_descriptor_decode_is_checked() {
 /// Digest spelling is canonical and cannot become an arbitrary filesystem path.
 #[test]
 fn keys_and_operation_bounds_are_canonical() {
-    assert!(artifact_digest(&format!("blake3:{}", "a".repeat(64))).is_some());
-    for key in [
-        "../data",
-        "blake3:abc",
-        &format!("blake3:{}", "A".repeat(64)),
-    ] {
+    assert!(artifact_digest(&"a".repeat(24)).is_some());
+    for key in ["../data", "blake3:abc", &"A".repeat(24)] {
         assert!(artifact_digest(key).is_none());
     }
     let mut request = ArtifactRequest {
@@ -118,33 +114,21 @@ fn artifact_references_round_trip_and_accept_bare_keys() {
     }
 }
 
-/// Old journal/descriptor keys keep their full verification bits, while emitted
-/// references and newly created identities use exactly 96 bits.
+/// Deprecated keys fail at both public reference and typed wire boundaries,
+/// rather than silently discarding digest bits.
 #[test]
-fn legacy_keys_preserve_integrity_and_serialize_unchanged() {
-    let digest = "a".repeat(64);
-    let legacy = ArtifactKey::parse(format!("blake3:{digest}")).expect("legacy");
-    let key = ArtifactKey::from_digest(&digest).expect("short");
-    assert_eq!(key.as_str(), "a".repeat(24));
-    assert_eq!(artifact_reference(&legacy), artifact_reference(&key));
-    let json = serde_json::to_string(&legacy).expect("encode");
-    let decoded: ArtifactKey = serde_json::from_str(&json).expect("old journal");
-    assert_eq!(decoded, legacy);
-    assert_eq!(
-        parse_artifact_reference(&format!("<tau-artifact:{legacy}>")).expect("legacy autolink"),
-        legacy
-    );
-    let different = format!("{}{}", "a".repeat(24), "b".repeat(40));
-    assert!(key.matches_digest(&different));
-    assert!(!legacy.matches_digest(&different));
+fn artifact_keys_reject_deprecated_and_malformed_spellings() {
     for invalid in [
         "a".repeat(23),
         "a".repeat(25),
         "a".repeat(64),
         "A".repeat(24),
-        format!("blake3:{}", "a".repeat(24)),
+        format!("blake3:{}", "a".repeat(64)),
     ] {
-        assert!(ArtifactKey::parse(invalid).is_err());
+        assert!(ArtifactKey::parse(&invalid).is_err());
+        assert!(parse_artifact_reference(&invalid).is_err());
+        assert!(parse_artifact_reference(&format!("<tau-artifact:{invalid}>")).is_err());
+        assert!(serde_json::from_value::<ArtifactKey>(serde_json::json!(invalid)).is_err());
     }
 }
 

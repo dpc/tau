@@ -18,10 +18,8 @@ Model-facing text names an artifact with the canonical Markdown autolink
 `<tau-artifact:0123456789abcdef01234567>`: exactly 24 lowercase hexadecimal
 digits, the first 96 bits of BLAKE3, with no algorithm label. Consumers may
 also accept the bare key. This is a fixed identity, not a variable abbreviation.
-The former `blake3:` plus 64-hex key, bare or wrapped, remains accepted as
-deprecated input pending removal; no removal date is set. Parsers and typed
-historical records retain all legacy bits, and legacy downloads still verify
-the full digest.
+Only the fixed-width key is accepted; former algorithm-labelled full-digest
+references and typed keys are rejected.
 
 Private CAS paths retain full BLAKE3 digests, so existing objects, receipts, and
 protected aliases need no renaming. Short identities resolve to one unique
@@ -29,9 +27,9 @@ full digest across ordinary and protected catalogs; duplicate aliases of that
 digest are not ambiguous. Distinct matching digests fail closed, and publication
 under the store lock rejects collisions rather than overwriting or aliasing
 different bytes. Lookup scans have bounded memory and a two-second decision
-budget between filesystem calls. Roots in either format retain the corresponding
-physical object. New publications and model-facing references use short keys;
-historical typed keys and exact legacy lookup are not rewritten.
+budget between filesystem calls. Current typed roots retain their corresponding
+physical objects. No physical-store migration is required. Old full-key typed
+history and upload receipts do not decode; ordinary textual history is unchanged.
 
 The 96-bit identity targets mostly trusted local development. It makes no new
 adversarial-content security claim and adds no algorithm-negotiation mechanism.
@@ -223,7 +221,7 @@ Hints travel beside references, never as digest-indexed metadata; key-only
 imports cannot recover them. Shell `import` validates a canonical reference or
 bare key, verifies the complete download, and publishes only private
 non-executable temporary-path and byte-size output headers on the shell execution
-host, optionally using accompanying hints for a sanitized basename or media suffix.
+host. Import accepts only the key and creates a generic temporary name.
 These tools never expose harness store paths or original bytes through
 model text; import and inspection do not renew age.
 

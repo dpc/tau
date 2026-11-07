@@ -114,10 +114,9 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
             result.provider_content = vec![tau_proto::ToolResultContentPart::ImageReference(
                 tau_proto::ImageReference {
                     blob: tau_proto::ArtifactDescriptor::new(
-                        tau_proto::ArtifactKey::parse(format!(
-                            "blake3:{}",
-                            blake3::hash(&image.data).to_hex()
-                        ))
+                        tau_proto::ArtifactKey::from_digest(
+                            &(blake3::hash(&image.data).to_hex()).to_string(),
+                        )
                         .expect("key"),
                         image.data.len() as u64,
                     )

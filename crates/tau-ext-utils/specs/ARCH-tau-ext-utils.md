@@ -32,23 +32,21 @@ The reporter is declared unless its configured instance sets
 its effective visibility.
 
 The independent `papercut_history.enable: true` switch declares three otherwise
-absent history tools: metadata-only `papercut_list`, whole-active-history
+absent history tools: metadata-only `papercut_list`, single-report
 `papercut_read`, and whole-active-file `papercut_archive`. Their registration
 defaults off for every role, and their distinct `papercut_history` group prevents
 ordinary reporter-group grants from authorizing history; exact role grants or an
 explicit history-group grant are required. All use the
 reporter's authenticated User-scope instance and the same locked active file
-as the operator CLI. The two readers each take a separate snapshot; neither
-reserves records for archive. Only a complete, validated read returns its opaque
-generation; oversized results fail without returning partial reports or a
-generation. Archive requires the caller to supply it as `expected_generation`,
-checks it against the current snapshot, and validates the shared v1 record contract
-before requesting conditional archival with the same generation. The generation
-identifies the returned snapshot; it does not prove semantic review. The harness
-verifies that the complete file generation still matches while holding the
-reporter's append lock, then renames the file to the first unused numbered
-archive without replacing an existing file and syncs the directory. If the file
-changes concurrently, archival fails rather than including a new, unseen report.
+as the operator CLI. List returns numbered metadata and a complete-file generation.
+Read requires a one-based index and that expected generation, and returns only the
+selected report. Stale generations and invalid indices fail. Archive requires the
+listed generation; callers should read all listed reports first. The extension
+validates the current snapshot and the shared v1 record contract before requesting
+conditional archival. The generation identifies bytes; it does not prove semantic review.
+The harness checks the same generation under the reporter's append lock, renames
+to the first unused numbered archive without replacement, and syncs the directory.
+A concurrent append makes archival fail rather than archive a different snapshot.
 These tools neither enumerate nor delete the private archives.
 
 The dedicated inspection bootstrap runs before timer state, timezone discovery

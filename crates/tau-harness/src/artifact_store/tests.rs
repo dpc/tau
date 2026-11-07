@@ -595,8 +595,7 @@ fn durable_intent_recovery_and_completed_receipt_expiry() {
         version: 1,
         owner: "tool/session".to_owned(),
         descriptor: ArtifactDescriptor::new(
-            ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"bytes").to_hex()))
-                .expect("valid key"),
+            ArtifactKey::from_digest(blake3::hash(b"bytes").to_hex().as_str()).expect("valid key"),
             5,
         )
         .expect("valid descriptor"),

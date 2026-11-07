@@ -55,15 +55,8 @@ impl ArtifactSignature {
 /// Accepts only prefixes of the canonical bare-key grammar.
 #[must_use]
 pub fn artifact_prefix_valid(prefix: &str) -> bool {
-    (prefix.len() <= super::ARTIFACT_DIGEST_HEX_LEN
+    prefix.len() <= super::ARTIFACT_DIGEST_HEX_LEN
         && prefix
             .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        || "blake3:".starts_with(prefix)
-        || prefix.strip_prefix("blake3:").is_some_and(|hex| {
-            hex.len() <= 64
-                && hex
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }

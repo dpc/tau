@@ -33,7 +33,7 @@ fn rejected_responses_do_not_advance_upload() {
     let before = upload.next_op();
     for (bytes, size) in [(b"original".as_slice(), 7), (b"different".as_slice(), 8)] {
         let descriptor = ArtifactDescriptor::new(
-            tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(bytes).to_hex()))
+            tau_proto::ArtifactKey::from_digest(blake3::hash(bytes).to_hex().as_str())
                 .expect("valid key"),
             size,
         )
@@ -51,7 +51,7 @@ fn rejected_responses_do_not_advance_upload() {
     );
     assert_eq!(upload.next_op(), before);
     let descriptor = ArtifactDescriptor::new(
-        tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"original").to_hex()))
+        tau_proto::ArtifactKey::from_digest(blake3::hash(b"original").to_hex().as_str())
             .expect("valid key"),
         8,
     )

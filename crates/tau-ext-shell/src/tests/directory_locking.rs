@@ -1663,19 +1663,6 @@ fn dir_lock_tool_can_be_disabled_by_config() {
     writer.flush().expect("flush");
 }
 
-/// Keeps the concise model-facing purpose text separate from configuration and
-/// argument details recorded elsewhere in the schema.
-#[test]
-fn dir_lock_tool_has_concise_model_facing_description() {
-    assert_eq!(
-        dir_lock_tool_spec(false).description.as_deref(),
-        Some(
-            "Lock or unlock a directory and its contents for updates. Waits for the lock when \
-             necessary."
-        )
-    );
-}
-
 #[test]
 fn dir_lock_blocks_conflicting_edit_until_unlock() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -3024,9 +3011,8 @@ fn same_agent_edit_reenters_manual_lock_while_shell_auto_lock_is_active() {
     writer.flush().expect("flush");
 }
 
-/// The two shell registrations must advertise noninteractive command guidance,
-/// their respective provider-facing directory spellings, and timeout schema
-/// differences.
+/// Provider-facing directory spellings and timeout shapes differ between the
+/// two registrations; keep both usable through the real startup protocol.
 #[test]
 fn startup_registers_surface_specific_shell_workdir_schemas() {
     // The model-visible schema must advertise the implemented working-directory
@@ -3046,14 +3032,6 @@ fn startup_registers_surface_specific_shell_workdir_schemas() {
             continue;
         };
         if register.tool.name == SHELL_TOOL_NAME || register.tool.name == GPT_SHELL_TOOL_NAME {
-            let description = register.tool.description.as_deref().expect("description");
-            assert!(description.contains(
-                "Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors."
-            ));
-            if register.tool.name == SHELL_TOOL_NAME {
-                assert!(description.contains("structured command results"));
-            }
-            assert!(!description.contains("tool errors"));
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let properties = &parameters["properties"];
             assert!(properties["mode"].is_null());
@@ -3068,19 +3046,8 @@ fn startup_registers_surface_specific_shell_workdir_schemas() {
                 );
                 assert_eq!(properties["workdir"]["type"], serde_json::json!("string"));
                 assert!(properties["cwd"].is_null());
-                assert!(
-                    properties["workdir"]["description"]
-                        .as_str()
-                        .expect("workdir description")
-                        .contains("top-level workdir(path) tool")
-                );
             }
-            assert_eq!(
-                properties["timeout"]["description"],
-                serde_json::json!(
-                    "Timeout in seconds. The command is killed if it exceeds this. Default: 300"
-                )
-            );
+
             assert!(matches!(
                 register.tool.examples.as_slice(),
                 [tau_proto::ToolExample {
@@ -3115,12 +3082,6 @@ fn workdir_schema_keeps_path_optional() {
         .into_iter()
         .find(|tool| tool.name.as_str() == WORKDIR_TOOL_NAME)
         .expect("workdir tool");
-    assert_eq!(
-        tool.description.as_deref(),
-        Some(
-            "Read or change your durable workdir. Omit `path` to read the current path and availability. A provided path is resolved from the last committed workdir, validated, canonicalized, and persisted. Do not combine a workdir change with shell or filesystem calls that rely on the new directory."
-        )
-    );
     let parameters = tool.parameters.expect("workdir parameters");
     assert!(parameters.get("required").is_none());
     assert_eq!(parameters["properties"]["path"]["type"], "string");

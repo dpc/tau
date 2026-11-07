@@ -208,9 +208,8 @@ Review former text-only roles; remove obsolete `zulip_send_attachment` and
 As designated receiver, supply at most ten attachments and exactly one
 `destination` or `reply_to`. Use canonical Artifact autolinks containing a
 24-lowercase-hex key or the bare key, not paths, URLs, inline bytes, `key` or
-`artifact_key` fields. The bridge accepts wrapped or bare legacy
-`blake3:<64 lowercase hex>` keys with full-digest verification. Filenames must
-be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`, without a
+`artifact_key` fields. Old algorithm-labelled full-digest references are rejected.
+Filenames must be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`, without a
 leading dot. Without attachments, `message` must be nonempty; with attachments
 it may be omitted or empty. Substitute a real exported key and authorized
 destination in this example:
@@ -348,8 +347,7 @@ or establish that a later build fixes the reported avatar incident.
 
 `zulip_update_self_profile` accepts
 `{"avatar":"<tau-artifact:0123456789abcdef01234567>"}` or a bare
-24-lowercase-hex key. The bridge accepts wrapped or bare legacy
-`blake3:<64 lowercase hex>` keys with full-digest verification.
+24-lowercase-hex key. Old algorithm-labelled full-digest references are rejected.
 `{"avatar":null}` resets to the realm default, which may not be blank.
 Enable it through its default-off `zulip:profiles:write` tag, exact tool or Zulip group.
 It requires the current ordinary receiver and is absent in send-only mode.

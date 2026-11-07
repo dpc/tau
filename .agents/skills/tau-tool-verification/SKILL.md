@@ -36,13 +36,10 @@ When `export` and `import` are exposed, verify a small original round trip:
 export a local regular file, confirm its `artifact` and `size` output headers,
 import the returned `<tau-artifact:FULL_KEY>` reference, confirm the import's
 `path` and `size` output headers, compare the imported local file byte-for-byte,
-and confirm its private non-executable permissions. Carry returned `filename`
-and `mime_type` hints to import and verify a sanitized useful filename/suffix;
-also verify key-only regular-file import stays generic (hints are not stored by
-digest).
+and confirm its private non-executable permissions and generic temporary name.
 Require exactly 24 lowercase hex digits without an algorithm label in exported
-references. Verify that import accepts deprecated full `blake3:` references and
-verifies their full digests, and that it rejects arbitrary shorter prefixes.
+references. Verify import and read_image reject old algorithm-labelled full-digest
+references and arbitrary shorter prefixes. Import accepts only the key argument.
 Export a small nested directory with an empty directory and binary member, then
 import using only its reference. Check `kind: directory`, the fixed directory
 MIME, exact member bytes and private non-executable permissions. Check that

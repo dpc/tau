@@ -392,9 +392,9 @@ does not prove live OAuth permissions. No new events or `files:read` are needed.
 
 Provide `attachments: [{artifact, filename, content_type?}]`, with at most ten
 entries and 16 MiB total original bytes. `artifact` accepts canonical
-`<tau-artifact:24-lowercase-hex>` or bare 24-lowercase-hex keys. Deprecated full
-`blake3:64-lowercase-hex` keys remain accepted, bare or wrapped, with full-digest
-verification. The larger shared SDK object ceiling does not enlarge Slack's limits.
+`<tau-artifact:24-lowercase-hex>` or bare 24-lowercase-hex keys. Old
+algorithm-labelled full-digest references are rejected. The larger shared SDK
+object ceiling does not enlarge Slack's limits.
 The tool rejects unknown fields. Use the same outbound destination and optional
 reply/thread selectors as text sends. Omitting `attachments` or passing an empty list preserves
 text-only behavior. A nonempty list permits an omitted or empty `message`; text

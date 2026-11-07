@@ -20,6 +20,16 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Unpublished source SDK 0.28.0
+
+Protocol 20.0 / source SDK 0.28.0 remove deprecated full-digest artifact keys.
+Only the fixed 24-lowercase-hex identity is accepted in references and typed DTOs.
+Rebuild configured extensions and UI peers together before activation. Old full-key
+typed image/history records and upload receipts no longer decode; plain-text
+history, current short-key records, and physical full-digest object paths remain
+unchanged. There is no migration. Source changes do not publish the SDK or deploy
+a runtime.
+
 ### Unpublished source SDK 0.27.0
 
 Proto/client 0.27.0 targets protocol 19.1 and adds optional
@@ -34,15 +44,14 @@ are unchanged. This source change does not publish crates or activate runtimes.
 ### Unpublished source SDK 0.26.0
 
 Proto/client 0.26.0 targets protocol 19.0 and emits artifact keys with 24 lowercase
-hex digits (96-bit BLAKE3, no algorithm label). Parsers continue to accept
-deprecated full `blake3:` keys as input and in historical typed records, with
-full-digest verification. Older peers cannot decode short keys, so configured
+hex digits (96-bit BLAKE3, no algorithm label). At that revision, parsers retained
+full keys; protocol 20 removes them. Older peers cannot decode short keys, so configured
 extensions and UIs must rebuild together. Journal framing and existing artifact
 paths remain unchanged. This source update does not publish packages or activate
 installed binaries.
 
 Canonical-main bridge receivers require Configure's advertised protocol major to
-match the SDK's compiled major, currently 19, and accept all minors within that
+match the SDK's compiled major, currently 20, and accept all minors within that
 major. This replaces the stale guard for the feature's introduction in protocol
 16.5. Missing revisions and other majors, including future majors, fail closed.
 Ordinary receiver requests remain unchanged.

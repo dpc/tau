@@ -54,7 +54,8 @@ fn verified_download_waits_for_close_and_rejects_corrupt_originals() {
     for corrupt in [false, true] {
         let (rpc, mut reader) = bridge();
         let bytes = b"exact\0\xfforiginal".to_vec();
-        let key: ArtifactKey = format!("blake3:{}", blake3::hash(&bytes).to_hex())
+        let key: ArtifactKey = blake3::hash(&bytes).to_hex()[..24]
+            .to_owned()
             .parse()
             .expect("canonical digest");
         let descriptor =
@@ -137,14 +138,14 @@ fn completion_rejects_old_prefix_and_keeps_full_keys() {
     assert!(complete(&[""]).is_empty());
     let first = request(&mut reader);
     assert!(matches!(&first.op, ArtifactOp::List { prefix, .. } if prefix.is_empty()));
-    assert!(complete(&["blake3:a"]).is_empty());
+    assert!(complete(&["a"]).is_empty());
     reply(
         &control.rpc,
         first,
         ArtifactValue::Listed { entries: vec![] },
     );
     let second = request(&mut reader);
-    assert!(matches!(&second.op, ArtifactOp::List { prefix, .. } if prefix == "blake3:a"));
+    assert!(matches!(&second.op, ArtifactOp::List { prefix, .. } if prefix == "a"));
     let key: ArtifactKey = "a".repeat(24).parse().expect("canonical key");
     reply(
         &control.rpc,
@@ -159,7 +160,7 @@ fn completion_rejects_old_prefix_and_keeps_full_keys() {
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     let rows = loop {
-        let rows = complete(&["blake3:a"]);
+        let rows = complete(&["a"]);
         if !rows.is_empty() {
             break rows;
         }
@@ -179,22 +180,17 @@ fn completion_rejects_old_prefix_and_keeps_full_keys() {
     worker.join().expect("completion worker exits");
 }
 
-/// A legacy completion query can return a canonical short key, but its visible
-/// digest bits must still match; a hex `b` must not mean the old label.
+/// Completion pages must match the requested fixed-width hex prefix, not an old
+/// algorithm label or an overlong identity.
 #[test]
-fn completion_validates_short_results_for_legacy_prefixes() {
+fn completion_validates_short_results_against_canonical_prefixes() {
     let entries = vec![ArtifactListEntry {
         descriptor: ArtifactDescriptor::new("a".repeat(24).parse().expect("key"), 1)
             .expect("descriptor"),
         last_put_at: 1,
         signature: None,
     }];
-    for prefix in [
-        "a",
-        "bl",
-        "blake3:a",
-        &format!("blake3:{}{}", "a".repeat(24), "b".repeat(40)),
-    ] {
+    for prefix in ["a", "aa"] {
         assert!(valid_page(prefix, &entries), "{prefix}");
     }
     for prefix in ["b", "blake3:b", "blake3:G", &"a".repeat(25)] {

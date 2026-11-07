@@ -59,8 +59,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         result.provider_content = vec![tau_proto::ToolResultContentPart::ImageReference(
             tau_proto::ImageReference {
                 blob: tau_proto::ArtifactDescriptor::new(
-                    tau_proto::ArtifactKey::parse(format!("blake3:{}", "ab".repeat(32)))
-                        .expect("key"),
+                    tau_proto::ArtifactKey::from_digest(&"ab".repeat(32)).expect("key"),
                     3,
                 )
                 .expect("descriptor"),

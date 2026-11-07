@@ -35,7 +35,7 @@ fn roots_are_a_durable_union_without_age_renewal() {
     let mut store = ArtifactStore::new(temp.path());
     let id = owner(&store, "history");
     let (_, mut first) = put(&mut store, "tool", "connection", b"old branch", 1);
-    first.key = ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"old branch").to_hex()))
+    first.key = ArtifactKey::from_digest(blake3::hash(b"old branch").to_hex().as_str())
         .expect("historical full-digest root");
     let (_, second) = put(&mut store, "tool", "connection", b"replacement window", 2);
     let (_, textual) = put(&mut store, "tool", "connection", b"textual link", 3);

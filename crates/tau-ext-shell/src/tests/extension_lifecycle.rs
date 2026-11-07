@@ -194,21 +194,7 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
         .write_event(&tool_started(
             "import-call",
             IMPORT_TOOL_NAME,
-            cbor_text_map(if directory {
-                vec![("key", reference.as_str())]
-            } else {
-                vec![
-                    ("key", reference.as_str()),
-                    (
-                        "filename",
-                        cbor_map_text(&export.result, "filename").expect("filename"),
-                    ),
-                    (
-                        "mime_type",
-                        cbor_map_text(&export.result, "mime_type").expect("MIME"),
-                    ),
-                ]
-            }),
+            cbor_text_map(vec![("key", reference.as_str())]),
             "agent-artifact",
         ))
         .expect("import");
@@ -253,12 +239,11 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
     assert!(rendered_import.contains("path: "));
     let path = PathBuf::from(cbor_map_text(&imported.result, "path").expect("import path"));
     assert!(
-        directory
-            || path
-                .file_name()
-                .expect("basename")
-                .to_string_lossy()
-                .ends_with("-original.png")
+        !path
+            .file_name()
+            .expect("basename")
+            .to_string_lossy()
+            .contains("original")
     );
     let display = imported.display.as_ref().expect("import display");
     assert_eq!(display.args, path.display().to_string());

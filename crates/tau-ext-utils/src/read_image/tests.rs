@@ -13,7 +13,7 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
     source
         .write_to(&mut bytes, ImageFormat::Png)
         .expect("encode fixture");
-    let key = ArtifactKey::parse(format!("blake3:{}", "0".repeat(64))).expect("artifact key");
+    let key = ArtifactKey::from_digest(&"0".repeat(64)).expect("artifact key");
     let reference = tau_proto::artifact_reference(&key);
     let request = ReadImageRequest::from_arguments(&CborValue::Map(vec![(
         CborValue::Text("key".to_owned()),
@@ -71,7 +71,7 @@ fn artifact_request_rejects_path_and_noncanonical_key() {
         CborValue::Text("not-a-key".to_owned()),
     )]);
     assert!(ReadImageRequest::from_arguments(&invalid).is_err());
-    let key = ArtifactKey::parse(format!("blake3:{}", "1".repeat(64))).expect("artifact key");
+    let key = ArtifactKey::from_digest(&"1".repeat(64)).expect("artifact key");
     let bare = CborValue::Map(vec![(
         CborValue::Text("key".to_owned()),
         CborValue::Text(key.to_string()),

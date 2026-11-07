@@ -176,18 +176,14 @@ impl std::fmt::Debug for ArtifactRequest {
 /// Number of hexadecimal digits in the fixed 96-bit artifact identity.
 pub const ARTIFACT_DIGEST_HEX_LEN: usize = 24;
 
-/// Returns the validated digest, retaining all 256 bits of deprecated keys.
+/// Returns the validated fixed-width public artifact identity.
 #[must_use]
 pub fn artifact_digest(key: &str) -> Option<&str> {
-    let (hex, len) = match key.strip_prefix("blake3:") {
-        Some(hex) => (hex, 64),
-        None => (key, ARTIFACT_DIGEST_HEX_LEN),
-    };
-    (hex.len() == len
-        && hex
+    (key.len() == ARTIFACT_DIGEST_HEX_LEN
+        && key
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-    .then_some(hex)
+    .then_some(key)
 }
 
 /// Formats one internal content-address key as the canonical Markdown autolink

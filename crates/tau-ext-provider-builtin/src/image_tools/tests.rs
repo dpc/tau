@@ -415,7 +415,8 @@ fn image_attachment_argument_contract() {
     let base = started();
     let key = descriptor(b"synthetic").key;
     let reference = tau_proto::artifact_reference(&key);
-    let legacy: tau_proto::ArtifactKey = format!("blake3:{}", blake3::hash(b"synthetic").to_hex())
+    let legacy: tau_proto::ArtifactKey = blake3::hash(b"synthetic").to_hex()[..24]
+        .to_owned()
         .parse()
         .expect("legacy");
     for (values, expected) in [
@@ -934,7 +935,8 @@ fn image_availability_failure_does_not_generate() {
 fn image_original_upload_returns_reference_without_path_or_inline_bytes() {
     let original = vec![0x9b; tau_proto::ARTIFACT_CHUNK_BYTES + 7];
     let descriptor = ArtifactDescriptor::new(
-        format!("blake3:{}", blake3::hash(&original).to_hex())
+        blake3::hash(&original).to_hex()[..24]
+            .to_owned()
             .parse()
             .expect("key"),
         original.len() as u64,

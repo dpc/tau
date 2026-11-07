@@ -250,16 +250,7 @@ fn valid_page(prefix: &str, entries: &[ArtifactListEntry]) -> bool {
         && entries.len() <= tau_proto::ARTIFACT_LIST_LIMIT as usize
         && entries.iter().all(|entry| {
             let key = &entry.descriptor.key;
-            if prefix.starts_with("bl") {
-                let prefix = prefix.strip_prefix("blake3:").unwrap_or("");
-                let digest = tau_proto::artifact_digest(key).expect("validated key");
-                // A canonical response contains only 96 bits. The store
-                // filters the full legacy suffix; validate every bit the
-                // response actually carries, without inventing the rest.
-                digest.starts_with(&prefix[..prefix.len().min(digest.len())])
-            } else {
-                key.canonical().starts_with(prefix)
-            }
+            key.as_str().starts_with(prefix)
         })
         && entries.windows(2).all(|pair| {
             pair[0].last_put_at > pair[1].last_put_at

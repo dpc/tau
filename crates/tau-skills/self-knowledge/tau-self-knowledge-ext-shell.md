@@ -16,17 +16,16 @@ advertise: false
 - `export`: uploads one regular file or in-process tar+zstd directory bundle and
   returns `<tau-artifact:FULL_KEY>`, `size`, and available `filename`/`mime_type` headers.
   `FULL_KEY` has exactly 24 lowercase hex digits (96-bit BLAKE3), without an
-  algorithm label. Import continues to accept deprecated full `blake3:` keys
-  pending removal and verifies their full digests.
+  algorithm label. Old full-digest reference syntax is rejected.
   MIME is declared or inferred, not verified. Export renews retention even for
   duplicate bytes; originals outlive ephemeral transcripts. Stored and expanded
   bytes each default to 32 MiB under `artifact_limits` in `harness.yaml`, with
   a 512 MiB configuration ceiling. Directory MIME is fixed; directory roots and
   members cannot be symlinks or special files. Use a quiescent source tree.
 - `import`: verifies artifact size/digest and returns a private mode-0600 `path`.
-  Pass the canonical reference and accompanying filename/MIME hints; hints are
-  not stored by digest. Import recognizes versioned directory bundles by their
-  bytes even with only a key, and extracts them into a private mode-0700 directory.
+  Pass only the canonical reference; rename the returned file locally if needed.
+  Import recognizes versioned directory bundles by their bytes and extracts them
+  into a private mode-0700 directory.
   It extracts only regular files and directories, without executable permissions.
   Results include `kind: file|directory`. Import does not renew retention or
   execute content. Pass image references directly to `read_image` for inspection.

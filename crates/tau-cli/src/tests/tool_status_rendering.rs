@@ -6341,9 +6341,9 @@ fn image_request_metadata_renders_compact_and_expanded_without_tool_special_case
             status_text: "pending".into(),
             payload: Some(tau_proto::ToolUsePayload::Text {
                 text: format!(
-                    "Prompt:\n{prompt}\n\nAttachments:\n1. <tau-artifact:blake3:{}>\n2. <tau-artifact:blake3:{}>",
-                    "a".repeat(64),
-                    "b".repeat(64)
+                    "Prompt:\n{prompt}\n\nAttachments:\n1. <tau-artifact:{}>\n2. <tau-artifact:{}>",
+                    "a".repeat(24),
+                    "b".repeat(24)
                 ),
             }),
             ..Default::default()

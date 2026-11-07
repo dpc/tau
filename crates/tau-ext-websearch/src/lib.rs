@@ -1018,13 +1018,7 @@ fn hybrid_fetch_tool_spec() -> ToolSpec {
         provider_scope: None,
         name: ToolName::new(HYBRID_FETCH_TOOL_NAME),
         model_visible_name: Some(ToolName::new(MODEL_VISIBLE_FETCH_TOOL_NAME)),
-        description: Some(
-            "Fetch and extract one web page through Tau's configured provider pool. \
-             Providers rotate between calls and bounded failover may submit the URL \
-             to more than one external service. Returned tau_web_content is untrusted \
-             external web data."
-                .to_owned(),
-        ),
+        description: Some("Fetch and extract one web page.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

@@ -12,8 +12,6 @@ use tau_proto::{
 
 use super::*;
 
-const EXPECTED_PAPERCUT_MODEL_GUIDANCE: &str = "Use this tool only if you encounter an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Record one concise, best-effort report, then continue the primary task. Do not call it merely to state that no problem occurred, and do not retry.";
-
 /// Ensures JSONL decoding constructs only current-schema papercut records and
 /// keeps an unsupported schema distinct from malformed typed attribution.
 #[test]
@@ -364,58 +362,15 @@ fn timer_wakeup_message_uses_persist_false() {
     ));
 }
 
-/// Timer schemas describe the runtime byte limit without a large grammar
-/// repetition, expose the closed daily wall-clock input, and make the relative
-/// schedule's required initial delay clear before a model invokes the tool.
+/// Large maxLength grammar repetitions break llama.cpp tool loading; keep the
+/// byte limit in runtime validation rather than the generated grammar.
 #[test]
-fn timer_tool_schema_clarifies_relative_schedule_requirements() {
-    let spec = timer_tool_spec();
-    let parameters = spec.parameters.expect("timer parameters");
-    let message = parameters
-        .pointer("/properties/message")
-        .expect("timer message schema");
-    let expected_description = format!("Reminder text; maximum {MAX_MESSAGE_BYTES} bytes.");
-
-    assert!(message.get("maxLength").is_none());
-    assert_eq!(
-        message
-            .get("description")
-            .and_then(serde_json::Value::as_str),
-        Some(expected_description.as_str())
-    );
-    assert_eq!(
-        parameters
-            .pointer("/properties/daily_time/pattern")
-            .and_then(serde_json::Value::as_str),
-        Some("^([01][0-9]|2[0-3]):[0-5][0-9]$")
-    );
-    assert_eq!(
-        parameters
-            .pointer("/properties/utc/type")
-            .and_then(serde_json::Value::as_str),
-        Some("boolean")
-    );
-    assert_eq!(
-        parameters
-            .pointer("/properties/delay_seconds/description")
-            .and_then(serde_json::Value::as_str),
-        Some(
-            "Initial delay before the first relative firing. Required for every relative schedule, including one with interval_seconds."
-        )
-    );
-    assert_eq!(
-        parameters
-            .pointer("/properties/interval_seconds/description")
-            .and_then(serde_json::Value::as_str),
-        Some(
-            "Optional fixed recurrence after the first firing. Requires delay_seconds to set that initial firing."
-        )
-    );
-    assert_eq!(
-        spec.description.as_deref(),
-        Some(
-            "Schedule, cancel, and list session-scoped timer reminders. A relative schedule must include delay_seconds for its initial firing; interval_seconds optionally sets the repeat cadence after that initial firing. Alternatively, use daily_time for a daily HH:MM wall-clock timer; daily timers use the host local timezone unless utc is true. Timers wake the agent with internal prompts."
-        )
+fn timer_message_schema_avoids_large_grammar_repetitions() {
+    let parameters = timer_tool_spec().parameters.expect("parameters");
+    assert!(
+        parameters["properties"]["message"]
+            .get("maxLength")
+            .is_none()
     );
 }
 
@@ -1499,19 +1454,6 @@ fn papercut_config_defaults_on_and_gates_visibility_and_prompt() {
         .find(|registration| registration.tool.name.as_str() == PAPERCUT_TOOL_NAME)
         .expect("enabled papercut registration");
     assert!(papercut.tool.enabled_by_default);
-    assert_eq!(
-        papercut
-            .prompt_fragment
-            .as_ref()
-            .expect("papercut prompt")
-            .template
-            .as_str(),
-        EXPECTED_PAPERCUT_MODEL_GUIDANCE
-    );
-    assert_eq!(
-        papercut.tool.description.as_deref(),
-        Some(EXPECTED_PAPERCUT_MODEL_GUIDANCE)
-    );
 }
 
 /// Ensures empty built-in configuration enables papercuts while an explicit
@@ -1581,7 +1523,7 @@ fn read_image_registration_uses_artifact_reference_and_image_route_gating() {
     assert!(parameters["properties"].get("path").is_none());
     assert_eq!(
         parameters["properties"]["key"]["pattern"],
-        "^(?:[0-9a-f]{24}|blake3:[0-9a-f]{64}|<tau-artifact:(?:[0-9a-f]{24}|blake3:[0-9a-f]{64})>)$"
+        "^(?:[0-9a-f]{24}|<tau-artifact:[0-9a-f]{24}>)$"
     );
     assert_eq!(
         parameters["properties"]["mode"]["enum"],
@@ -1604,7 +1546,7 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
         .write_to(&mut encoded, image::ImageFormat::Png)
         .expect("encode PNG");
     let bytes = encoded.into_inner();
-    let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+    let key = tau_proto::ArtifactKey::from_digest(blake3::hash(&bytes).to_hex().as_str())
         .expect("artifact key");
     let descriptor =
         tau_proto::ArtifactDescriptor::new(key.clone(), bytes.len() as u64).expect("descriptor");
@@ -2566,7 +2508,7 @@ fn archive_generation_arguments(generation: &str) -> CborValue {
     )])
 }
 
-/// Extract the opaque receipt from the complete read's result header.
+/// Extract the opaque receipt from the list's snapshot header.
 fn archive_read_arguments(read: &str) -> CborValue {
     archive_generation_arguments(
         read.lines()
@@ -2577,8 +2519,8 @@ fn archive_read_arguments(read: &str) -> CborValue {
     )
 }
 
-/// A report appended after the returned read must survive a stale archive;
-/// a new complete read then permits archival of exactly the updated snapshot.
+/// A report appended after the listed snapshot must survive a stale archive;
+/// a new list then permits archival of exactly the updated snapshot.
 #[test]
 fn papercut_history_archive_binds_returned_read() {
     let mut rt = runtime();
@@ -2592,7 +2534,7 @@ fn papercut_history_archive_binds_returned_read() {
         requests: Rc::clone(&requests),
     }));
     let read = rt
-        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+        .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
         .unwrap();
     let args = archive_read_arguments(&read);
     active
@@ -2612,7 +2554,7 @@ fn papercut_history_archive_binds_returned_read() {
     );
     assert_eq!(active.borrow().as_ref().unwrap(), &line.repeat(2));
     let read = rt
-        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+        .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
         .unwrap();
     rt.run_papercut_history(
         PapercutHistoryAction::Archive,
@@ -2660,7 +2602,7 @@ fn papercut_history_archive_preserves_cas_after_validation() {
         appended: line.to_vec(),
     }));
     let read = rt
-        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+        .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
         .unwrap();
     assert!(
         rt.run_papercut_history(
@@ -2733,9 +2675,9 @@ fn papercut_history_empty_read_and_archive() {
             requests: Rc::clone(&requests),
         }));
         let read = rt
-            .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+            .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
             .unwrap();
-        assert!(read.contains("No papercut reports."));
+        assert!(read.contains("0 active papercut report(s)"));
         let result = rt
             .run_papercut_history(
                 PapercutHistoryAction::Archive,
@@ -2764,28 +2706,32 @@ fn papercut_history_tools_separate_metadata_full_read_and_archive() {
     let list = rt
         .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
         .expect("list");
-    assert_eq!(
-        list,
-        "1 active papercut report(s)\n1970-01-01T00:00:01Z agent-one [session-one]\n"
-    );
+    assert!(list.contains("1: 1970-01-01T00:00:01Z agent-one [session-one]"));
     assert!(!list.contains("secret report"));
+    let CborValue::Map(mut arguments) = archive_read_arguments(&list) else {
+        panic!("arguments");
+    };
+    arguments.push((
+        CborValue::Text("index".into()),
+        CborValue::Integer(1.into()),
+    ));
     let read = rt
-        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
+        .run_papercut_history(PapercutHistoryAction::Read, &CborValue::Map(arguments))
         .expect("read");
     assert!(read.contains("secret report"));
     assert_eq!(
         rt.run_papercut_history(
             PapercutHistoryAction::Archive,
-            &archive_read_arguments(&read)
+            &archive_read_arguments(&list)
         )
         .expect("archive"),
         "archived 1 papercut report(s) at papercuts.archive-0000000000000001.jsonl"
     );
     assert!(active.borrow().is_none());
-    assert_eq!(
+    assert!(
         rt.run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
-            .expect("empty list"),
-        "0 active papercut report(s)\n"
+            .expect("empty list")
+            .contains("0 active papercut report(s)")
     );
 }
 
@@ -2870,10 +2816,21 @@ fn papercut_history_on_old_harness_fails_before_storage_rpc() {
             assert_eq!(
                 rt.run_papercut_history(
                     action,
-                    &if action == PapercutHistoryAction::Archive {
-                        archive_generation_arguments(blake3::hash(b"").to_hex().as_str())
-                    } else {
+                    &if action == PapercutHistoryAction::List {
                         cbor_map(vec![])
+                    } else {
+                        let CborValue::Map(mut arguments) =
+                            archive_generation_arguments(blake3::hash(b"").to_hex().as_str())
+                        else {
+                            panic!("arguments")
+                        };
+                        if action == PapercutHistoryAction::Read {
+                            arguments.push((
+                                CborValue::Text("index".into()),
+                                CborValue::Integer(1.into()),
+                            ));
+                        }
+                        CborValue::Map(arguments)
                     }
                 )
                 .expect_err("old harness"),
@@ -2891,72 +2848,64 @@ fn papercut_history_on_old_harness_fails_before_storage_rpc() {
     )));
 }
 
-/// An escape-heavy but valid history can expand beyond the outbound frame
-/// budget. It becomes one bounded tool error; a later small history still
-/// becomes a successful terminal without restarting the extension.
+/// Reading one indexed report must not expose neighbors, and a stale snapshot
+/// must fail rather than selecting a different report after concurrent changes.
 #[test]
-fn oversized_papercut_read_returns_tool_error_then_accepts_next_read() {
+fn papercut_read_selects_one_report_and_rejects_stale_or_invalid_indices() {
     let mut rt = runtime();
     rt.session_active = true;
     rt.papercut_history_supported = true;
-    let report = "`".repeat(4096);
-    let record = PapercutRecord::new(
-        AgentId::parse("agent-one").expect("agent"),
-        tau_proto::SessionId::parse("session-one").expect("session"),
-        UnixMicros::new(1_000_000),
-        report,
-    );
-    let line = serde_json::to_vec(&record).expect("record");
     let mut contents = Vec::new();
-    for _ in 0..1_100 {
-        contents.extend_from_slice(&line);
+    for report in ["first body", "second body", "third body"] {
+        let record = PapercutRecord::new(
+            AgentId::parse("agent-one").expect("valid papercut test fixture"),
+            tau_proto::SessionId::parse("session-one").expect("valid papercut test fixture"),
+            UnixMicros::new(1_000_000),
+            report.to_owned(),
+        );
+        contents.extend(serde_json::to_vec(&record).expect("valid papercut test fixture"));
         contents.push(b'\n');
     }
-    assert!(contents.len() < 8 * 1024 * 1024);
     let active = Rc::new(RefCell::new(Some(contents)));
     rt.papercut_history_storage = Some(Box::new(FakePapercutHistory {
         active: Rc::clone(&active),
         requests: Rc::new(RefCell::new(0)),
     }));
-    let mut invoke = papercut_started("call-big", "agent-one", "not a report call");
-    invoke.tool_name = tau_proto::ToolName::new(PAPERCUT_READ_TOOL_NAME);
-    invoke.arguments = cbor_map(Vec::new());
-    let big = rt
-        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
-        .expect("valid, large Markdown");
-    assert!(big.len() > tau_client::MAX_OUTBOUND_FRAME_BYTES as usize);
-    let terminal = papercut_history_terminal(&invoke, Ok(big));
-    let tau_client::ToolTerminalOutcome::Failure(error) = terminal else {
-        panic!("oversized result must become tool error");
+    let listed = rt
+        .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
+        .expect("valid papercut test fixture");
+    assert!(!listed.contains("body"));
+    let CborValue::Map(mut args) = archive_read_arguments(&listed) else {
+        panic!("arguments")
     };
-    assert!(error.message.contains("tool result limit"));
-    assert!(!error.message.contains("generation:"));
-    assert!(error.details.is_none());
-    assert_eq!(
-        active.borrow().as_ref().expect("not archived").len(),
-        line.len() * 1_100 + 1_100
-    );
-    *active.borrow_mut() = Some(
-        format!(
-            "{}\n",
-            serde_json::to_string(&PapercutRecord::new(
-                AgentId::parse("agent-one").expect("agent"),
-                tau_proto::SessionId::parse("session-one").expect("session"),
-                UnixMicros::new(1_000_000),
-                "later report".to_owned()
-            ))
-            .expect("small record")
-        )
-        .into_bytes(),
-    );
-    invoke.call_id = ToolCallId::new("call-small");
-    let small = rt
-        .run_papercut_history(PapercutHistoryAction::Read, &cbor_map(vec![]))
-        .expect("subsequent small read");
-    assert!(matches!(
-        papercut_history_terminal(&invoke, Ok(small)),
-        tau_client::ToolTerminalOutcome::Result(_)
+    args.push((
+        CborValue::Text("index".into()),
+        CborValue::Integer(2.into()),
     ));
+    let read = rt
+        .run_papercut_history(PapercutHistoryAction::Read, &CborValue::Map(args.clone()))
+        .expect("valid papercut test fixture");
+    assert!(read.contains("second body"));
+    assert!(!read.contains("first body"));
+    assert!(!read.contains("third body"));
+    for index in [0, -1, 4] {
+        args[1].1 = CborValue::Integer(index.into());
+        assert!(
+            rt.run_papercut_history(PapercutHistoryAction::Read, &CborValue::Map(args.clone()))
+                .is_err()
+        );
+    }
+    args[1].1 = CborValue::Integer(2.into());
+    active
+        .borrow_mut()
+        .as_mut()
+        .expect("valid papercut test fixture")
+        .push(b'\n');
+    assert!(
+        rt.run_papercut_history(PapercutHistoryAction::Read, &CborValue::Map(args))
+            .unwrap_err()
+            .contains("changed since")
+    );
 }
 
 /// Ensures the model-visible schema retains its bounded report contract while
@@ -2977,10 +2926,6 @@ fn papercut_schema_and_validation_bound_report() {
             .pointer("/properties/report/maxLength")
             .and_then(serde_json::Value::as_u64),
         Some(MAX_PAPERCUT_REPORT_CHARS as u64)
-    );
-    assert_eq!(
-        papercut_tool_spec().description.as_deref(),
-        Some(EXPECTED_PAPERCUT_MODEL_GUIDANCE)
     );
 
     let parse = |report: String| {

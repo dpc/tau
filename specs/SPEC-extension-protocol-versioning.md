@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 20.0 / source SDK 0.28.0 remove deprecated full-digest artifact keys.
+Only the fixed 24-lowercase-hex identity is accepted in references and typed DTOs.
+Rebuild configured extensions and UI peers together before activation. Old full-key
+typed image/history records and upload receipts no longer decode; plain-text
+history, current short-key records, and physical full-digest object paths remain
+unchanged. There is no migration. Source changes do not publish the SDK or deploy
+a runtime.
+
 Protocol 19.1 / source SDK 0.27.0 add optional same-snapshot compaction
 effectiveness estimates to the canonical boundary. Older readers ignore the field;
 new readers treat omission as unknown. Enum, admission, replay authority, and
@@ -17,10 +25,9 @@ separate; this compatible minor revision does not require a coordinated rebuild.
 
 Protocol 19.0 / source SDK 0.26.0 emit fixed 96-bit artifact keys (24 lowercase
 hex digits, no algorithm label). Older peers reject these keys, so configured
-extensions and UI peers must rebuild together. Parsers continue to accept
-deprecated full `blake3:` keys as input and in historical typed records,
-preserving full verification. Journal framing, existing artifact bytes, and
-storage paths do not change. SDK publication and runtime activation remain
+extensions and UI peers must rebuild together. At that revision, parsers retained
+deprecated full keys; protocol 20 removes them. Journal framing, existing artifact
+bytes, and storage paths do not change. SDK publication and runtime activation remain
 separate.
 
 Protocol 18.0 / source SDK 0.25.0 use a fixed 32 MiB outer message ceiling and
@@ -72,7 +79,7 @@ Omitted targets preserve ordinary behavior. The original 16.x SDK required
 Configure's advertised revision to be at least 16.5 within 16.x because older
 harnesses could ignore the constraint. After coordinated major migrations, the
 current SDK requires Configure's advertised protocol major to match its compiled
-major, currently 19, and accepts all minors within that major. Missing revisions
+major, currently 20, and accepts all minors within that major. Missing revisions
 and other majors, including future majors, fail closed. Protocol 16.5 marks the
 historical introduction, not permission for cross-major use. The public
 request and config fields first appeared in source SDK 0.20.0.

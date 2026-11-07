@@ -2228,7 +2228,7 @@ fn assert_finished_report_live_delivery_clears_image_payload(referenced: bool) {
         provider_response_id: None,
         ws_pool_delta: None,
     };
-    let key = format!("blake3:{}", "ab".repeat(32));
+    let key = "ab".repeat(12);
     if referenced {
         let tau_proto::ContextItem::ToolResult(result) = &mut response.output_items[0] else {
             panic!("tool result fixture");

@@ -5,7 +5,7 @@ use crate::*;
 fn reference() -> ToolResultContentPart {
     ToolResultContentPart::ImageReference(ImageReference {
         blob: ArtifactDescriptor::new(
-            ArtifactKey::parse(format!("blake3:{}", "ab".repeat(32))).expect("digest"),
+            ArtifactKey::from_digest(&"ab".repeat(32)).expect("digest"),
             3,
         )
         .expect("descriptor"),
@@ -42,11 +42,26 @@ fn reference_and_legacy_inline_round_trip_without_ambiguous_payloads() {
     assert!(serde_json::from_value::<ToolResultContentPart>(ambiguous_inline).is_err());
 }
 
+/// Old typed image references reject full public keys instead of silently
+/// truncating stored verification identity during historical decode.
+#[test]
+fn historical_full_key_image_reference_is_rejected() {
+    let mut historical = serde_json::to_value(reference()).expect("reference");
+    historical["content"]["blob"]["key"] = serde_json::json!(format!("blake3:{}", "ab".repeat(32)));
+    assert!(serde_json::from_value::<ToolResultContentPart>(historical.clone()).is_err());
+    let encoded = encode_message_to_vec(&historical).expect("historical CBOR");
+    assert!(decode_message_from_slice::<ToolResultContentPart>(&encoded).is_err());
+}
+
 /// Debug and generic projections must not disclose a key that permits fetching.
 #[test]
 fn debug_and_payload_clear_omit_fetchable_reference() {
     let mut part = reference();
-    assert!(!format!("{part:?}").contains("abababab"));
+    let ToolResultContentPart::ImageReference(image) = &part else {
+        panic!("reference fixture")
+    };
+    let key = image.blob.key.clone();
+    assert!(!format!("{part:?}").contains(key.as_str()));
     assert_eq!(part.encoded_image_bytes(), 3);
     part.clear_payload();
     assert!(!part.is_image_reference());
@@ -56,7 +71,7 @@ fn debug_and_payload_clear_omit_fetchable_reference() {
     assert!(
         !serde_json::to_string(&part)
             .expect("projection")
-            .contains("blake3")
+            .contains(key.as_str())
     );
 }
 

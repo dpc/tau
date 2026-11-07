@@ -52,15 +52,10 @@ impl ArtifactStore {
         Ok(self.root.join("transcript-objects").join(digest))
     }
 
-    /// Keeps full legacy locators exact; resolves only fixed-width new
-    /// identities.
+    /// Resolves a public identity to its full private storage digest.
     pub(super) fn storage_digest(&self, key: &ArtifactKey) -> Result<String, ArtifactError> {
         let digest = artifact_digest(key).ok_or(ArtifactError::Invalid)?;
-        if digest.len() == 64 {
-            Ok(digest.to_owned())
-        } else {
-            self.resolve_short_digest(digest)
-        }
+        self.resolve_short_digest(digest)
     }
 
     /// Finds one private full-digest locator across both catalogs, never a
@@ -83,7 +78,11 @@ impl ArtifactStore {
                 let entry = entry.map_err(io_error)?;
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else { continue };
-                if !name.starts_with(digest) || artifact_digest(&format!("blake3:{name}")).is_none()
+                if !name.starts_with(digest)
+                    || name.len() != 64
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                 {
                     continue;
                 }

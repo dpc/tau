@@ -25,7 +25,7 @@ impl SelfInfoTool {
             name: ToolName::new(SELF_INFO_TOOL_NAME),
             model_visible_name: None,
             description: Some(
-                "Return authoritative runtime identity, running Tau build, concise model context and compaction estimates, applicable provider quota usage, and work status for the calling agent."
+                "Return authoritative runtime information about Tau harness, model, inference backend, and other self agent information."
                     .to_owned(),
             ),
             tool_type: ToolType::Function,

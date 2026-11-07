@@ -7,11 +7,10 @@ peers may ignore them. Provider usage, admission, scheduling, and journal framin
 unchanged. See
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 
-Protocol 19.0 / source SDK 0.26.0 use fixed 96-bit artifact keys without an
-algorithm label. The shared key type also retains deprecated full BLAKE3 keys
-when decoding old records or accepting legacy references. Old peers cannot
-decode new keys and must rebuild together. Journal framing is unchanged;
-SDK publication and runtime activation remain separate.
+Protocol 20.0 / source SDK 0.28.0 accept only fixed 96-bit artifact keys without
+an algorithm label. Full-digest public references and old full-key typed records
+and receipts no longer decode. Private full-digest object paths remain unchanged.
+Peers must rebuild together. SDK publication and runtime activation remain separate.
 
 Protocol 18.0 and source SDK 0.25.0 raise the fixed outer message ceiling to
 32 MiB, add Configure artifact limits, and admit original objects up to

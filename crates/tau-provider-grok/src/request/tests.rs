@@ -172,13 +172,10 @@ pub(super) fn image_result() -> ToolResultItem {
 /// retain explicit omission and never expose a fetchable key.
 #[test]
 fn unresolved_image_reference_rejects_grok_request_admission() {
+    let key = tau_proto::ArtifactKey::from_digest(&"ab".repeat(32)).expect("key");
     let mut result = image_result();
     result.provider_content = vec![ToolResultContentPart::ImageReference(ImageReference {
-        blob: ArtifactDescriptor::new(
-            ArtifactKey::parse(format!("blake3:{}", "ab".repeat(32))).expect("key"),
-            3,
-        )
-        .expect("descriptor"),
+        blob: ArtifactDescriptor::new(key.clone(), 3).expect("descriptor"),
         media_type: ImageMediaType::Png,
         width: 1,
         height: 1,
@@ -194,7 +191,7 @@ fn unresolved_image_reference_rejects_grok_request_admission() {
     assert!(Request::lower(&prompt, &model(), 0, &[], true).is_err());
     let omitted = json_request(&prompt, false).to_string();
     assert!(omitted.contains("image omitted"));
-    assert!(!omitted.contains("blake3:"));
+    assert!(!omitted.contains(key.as_str()));
     prompt.operation = PromptOperation::StandaloneCompaction;
     prompt
         .context
@@ -204,7 +201,7 @@ fn unresolved_image_reference_rejects_grok_request_admission() {
         }));
     assert!(Request::lower_compact(&prompt, &model(), &[], true).is_err());
     let omitted = Request::lower_compact(&prompt, &model(), &[], false).expect("compact omission");
-    assert!(!omitted.get().contains("blake3:"));
+    assert!(!omitted.get().contains(key.as_str()));
 }
 
 /// Typed images stay in their tool result while exact opaque JSON survives.

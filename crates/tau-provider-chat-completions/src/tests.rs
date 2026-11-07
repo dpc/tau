@@ -2262,11 +2262,8 @@ fn local_summary_canonical_admission_preserves_identity_policy_and_trigger_check
     };
     results.items[0].provider_content = vec![tau_proto::ToolResultContentPart::ImageReference(
         tau_proto::ImageReference {
-            blob: tau_proto::ArtifactDescriptor::new(
-                format!("blake3:{}", "ab".repeat(32)).parse().expect("key"),
-                1024,
-            )
-            .expect("descriptor"),
+            blob: tau_proto::ArtifactDescriptor::new("ab".repeat(12).parse().expect("key"), 1024)
+                .expect("descriptor"),
             media_type: tau_proto::ImageMediaType::Png,
             width: 17,
             height: 19,
@@ -2462,6 +2459,7 @@ fn image_tool_results_block(call_id: &str, data: impl Into<Arc<[u8]>>) -> tau_pr
 /// needing the bytes.
 #[test]
 fn unresolved_image_reference_rejects_chat_request_admission() {
+    let key = tau_proto::ArtifactKey::from_digest(&"ab".repeat(32)).expect("key");
     let mut created = prompt();
     let mut block = image_tool_results_block("image", [1, 2, 3]);
     let tau_proto::ContextBlock::ToolResults(results) = &mut block else {
@@ -2469,11 +2467,7 @@ fn unresolved_image_reference_rejects_chat_request_admission() {
     };
     results.items[0].provider_content = vec![tau_proto::ToolResultContentPart::ImageReference(
         tau_proto::ImageReference {
-            blob: tau_proto::ArtifactDescriptor::new(
-                tau_proto::ArtifactKey::parse(format!("blake3:{}", "ab".repeat(32))).expect("key"),
-                3,
-            )
-            .expect("descriptor"),
+            blob: tau_proto::ArtifactDescriptor::new(key.clone(), 3).expect("descriptor"),
             media_type: tau_proto::ImageMediaType::Png,
             width: 1,
             height: 1,
@@ -2504,7 +2498,7 @@ fn unresolved_image_reference_rejects_chat_request_admission() {
     let request = try_build_request(&config, &model, &created).expect("text-only omission");
     let json = serde_json::to_string(&request).expect("request");
     assert!(json.contains("image omitted"));
-    assert!(!json.contains("blake3:"));
+    assert!(!json.contains(key.as_str()));
 }
 
 /// An explicitly audited llama.cpp route must receive exact multimodal tool

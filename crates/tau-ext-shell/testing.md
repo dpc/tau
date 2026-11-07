@@ -74,8 +74,7 @@ canonical `<tau-artifact:FULL_KEY>` reference directly into import, and passes
 the returned path as an ordinary filesystem artifact; image inspection consumes
 the same reference directly through `std-utils`.
 Canonical keys have 24 lowercase hex digits and no algorithm label. Coverage
-also checks acceptance of deprecated full `blake3:` keys with full-digest
-verification rather than truncation.
+also checks rejection of deprecated full `blake3:` keys.
 The same protocol roundtrip covers nested directory export and key-only import.
 Codec tests cover deterministic bytes, empty/binary members, exact stored and
 expanded bounds, link/path/type rejection, tar endings and zstd corruption.
@@ -154,11 +153,10 @@ lock-wait snapshots, and unchanged local-to-wire terminal names.
 
 ## Discovery
 
-Artifact transfer tests carry export filename/MIME hints into import and require
-a useful sanitized suffix, unchanged original bytes, and mode-0600 permissions.
-Focused hint tests cover traversal, Windows separators, unsafe characters,
-bounded names, MIME-only suffixes, extension precedence, unknown/missing hints,
-and distinct private tempfiles for identical bytes. Key-only imports stay generic.
+Artifact transfer tests import using only the reference and require generic private
+names, unchanged original bytes, mode-0600 permissions, and distinct temporary
+files for identical bytes. Export-only hint tests cover declared MIME precedence,
+known extension inference, unknown types, and bounded hints.
 
 AGENTS.md tests cover ancestor and local ordering, size caps, user roots before
 project roots, and trusted symlink following. Skill tests cover project/user and

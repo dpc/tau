@@ -387,7 +387,7 @@ fn scripted_response_parts(
         ScriptStep::ImageTool => (
             "200 OK",
             "text/event-stream",
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"prepared-image-call\",\"type\":\"function\",\"function\":{\"name\":\"read_image\",\"arguments\":\"{\\\"key\\\":\\\"blake3:1c22ad7f40a18bbcb1c50dc8a78ac6a1a36b9a0a3c7f9833c965b2ef8100a734\\\"}\"}}]}}]}\n\n\
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"prepared-image-call\",\"type\":\"function\",\"function\":{\"name\":\"read_image\",\"arguments\":\"{\\\"key\\\":\\\"1c22ad7f40a18bbcb1c50dc8\\\"}\"}}]}}]}\n\n\
              data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
              data: [DONE]\n\n",
             None,

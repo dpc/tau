@@ -1962,7 +1962,7 @@ artifact reference into another call:
 ```json
 {
   "prompt": "Keep image 1's composition and transparency; make the leaf blue.",
-  "attachments": ["<tau-artifact:blake3:FULL_DIGEST_FROM_THE_FIRST_RESULT>"]
+  "attachments": ["<tau-artifact:KEY_FROM_THE_FIRST_RESULT>"]
 }
 ```
 

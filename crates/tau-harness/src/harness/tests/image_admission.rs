@@ -886,10 +886,9 @@ fn image_admission_nondurable_modes_never_start_artifact_io() {
         result.provider_content = vec![ToolResultContentPart::ImageReference(
             tau_proto::ImageReference {
                 blob: ArtifactDescriptor::new(
-                    tau_proto::ArtifactKey::parse(format!(
-                        "blake3:{}",
-                        blake3::hash(&bytes).to_hex()
-                    ))
+                    tau_proto::ArtifactKey::from_digest(
+                        &(blake3::hash(&bytes).to_hex()).to_string(),
+                    )
                     .expect("key"),
                     bytes.len() as u64,
                 )
@@ -1085,7 +1084,7 @@ fn tool_started_interception_cannot_change_captured_image_storage() {
     result.provider_content = vec![ToolResultContentPart::ImageReference(
         tau_proto::ImageReference {
             blob: ArtifactDescriptor::new(
-                tau_proto::ArtifactKey::parse(format!("blake3:{}", "ab".repeat(32))).expect("key"),
+                tau_proto::ArtifactKey::from_digest(&"ab".repeat(32)).expect("key"),
                 3,
             )
             .expect("size"),

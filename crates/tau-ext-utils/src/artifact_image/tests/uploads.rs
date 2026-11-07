@@ -115,7 +115,7 @@ fn source_bytes() -> Vec<u8> {
 /// machine.
 fn descriptor(bytes: &[u8]) -> ArtifactDescriptor {
     ArtifactDescriptor::new(
-        ArtifactKey::parse(format!("blake3:{}", blake3::hash(bytes).to_hex())).expect("key"),
+        ArtifactKey::from_digest(blake3::hash(bytes).to_hex().as_str()).expect("key"),
         bytes.len() as u64,
     )
     .expect("descriptor")

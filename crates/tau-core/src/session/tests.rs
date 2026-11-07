@@ -1149,7 +1149,7 @@ fn provider_image_content_rejects_per_agent_aggregate_overflow() {
 fn referenced_image(size: u64) -> tau_proto::ToolResultContentPart {
     tau_proto::ToolResultContentPart::ImageReference(tau_proto::ImageReference {
         blob: tau_proto::ArtifactDescriptor::new(
-            tau_proto::ArtifactKey::parse(format!("blake3:{}", "cd".repeat(32))).expect("key"),
+            tau_proto::ArtifactKey::from_digest(&"cd".repeat(32)).expect("key"),
             size,
         )
         .expect("bounded descriptor"),

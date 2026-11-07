@@ -2097,7 +2097,7 @@ fn skill_tool_spec() -> ToolSpec {
         provider_scope: None,
         name: ToolName::new(SKILL_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Discover available skills not pre-advertised in <available_skills>. If the search resolves to one skill, the full skill is loaded; otherwise matching skill names and descriptions are returned with guidance. Query terms are split on punctuation, lowercased, and deduplicated; hyphenated skill names are preserved. Call with exact skill name to load exact match.".to_owned()),
+        description: Some("Discover available skills. If the search resolves to one skill, the full skill is loaded; otherwise matching skill names and descriptions are returned with guidance. Query terms are split on punctuation, lowercased, and deduplicated; hyphenated skill names are preserved.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Keywords matched case-insensitively against skill names and descriptions."},"search_content":{"type":"boolean","description":"When true, also search the first 64 KiB of the skill file (except the frontmatter). Default false."}},"required":["query"],"additionalProperties":false})),
         format: None,
@@ -2127,7 +2127,7 @@ fn agent_start_tool_spec() -> ToolSpec {
 }
 
 fn message_tool_spec() -> ToolSpec {
-    ToolSpec { provider_scope: None, name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Commit an async message to another agent or another session. Success returns the stable message id and confirms acceptance, not recipient inference, reply, or completion. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. In exact session/agent addresses, `&` and `@` are independently optional. A received CLI message may instead provide a local `!cli-...` address: use it exactly once, only for the final response, never progress; acceptance consumes it without creating a sender fact. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`; in exact session/agent addresses, `&` and `@` are independently optional. Also accepts an explicitly provided local one-shot CLI reply address."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { provider_scope: None, name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send a message to another agent or another session. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. In exact session/agent addresses, `&` and `@` are independently optional. A received CLI message may instead provide a local `!cli-...` address: use it exactly once, only for the final response, never progress.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`; in exact session/agent addresses, `&` and `@` are independently optional. Also accepts an explicitly provided local one-shot CLI reply address."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {
@@ -2156,9 +2156,13 @@ fn session_list_tool_spec() -> ToolSpec {
         provider_scope: None,
         name: ToolName::new(SESSION_LIST_TOOL_NAME),
         model_visible_name: None,
-        description: Some("List a bounded, redacted snapshot of live Tau sessions available for inter-session messaging. Results are racy and sorted by session id.".to_owned()),
+        description: Some(
+            "List live Tau sessions available for inter-session messaging.".to_owned(),
+        ),
         tool_type: ToolType::Function,
-        parameters: Some(serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":256,"description":"Optional case-insensitive literal match over session id or project label."},"limit":{"type":"integer","minimum":1,"maximum":DISCOVERY_MAX_RESULTS}},"additionalProperties":false})),
+        parameters: Some(
+            serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":256,"description":"Optional case-insensitive literal match over session id or project label."},"limit":{"type":"integer","minimum":1,"maximum":DISCOVERY_MAX_RESULTS}},"additionalProperties":false}),
+        ),
         format: None,
         tags: vec![tau_proto::ToolTag::new("harness:discovery:session")],
         enabled_by_default: false,

@@ -4,7 +4,7 @@ use super::*;
 /// authority; an omitted name is resolved only after verified byte inference.
 #[test]
 fn explicit_file_grammar_and_safe_names() {
-    let key = format!("blake3:{}", "a".repeat(64));
+    let key = "a".repeat(24);
     let default = Command::parse(&format!("{key} --file")).expect("default file command");
     assert!(matches!(default.mode, Mode::File(None)));
     for name in [

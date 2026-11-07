@@ -80,7 +80,7 @@ fn queued_cancellation_precedes_ready_decoder_completion() {
         .write_to(&mut encoded, image::ImageFormat::Png)
         .expect("encode PNG");
     let bytes = encoded.into_inner();
-    let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+    let key = tau_proto::ArtifactKey::from_digest(blake3::hash(&bytes).to_hex().as_str())
         .expect("artifact key");
     let call_id = ToolCallId::new("queued-cancel");
     let invoke = ToolStarted {

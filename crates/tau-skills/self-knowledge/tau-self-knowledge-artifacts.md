@@ -10,9 +10,8 @@ Tau stores immutable original bytes under a content-addressed key. The
 model-facing reference is `<tau-artifact:FULL_KEY>`: use the **complete** returned
 reference directly with `import` or `read_image`, without removing the wrapper.
 `FULL_KEY` is exactly 24 lowercase hex digits (96 bits of BLAKE3), with no
-algorithm label. Old `blake3:` plus 64-hex keys remain accepted as deprecated
-input pending removal; no removal date is set. Existing objects remain accessible,
-and legacy input keeps full-digest verification. Do not shorten keys further.
+algorithm label. No old full-digest syntax or shorter prefixes are accepted.
+Existing stored originals remain accessible through short keys.
 `export(path)` reads one regular file or directory under the shell instance's
 remembered workdir authority and returns an artifact reference and size. `import(key)`
 verifies the original and writes a private mode-0600 temporary file on the
@@ -20,9 +19,9 @@ shell execution host, returning its path and size. `read_image(key)` consumes
 the original without granting shell or filesystem authority; use it for images
 when available. All three remain subject to their respective tool-role policy.
 Directory export packs a versioned tar+zstd bundle in-process. Key-only import
-recognizes its bytes and extracts a private directory; filename/MIME hints do
-not select extraction. Results include `kind: file|directory`. The codec supports
-only regular files and directories and does not restore executable permissions.
+recognizes its bytes and extracts a private directory. Results include
+`kind: file|directory`. The codec supports only regular files and directories
+and does not restore executable permissions.
 It rejects directory symlinks and special files; use a quiescent source tree.
 `artifact_limits.stored_bytes` and `expanded_bytes` in `harness.yaml` each default
 to 32 MiB and accept integer bytes through 512 MiB. Image and clipboard limits

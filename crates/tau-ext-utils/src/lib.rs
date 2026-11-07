@@ -14,6 +14,7 @@ mod read_image;
 mod tests;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
@@ -45,7 +46,7 @@ pub const PAPERCUT_READ_TOOL_NAME: &str = "papercut_read";
 pub const PAPERCUT_ARCHIVE_TOOL_NAME: &str = "papercut_archive";
 /// Model-visible artifact image inspection tool name.
 pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
-const PAPERCUT_MODEL_GUIDANCE: &str = "Use this tool only if you encounter an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Record one concise, best-effort report, then continue the primary task. Do not call it merely to state that no problem occurred, and do not retry.";
+const PAPERCUT_MODEL_GUIDANCE: &str = "Use this tool to report an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Record one concise, best-effort report, then continue the primary task. Do not call it merely to state that no problem occurred, and do not retry.";
 
 /// Canonical JSONL filename owned by the standard papercut reporter.
 pub const PAPERCUT_FILE_NAME: &str = tau_proto::PAPERCUT_FILE_NAME;
@@ -1125,7 +1126,7 @@ impl TimerRuntime {
         action: PapercutHistoryAction,
         arguments: &CborValue,
     ) -> Result<String, String> {
-        let expected_generation = papercut_history_generation(action, arguments)?;
+        let (expected_generation, index) = papercut_history_arguments(action, arguments)?;
         if !self.session_active {
             return Err("no active session is available".to_owned());
         }
@@ -1139,16 +1140,17 @@ impl TimerRuntime {
         let contents = storage.read()?;
         let generation = blake3::hash(contents.as_deref().unwrap_or_default()).to_hex();
         if expected_generation.is_some_and(|expected| expected != generation.as_str()) {
-            return Err(
-                "papercut records changed since the complete read; read again before archiving"
-                    .to_owned(),
-            );
+            return Err("papercut records changed since listing; list again".to_owned());
         }
         let records = papercut_history::parse_records(contents.as_deref().unwrap_or_default())?;
         match action {
             PapercutHistoryAction::List => {
-                let mut output = format!("{} active papercut report(s)\n", records.len());
-                for record in records {
+                let mut output = format!(
+                    "generation: {generation}\n{} active papercut report(s)\n",
+                    records.len()
+                );
+                for (index, record) in records.iter().enumerate() {
+                    let _ = write!(&mut output, "{}: ", index + 1);
                     output.push_str(&papercut_history::format_timestamp(record.timestamp_us())?);
                     output.push(' ');
                     output.push_str(record.agent_id().as_str());
@@ -1159,8 +1161,10 @@ impl TimerRuntime {
                 Ok(output)
             }
             PapercutHistoryAction::Read => {
-                let markdown = papercut_history::format_markdown(&records)?;
-                Ok(format!("generation: {generation}\n\n{markdown}"))
+                let record = records
+                    .get(index.expect("read requires an index") - 1)
+                    .ok_or_else(|| "papercut index is out of range".to_owned())?;
+                papercut_history::format_markdown(std::slice::from_ref(record))
             }
             PapercutHistoryAction::Archive => {
                 let Some(_) = contents else {
@@ -1551,17 +1555,14 @@ fn tool_registrations(
     }
     if papercut_history_enabled {
         registrations.extend([
-            papercut_history_registration(
-                PAPERCUT_LIST_TOOL_NAME,
-                "List timestamps and attribution for active papercut reports, without report bodies.",
-            ),
+            papercut_history_registration(PAPERCUT_LIST_TOOL_NAME, "List active papercut reports."),
             papercut_history_registration(
                 PAPERCUT_READ_TOOL_NAME,
-                "Read all active papercut reports as copyable Markdown, including their full bodies and an opaque generation for archival.",
+                "Read an active papercut report.",
             ),
             papercut_history_registration(
                 PAPERCUT_ARCHIVE_TOOL_NAME,
-                "Archive the complete active papercut file only if it matches expected_generation from a successful complete papercut_read. Never delete preserved reports; changed history requires another read.",
+                "Archive the listed papercut snapshot after reading its reports.",
             ),
         ]);
     }
@@ -1580,26 +1581,36 @@ fn papercut_history_registration(
             model_visible_name: None,
             description: Some(description.to_owned()),
             tool_type: ToolType::Function,
-            parameters: Some(if name == PAPERCUT_ARCHIVE_TOOL_NAME {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "expected_generation": {
-                            "type": "string",
-                            "pattern": "^[0-9a-f]{64}$",
-                            "description": "Opaque generation returned by the complete papercut_read being archived."
-                        }
-                    },
-                    "required": ["expected_generation"],
-                    "additionalProperties": false
-                })
-            } else {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                })
-            }),
+            parameters: Some(
+                if name == PAPERCUT_ARCHIVE_TOOL_NAME || name == PAPERCUT_READ_TOOL_NAME {
+                    let mut schema = serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "expected_generation": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$",
+                                "description": "Snapshot generation returned by papercut_list."
+                            }
+                        },
+                        "required": ["expected_generation"],
+                        "additionalProperties": false
+                    });
+                    if name == PAPERCUT_READ_TOOL_NAME {
+                        schema["properties"]["index"] = serde_json::json!({
+                            "type": "integer", "minimum": 1,
+                            "description": "One-based report index from papercut_list."
+                        });
+                        schema["required"] = serde_json::json!(["expected_generation", "index"]);
+                    }
+                    schema
+                } else {
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    })
+                },
+            ),
             format: None,
             tags: vec![],
             enabled_by_default: false,
@@ -1842,33 +1853,53 @@ fn report_papercut_history_tool(
 }
 
 /// Require the caller's read generation before issuing any archive storage RPC.
-fn papercut_history_generation(
+fn papercut_history_arguments(
     action: PapercutHistoryAction,
     arguments: &CborValue,
-) -> Result<Option<&str>, String> {
+) -> Result<(Option<&str>, Option<usize>), String> {
     let CborValue::Map(arguments) = arguments else {
         return Err("papercut history arguments must be an object".to_owned());
     };
-    if !matches!(action, PapercutHistoryAction::Archive) {
+    if matches!(action, PapercutHistoryAction::List) {
         return if arguments.is_empty() {
-            Ok(None)
+            Ok((None, None))
         } else {
-            Err("papercut list and read accept no arguments".to_owned())
+            Err("papercut list accepts no arguments".to_owned())
         };
     }
-    if let [(CborValue::Text(key), CborValue::Text(generation))] = arguments.as_slice()
-        && key == "expected_generation"
-        && generation.len() == 64
-        && generation
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Ok(Some(generation));
+    let mut generation = None;
+    let mut index = None;
+    for (key, value) in arguments {
+        match (key, value) {
+            (CborValue::Text(key), CborValue::Text(value))
+                if key == "expected_generation"
+                    && generation.is_none()
+                    && value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+            {
+                generation = Some(value.as_str())
+            }
+            (CborValue::Text(key), CborValue::Integer(value))
+                if key == "index"
+                    && index.is_none()
+                    && matches!(action, PapercutHistoryAction::Read) =>
+            {
+                index = Some(
+                    usize::try_from(*value)
+                        .ok()
+                        .filter(|index| *index > 0)
+                        .ok_or_else(|| "papercut index must be a positive integer".to_owned())?,
+                )
+            }
+            _ => return Err("invalid papercut history arguments".to_owned()),
+        }
     }
-    Err(
-        "papercut archive requires only expected_generation from a complete papercut_read"
-            .to_owned(),
-    )
+    if generation.is_none() || (matches!(action, PapercutHistoryAction::Read) && index.is_none()) {
+        return Err("papercut read requires index and expected_generation; archive requires expected_generation".to_owned());
+    }
+    Ok((generation, index))
 }
 
 /// Select a bounded terminal before sending anything through the writer.
@@ -2072,7 +2103,7 @@ fn timer_tool_spec() -> ToolSpec {
         provider_scope: None,
         name: tau_proto::ToolName::new(TIMER_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Schedule, cancel, and list session-scoped timer reminders. A relative schedule must include delay_seconds for its initial firing; interval_seconds optionally sets the repeat cadence after that initial firing. Alternatively, use daily_time for a daily HH:MM wall-clock timer; daily timers use the host local timezone unless utc is true. Timers wake the agent with internal prompts.".to_owned()),
+        description: Some("Manage timer reminders. A relative schedule must include delay_seconds for its initial firing; interval_seconds optionally sets the repeat cadence after that initial firing. Alternatively, use daily_time for a daily HH:MM wall-clock timer. Timers wake the agent with internal prompts.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -2082,7 +2113,7 @@ fn timer_tool_spec() -> ToolSpec {
                 "delay_seconds": {"type": "integer", "minimum": MIN_DELAY_SECONDS, "maximum": MAX_DELAY_SECONDS, "description": "Initial delay before the first relative firing. Required for every relative schedule, including one with interval_seconds."},
                 "interval_seconds": {"type": "integer", "minimum": MIN_INTERVAL_SECONDS, "maximum": MAX_DELAY_SECONDS, "description": "Optional fixed recurrence after the first firing. Requires delay_seconds to set that initial firing."},
                 "daily_time": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "description": "Daily wall-clock time in exact HH:MM format. Mutually exclusive with delay_seconds and interval_seconds."},
-                "utc": {"type": "boolean", "description": "Use UTC for daily_time. Omitted or false uses the running host's local timezone."},
+                "utc": {"type": "boolean", "description": "Use UTC instead of local timezone."},
                 // Keep the byte limit in runtime validation: JSON Schema
                 // maxLength counts characters, and large values also produce
                 // grammar repetitions that llama.cpp refuses to parse.
@@ -2135,30 +2166,25 @@ fn read_image_tool_spec() -> ToolSpec {
         provider_scope: None,
         name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
         model_visible_name: None,
-        description: Some(
-            "Read one stored artifact image for visual inspection from a canonical \
-             <tau-artifact:FULL_KEY> reference. A bare internal key is also accepted. The artifact \
-             must already exist in configured persistent storage."
-                .to_owned(),
-        ),
+        description: Some("Read one tau-artifact reference for visual inspection.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "key": {
                     "type": "string",
-                    "pattern": "^(?:[0-9a-f]{24}|blake3:[0-9a-f]{64}|<tau-artifact:(?:[0-9a-f]{24}|blake3:[0-9a-f]{64})>)$",
-                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits> reference for one PNG, JPEG, or WebP image, or a bare key. Full blake3: keys are deprecated and pending removal."
+                    "pattern": "^(?:[0-9a-f]{24}|<tau-artifact:[0-9a-f]{24}>)$",
+                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits> reference for one PNG, JPEG, or WebP image, or a bare key."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["high", "overview"],
                     "default": "high",
-                    "description": "Local preparation profile. `high` (the default) preserves the existing 2048-side/2500-patch bounds. `overview` is experimental, intended only for coarse inspection, and is bounded to 1024 pixels on a side and 600 32px patches."
+                    "description": "`high` (the default) preserves the high fidelity. `overview` for very coarse inspection."
                 },
                 "region": {
                     "type": "object",
-                    "description": "Optional crop in pixels of the EXIF-oriented source raster, before mode resizing. Uses a top-left origin and half-open extents.",
+                    "description": "Optional crop in pixels. Uses a top-left origin and half-open extents.",
                     "properties": {
                         "x": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
                         "y": {"type": "integer", "minimum": 0, "maximum": u32::MAX},

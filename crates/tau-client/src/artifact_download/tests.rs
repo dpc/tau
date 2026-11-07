@@ -1,42 +1,11 @@
 use super::*;
 
-/// A full legacy reference must not silently downgrade to 96-bit verification
-/// when a response contains bytes matching only its short prefix.
-#[test]
-fn legacy_download_verifies_the_digest_suffix() {
-    let bytes = b"original";
-    let full = blake3::hash(bytes).to_hex();
-    let short = ArtifactKey::from_digest(full.as_str()).expect("short key");
-    let wrong_legacy =
-        ArtifactKey::parse(format!("blake3:{}{}", short, "0".repeat(40))).expect("legacy key");
-    for (key, expected) in [
-        (short, Ok(())),
-        (wrong_legacy, Err(ArtifactError::Integrity)),
-    ] {
-        let mut download = ArtifactDownload::new(key.clone());
-        download
-            .accept(ArtifactValue::Opened {
-                read: "read".parse().expect("read"),
-                descriptor: ArtifactDescriptor::new(key, bytes.len() as u64).expect("descriptor"),
-            })
-            .expect("open");
-        assert_eq!(
-            download.accept(ArtifactValue::Chunk {
-                offset: 0,
-                bytes: bytes.to_vec(),
-                eof: true,
-            }),
-            expected
-        );
-    }
-}
-
 /// Explicit consumers can read larger originals, while image/clipboard users of
 /// the legacy constructor reject descriptors before allocating any chunk
 /// buffer.
 #[test]
 fn explicit_download_limit_preserves_legacy_consumers() {
-    let key = ArtifactKey::parse(format!("blake3:{}", "a".repeat(64))).expect("fixture key");
+    let key = ArtifactKey::from_digest(&"a".repeat(64)).expect("fixture key");
     let value = ArtifactValue::Opened {
         read: "read".parse().expect("fixture read ID"),
         descriptor: ArtifactDescriptor::new(key.clone(), 32 * 1024 * 1024)
@@ -68,8 +37,7 @@ fn explicit_download_limit_preserves_legacy_consumers() {
 /// chunk framing are otherwise valid; a best-effort close remains available.
 #[test]
 fn corrupt_original_is_not_exposed() {
-    let key = ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"good").to_hex()))
-        .expect("valid key");
+    let key = ArtifactKey::from_digest(blake3::hash(b"good").to_hex().as_str()).expect("valid key");
     let mut download = ArtifactDownload::new(key.clone());
     download
         .accept(ArtifactValue::Opened {
@@ -93,8 +61,7 @@ fn corrupt_original_is_not_exposed() {
 /// responses before they can make a completed original available.
 #[test]
 fn incorrect_range_and_eof_are_rejected() {
-    let key = ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"good").to_hex()))
-        .expect("valid key");
+    let key = ArtifactKey::from_digest(blake3::hash(b"good").to_hex().as_str()).expect("valid key");
     let mut download = ArtifactDownload::new(key.clone());
     download
         .accept(ArtifactValue::Opened {

@@ -464,16 +464,11 @@ impl ArtifactTransferManager {
                             agent_id: Some(invoke.agent_id.clone()),
                             queued_bytes: 0,
                         };
-                        let suffix = hints::import_suffix(
-                            tau_proto::cbor_text_field(&invoke.arguments, "filename").as_deref(),
-                            tau_proto::cbor_text_field(&invoke.arguments, "mime_type").as_deref(),
-                        );
                         let enqueue = scheduler.enqueue(WorkPriority::Cheap, meta, move || {
-                            let result =
-                                write_import(&bytes, &cancel, &suffix, limits).map(|mut temp| {
-                                    temp.reservation = buffer_reservation;
-                                    temp
-                                });
+                            let result = write_import(&bytes, &cancel, limits).map(|mut temp| {
+                                temp.reservation = buffer_reservation;
+                                temp
+                            });
                             drop(reservation);
                             let _ = tx.send(Command::ImportWritten {
                                 call_id,
@@ -856,14 +851,9 @@ fn prepare_import_with_limit(
     })
 }
 
-fn write_private_temp(
-    bytes: &[u8],
-    cancel: &AtomicBool,
-    suffix: &str,
-) -> Result<RetainedTemp, String> {
+fn write_private_temp(bytes: &[u8], cancel: &AtomicBool) -> Result<RetainedTemp, String> {
     let mut temp = tempfile::Builder::new()
         .prefix("tau-artifact-")
-        .suffix(suffix)
         .tempfile()
         .map_err(|error| format!("failed to create private import file: {error}"))?;
     #[cfg(unix)]
@@ -893,7 +883,6 @@ fn write_private_temp(
 fn write_import(
     bytes: &[u8],
     cancel: &AtomicBool,
-    suffix: &str,
     limits: tau_artifact::Limits,
 ) -> Result<RetainedTemp, String> {
     if bytes.len() as u64 > limits.stored_bytes {
@@ -908,7 +897,7 @@ fn write_import(
             reservation: None,
         })
     } else {
-        write_private_temp(bytes, cancel, suffix)
+        write_private_temp(bytes, cancel)
     }
 }
 

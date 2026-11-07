@@ -47,31 +47,21 @@ impl ArtifactStore {
             if !entry.file_type().map_err(io_error)?.is_dir() {
                 continue;
             }
-            let Ok(key) =
-                ArtifactKey::parse(format!("blake3:{}", entry.file_name().to_string_lossy()))
-            else {
+            let name = entry.file_name();
+            let digest = name.to_string_lossy();
+            let Ok(key) = ArtifactKey::from_digest(&digest) else {
                 continue;
             };
-            // "b" is a canonical hex prefix, not an abbreviation for the old
-            // algorithm label. Longer label prefixes remain transition input.
-            let spelling = if prefix.starts_with("bl") {
-                key.as_str()
-            } else {
-                key.canonical()
-            };
-            if !spelling.starts_with(prefix) {
+            if !key.as_str().starts_with(prefix) {
                 continue;
             }
-            let metadata = match self.metadata(&key) {
+            let metadata = match self.metadata_at_digest(&digest) {
                 Ok(metadata) => metadata,
                 Err(ArtifactError::Unavailable | ArtifactError::Integrity) => continue,
                 Err(error) => return Err(error),
             };
             entries.push(ArtifactListEntry {
-                descriptor: ArtifactDescriptor::new(
-                    ArtifactKey::parse(key.canonical())?,
-                    metadata.size,
-                )?,
+                descriptor: ArtifactDescriptor::new(key, metadata.size)?,
                 last_put_at: metadata.last_put_at,
                 signature: None,
             });
@@ -84,6 +74,8 @@ impl ArtifactStore {
         }
         for entry in &mut entries {
             check()?;
+            // Resolve only the bounded selected page. Ambiguous identities
+            // invalidate it without rescanning the store for every candidate.
             let digest = self.storage_digest(&entry.descriptor.key)?;
             if let Ok(mut file) = File::open(self.root.join("blake3").join(digest).join("data")) {
                 let mut header = [0_u8; 32];

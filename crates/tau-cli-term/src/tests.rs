@@ -12,13 +12,13 @@ const TEST_PROMPT_HISTORY_MAX_BYTES: usize = 64 * 1024;
 #[test]
 fn argument_completion_display_label_preserves_full_insertion() {
     let data = CompletionData::new();
-    let key = format!("blake3:{}", "a".repeat(64));
+    let key = "a".repeat(24);
     data.set_arg_completions(
         CommandName::new(":export-to-clipboard"),
-        vec![CompletionItem::new(&key, "format unknown · 12 bytes").with_label("blake3:aaaa…aaaa")],
+        vec![CompletionItem::new(&key, "format unknown · 12 bytes").with_label("aaaa…aaaa")],
     );
     let candidates = completion::build_candidates(&[], &data, ":export-to-clipboard ", 21);
-    assert_eq!(candidates[0].label, "blake3:aaaa…aaaa");
+    assert_eq!(candidates[0].label, "aaaa…aaaa");
     assert_eq!(
         candidates[0].replacement,
         format!(":export-to-clipboard {key}")

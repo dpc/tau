@@ -88,23 +88,19 @@ ordinary `papercut` reporter group does not grant history access. Restrict the
 instance opt-in to the intended sandbox: a role grant applies wherever that
 configuration is loaded.
 
-`papercut_list` shows only active report count, timestamps, agent IDs, and
-session IDs. `papercut_read` shows complete active reports in the same Markdown
-format as `tau dev papercut list --markdown`, preceded by an opaque `generation`.
-`papercut_archive` requires `{"expected_generation":"<generation from read>"}`.
-It validates and preserves the whole active file in a numbered private archive,
-like `tau dev papercut clear`; it does not delete reports. List and read take no
-arguments. Reading does not reserve reports: archive fails if the active bytes
-have changed since that complete read, including during archival validation.
-Read again before retrying a stale archive. Archive rejects missing or invalid
-generations without archiving. An oversized or invalid read returns an error
-without partial reports or a generation; the tool never truncates report bodies
-to permit archival.
-The generation identifies the returned bytes; it does not prove semantic review.
-Reading an absent history returns an empty-snapshot generation. Archiving that
-snapshot is a no-op if the history is still absent; an existing empty file retains ordinary
-archival behavior. These tools use the authenticated extension instance's
-User-scope storage and still obey global and role tool policy.
+`papercut_list()` returns numbered metadata and an opaque snapshot `generation`.
+Read one report with `papercut_read({"index":1,"expected_generation":"<generation>"})`.
+Indices are one-based; a stale generation or invalid index fails rather than
+selecting a different report. Read each listed report before archiving the snapshot
+with `papercut_archive({"expected_generation":"<generation>"})`.
+Archive preserves the whole active file in a numbered private archive, like
+`tau dev papercut clear`; it never deletes reports or overwrites an archive.
+Read and archive fail if the snapshot changes; list again before retrying.
+The generation identifies bytes; it does not prove semantic review. Results are never
+truncated to permit archival. Listing absent history returns an empty-snapshot
+generation; archiving that still-absent snapshot is a no-op. Existing empty files
+retain ordinary archival behavior. All tools use the authenticated extension
+instance's User-scope storage and obey global and role tool policy.
 When the harness is older than protocol 10.1 or does not advertise its
 revision, all three tools return an explicit unsupported error without
 sending a history request or interrupting other utility tools.

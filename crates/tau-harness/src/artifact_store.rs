@@ -352,6 +352,12 @@ impl ArtifactStore {
 
     fn metadata(&self, key: &ArtifactKey) -> Result<Metadata, ArtifactError> {
         let hex = artifact_digest(key).ok_or(ArtifactError::Invalid)?;
+        self.metadata_at_digest(hex)
+    }
+
+    /// Reads metadata at a validated physical digest without scanning catalogs;
+    /// public short identities still resolve through `object_directory`.
+    fn metadata_at_digest(&self, hex: &str) -> Result<Metadata, ArtifactError> {
         let metadata: Metadata = read_json(&self.object_directory(hex)?.join("meta.json"))?;
         if metadata.version != 1 || metadata.size > ARTIFACT_MAX_BYTES {
             return Err(ArtifactError::Integrity);

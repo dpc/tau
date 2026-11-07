@@ -11,8 +11,7 @@ fn legacy_cleanup(store: &ArtifactStore, now: u64) {
     let _lock = store.lock(true).expect("legacy coordination");
     for entry in fs::read_dir(store.root.join("blake3")).expect("objects") {
         let entry = entry.expect("object");
-        let Ok(_) = ArtifactKey::parse(format!("blake3:{}", entry.file_name().to_string_lossy()))
-        else {
+        let Ok(_) = ArtifactKey::from_digest(&entry.file_name().to_string_lossy()) else {
             continue;
         };
         let metadata: Metadata =

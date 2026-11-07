@@ -4,7 +4,7 @@ use super::*;
 /// Arcs; cache eviction never invalidates a request's already verified bytes.
 #[test]
 fn cache_enforces_entry_and_byte_limits_without_revoking_consumers() {
-    let key = |index: u64| -> ArtifactKey { format!("blake3:{index:064x}").parse().expect("key") };
+    let key = |index: u64| -> ArtifactKey { format!("{index:024x}").parse().expect("key") };
     let mut cache = Cache::default();
     for index in 0..MAX_CACHE_ENTRIES as u64 {
         cache.insert(key(index), Arc::from([42_u8]));

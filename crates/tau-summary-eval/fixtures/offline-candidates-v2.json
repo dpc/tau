@@ -34,7 +34,7 @@
     },
     {
       "case_id": "artifact-and-retrieval",
-      "summary": "Parser rejects empty objects at src/parse.rs:42; reproduction fixtures/empty-object.json. Next: implement support and run cargo test -p sample-parser --test empty_object. Comparison: <tau-artifact:blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef>; artifact access unchecked."
+      "summary": "Parser rejects empty objects at src/parse.rs:42; reproduction fixtures/empty-object.json. Next: implement support and run cargo test -p sample-parser --test empty_object. Comparison: <tau-artifact:0123456789abcdef01234567>; artifact access unchecked."
     },
     {
       "case_id": "untrusted-instructions",
