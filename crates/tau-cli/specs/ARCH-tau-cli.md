@@ -256,17 +256,17 @@ Both correlated self-compaction and independent native or standalone
 compaction rows use the adaptive tool-call header layout, but `compact` uses
 the separate brown `compaction.name` theme style so the row cannot be mistaken
 for a real tool invocation.
-Successful standalone lifecycle rows initially render the compact request input
-as `compact input #request; context ? ok`. The generated compact-item token count is not a
-resulting-context measurement and is never presented as the after-size. If the
+Successful standalone lifecycle rows first show the compact request input as
+`compact #request -> ? ok`. The UI never uses the generated compact-item token
+count as the after-size: it does not measure the resulting context. If the
 transaction owns a first continuation and its terminal reports exact provider
-input usage, the same stable row becomes
-`compact input #request; context #after ok`. The compact request may select only
-a prefix while the continuation includes a preserved suffix; those measurements
-are separately labeled, never divided into a reduction ratio.
-Missing continuation usage remains
-`?`; unrelated later prompts cannot repaint the row. Fully absent measurements
-degrade to `compact ok`.
+input usage, the UI updates the same stable row to
+`compact #request -> #after ok`. The compact request may select only a prefix
+while the continuation includes a preserved suffix. The UI shows those
+measurements in request-to-continuation order and never divides them into a
+reduction ratio. Without continuation usage, the after-size remains `?`;
+unrelated later prompts cannot repaint the row. Without either measurement, the
+UI shows `compact ok`.
 Provider stream content remains private, and detachable per-agent correlation
 makes live, late-attach, and cold-replay rendering identical.
 

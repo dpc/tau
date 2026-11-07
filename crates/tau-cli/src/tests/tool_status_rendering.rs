@@ -2886,10 +2886,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     }));
     sync(&handle);
     let compacted = vt.screen_text(100).join("\n");
-    assert!(
-        compacted.contains("input #226.2k; context ? 0s ok"),
-        "{compacted}"
-    );
+    assert!(compacted.contains("#226.2k -> ? 0s ok"), "{compacted}");
     assert!(!compacted.contains("complete"), "{compacted}");
 
     renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
@@ -2903,10 +2900,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     sync(&handle);
 
     let completed = vt.screen_text(100).join("\n");
-    assert!(
-        completed.contains("input #226.2k; context ? 0s ok"),
-        "{completed}"
-    );
+    assert!(completed.contains("#226.2k -> ? 0s ok"), "{completed}");
     assert!(!completed.contains("complete"), "{completed}");
     assert!(!completed.contains("Compacting…"), "{completed}");
 
@@ -2919,10 +2913,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     sync(&handle);
 
     let measured = vt.screen_text(100).join("\n");
-    assert!(
-        measured.contains("input #226.2k; context #80.1k ok 0s"),
-        "{measured}"
-    );
+    assert!(measured.contains("#226.2k -> #80.1k ok 0s"), "{measured}");
     assert!(!measured.contains("#4.5k"), "{measured}");
 }
 
@@ -2960,10 +2951,7 @@ fn standalone_compaction_repaints_from_owned_continuation_usage_only() {
     sync(&handle);
 
     let unknown = vt.screen_text(100).join("\n");
-    assert!(
-        unknown.contains("compact input #149.1k; context ? ok"),
-        "{unknown}"
-    );
+    assert!(unknown.contains("compact #149.1k -> ? ok"), "{unknown}");
     assert!(!unknown.contains("#2.5k"), "{unknown}");
     assert!(!unknown.contains("#9.9k"), "{unknown}");
 
@@ -2977,7 +2965,7 @@ fn standalone_compaction_repaints_from_owned_continuation_usage_only() {
 
     let measured = vt.screen_text(100).join("\n");
     assert!(
-        measured.contains("compact input #149.1k; context #864.8k ok"),
+        measured.contains("compact #149.1k -> #864.8k ok"),
         "{measured}"
     );
     assert!(!measured.contains("580%"), "{measured}");
@@ -3031,7 +3019,7 @@ fn hidden_compaction_continuation_repaints_owning_detached_transcript() {
     sync(&handle);
     let attached = vt.screen_text(100).join("\n");
     assert!(
-        attached.contains("compact input #100.1k; context #79.7k ok"),
+        attached.contains("compact #100.1k -> #79.7k ok"),
         "{attached}"
     );
     assert!(!attached.contains("#2.2k"), "{attached}");
@@ -4173,7 +4161,7 @@ fn late_self_compaction_tool_start_adopts_retained_lifecycle_status() {
 }
 
 /// Compact request input and full continuation context may have different
-/// scopes. Keep each labeled rather than inventing a reduction ratio.
+/// scopes. Keep both counts rather than inventing a reduction ratio.
 #[test]
 fn compaction_success_status_formats_exact_and_partial_measurements() {
     let exact = |tokens| tau_proto::TokenCount::new(tokens);
@@ -4183,30 +4171,30 @@ fn compaction_success_status_formats_exact_and_partial_measurements() {
             Some(exact(226_200)),
             Some(exact(4_500)),
         ),
-        "input #226.2k; context #4.5k ok"
+        "#226.2k -> #4.5k ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(12_000)), None),
-        "input #12k; context ? ok"
+        "#12k -> ? ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(None, Some(exact(4_500))),
-        "input ?; context #4.5k ok"
+        "? -> #4.5k ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(0)), Some(exact(1))),
-        "input #0; context #1 ok"
+        "#0 -> #1 ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(3)), Some(exact(2))),
-        "input #3; context #2 ok"
+        "#3 -> #2 ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(
             Some(exact(u64::MAX)),
             Some(exact(u64::MAX)),
         ),
-        "input #18446744073709.5m; context #18446744073709.5m ok"
+        "#18446744073709.5m -> #18446744073709.5m ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(None, None),
@@ -4217,7 +4205,7 @@ fn compaction_success_status_formats_exact_and_partial_measurements() {
             Some(exact(149_101)),
             Some(exact(864_820)),
         ),
-        "input #149.1k; context #864.8k ok",
+        "#149.1k -> #864.8k ok",
         "a retained suffix is not a 580% compaction expansion"
     );
 }

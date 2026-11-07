@@ -4893,7 +4893,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "compact input #226.2k; context ? ok 2/2"),
+        vt.screen_contains(100, "compact #226.2k -> ? ok 2/2"),
         "{:?}",
         vt.screen_text(100)
     );
@@ -4906,7 +4906,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert_eq!(
         vt.screen_text(100)
             .join("\n")
-            .matches("compact input #226.2k; context ? ok 2/2")
+            .matches("compact #226.2k -> ? ok 2/2")
             .count(),
         1,
         "one canonical outcome produces one successful row"

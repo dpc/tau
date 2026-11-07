@@ -135,21 +135,15 @@ impl EventRenderer {
     ) -> String {
         match (original, after) {
             (Some(original), Some(after)) => format!(
-                "input {}; context {} ok",
+                "{} -> {} ok",
                 Self::compaction_token_chip(original.get()),
                 Self::compaction_token_chip(after.get()),
             ),
             (Some(original), None) => {
-                format!(
-                    "input {}; context ? ok",
-                    Self::compaction_token_chip(original.get())
-                )
+                format!("{} -> ? ok", Self::compaction_token_chip(original.get()))
             }
             (None, Some(after)) => {
-                format!(
-                    "input ?; context {} ok",
-                    Self::compaction_token_chip(after.get())
-                )
+                format!("? -> {} ok", Self::compaction_token_chip(after.get()))
             }
             (None, None) => "ok".to_owned(),
         }
