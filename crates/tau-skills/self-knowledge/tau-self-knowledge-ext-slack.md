@@ -78,6 +78,29 @@ automatically retry an uncertain result. Cancellation or retirement can leave
 remote membership; there is no compensating leave. A non-evicting 1,024-call
 process-local set prevents repeat attempts under the same call ID.
 
+Room failures carry bounded `stage` / `reason` labels and an action.
+`list_fetch` and `info_fetch` identify provider fetch failures; `list_validation`
+and `info_validation` identify strict public-room/page validation failures.
+Examples include `missing_scope`, `permission_denied`, `transport_timeout`,
+`malformed_response` and `unavailable_or_policy`. These labels describe observed
+failures without diagnosing the operator's underlying configuration. During
+preparation, the bridge reports `prepare` / `unavailable_or_policy` without
+revealing which private admission prerequisite failed. When the budget expires,
+it reports `deadline_exceeded` at the selected boundary
+(`list_fetch`, `info_fetch` or `join_preflight`).
+A failed remote join attempt still returns `join_unknown`; its existing `note`
+adds `join_attempt` and a safe reason. Do not treat that reason as proof that
+membership did not change or retry on that basis, even for permission or
+authentication failures.
+Retirement replaces pending provider facts with `disclosure` /
+`lifecycle_changed` and preserves remote-membership uncertainty.
+No raw provider codes, headers, bodies, private IDs, URLs or token data enter
+these diagnostics. Use retained results and existing operator logs;
+there is no status/auth/scope probe tool, no new logging, and no permission
+to broaden OAuth grants or change receive/send policy. Older generic room
+errors do not identify a cause; check the deployed build before relying on
+these labels.
+
 `slack_recent_history({"destination":"team","limit":10})` requires a configured
 receive-enabled alias, not outbound permission. The limit defaults to 10, with a
 maximum of 50.
