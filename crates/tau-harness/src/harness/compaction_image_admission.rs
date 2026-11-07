@@ -131,9 +131,13 @@ impl Harness {
             live: Arc::clone(&live),
         };
         if self.runtime_io.artifacts.is_none() {
-            self.runtime_io.artifacts = Some(ArtifactWorker::start(
+            self.runtime_io.artifacts = Some(ArtifactWorker::start_with_limit(
                 &self.session_runtime.state_dir,
                 self.runtime_io.tx.clone(),
+                self.config
+                    .accepted_harness_settings
+                    .artifact_limits
+                    .stored_bytes,
             )?);
         }
         self.runtime_io

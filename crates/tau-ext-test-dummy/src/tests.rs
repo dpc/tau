@@ -296,6 +296,7 @@ fn replayed_restart() -> HarnessOutputMessage {
 fn restart_config(mode: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -314,6 +315,7 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
 fn typed_image_config() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -332,6 +334,7 @@ fn typed_image_config() -> HarnessOutputMessage {
 fn provider_context_raw_message_config() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -370,6 +373,7 @@ fn invoke_provider_context_raw_message() -> HarnessOutputMessage {
 fn release_config(socket_path: &std::path::Path, nonce: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -398,6 +402,7 @@ fn release_config(socket_path: &std::path::Path, nonce: &str) -> HarnessOutputMe
 fn exit_once_config(marker_path: &std::path::Path) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -498,6 +503,7 @@ fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
         writer
             .write_message(&HarnessOutputMessage::Configure(Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                artifact_limits: Default::default(),
                 harness_protocol_version: None,
                 tool_prefix: None,
                 instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1145,6 +1151,7 @@ fn exit_once_mode_configuration_fails_closed() {
     let missing = restart_config("exit_once_then_success");
     let relative = HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1167,6 +1174,7 @@ fn exit_once_mode_configuration_fails_closed() {
     let extra_marker_path = unique_marker_path("exit-extra");
     let extra = HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1182,6 +1190,7 @@ fn exit_once_mode_configuration_fails_closed() {
     });
     let release_extra = HarnessOutputMessage::Configure(Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1398,6 +1407,7 @@ fn release_mode_requires_complete_configuration() {
         let frames = run_restart_frames(
             &[HarnessOutputMessage::Configure(Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                artifact_limits: Default::default(),
                 harness_protocol_version: None,
                 tool_prefix: None,
                 instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -2237,6 +2247,7 @@ fn run_intercept(
     writer
         .write_message(&HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")

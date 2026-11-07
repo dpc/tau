@@ -19,7 +19,7 @@ pub const MAX_PROVIDER_PROFILE_FILES: usize = 4_096;
 pub const MAX_PROVIDER_PROFILE_FILE_BYTES: u64 = 1024 * 1024;
 /// Maximum merged profile bytes, reserving one MiB for the Configure envelope.
 pub const MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES: u64 =
-    tau_proto::MAX_PROTOCOL_MESSAGE_BYTES - MAX_PROVIDER_PROFILE_FILE_BYTES;
+    16 * 1024 * 1024 - MAX_PROVIDER_PROFILE_FILE_BYTES;
 
 /// Leaf-symlink policy for one provider profile read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

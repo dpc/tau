@@ -55,12 +55,43 @@ fn send_artifact_result(
 /// file for ordinary filesystem consumers.
 #[test]
 fn artifact_export_import_round_trip_preserves_original_and_private_path() {
+    artifact_roundtrip(false, false);
+}
+
+/// Directory identity survives RPC using only the key, not untrusted MIME/name
+/// hints, and extraction returns a private directory with binary/empty members.
+#[test]
+fn directory_artifact_round_trip_with_key_only_import() {
+    artifact_roundtrip(true, false);
+}
+
+/// Exporting already-encoded bundle bytes reports the same kind and fixed MIME
+/// as directory-source export; filesystem source type cannot change key
+/// meaning.
+#[test]
+fn encoded_directory_file_round_trip_reports_directory_kind() {
+    artifact_roundtrip(true, true);
+}
+
+fn artifact_roundtrip(directory: bool, preencoded: bool) {
     let tempdir = TempDir::new().expect("tempdir");
     let source = tempdir.path().join("original.png");
-    image::DynamicImage::new_rgba8(2, 2)
-        .save(&source)
-        .expect("write png");
-    let original = fs::read(&source).expect("read png");
+    let original = if directory {
+        fs::create_dir(&source).expect("source directory");
+        fs::create_dir(source.join("empty")).expect("empty member");
+        fs::write(source.join("data"), [0, 255, 1]).expect("binary member");
+        tau_artifact::pack(&source, tau_artifact::Limits::default(), || false)
+            .expect("expected bundle")
+    } else {
+        image::DynamicImage::new_rgba8(2, 2)
+            .save(&source)
+            .expect("write png");
+        fs::read(&source).expect("read png")
+    };
+    if preencoded {
+        fs::remove_dir_all(&source).expect("replace source tree");
+        fs::write(&source, &original).expect("write already-encoded bundle");
+    }
     let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(&original).to_hex()))
         .expect("artifact key");
     let descriptor =
@@ -138,7 +169,15 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
     );
     assert_eq!(
         cbor_map_text(&export.result, "mime_type"),
-        Some("image/png")
+        Some(if directory {
+            tau_artifact::DIRECTORY_MIME
+        } else {
+            "image/png"
+        })
+    );
+    assert_eq!(
+        cbor_map_text(&export.result, "kind"),
+        Some(if directory { "directory" } else { "file" })
     );
     let display = export.display.as_ref().expect("export display");
     assert_eq!(display.args, source_text);
@@ -155,17 +194,21 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
         .write_event(&tool_started(
             "import-call",
             IMPORT_TOOL_NAME,
-            cbor_text_map(vec![
-                ("key", reference.as_str()),
-                (
-                    "filename",
-                    cbor_map_text(&export.result, "filename").expect("filename"),
-                ),
-                (
-                    "mime_type",
-                    cbor_map_text(&export.result, "mime_type").expect("MIME"),
-                ),
-            ]),
+            cbor_text_map(if directory {
+                vec![("key", reference.as_str())]
+            } else {
+                vec![
+                    ("key", reference.as_str()),
+                    (
+                        "filename",
+                        cbor_map_text(&export.result, "filename").expect("filename"),
+                    ),
+                    (
+                        "mime_type",
+                        cbor_map_text(&export.result, "mime_type").expect("MIME"),
+                    ),
+                ]
+            }),
             "agent-artifact",
         ))
         .expect("import");
@@ -210,10 +253,12 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
     assert!(rendered_import.contains("path: "));
     let path = PathBuf::from(cbor_map_text(&imported.result, "path").expect("import path"));
     assert!(
-        path.file_name()
-            .expect("basename")
-            .to_string_lossy()
-            .ends_with("-original.png")
+        directory
+            || path
+                .file_name()
+                .expect("basename")
+                .to_string_lossy()
+                .ends_with("-original.png")
     );
     let display = imported.display.as_ref().expect("import display");
     assert_eq!(display.args, path.display().to_string());
@@ -225,17 +270,33 @@ fn artifact_export_import_round_trip_preserves_original_and_private_path() {
             text: format!("artifact: {reference}"),
         })
     );
-    assert_eq!(fs::read(&path).expect("imported bytes"), original);
+    assert_eq!(
+        cbor_map_text(&imported.result, "kind"),
+        Some(if directory { "directory" } else { "file" })
+    );
+    if directory {
+        assert!(path.join("empty").is_dir());
+        assert_eq!(
+            fs::read(path.join("data")).expect("imported member"),
+            [0, 255, 1]
+        );
+    } else {
+        assert_eq!(fs::read(&path).expect("imported bytes"), original);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
-            0o600
+            if directory { 0o700 } else { 0o600 }
         );
     }
 
-    fs::remove_file(path).expect("remove imported temp");
+    if directory {
+        fs::remove_dir_all(path).expect("remove imported tree");
+    } else {
+        fs::remove_file(path).expect("remove imported temp");
+    }
     writer
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
@@ -1639,6 +1700,7 @@ fn mandatory_discovery_write_failure_exits_production_manual_loop() {
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1724,6 +1786,7 @@ fn mandatory_terminal_preparation_failure_exits_production_manual_loop() {
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: test_extension_name("test-extension"),
@@ -1831,6 +1894,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1896,6 +1960,7 @@ fn shell_extension_rejects_invalid_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1963,6 +2028,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")

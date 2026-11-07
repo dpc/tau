@@ -556,6 +556,7 @@ fn spawn_extension_with_exit_and_prefix(
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -665,6 +666,7 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -704,6 +706,7 @@ fn send_shell_regex_allowlist_config(
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: tau_proto::ExtensionName::parse("test-extension")
@@ -1005,6 +1008,7 @@ fn run_after_production_fifo_saturation(
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: test_extension_name("test-extension"),
@@ -1162,6 +1166,7 @@ fn assert_mandatory_frame_failure_exits(event: Event, needle: &'static [u8], lab
     input
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             instance_name: test_extension_name("test-extension"),

@@ -46,6 +46,8 @@ const RECEIPT_LIFETIME: u64 = 24 * 60 * 60;
 
 /// Worker-owned state; construction itself performs no filesystem access.
 pub(crate) struct ArtifactStore {
+    /// Operational original-byte ceiling; independent of protocol validation.
+    max_bytes: u64,
     /// Independent shared domain beneath the selected persistent state root.
     root: PathBuf,
     /// Incomplete connection-owned uploads; disconnect/timeout drops bytes.
@@ -59,10 +61,16 @@ impl ArtifactStore {
     /// it.
     pub(crate) fn new(state_root: &Path) -> Self {
         Self {
+            max_bytes: tau_proto::ArtifactLimits::default().stored_bytes.get(),
             root: state_root.join("artifacts"),
             uploads: HashMap::new(),
             reads: HashMap::new(),
         }
+    }
+
+    /// Applies immutable harness policy before any transfer is admitted.
+    pub(crate) fn set_max_bytes(&mut self, max_bytes: tau_proto::ArtifactSize) {
+        self.max_bytes = max_bytes.get();
     }
 
     /// Drops abandoned connection state; committed objects and receipts
@@ -137,6 +145,22 @@ impl ArtifactStore {
         connection: &str,
         size: tau_proto::ArtifactSize,
     ) -> Result<ArtifactValue, ArtifactError> {
+        if size.get() > self.max_bytes {
+            return Err(ArtifactError::Invalid);
+        }
+        // Preserve the former eight-times-16-MiB concurrent allocation ceiling.
+        // One explicitly configured larger original may run alone.
+        if self
+            .uploads
+            .values()
+            .map(|upload| upload.size.get())
+            .sum::<u64>()
+            + size.get()
+            > 128 * 1024 * 1024
+            && !self.uploads.is_empty()
+        {
+            return Err(ArtifactError::Busy);
+        }
         if self.uploads.len() + self.reads.len() >= TRANSFER_LIMIT {
             return Err(ArtifactError::Busy);
         }
@@ -332,6 +356,9 @@ impl ArtifactStore {
         }
         let lock = self.lock(false)?;
         let descriptor = self.descriptor(&key)?;
+        if descriptor.size.get() > self.max_bytes {
+            return Err(ArtifactError::Invalid);
+        }
         let hex = artifact_digest(&key).ok_or(ArtifactError::Invalid)?;
         let data = File::open(self.object_directory(hex)?.join("data")).map_err(io_error)?;
         if data.metadata().map_err(io_error)?.len() != descriptor.size.get() {

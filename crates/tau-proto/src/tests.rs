@@ -2714,6 +2714,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     vec![
         HarnessOutputMessage::Configure(Configure {
             purpose: crate::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             instance_name: crate::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
@@ -4522,6 +4523,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
 
     let with_state = Configure {
         purpose: crate::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: Some(crate::PROTOCOL_VERSION),
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
@@ -4539,13 +4541,14 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 17, "minor": 0})
+        serde_json::json!({"major": 18, "minor": 0})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
 
     let without_state = serde_json::to_value(Configure {
         purpose: crate::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
@@ -4605,6 +4608,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
         purpose: crate::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         instance_name: crate::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
@@ -4650,7 +4654,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 17, "minor": 0})
+        serde_json::json!({"major": 18, "minor": 0})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4743,7 +4747,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 17, "minor": 0})
+        serde_json::json!({"major": 18, "minor": 0})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -8156,6 +8160,57 @@ fn streaming_reader_rejects_oversized_protocol_message() {
         .read_message()
         .expect_err("oversized frame must fail");
     assert!(error.to_string().contains("protocol message exceeds"));
+}
+
+/// The outer transport accepts an exact 32 MiB frame in either direction,
+/// independently of smaller semantic producer and queue admission budgets.
+#[test]
+fn streaming_reader_accepts_exact_transport_boundary() {
+    let limit = MAX_PROTOCOL_MESSAGE_BYTES as usize;
+    let mut input = HarnessInputMessage::ConfigError(ConfigError {
+        message: "x".repeat(limit),
+    });
+    let overhead = encode_harness_input_to_vec(&input)
+        .expect("encode input fixture")
+        .len()
+        - limit;
+    let HarnessInputMessage::ConfigError(error) = &mut input else {
+        unreachable!()
+    };
+    error.message.truncate(limit - overhead);
+    let bytes = encode_harness_input_to_vec(&input).expect("encode exact input boundary");
+    assert_eq!(bytes.len(), limit);
+    assert_eq!(
+        HarnessInputReader::new(bytes.as_slice())
+            .read_message()
+            .expect("read exact input boundary"),
+        Some(input)
+    );
+
+    let mut output = HarnessOutputMessage::Disconnect(Disconnect {
+        reason: Some("x".repeat(limit)),
+    });
+    let overhead = encode_harness_output_to_vec(&output)
+        .expect("encode output fixture")
+        .len()
+        - limit;
+    let HarnessOutputMessage::Disconnect(disconnect) = &mut output else {
+        unreachable!()
+    };
+    disconnect
+        .reason
+        .as_mut()
+        .expect("present disconnect reason")
+        .truncate(limit - overhead);
+    let bytes = encode_harness_output_to_vec(&output).expect("encode exact output boundary");
+    assert_eq!(bytes.len(), limit);
+    assert_eq!(
+        HarnessOutputReader::new(bytes.as_slice())
+            .read_message()
+            .expect("read exact output boundary"),
+        Some(output)
+    );
+    assert_eq!(MAX_SEMANTIC_MESSAGE_BYTES, 16 * 1024 * 1024);
 }
 
 /// Locks the navigation request wire spelling, including explicit active-auto.

@@ -12,6 +12,10 @@ transfer state separate from transport and tool lifecycle; downloads verify exac
 original size and digest before exposing bytes. They provide no direct operational
 filesystem access. See
 [SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
+`ArtifactDownload::with_max_bytes` lets consumers set a larger explicit bound;
+the ordinary constructor retains the 16 MiB limit for image/clipboard callers.
+Consumers retain Close authority for rejected Open descriptors without allocating
+original buffers.
 
 For changes to this shared harness-extension interface, follow the approval
 requirements in

@@ -1174,6 +1174,7 @@ fn run_provider_purpose(
         writer
             .write_message(&tau_proto::HarnessOutputMessage::Configure(
                 tau_proto::Configure {
+                    artifact_limits: Default::default(),
                     purpose,
                     harness_protocol_version: None,
                     tool_prefix: None,
@@ -1183,7 +1184,7 @@ fn run_provider_purpose(
                     state_dir: None,
                     secrets: BTreeMap::new(),
                     absent_optional_secrets: Default::default(),
-                    settings_files,
+                    settings_files: Box::new(settings_files),
                 },
             ))
             .expect("encode Configure");
@@ -1296,6 +1297,7 @@ fn run_production_credential_scenario_with(
         .write_message(&tau_proto::HarnessOutputMessage::Configure(
             tau_proto::Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                artifact_limits: Default::default(),
                 harness_protocol_version: None,
                 tool_prefix: None,
                 config: tau_proto::CborValue::Map(Vec::new()),
@@ -1304,7 +1306,7 @@ fn run_production_credential_scenario_with(
                 state_dir: None,
                 secrets: BTreeMap::new(),
                 absent_optional_secrets: Default::default(),
-                settings_files: BTreeMap::from([(settings_file, settings)]),
+                settings_files: Box::new(BTreeMap::from([(settings_file, settings)])),
             },
         ))
         .expect("write Configure");
@@ -1499,6 +1501,7 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
         .write_message(&tau_proto::HarnessOutputMessage::Configure(
             tau_proto::Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                artifact_limits: Default::default(),
                 harness_protocol_version: None,
                 tool_prefix: None,
                 config: tau_proto::CborValue::Map(Vec::new()),
@@ -1507,10 +1510,10 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
                 state_dir: None,
                 secrets: BTreeMap::new(),
                 absent_optional_secrets: Default::default(),
-                settings_files: BTreeMap::from([(
+                settings_files: Box::new(BTreeMap::from([(
                     "deepseek.json".to_owned(),
                     configured_chat_completions_settings("deepseek", serde_json::json!({})),
-                )]),
+                )])),
             },
         ))
         .expect("write Configure");
@@ -5633,6 +5636,7 @@ fn provider_prompt_trace_omits_model_visible_content() {
             .write_message(&tau_proto::HarnessOutputMessage::Configure(
                 tau_proto::Configure {
                     purpose: tau_proto::ConfigurePurpose::Runtime,
+                    artifact_limits: Default::default(),
                     harness_protocol_version: None,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
@@ -5641,7 +5645,7 @@ fn provider_prompt_trace_omits_model_visible_content() {
                     state_dir: None,
                     secrets: BTreeMap::new(),
                     absent_optional_secrets: Default::default(),
-                    settings_files: BTreeMap::new(),
+                    settings_files: Default::default(),
                 },
             ))
             .expect("encode Configure");
@@ -5794,6 +5798,7 @@ fn receipt_trace_observes_real_worker_slot_queue() {
             .write_message(&tau_proto::HarnessOutputMessage::Configure(
                 tau_proto::Configure {
                     purpose: tau_proto::ConfigurePurpose::Runtime,
+                    artifact_limits: Default::default(),
                     harness_protocol_version: None,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
@@ -5802,7 +5807,7 @@ fn receipt_trace_observes_real_worker_slot_queue() {
                     state_dir: None,
                     secrets: BTreeMap::new(),
                     absent_optional_secrets: Default::default(),
-                    settings_files: BTreeMap::new(),
+                    settings_files: Default::default(),
                 },
             ))
             .expect("encode Configure");

@@ -120,6 +120,7 @@ fn grok_worker_secret_callbacks_suppress_exchanged_generation_not_readback() {
             let mut writer = HarnessOutputWriter::new(&mut input);
             writer
                 .write_message(&HarnessOutputMessage::Configure(Configure {
+                    artifact_limits: Default::default(),
                     purpose: Default::default(),
                     harness_protocol_version: None,
                     config: tau_proto::CborValue::Map(Vec::new()),

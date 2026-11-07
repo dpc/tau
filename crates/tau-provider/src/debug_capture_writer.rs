@@ -12,6 +12,8 @@ pub use tau_proto::ProviderDebugCaptureClass;
 const CAPTURE_QUEUE_CAPACITY: usize = 64;
 /// Compression level used for private diagnostic captures.
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+/// Independent raw and encoded diagnostic budget; not a transport setting.
+const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// One typed serialized provider capture awaiting best-effort admission.
 pub struct ProviderDebugCapture {
@@ -253,7 +255,7 @@ fn cache_capture_fits_bound(capture: &ProviderDebugCapture) -> bool {
 /// Return whether one uncompressed job fits the established protocol bound
 /// before it can consume a queue slot.
 fn capture_fits_raw_bound(capture: &ProviderDebugCapture) -> bool {
-    capture.json.len() as u64 <= tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+    capture.json.len() as u64 <= MAX_CAPTURE_BYTES
 }
 
 /// Drain accepted jobs until every producer disconnects.
@@ -303,7 +305,7 @@ fn enforce_encoded_bound(
     message: tau_proto::HarnessInputMessage,
     encoded_len: u64,
 ) -> io::Result<tau_proto::HarnessInputMessage> {
-    if tau_proto::MAX_PROTOCOL_MESSAGE_BYTES < encoded_len {
+    if MAX_CAPTURE_BYTES < encoded_len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "compressed provider debug capture exceeds the protocol bound",

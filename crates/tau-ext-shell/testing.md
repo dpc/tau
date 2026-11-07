@@ -73,6 +73,12 @@ original-byte equality and private imported-file permissions, asserts
 canonical `<tau-artifact:FULL_KEY>` reference directly into import, and passes
 the returned path as an ordinary filesystem artifact; image inspection consumes
 the same reference directly through `std-utils`.
+The same protocol roundtrip covers nested directory export and key-only import.
+Codec tests cover deterministic bytes, empty/binary members, exact stored and
+expanded bounds, link/path/type rejection, tar endings and zstd corruption.
+Worker tests cover canceled/failed extraction cleanup and aggregate reservation
+release; storage tests cover larger chunked originals, restart and configured
+Begin/Open rejection.
 Terminal display coverage keeps the export source or import destination path,
 verified byte size, and artifact reference visible without displaying file contents.
 the removed GPT `cwd` spelling appears only in an explicitly named legacy

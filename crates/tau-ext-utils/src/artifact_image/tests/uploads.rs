@@ -35,6 +35,7 @@ fn with_manager(f: impl FnOnce(&mut ArtifactImageManager)) -> Vec<HarnessInputMe
     let mut input = Vec::new();
     tau_proto::HarnessOutputWriter::new(&mut input)
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            artifact_limits: Default::default(),
             purpose: Default::default(),
             harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
             config: CborValue::Null,
@@ -714,6 +715,7 @@ fn utility_loop_uploads_prepared_bytes_before_reference_terminal() {
     ));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            artifact_limits: Default::default(),
             purpose: Default::default(),
             harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
             config: tau_proto::json_to_cbor(&serde_json::json!({"papercut":{"enable":false}})),

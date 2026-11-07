@@ -1,5 +1,38 @@
 use super::*;
 
+/// Explicit consumers can read larger originals, while image/clipboard users of
+/// the legacy constructor reject descriptors before allocating any chunk
+/// buffer.
+#[test]
+fn explicit_download_limit_preserves_legacy_consumers() {
+    let key = ArtifactKey::parse(format!("blake3:{}", "a".repeat(64))).expect("fixture key");
+    let value = ArtifactValue::Opened {
+        read: "read".parse().expect("fixture read ID"),
+        descriptor: ArtifactDescriptor::new(key.clone(), 32 * 1024 * 1024)
+            .expect("fixture descriptor"),
+    };
+    assert!(
+        ArtifactDownload::new(key.clone())
+            .accept(value.clone())
+            .is_err()
+    );
+    let mut download = ArtifactDownload::with_max_bytes(
+        key.clone(),
+        ArtifactSize::new(32 * 1024 * 1024).expect("consumer limit"),
+    );
+    download
+        .accept(value.clone())
+        .expect("accept exact-size descriptor");
+    assert!(download.bytes.is_empty());
+    let mut too_small = ArtifactDownload::with_max_bytes(
+        key,
+        ArtifactSize::new(32 * 1024 * 1024 - 1).expect("smaller consumer limit"),
+    );
+    assert!(too_small.accept(value).is_err());
+    assert!(too_small.bytes.is_empty());
+    assert!(too_small.close_op().is_some());
+}
+
 /// Corrupted originals must never become usable output, even when length and
 /// chunk framing are otherwise valid; a best-effort close remains available.
 #[test]

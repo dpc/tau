@@ -549,21 +549,23 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(EXPORT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Export one local regular file to the shared content-addressed artifact store. \
-             Originals are limited to 16 MiB. A successful export returns a canonical \
+            "Export one local regular file or directory to the shared content-addressed artifact store. \
+             Stored bytes and expanded directory contents each default to a configurable 32 MiB limit. \
+             Directories are packed in-process as versioned tar+zstd bundles; directory links and special files are rejected. \
+             Use a quiescent source tree. A successful export returns kind=file|directory, a canonical \
              <tau-artifact:FULL_KEY> reference and byte size as output headers and renews shared \
              artifact age, including for duplicate bytes. Original bytes persist independently \
              of ephemeral session transcripts. Filename and declared mime_type hints are \
              returned beside the reference; pass them to import to retain useful names. \
-             MIME is not verified and hints are not stored by digest."
+             File MIME is not verified and hints are not stored by digest. Directory bundles use application/vnd.tau.directory."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to one local regular file"},
-                "mime_type": {"type": "string", "description": "Optional declared MIME hint; otherwise inferred best-effort from common filename extensions, not content"}
+                "path": {"type": "string", "description": "Path to one local regular file or directory"},
+                "mime_type": {"type": "string", "description": "Optional declared file MIME hint; otherwise inferred from common extensions. Directory bundle MIME is fixed."}
             },
             "required": ["path"],
             "additionalProperties": false
@@ -588,11 +590,12 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         model_visible_name: None,
         description: Some(
             "Import one <tau-artifact:FULL_KEY> reference to a private, unpredictable, \
-             non-executable temporary file on this shell host. A bare internal key is also \
+             non-executable temporary file, or an automatically extracted private directory for Tau directory bundles, on this shell host. A bare internal key is also \
              accepted. Size and digest are verified before success. The local path and byte size \
              are returned as output headers. Import does not renew retention age; pass the \
               returned local path to filesystem tools. Pass accompanying filename/mime_type \
-              hints for a sanitized useful name or extension; key-only imports cannot recover hints."
+              hints for a sanitized useful file name or extension; key-only imports cannot recover hints, but recognize directory bundles from their bytes. \
+              Returns kind=file|directory. Extraction accepts only regular files/directories, restores no executability, and fails closed on malformed or over-limit bundles."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -1308,6 +1311,8 @@ impl tau_client::TauExtension for ShellExtension {
             )
             .configure_raw(|cx| {
                 let cfg = cx.parse_config::<ExtConfig>()?;
+                cx.state
+                    .configure_artifact_limits(cx.configure.artifact_limits);
                 cx.state.apply_config(
                     cx.configure.instance_name.clone(),
                     cx.configure.tool_prefix.clone(),

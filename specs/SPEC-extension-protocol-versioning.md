@@ -8,6 +8,15 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 18.0 / source SDK 0.25.0 use a fixed 32 MiB outer message ceiling and
+512 MiB artifact object ceiling, with Configure carrying independent operational
+stored/expanded limits. Older peers reject larger objects or frames, so
+configured extensions and UI peers rebuild together. Artifact chunks remain
+1 MiB; general messages do not gain automatic chunking. Existing semantic
+producer, client queue/admission, debug and durable record budgets do not grow.
+Event-log framing remains unchanged; archive bytes do not enter journals. These
+source changes neither publish the SDK nor activate running installations.
+
 Protocol 17.0 and source SDK 0.24.0 add local encoded-message and peer WebSocket
 1009 failure variants, a standalone message-size failure reason, and a
 growth-stopped recovery disposition. Compaction reports, canonical terminals,

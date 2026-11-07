@@ -2,8 +2,8 @@ use std::io;
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::{
-    CaptureJob, CaptureQueue, ProviderDebugCapture, capture_fits_raw_bound, compressed_message,
-    enforce_encoded_bound, run_worker, start_transport_with,
+    CaptureJob, CaptureQueue, MAX_CAPTURE_BYTES, ProviderDebugCapture, capture_fits_raw_bound,
+    compressed_message, enforce_encoded_bound, run_worker, start_transport_with,
 };
 
 /// Metadata's inclusive byte cap cannot silently inherit the much larger raw
@@ -223,14 +223,8 @@ fn operation_compression_preserves_non_prompt_attribution() {
 /// ceiling and rejects the next byte before queue admission.
 #[test]
 fn raw_payload_bound_precedes_queue_admission() {
-    let exact = job(
-        "exact",
-        &vec![0; tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize],
-    );
-    let oversized = job(
-        "oversized",
-        &vec![0; tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize + 1],
-    );
+    let exact = job("exact", &vec![0; MAX_CAPTURE_BYTES as usize]);
+    let oversized = job("oversized", &vec![0; MAX_CAPTURE_BYTES as usize + 1]);
     assert!(capture_fits_raw_bound(&exact.capture));
     assert!(!capture_fits_raw_bound(&oversized.capture));
 }
@@ -248,6 +242,6 @@ fn worker_spawn_failure_is_nonfatal() {
 #[test]
 fn encoded_complete_frame_bound_is_enforced() {
     let message = compressed_message(&job("frame", b"small")).expect("message");
-    assert!(enforce_encoded_bound(message.clone(), tau_proto::MAX_PROTOCOL_MESSAGE_BYTES).is_ok());
-    assert!(enforce_encoded_bound(message, tau_proto::MAX_PROTOCOL_MESSAGE_BYTES + 1).is_err());
+    assert!(enforce_encoded_bound(message.clone(), MAX_CAPTURE_BYTES).is_ok());
+    assert!(enforce_encoded_bound(message, MAX_CAPTURE_BYTES + 1).is_err());
 }

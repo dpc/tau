@@ -2,16 +2,22 @@
 
 `tau-ext-shell` owns Tau's local filesystem and subprocess tools. It must avoid process-global cwd changes after startup: concurrent tool workers resolve paths against per-agent state instead.
 
-`export` reads a regular file off the protocol loop under the same remembered
-workdir authority, then the main loop drives one typed Artifact upload operation
-at a time. `import` drives a verified typed download on that loop and hands the
-completed bounded bytes to a shell worker, which creates a mode-0600 unpredictable
-temporary file on the shell host. Exact request correlation and complete Artifact
+`export` reads a regular file or encodes a directory off the protocol loop under
+the same remembered workdir authority, then the main loop drives one typed
+Artifact upload operation at a time. `import` drives a verified typed download on
+that loop and hands the completed bounded bytes to a shell worker, which creates
+an unpredictable mode-0600 temporary file or validates and extracts a typed
+directory bundle on the shell host. `tau-artifact` owns the directory codec;
+hints never choose the decoder.
+Exact request correlation and complete Artifact
 frame validation precede transfer-state acceptance; cancellation submits
 Abort/Close best-effort and suppresses the normal tool result.
 Verified originals waiting for or executing temp-file writes share a separate
-16 MiB admission budget; cancellation and shutdown remain visible to the writer
-so an unreported retained temp file is removed.
+512 MiB hard admission budget. A separate reservation spans preparation,
+transfer and result publication: at most 128 MiB concurrently or one larger
+configured original alone. The accepted Configure policy sets independent stored
+and expanded limits, each defaulting to 32 MiB. Workers observe cancellation and
+shutdown and remove unreported files and directory trees.
 
 Image inspection is not shell-owned. `std-utils` consumes stored originals by
 canonical artifact reference, so no-shell roles can inspect an already-permitted artifact

@@ -86,17 +86,35 @@ an already admitted packet. A lost acknowledgment or cancellation racing commit
 has an unknown native outcome. No clipboard bytes or control payloads enter
 semantic history or diagnostic logs.
 
-Objects are bounded to 16 MiB and raw chunks to 1 MiB, with the complete encoded
-frame bounded separately in both directions. A bounded off-loop worker owns
-filesystem I/O. Artifact response retention remains bounded through writer acknowledgement or
-retirement; egress overflow disconnects only the affected recipient. Ordinary
-semantic event publication retains its existing independent lag policy.
+The startup `artifact_limits.stored_bytes` policy defaults to 32 MiB, bounded by
+a 512 MiB protocol object ceiling. Expanded directory content has an independent
+`expanded_bytes` policy with the same default and ceiling.
+Configure propagates the accepted policy to consumers; store Begin/Open and
+consumer allocation admission enforce it independently. Raw chunks remain 1 MiB,
+with the complete encoded frame bounded separately in both directions. A bounded
+off-loop worker owns filesystem I/O. Artifact response retention remains bounded
+through writer acknowledgement or retirement; egress overflow disconnects only
+the affected recipient. Ordinary semantic event publication retains its existing
+independent lag policy.
 Uploads and reads have finite non-renewable lifetimes and connection ownership;
 write chunks acknowledge accepted bytes, accepting only
 next offsets or identical retransmissions. Active read transfers hold stable
 cross-process coordination so cleanup skips them. Stat alone does not pin.
 Consumers verify original size and digest before use; a digest proves equality,
 not provenance, safe content, or media validity.
+
+Directory exports use an in-process versioned tar+zstd codec shared with other
+producers. The identifying bytes are part of the digest; MIME remains an
+unverified per-use hint and cannot trigger extraction. Key-only import recognizes
+directory bundles, verifies the full stored original, then validates and extracts
+regular files and directories into private staging. Unsupported versions,
+unsafe paths, links, special entries, exceeded limits and malformed/trailing
+streams fail closed with staging cleanup. Returned files are non-executable.
+Directory traversal does not follow symlinks; existing top-level regular-file
+symlink exports remain supported. The encoder uses sorted paths, normalized
+metadata and fixed settings for repeatable bytes within an encoder version,
+without cross-version canonicalization or filesystem snapshot semantics.
+Artifact transfer bytes remain outside event logs.
 
 Finalization publishes complete originals and explicit metadata atomically,
 synchronizing files and publication directories before a successful descriptor.

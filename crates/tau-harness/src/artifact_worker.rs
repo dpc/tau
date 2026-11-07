@@ -90,6 +90,7 @@ pub(crate) struct ArtifactCompleted {
 
 impl ArtifactWorker {
     /// Starts one worker without opening or inspecting the persistent root.
+    #[cfg(test)]
     pub(crate) fn start(
         root: &Path,
         completion: mpsc::Sender<HarnessEvent>,
@@ -97,6 +98,7 @@ impl ArtifactWorker {
         Self::start_inner(
             root,
             completion,
+            tau_proto::ArtifactLimits::default().stored_bytes,
             #[cfg(test)]
             None,
         )
@@ -109,15 +111,37 @@ impl ArtifactWorker {
         completion: mpsc::Sender<HarnessEvent>,
         hook: ImageHook,
     ) -> Result<Self, ArtifactError> {
-        Self::start_inner(root, completion, Some(hook))
+        Self::start_inner(
+            root,
+            completion,
+            tau_proto::ArtifactLimits::default().stored_bytes,
+            Some(hook),
+        )
+    }
+
+    /// Starts a worker with the accepted harness original-byte policy.
+    pub(crate) fn start_with_limit(
+        root: &Path,
+        completion: mpsc::Sender<HarnessEvent>,
+        max_bytes: tau_proto::ArtifactSize,
+    ) -> Result<Self, ArtifactError> {
+        Self::start_inner(
+            root,
+            completion,
+            max_bytes,
+            #[cfg(test)]
+            None,
+        )
     }
 
     fn start_inner(
         root: &Path,
         completion: mpsc::Sender<HarnessEvent>,
+        max_bytes: tau_proto::ArtifactSize,
         #[cfg(test)] image_hook: Option<ImageHook>,
     ) -> Result<Self, ArtifactError> {
         let mut store = ArtifactStore::new(root);
+        store.set_max_bytes(max_bytes);
         let (tx, rx) = mpsc::sync_channel::<Job>(REQUEST_LIMIT);
         thread::Builder::new()
             .name("tau-artifacts".to_owned())

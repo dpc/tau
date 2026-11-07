@@ -125,7 +125,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(17, 0);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(18, 0);
 
 /// Reporter-owned filename used by the locked papercut history RPC.
 pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";
@@ -1358,7 +1358,12 @@ pub type DecodeError = ciborium::de::Error<std::io::Error>;
 ///
 /// This bounds peer-controlled buffering before higher-level connection and
 /// activation quotas can apply.
-pub const MAX_PROTOCOL_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_PROTOCOL_MESSAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Existing semantic-envelope producer budget, independent of outer framing.
+///
+/// Raising the transport ceiling must not silently enlarge event admission.
+pub const MAX_SEMANTIC_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Encoded byte count for one complete protocol message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

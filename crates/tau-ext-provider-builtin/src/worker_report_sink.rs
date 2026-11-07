@@ -137,12 +137,12 @@ pub(super) fn prepare_worker_report(
     message: HarnessInputMessage,
 ) -> ClientResult<tau_client::PeerOutput> {
     let output = tau_client::PeerOutput::prepare(message)?;
-    if tau_proto::MAX_PROTOCOL_MESSAGE_BYTES < output.encoded_bytes() {
+    if tau_proto::MAX_SEMANTIC_MESSAGE_BYTES < output.encoded_bytes() {
         return Err(path_std_io::Error::new(
             path_std_io::ErrorKind::InvalidData,
             format!(
                 "protocol message exceeds {} byte limit",
-                tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+                tau_proto::MAX_SEMANTIC_MESSAGE_BYTES
             ),
         )
         .into());

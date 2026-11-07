@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,7 @@ use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
 use crate::tool_lifecycle::ToolLifecycle;
 use crate::tools::{EXPORT_TOOL_NAME, IMPORT_TOOL_NAME};
 
+mod buffer_budget;
 mod hints;
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,10 @@ const ARTIFACT_COMMAND_LIMIT: usize = 96;
 /// Cloneable worker-side entry point for preparing artifact operations.
 #[derive(Clone)]
 pub(crate) struct ArtifactTransferControl {
+    /// Aggregate buffers charged before any original allocation.
+    buffers: buffer_budget::BufferBudget,
+    /// Effective startup directory and original-byte policy.
+    limits: Arc<Mutex<tau_artifact::Limits>>,
     /// Bounded nonblocking completion queue consumed by the main loop.
     queue: Arc<Mutex<VecDeque<Command>>>,
     /// Manual-loop wake handle installed after startup.
@@ -65,6 +70,10 @@ pub(crate) struct ArtifactTransferManager {
 enum Command {
     /// A local regular file has been read and bounded.
     StartExport {
+        /// Capacity retained through preparation and upload completion.
+        reservation: Option<buffer_budget::Reservation>,
+        /// Whether the original encodes a directory rather than a regular file.
+        directory: bool,
         /// Original invocation identity.
         invoke: ToolStarted,
         /// Lifecycle retained until the terminal is flushed.
@@ -76,6 +85,8 @@ enum Command {
     },
     /// A key has been validated and is ready to open.
     StartImport {
+        /// Capacity retained through download and private extraction.
+        reservation: Option<buffer_budget::Reservation>,
         /// Original invocation identity.
         invoke: ToolStarted,
         /// Lifecycle retained until the terminal is flushed.
@@ -98,6 +109,10 @@ enum Command {
 enum Transfer {
     /// Upload of one already-read original.
     Export {
+        /// Capacity retained while the upload owns original bytes.
+        reservation: Option<buffer_budget::Reservation>,
+        /// Whether the original encodes a directory rather than a regular file.
+        directory: bool,
         /// Original invocation identity.
         invoke: ToolStarted,
         /// Lifecycle retained until terminal publication.
@@ -109,6 +124,8 @@ enum Transfer {
     },
     /// Download of one validated key.
     Import {
+        /// Capacity retained while the download accumulates original bytes.
+        reservation: Option<buffer_budget::Reservation>,
         /// Original invocation identity.
         invoke: ToolStarted,
         /// Lifecycle retained until terminal publication.
@@ -145,11 +162,26 @@ struct ImportWriteReservation {
 /// Retained private temp that unlinks itself unless a reported tool result
 /// takes it.
 struct RetainedTemp {
+    /// Original/extraction capacity remains charged until result publication.
+    reservation: Option<buffer_budget::Reservation>,
+    /// Directory trees need recursive cleanup rather than unlink.
+    directory: bool,
     /// Owned path removed on drop until successfully published to the caller.
     path: Option<PathBuf>,
 }
 
 impl ArtifactTransferManager {
+    /// Installs the harness-owned immutable startup byte policy.
+    pub(crate) fn configure_limits(&mut self, limits: tau_proto::ArtifactLimits) {
+        *self
+            .control
+            .limits
+            .lock()
+            .expect("artifact limits poisoned") = tau_artifact::Limits {
+            stored_bytes: limits.stored_bytes.get(),
+            expanded_bytes: limits.expanded_bytes.get(),
+        };
+    }
     /// Creates the production transfer manager.
     pub(crate) fn new(client: ArtifactClient) -> Self {
         let waker = Arc::new(Mutex::new(None));
@@ -157,7 +189,12 @@ impl ArtifactTransferManager {
         Self {
             client: Some(client),
             session: None,
-            control: ArtifactTransferControl { queue, waker },
+            control: ArtifactTransferControl {
+                queue,
+                waker,
+                limits: Arc::new(Mutex::new(tau_artifact::Limits::default())),
+                buffers: Default::default(),
+            },
             transfers: HashMap::new(),
             requests: HashMap::new(),
             import_write_budget: ImportWriteBudget::default(),
@@ -174,7 +211,12 @@ impl ArtifactTransferManager {
         Self {
             client: None,
             session: None,
-            control: ArtifactTransferControl { queue, waker },
+            control: ArtifactTransferControl {
+                queue,
+                waker,
+                limits: Arc::new(Mutex::new(tau_artifact::Limits::default())),
+                buffers: Default::default(),
+            },
             transfers: HashMap::new(),
             requests: HashMap::new(),
             import_write_budget: ImportWriteBudget::default(),
@@ -213,6 +255,8 @@ impl ArtifactTransferManager {
             };
             match command {
                 Command::StartExport {
+                    reservation,
+                    directory,
                     invoke,
                     lifecycle,
                     upload,
@@ -226,6 +270,8 @@ impl ArtifactTransferManager {
                     self.transfers.insert(
                         call_id.clone(),
                         Transfer::Export {
+                            reservation,
+                            directory,
                             invoke,
                             lifecycle,
                             upload,
@@ -235,6 +281,7 @@ impl ArtifactTransferManager {
                     self.start_next(&call_id, output);
                 }
                 Command::StartImport {
+                    reservation,
                     invoke,
                     lifecycle,
                     download,
@@ -247,6 +294,7 @@ impl ArtifactTransferManager {
                     self.transfers.insert(
                         call_id.clone(),
                         Transfer::Import {
+                            reservation,
                             invoke,
                             lifecycle,
                             download,
@@ -279,6 +327,11 @@ impl ArtifactTransferManager {
                                 output,
                                 &invoke,
                                 CborValue::Map(vec![
+                                    text_entry(
+                                        "kind",
+                                        if temp.directory { "directory" } else { "file" }
+                                            .to_owned(),
+                                    ),
                                     text_entry("path", temp.path().display().to_string()),
                                     int_entry("size", size),
                                 ]),
@@ -340,6 +393,8 @@ impl ArtifactTransferManager {
         }
         match transfer {
             Transfer::Export {
+                reservation: _reservation,
+                directory,
                 invoke,
                 lifecycle,
                 upload,
@@ -347,10 +402,22 @@ impl ArtifactTransferManager {
             } if upload.descriptor().is_some() => {
                 let descriptor = upload.descriptor().expect("checked descriptor");
                 let mut entries = vec![
+                    text_entry(
+                        "kind",
+                        if directory { "directory" } else { "file" }.to_owned(),
+                    ),
                     text_entry("artifact", artifact_reference(&descriptor.key)),
                     int_entry("size", descriptor.size.get()),
                 ];
-                if let Some(filename) = filename {
+                if directory {
+                    entries.push(text_entry(
+                        "mime_type",
+                        tau_artifact::DIRECTORY_MIME.to_owned(),
+                    ));
+                    if let Some(filename) = filename {
+                        entries.push(text_entry("filename", filename));
+                    }
+                } else if let Some(filename) = filename {
                     if let Some(mime_type) = hints::export_mime(&invoke, Some(&filename)) {
                         entries.push(text_entry("mime_type", mime_type));
                     }
@@ -362,6 +429,7 @@ impl ArtifactTransferManager {
                 lifecycle.finish();
             }
             Transfer::Import {
+                reservation: buffer_reservation,
                 invoke,
                 lifecycle,
                 download,
@@ -380,6 +448,7 @@ impl ArtifactTransferManager {
                             }
                         };
                         let tx = self.control.clone();
+                        let limits = *tx.limits.lock().expect("artifact limits poisoned");
                         let call_id = invoke.call_id.clone();
                         let cancel = Arc::new(AtomicBool::new(false));
                         self.transfers.insert(
@@ -400,7 +469,11 @@ impl ArtifactTransferManager {
                             tau_proto::cbor_text_field(&invoke.arguments, "mime_type").as_deref(),
                         );
                         let enqueue = scheduler.enqueue(WorkPriority::Cheap, meta, move || {
-                            let result = write_private_temp(&bytes, &cancel, &suffix);
+                            let result =
+                                write_import(&bytes, &cancel, &suffix, limits).map(|mut temp| {
+                                    temp.reservation = buffer_reservation;
+                                    temp
+                                });
                             drop(reservation);
                             let _ = tx.send(Command::ImportWritten {
                                 call_id,
@@ -543,15 +616,47 @@ impl ArtifactTransferControl {
         output: &Output,
     ) -> bool {
         let failure_invoke = invoke.clone();
+        let limits = *self.limits.lock().expect("artifact limits poisoned");
+        let reservation = match self
+            .buffers
+            .reserve(limits.stored_bytes.max(limits.expanded_bytes))
+        {
+            Ok(reservation) => reservation,
+            Err(message) => {
+                report_error(output, &invoke, message);
+                return false;
+            }
+        };
         let command = if invoke.tool_name == EXPORT_TOOL_NAME {
-            prepare_export(invoke, lifecycle, workdir)
+            prepare_export_with_limits(
+                invoke,
+                lifecycle,
+                workdir,
+                *self.limits.lock().expect("artifact limits poisoned"),
+            )
         } else if invoke.tool_name == IMPORT_TOOL_NAME {
-            prepare_import(invoke, lifecycle)
+            prepare_import_with_limit(
+                invoke,
+                lifecycle,
+                self.limits
+                    .lock()
+                    .expect("artifact limits poisoned")
+                    .stored_bytes,
+            )
         } else {
             return false;
         };
         match command {
-            Ok(command) => {
+            Ok(mut command) => {
+                match &mut command {
+                    Command::StartExport {
+                        reservation: slot, ..
+                    }
+                    | Command::StartImport {
+                        reservation: slot, ..
+                    } => *slot = Some(reservation),
+                    Command::ImportWritten { .. } => unreachable!("preparation starts transfers"),
+                }
                 if self.send(command).is_ok() {
                     true
                 } else {
@@ -606,10 +711,24 @@ impl Transfer {
     clippy::result_large_err,
     reason = "the error retains the exact invocation and lifecycle needed for one terminal"
 )]
+#[cfg(test)]
 fn prepare_export(
     invoke: ToolStarted,
     lifecycle: ToolLifecycle,
     workdir: &Path,
+) -> Result<Command, (ToolStarted, ToolLifecycle, String)> {
+    prepare_export_with_limits(invoke, lifecycle, workdir, tau_artifact::Limits::default())
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "the error retains the exact invocation and lifecycle needed for one terminal"
+)]
+fn prepare_export_with_limits(
+    invoke: ToolStarted,
+    lifecycle: ToolLifecycle,
+    workdir: &Path,
+    limits: tau_artifact::Limits,
 ) -> Result<Command, (ToolStarted, ToolLifecycle, String)> {
     let Some(path) = tau_proto::cbor_text_field(&invoke.arguments, "path") else {
         return Err((invoke, lifecycle, "path must be a string".to_owned()));
@@ -629,31 +748,48 @@ fn prepare_export(
             format!("failed to inspect {}: {error}", path.display()),
         )
     })?;
-    if !metadata.is_file() {
+    let directory = metadata.is_dir();
+    if !metadata.is_file() && !directory {
         return Err((
             invoke,
             lifecycle,
-            "export path is not a regular file".to_owned(),
+            "export path is not a regular file or directory".to_owned(),
         ));
     }
-    if metadata.len() > ARTIFACT_MAX_BYTES {
+    if !directory && metadata.len() > limits.stored_bytes {
         return Err((
             invoke,
             lifecycle,
-            "artifact exceeds the 16 MiB limit".to_owned(),
+            "artifact exceeds the configured stored-byte limit".to_owned(),
         ));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    Read::by_ref(&mut file)
-        .take(ARTIFACT_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            (
-                invoke.clone(),
-                lifecycle.clone(),
-                format!("failed to read {}: {error}", path.display()),
-            )
-        })?;
+    let bytes = if directory {
+        tau_artifact::pack(&path, limits, || lifecycle.effect_cancel_requested())
+    } else {
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut file)
+            .take(limits.stored_bytes + 1)
+            .read_to_end(&mut bytes)
+            .and_then(|_| {
+                if bytes.len() as u64 > limits.stored_bytes {
+                    Err(io::Error::other(
+                        "artifact exceeds configured stored-byte limit",
+                    ))
+                } else {
+                    Ok(bytes)
+                }
+            })
+    }
+    .map_err(|error| {
+        (
+            invoke.clone(),
+            lifecycle.clone(),
+            format!("failed to read {}: {error}", path.display()),
+        )
+    })?;
+    // Kind follows the reserved byte identity even when the source is an
+    // already-encoded regular file. Import still validates the whole bundle.
+    let directory = tau_artifact::is_directory(&bytes);
     let upload = ArtifactUpload::new(bytes).map_err(|error| {
         (
             invoke.clone(),
@@ -666,6 +802,8 @@ fn prepare_export(
         .and_then(|name| name.to_str())
         .map(bounded_hint);
     Ok(Command::StartExport {
+        reservation: None,
+        directory,
         invoke,
         lifecycle,
         upload,
@@ -692,9 +830,10 @@ fn open_export_file(path: &Path) -> std::io::Result<File> {
     clippy::result_large_err,
     reason = "the error retains the exact invocation and lifecycle needed for one terminal"
 )]
-fn prepare_import(
+fn prepare_import_with_limit(
     invoke: ToolStarted,
     lifecycle: ToolLifecycle,
+    max_bytes: u64,
 ) -> Result<Command, (ToolStarted, ToolLifecycle, String)> {
     let Some(key) = tau_proto::cbor_text_field(&invoke.arguments, "key") else {
         return Err((invoke, lifecycle, "key must be a string".to_owned()));
@@ -707,9 +846,13 @@ fn prepare_import(
         )
     })?;
     Ok(Command::StartImport {
+        reservation: None,
         invoke,
         lifecycle,
-        download: ArtifactDownload::new(key),
+        download: ArtifactDownload::with_max_bytes(
+            key,
+            tau_proto::ArtifactSize::new(max_bytes).expect("validated startup limit"),
+        ),
     })
 }
 
@@ -740,7 +883,33 @@ fn write_private_temp(
         let _ = fs::remove_file(&path);
         return Err("artifact import was cancelled".to_owned());
     }
-    Ok(RetainedTemp { path: Some(path) })
+    Ok(RetainedTemp {
+        path: Some(path),
+        directory: false,
+        reservation: None,
+    })
+}
+
+fn write_import(
+    bytes: &[u8],
+    cancel: &AtomicBool,
+    suffix: &str,
+    limits: tau_artifact::Limits,
+) -> Result<RetainedTemp, String> {
+    if bytes.len() as u64 > limits.stored_bytes {
+        return Err("artifact exceeds configured stored-byte limit".to_owned());
+    }
+    if tau_artifact::is_directory(bytes) {
+        let temp = tau_artifact::unpack(bytes, limits, || cancel.load(Ordering::Acquire))
+            .map_err(|error| format!("failed to extract directory artifact: {error}"))?;
+        Ok(RetainedTemp {
+            path: Some(temp.keep()),
+            directory: true,
+            reservation: None,
+        })
+    } else {
+        write_private_temp(bytes, cancel, suffix)
+    }
 }
 
 fn finish_error(output: &Output, transfer: Transfer, message: String) {
@@ -900,7 +1069,11 @@ impl RetainedTemp {
 impl Drop for RetainedTemp {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = fs::remove_file(path);
+            if self.directory {
+                let _ = fs::remove_dir_all(path);
+            } else {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }

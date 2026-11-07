@@ -110,6 +110,7 @@ fn queued_cancellation_precedes_ready_decoder_completion() {
         writer
             .write_message(&HarnessOutputMessage::Configure(Configure {
                 purpose: tau_proto::ConfigurePurpose::Runtime,
+                artifact_limits: Default::default(),
                 harness_protocol_version: None,
                 tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
                 instance_name: tau_proto::ExtensionName::parse("std-utils").expect("instance"),

@@ -1737,6 +1737,7 @@ impl Harness {
             );
         }
         let configure = HarnessOutputMessage::Configure(tau_proto::Configure {
+            artifact_limits: self.config.accepted_harness_settings.artifact_limits,
             purpose: tau_proto::ConfigurePurpose::Runtime,
             harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
             config: tau_proto::json_to_cbor(&config_json),
@@ -1750,7 +1751,7 @@ impl Harness {
             state_dir,
             secrets,
             absent_optional_secrets,
-            settings_files,
+            settings_files: Box::new(settings_files),
         });
         let configure_fits = tau_proto::encode_harness_output_to_vec(&configure)
             .is_ok_and(|encoded| encoded.len() as u64 <= tau_proto::MAX_PROTOCOL_MESSAGE_BYTES);

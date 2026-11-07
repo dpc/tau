@@ -2,6 +2,81 @@ use std::process::Command;
 
 use super::*;
 
+/// Larger originals retain chunked transfer, digest verification, retry
+/// identity and restart lookup; lowering operational policy rejects Open/Begin,
+/// not replay.
+#[test]
+fn larger_original_roundtrip_restart_and_policy() {
+    let root = tempfile::tempdir().expect("store fixture");
+    let bytes = vec![0xa5; 32 * 1024 * 1024];
+    let mut store = ArtifactStore::new(root.path());
+    let (upload, descriptor) = put(&mut store, "owner", "connection", &bytes, 1);
+    drop(store);
+    let mut store = ArtifactStore::new(root.path());
+    assert_eq!(
+        store
+            .finalize("owner", "connection", &upload, 2)
+            .expect("restart finalize retry"),
+        ArtifactValue::Descriptor(descriptor.clone())
+    );
+    let mut download = tau_client::ArtifactDownload::with_max_bytes(
+        descriptor.key.clone(),
+        tau_proto::ArtifactSize::new(bytes.len() as u64).expect("valid fixture size"),
+    );
+    while let Some(op) = download.next_op() {
+        if let ArtifactOp::Read { length, .. } = &op {
+            assert!(*length as usize <= ARTIFACT_CHUNK_BYTES);
+        }
+        download
+            .accept(
+                store
+                    .execute("owner", "connection", op, 2)
+                    .expect("execute download operation"),
+            )
+            .expect("accept download response");
+    }
+    assert_eq!(download.into_bytes().expect("verified original"), bytes);
+    store.set_max_bytes(tau_proto::ArtifactSize::new(16 * 1024 * 1024).expect("lowered policy"));
+    assert_eq!(
+        store.open("connection", descriptor.key),
+        Err(ArtifactError::Invalid)
+    );
+    assert_eq!(
+        store.begin(
+            "owner",
+            "connection",
+            tau_proto::ArtifactSize::new(16 * 1024 * 1024 + 1).expect("above operational limit")
+        ),
+        Err(ArtifactError::Invalid)
+    );
+}
+
+/// Configured large originals run alone instead of multiplying the hard ceiling
+/// by the transfer count; disconnect releases admission without allocating
+/// data.
+#[test]
+fn large_upload_reservations_are_exclusive_and_released() {
+    let root = tempfile::tempdir().expect("store fixture");
+    let mut store = ArtifactStore::new(root.path());
+    let largest = tau_proto::ArtifactSize::new(ARTIFACT_MAX_BYTES).expect("maximum object size");
+    store.set_max_bytes(largest);
+    store
+        .begin("owner", "one", largest)
+        .expect("exclusive large upload");
+    assert_eq!(
+        store.begin(
+            "owner",
+            "two",
+            tau_proto::ArtifactSize::new(1).expect("small size")
+        ),
+        Err(ArtifactError::Busy)
+    );
+    store.disconnect("one");
+    store
+        .begin("owner", "two", largest)
+        .expect("capacity released");
+}
+
 /// Recent pages use last put, deterministic ties and prefix-before-limit
 /// without renewal.
 #[test]
@@ -574,7 +649,7 @@ fn cancellation_expiry_and_admission_are_bounded() {
             .begin(
                 "tool/session",
                 "one",
-                tau_proto::ArtifactSize::new(ARTIFACT_MAX_BYTES).expect("size"),
+                tau_proto::ArtifactSize::new(16 * 1024 * 1024).expect("size"),
             )
             .expect("admit bounded upload");
     }

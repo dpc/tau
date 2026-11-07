@@ -20,6 +20,18 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Unpublished source SDK 0.25.0
+
+Proto/client 0.25.0 targets protocol 18.0: fixed 32 MiB outer framing,
+independent Configure artifact limits and larger chunked original objects.
+Configured extensions and UI peers rebuild together; source Configure literals
+must initialize `artifact_limits` and box `settings_files`, now a
+`Box<BTreeMap<...>>` with unchanged wire encoding. Boxing keeps the startup-only
+Configure size from inflating every runtime message enum after the addition of
+`ArtifactLimits`. Client image/clipboard download defaults,
+semantic producer budgets and durable record limits remain unchanged. No package
+publication or runtime activation is implied.
+
 ### Unpublished source SDK 0.24.0
 
 Proto/client 0.24.0 targets protocol 17.0. New typed size failures and

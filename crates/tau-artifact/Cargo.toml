@@ -1,0 +1,24 @@
+[package]
+name = "dpc-tau-artifact"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Bounded in-process Tau directory artifact encoding."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "tau_artifact"
+
+[lints]
+workspace = true
+
+[dependencies]
+rustix-v1 = { workspace = true, features = ["fs", "std"] }
+tar.workspace = true
+tempfile.workspace = true
+zstd.workspace = true

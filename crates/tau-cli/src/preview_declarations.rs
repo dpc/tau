@@ -308,6 +308,7 @@ fn inspect_connection<R: Read, W: Write>(
         BTreeMap::new()
     };
     let configure = Configure {
+        artifact_limits: Default::default(),
         purpose: tau_proto::ConfigurePurpose::DeclarationInspection,
         harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
         config: tau_proto::CborValue::serialized(&extension.config)
@@ -317,7 +318,7 @@ fn inspect_connection<R: Read, W: Write>(
         state_dir: None,
         secrets: BTreeMap::new(),
         absent_optional_secrets: Default::default(),
-        settings_files,
+        settings_files: Box::new(settings_files),
     };
     let mut writer = tau_proto::HarnessOutputWriter::new(Vec::new());
     writer

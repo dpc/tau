@@ -10,6 +10,7 @@ from pathlib import Path
 
 PUBLICATION_ORDER = [
     "dpc-tau-actions",
+    "dpc-tau-artifact",
     "dpc-tau-blocking-notify-channel",
     "dpc-tau-themes",
     "dpc-tau-util-fs-err",

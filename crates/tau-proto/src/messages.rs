@@ -138,6 +138,9 @@ pub struct Disconnect {
 /// contain floats; `PartialEq` is enough for tests.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Configure {
+    /// Immutable operational artifact limits; originals never enter event logs.
+    #[serde(default)]
+    pub artifact_limits: crate::ArtifactLimits,
     /// Select declaration inspection instead of ordinary operational startup.
     /// Collectors must first check Hello's explicit inspection support.
     #[serde(default, skip_serializing_if = "ConfigurePurpose::is_runtime")]
@@ -172,8 +175,10 @@ pub struct Configure {
     /// Keys are sanitized relative file names. The harness captures this map
     /// once before configuration; changes become visible after extension
     /// restart.
+    /// Boxed so startup-only policy does not enlarge every runtime message
+    /// enum.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub settings_files: BTreeMap<String, Vec<u8>>,
+    pub settings_files: Box<BTreeMap<String, Vec<u8>>>,
 }
 
 /// Secret text passed from the harness to one authorized extension.

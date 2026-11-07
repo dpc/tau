@@ -1107,6 +1107,8 @@ pub struct HarnessSettings {
     /// Optional lifetime of shared original-byte artifacts since last explicit
     /// put.
     pub artifact_retention: Option<RetentionDuration>,
+    /// Stored and expanded artifact byte limits, independently configurable.
+    pub artifact_limits: tau_proto::ArtifactLimits,
     /// Session-level bare-message receiver and outbound remote-session access
     /// policy.
     pub inter_session: InterSessionPolicy,
@@ -1198,6 +1200,9 @@ struct HarnessSettingsWire {
     diagnostic_retention: Option<RetentionDuration>,
     /// Independent original-byte artifact retention policy.
     artifact_retention: Option<RetentionDuration>,
+    /// Bounded startup policy propagated to artifact consumers.
+    #[serde(default)]
+    artifact_limits: tau_proto::ArtifactLimits,
     /// Outbound remote-session project-root policy.
     #[serde(default)]
     inter_session: InterSessionPolicy,
@@ -1322,6 +1327,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             agent_retention: wire.agent_retention,
             diagnostic_retention: wire.diagnostic_retention,
             artifact_retention: wire.artifact_retention,
+            artifact_limits: wire.artifact_limits,
             inter_session: wire.inter_session,
             show_introduction_notice: wire.show_introduction_notice,
             wait_timeout_bounds,
@@ -4568,6 +4574,13 @@ fn normalize_harness_config_value(
         return Ok(());
     };
     validate_retention_config_values(map, source)?;
+    if let Some(value) = map.get("artifact_limits") {
+        serde_json::from_value::<tau_proto::ArtifactLimits>(value.clone()).map_err(|error| {
+            SettingsError::Config(config::ConfigError::Message(format!(
+                "{source}: invalid `artifact_limits`: {error}"
+            )))
+        })?;
+    }
     normalize_prompt_fragment_text_files(map, source, config_dir)
 }
 

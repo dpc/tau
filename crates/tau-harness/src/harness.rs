@@ -517,7 +517,7 @@ impl io::Write for EncodedSizeLimit {
 
 fn protocol_message_fits(message: &HarnessOutputMessage) -> bool {
     let mut encoded_size = EncodedSizeLimit {
-        remaining: tau_proto::MAX_PROTOCOL_MESSAGE_BYTES,
+        remaining: tau_proto::MAX_SEMANTIC_MESSAGE_BYTES,
     };
     tau_proto::encode_message(&mut encoded_size, message).is_ok()
 }

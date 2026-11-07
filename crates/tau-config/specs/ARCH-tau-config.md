@@ -5,6 +5,10 @@ retention-duration grammar. Its built-in default is `null`, and session/agent
 retention cannot delete shared original bytes. The cross-component contract is
 [SPEC-shared-artifacts](../../../specs/SPEC-shared-artifacts.md).
 
+`artifact_limits.stored_bytes` and `expanded_bytes` define independent startup
+limits in integer bytes. Each defaults to 32 MiB and has a validated 512 MiB ceiling.
+They do not configure transport frame size and have no message-size ratio rule.
+
 `tau_state_access` selects `hidden` or `read_only` for supervised
 extensions, and an extension entry can override it with the same field. A
 selected profile can replace this global default before command-line layers.

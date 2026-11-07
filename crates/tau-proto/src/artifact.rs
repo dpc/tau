@@ -8,6 +8,7 @@ mod error;
 mod frame;
 mod identifier;
 mod key;
+mod limits;
 mod listing;
 mod read_id;
 mod request_id;
@@ -20,6 +21,7 @@ pub use descriptor::ArtifactDescriptor;
 pub use error::ArtifactError;
 pub use frame::artifact_frame_fits;
 pub use key::ArtifactKey;
+pub use limits::ArtifactLimits;
 pub use listing::{
     ARTIFACT_LIST_LIMIT, ArtifactListEntry, ArtifactSignature, artifact_prefix_valid,
 };
@@ -30,7 +32,7 @@ pub use size::ArtifactSize;
 pub use upload_id::ArtifactUploadId;
 
 /// Maximum original object size, independent of image preview limits.
-pub const ARTIFACT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+pub const ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum raw payload in either transfer direction.
 pub const ARTIFACT_CHUNK_BYTES: usize = 1024 * 1024;
 /// Maximum complete encoded Artifact request or response frame.

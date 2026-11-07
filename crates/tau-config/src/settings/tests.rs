@@ -1001,6 +1001,40 @@ fn session_and_agent_retention_default_to_disabled() {
     assert_eq!(settings.artifact_retention(), None);
 }
 
+/// Artifact sizes are independent startup byte budgets, not message-size
+/// ratios; invalid or mistyped policy must fail instead of silently falling
+/// back.
+#[test]
+fn artifact_limits_validate_defaults_and_independent_bounds() {
+    let mut json: serde_json::Value =
+        serde_yaml_ng::from_str(BUILT_IN_HARNESS_YAML).expect("built-in YAML");
+    let default: HarnessSettings = serde_json::from_value(json.clone()).expect("default settings");
+    assert_eq!(default.artifact_limits.stored_bytes.get(), 32 * 1024 * 1024);
+    assert_eq!(
+        default.artifact_limits.expanded_bytes.get(),
+        32 * 1024 * 1024
+    );
+    json["artifact_limits"] =
+        serde_json::json!({"stored_bytes": tau_proto::ARTIFACT_MAX_BYTES, "expanded_bytes": 0});
+    let settings: HarnessSettings =
+        serde_json::from_value(json.clone()).expect("independent size policy");
+    assert_eq!(
+        settings.artifact_limits.stored_bytes.get(),
+        tau_proto::ARTIFACT_MAX_BYTES
+    );
+    assert_eq!(settings.artifact_limits.expanded_bytes.get(), 0);
+    for invalid in [
+        serde_json::json!({"stored_bytes": tau_proto::ARTIFACT_MAX_BYTES + 1}),
+        serde_json::json!({"expanded_bytes": tau_proto::ARTIFACT_MAX_BYTES + 1}),
+        serde_json::json!({"stored_bytes": -1}),
+        serde_json::json!({"stored_bytes": "32MiB"}),
+        serde_json::json!({"stored_btyes": 32}),
+    ] {
+        json["artifact_limits"] = invalid;
+        assert!(serde_json::from_value::<HarnessSettings>(json.clone()).is_err());
+    }
+}
+
 /// Artifact policy is independent, explicitly nullable, and uses the same
 /// validated duration grammar rather than borrowing diagnostic defaults.
 #[test]

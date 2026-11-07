@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 18.0 and source SDK 0.25.0 raise the fixed outer message ceiling to
+32 MiB, add Configure artifact limits, and admit original objects up to
+512 MiB via existing 1 MiB chunks. Configured peers must rebuild together.
+The 16 MiB semantic producer, 8 MiB client queue/admission, 16 MiB debug and
+64 MiB durable record ceilings remain independent and unchanged. No archive bytes
+enter event logs. SDK publication and runtime activation remain separate.
+
 Protocol 17.0 and source SDK 0.24.0 distinguish local encoded-message rejection
 and peer WebSocket 1009 from token overflow. Standalone failures retain a distinct
 message-size reason; ordinary terminals can record a growth-stopped recovery.
@@ -453,7 +460,7 @@ create admission does not claim prompt execution success. See
 [SPEC-ui-create-agent-admission](../../../specs/SPEC-ui-create-agent-admission.md).
 The protocol deliberately provides no generic transport registration, ingress
 acknowledgement, reply-route, deduplication, or send-completion schema.
-Streaming readers reject a single encoded protocol message larger than 16 MiB
+Streaming readers reject a single encoded protocol message larger than 32 MiB
 before higher-level connection or activation queues receive it.
 
 Provider debug captures use the dedicated `provider_debug_capture` input

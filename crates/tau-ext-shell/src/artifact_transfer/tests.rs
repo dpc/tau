@@ -10,6 +10,87 @@ use crate::config::ExtConfig;
 use crate::runtime::ShellRuntime;
 use crate::tool_lifecycle::ToolLifecycleRegistry;
 
+/// Unreported extracted directories are removed recursively; cancellation and
+/// malformed typed bytes never return a misleading regular-file success.
+#[test]
+fn directory_import_cleanup_and_type_identity() {
+    let source = tempfile::tempdir().expect("private source");
+    fs::write(source.path().join("data"), b"binary\0data").expect("binary source");
+    let limits = tau_artifact::Limits::default();
+    let bytes = tau_artifact::pack(source.path(), limits, || false).expect("encode fixture");
+    let cancel = AtomicBool::new(false);
+    let temp = write_import(&bytes, &cancel, ".txt", limits).expect("import fixture");
+    let path = temp.path().to_owned();
+    assert!(temp.directory);
+    assert_eq!(
+        fs::read(path.join("data")).expect("imported bytes"),
+        b"binary\0data"
+    );
+    drop(temp);
+    assert!(!path.exists());
+    cancel.store(true, Ordering::Release);
+    assert!(write_import(&bytes, &cancel, "", limits).is_err());
+    cancel.store(false, Ordering::Release);
+    assert!(write_import(&bytes[..bytes.len() - 1], &cancel, ".txt", limits).is_err());
+    let ordinary =
+        write_import(b"not a directory", &cancel, ".directory", limits).expect("ordinary import");
+    assert!(
+        !ordinary.directory,
+        "filename/MIME cannot select extraction"
+    );
+}
+
+/// Reservation spans preparation/transfer/write lifetimes without allowing a
+/// queue's entry count to multiply a configured large original-byte ceiling.
+#[test]
+fn original_buffer_reservations_bound_concurrency() {
+    let budget = buffer_budget::BufferBudget::default();
+    let a = budget.reserve(64 * 1024 * 1024).expect("first reservation");
+    let b = budget
+        .reserve(64 * 1024 * 1024)
+        .expect("second reservation");
+    assert!(budget.reserve(1).is_err());
+    drop((a, b));
+    let large = budget
+        .reserve(ARTIFACT_MAX_BYTES)
+        .expect("exclusive large reservation");
+    assert!(budget.reserve(1).is_err());
+    drop(large);
+    assert!(budget.reserve(ARTIFACT_MAX_BYTES).is_ok());
+}
+
+/// Harness-supplied limits reach off-loop export preparation before upload
+/// admission, rather than using the codec's or transport's larger defaults.
+#[test]
+fn configured_policy_rejects_export_before_rpc() {
+    let root = tempfile::tempdir().expect("private source");
+    let path = root.path().join("source");
+    fs::write(&path, b"two bytes exceed one").expect("source bytes");
+    let mut manager = ArtifactTransferManager::unavailable();
+    manager.configure_limits(tau_proto::ArtifactLimits {
+        stored_bytes: tau_proto::ArtifactSize::new(1).expect("small stored limit"),
+        expanded_bytes: tau_proto::ArtifactSize::new(1).expect("small expanded limit"),
+    });
+    let (invoke, lifecycle, output, rx) = export_preparation_fixture(&path);
+    assert!(
+        !manager
+            .control
+            .prepare(invoke, lifecycle, root.path(), &output)
+    );
+    assert!(
+        manager
+            .control
+            .queue
+            .lock()
+            .expect("command queue")
+            .is_empty()
+    );
+    let tau_proto::HarnessInputMessage::Emit(emit) = rx.recv().expect("error terminal") else {
+        panic!("expected terminal emit");
+    };
+    assert!(matches!(*emit.event, Event::ToolErrorReported(_)));
+}
+
 /// Minimal client extension used to obtain a real production artifact writer.
 struct ArtifactClientFixture;
 
@@ -104,6 +185,7 @@ fn live_artifact_manager() -> (
 ) {
     let configure = HarnessOutputMessage::Configure(tau_proto::Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         instance_name: "artifact-client-fixture".parse().expect("extension name"),
@@ -278,6 +360,25 @@ fn regular_file_export_preparation_preserves_bytes() {
     assert_eq!(bytes, expected);
 }
 
+/// The shell boundary must reject directory-root links even when trailing slash
+/// or dot spellings would bypass a naive final-component NOFOLLOW open.
+#[cfg(unix)]
+#[test]
+fn directory_root_symlink_spellings_are_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("source fixture");
+    fs::create_dir(root.path().join("target")).expect("target directory");
+    symlink("target", root.path().join("link")).expect("root link");
+    for name in ["link", "link/", "link/.", "link/./"] {
+        let (invoke, lifecycle, _output, _rx) = export_preparation_fixture(&root.path().join(name));
+        assert!(
+            prepare_export(invoke, lifecycle, root.path()).is_err(),
+            "{name}"
+        );
+    }
+}
+
 /// Ensures Unix exports continue to follow a symlink whose opened target is a
 /// regular file.
 #[cfg(unix)]
@@ -342,7 +443,10 @@ fn fifo_export_rejection_subprocess_helper() {
     let Event::ToolErrorReported(error) = *emit.event else {
         panic!("expected preparation error");
     };
-    assert_eq!(error.message, "export path is not a regular file");
+    assert_eq!(
+        error.message,
+        "export path is not a regular file or directory"
+    );
 
     let (tx, runtime_rx) = mpsc::channel();
     let mut runtime = ShellRuntime::new_for_test_harness(
@@ -375,7 +479,10 @@ fn fifo_export_rejection_subprocess_helper() {
         };
         if let Event::ToolErrorReported(error) = *emit.event {
             assert_eq!(error.call_id.as_str(), "scheduled-fifo-export");
-            assert_eq!(error.message, "export path is not a regular file");
+            assert_eq!(
+                error.message,
+                "export path is not a regular file or directory"
+            );
             break;
         }
     }
@@ -459,6 +566,8 @@ fn export_transfer_fixture() -> (
     manager.transfers.insert(
         invoke.call_id.clone(),
         Transfer::Export {
+            reservation: None,
+            directory: false,
             invoke,
             lifecycle,
             upload: ArtifactUpload::new(b"x".to_vec()).expect("upload"),
@@ -608,6 +717,8 @@ fn queued_import_completion_unlinks_unreported_temp_on_shutdown_drop() {
                 call_id: "finished-import".into(),
                 size: 0,
                 result: Ok(RetainedTemp {
+                    reservation: None,
+                    directory: false,
                     path: Some(path.clone()),
                 }),
             })
@@ -645,6 +756,8 @@ fn full_artifact_completion_queue_rejects_without_blocking_or_leaking() {
         call_id: "rejected".into(),
         size: 0,
         result: Ok(RetainedTemp {
+            reservation: None,
+            directory: false,
             path: Some(path.clone()),
         }),
     });
@@ -716,6 +829,8 @@ fn correlated_upload_error_aborts_known_upload_once() {
     manager.transfers.insert(
         invoke.call_id.clone(),
         Transfer::Export {
+            reservation: None,
+            directory: false,
             invoke,
             lifecycle,
             upload,
@@ -794,6 +909,7 @@ fn correlated_download_error_closes_known_read_once() {
     manager.transfers.insert(
         invoke.call_id.clone(),
         Transfer::Import {
+            reservation: None,
             invoke,
             lifecycle,
             download,
@@ -843,6 +959,8 @@ fn local_request_failure_releases_only_known_transfer_identity() {
     manager.transfers.insert(
         invoke.call_id.clone(),
         Transfer::Export {
+            reservation: None,
+            directory: false,
             invoke: invoke.clone(),
             lifecycle,
             upload,
@@ -867,6 +985,8 @@ fn local_request_failure_releases_only_known_transfer_identity() {
     manager.transfers.insert(
         initial.call_id.clone(),
         Transfer::Export {
+            reservation: None,
+            directory: false,
             invoke: initial.clone(),
             lifecycle: initial_lifecycle,
             upload: ArtifactUpload::new(b"x".to_vec()).expect("upload"),
@@ -929,6 +1049,8 @@ fn cleanup_admission_failure_preserves_original_terminal() {
     manager.transfers.insert(
         invoke.call_id.clone(),
         Transfer::Export {
+            reservation: None,
+            directory: false,
             invoke,
             lifecycle,
             upload,

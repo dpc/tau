@@ -33,6 +33,7 @@ fn with_transport(
         let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
         writer
             .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+                artifact_limits: Default::default(),
                 purpose: Default::default(),
                 harness_protocol_version: None,
                 config: CborValue::Map(Vec::new()),

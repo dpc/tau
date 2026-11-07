@@ -275,6 +275,11 @@ impl ShellRuntime {
         Ok(())
     }
 
+    /// Propagates the immutable harness artifact policy to worker preparation.
+    pub(super) fn configure_artifact_limits(&mut self, limits: tau_proto::ArtifactLimits) {
+        self.artifact_transfers.configure_limits(limits);
+    }
+
     pub(super) fn handle_event(
         &mut self,
         event: Event,

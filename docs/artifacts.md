@@ -112,19 +112,19 @@ bare key for simple existing integrations.
 
 The shell extension registers `export(path, mime_type?)` and
 `import(key, filename?, mime_type?)` under ordinary
-tool-role policy. Export reads one local regular file under the shell instance's
-remembered workdir authority, uploads at most 16 MiB of original bytes, and
-returns `artifact` and `size` output headers plus bounded `filename` and available
-`mime_type` hints. Explicit MIME wins; otherwise common filename extensions supply
-a best-effort declaration, without content sniffing.
+tool-role policy. Export reads one local regular file or directory under the shell
+instance's remembered workdir authority, applies the configured stored-byte limit
+(32 MiB by default), and returns `artifact` and `size` output headers plus bounded
+`filename` and available `mime_type` hints. Explicit MIME wins; otherwise common
+filename extensions supply a best-effort declaration, without content sniffing.
 Import validates the reference, downloads and verifies the complete original,
 and returns `path` and `size` output headers after writing it to a private
 unpredictable mode-0600 temporary file on the shell execution host; that local
 path can be passed to filesystem tools. The provider-independent
 `read_image(key)` tool instead consumes a verified original directly from
 Artifact storage without granting shell or workdir authority. None of these
-tools exposes store paths, inline original bytes, execution, or archive
-extraction.
+tools exposes store paths, inline original bytes, or execution.
+Tau directory bundles are automatically extracted as described below.
 
 Carry accompanying hints through the assistant workflow, for example
 `import(key="<tau-artifact:FULL_KEY>", filename="report", mime_type="application/pdf")`.
@@ -139,6 +139,53 @@ them and still creates a generic private temporary name. Identical bytes can
 carry different names/media claims without overwriting shared metadata. Preserve
 the hints beside the canonical reference when sharing it, then pass the hints
 separately to import; the reference parser still accepts only the reference/key.
+
+### Directory artifacts
+
+Export packs directories in-process as versioned tar+zstd bundles. The complete
+bundle, including its identifying header, is the content-addressed original.
+Import recognizes that header even with only a key; MIME and filename hints
+never select extraction. Results include `kind: file` or `kind: directory`.
+Directory exports always advertise `application/vnd.tau.directory`.
+Malformed or unsupported typed bundles fail rather than becoming regular files.
+Ordinary tar/zstd files without the Tau header remain ordinary files.
+
+The directory codec supports only regular files and directories. Export rejects
+directory-root and member symlinks and special files; existing top-level symlinks
+to regular files still work. It copies files with multiple hardlinks independently.
+Traversal uses directory-relative no-follow handles. The encoder sorts paths,
+normalizes ownership, timestamps and modes, and uses fixed compression settings.
+Identical quiescent content produces repeatable bytes within an encoder version,
+not across library upgrades. This is not an atomic filesystem snapshot.
+
+Import first verifies the entire stored original, then extracts to a new private
+directory. It rejects unsafe paths, duplicate/conflicting members, links, sparse
+entries and unsupported tar metadata. Files are mode 0600 and directories 0700;
+executable bits, ownership, ACLs and xattrs are not restored. Failed or canceled
+extraction removes its staging tree. Successful returned paths belong to the
+caller and can be read with ordinary filesystem tools.
+
+Set independent startup limits in `harness.yaml`:
+
+```yaml
+artifact_limits:
+  stored_bytes: 33554432
+  expanded_bytes: 33554432
+```
+
+Both accept integer bytes from zero through 512 MiB. Invalid values fail config
+loading. Stored bytes cover regular originals or complete compressed bundles;
+expanded bytes cover aggregate logical regular-file content. There is no ratio
+constraint against message size. The shell receives the accepted policy through
+Configure; the store rejects over-limit Begin/Open requests. Image, clipboard
+and terminal-paste consumers retain their own smaller bounds.
+
+Directory processing also limits entries to 10,000, UTF-8 paths to 255 bytes and
+32 components, zstd windows to 8 MiB, and the full decoded tar stream to the
+expanded limit plus 16 MiB. Limits apply during I/O, including trailer validation.
+The format is a reserved `TAU-DIRECTORY` prefix plus NUL, version byte 1, and
+exactly one zstd frame containing restricted tar. The decoder rejects concatenated
+frames and hidden nonzero payload after the tar end.
 
 ## Recover from Busy tool calls
 
@@ -214,12 +261,19 @@ does not authenticate a producer or make content safe to execute.
 
 ## Bounds and storage
 
-- Original: 16 MiB; raw range: 1 MiB; complete encoded frame: 8 MiB.
+- Original: 32 MiB by default, configurable through 512 MiB; raw range: 1 MiB;
+  complete encoded Artifact frame: 8 MiB. The outer protocol ceiling is fixed at
+  32 MiB, not a promise that every operation admits that size. Existing client
+  8 MiB queue/admission, semantic producer 16 MiB, debug 16 MiB, and durable
+  record 64 MiB bounds remain separate. Artifact bytes never enter event logs.
 - One harness: eight open uploads/reads combined; eight queued/in-flight or
   unconsumed worker completions, plus eight retained Artifact egress frames
   until writer acknowledgement or retirement (a two-stage bound of sixteen,
   not eight end-to-end). Overflow disconnects only that recipient without
-  queueing another response. Upload bytes remain bounded in worker memory.
+  queueing another response. Upload reservations admit 128 MiB concurrently,
+  or one larger configured original alone. The shell applies the same aggregate
+  policy before preparation/download and keeps it through result publication;
+  large configuration values do not multiply by its command queue length.
 - Transfers expire after 120 seconds from admission, never extended by traffic.
   Reads require explicit Close so a lost final-range response can be retried.
   Disconnect invalidates unfinished connection-owned state.
@@ -300,7 +354,7 @@ This progress notice disappears on success, failure, or cancellation; failures
 still report retry/discard guidance.
 CRLF and bare CR become LF before measuring and uploading; no other trimming
 occurs. Smaller pastes, including pasted file paths, remain ordinary text.
-The maximum artifact is 16 MiB. Tau does not read paths or fetch pasted URLs.
+The terminal-paste maximum remains 16 MiB. Tau does not read paths or fetch pasted URLs.
 
 While uploading, the original draft and cursor stay unchanged and editing,
 submission, history navigation, and draft-switch bindings are paused. Ctrl-C
@@ -381,7 +435,8 @@ metadata are rejected. There is no discretionary sixteen-file limit: framing
 and the existing aggregate acquisition bound constrain admission.
 
 The existing 16 MiB acquisition cap includes **all bundle framing and bodies**;
-the artifact API separately caps each original at 16 MiB. Neither cap is an
+clipboard consumers retain a separate 16 MiB original limit even though general
+artifact storage supports larger originals. Neither cap is an
 OSC5522 requirement. Existing fixed acquisition/upload deadlines still apply,
 so slow SSH transfers can fail explicitly. Terminal file snapshots are ordinary
 bounded filesystem reads, not atomic snapshots or a promise to interrupt a

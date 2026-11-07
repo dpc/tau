@@ -92,7 +92,7 @@ impl PasteUpload {
         text: tau_cli_term::PasteContent,
         handle: tau_cli_term::TermHandle,
     ) {
-        if text.bytes().len() as u64 > tau_proto::ARTIFACT_MAX_BYTES {
+        if text.bytes().len() > 16 * 1024 * 1024 {
             handle.finish_paste_upload(
                 id,
                 Err("paste exceeds the 16 MiB artifact limit".to_owned()),

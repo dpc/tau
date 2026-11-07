@@ -23,6 +23,7 @@ fn dummy_stderr(filter: Option<&str>) -> String {
     input
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({})),

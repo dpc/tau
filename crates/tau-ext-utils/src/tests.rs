@@ -125,6 +125,7 @@ fn configured_frames_with_config(
     deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
 ) -> Vec<HarnessInputMessage> {
     let configure = HarnessOutputMessage::Configure(Configure {
+        artifact_limits: Default::default(),
         purpose,
         harness_protocol_version: Some(tau_proto::PROTOCOL_VERSION),
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
@@ -1619,6 +1620,7 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
     writer
         .write_message(&HarnessOutputMessage::Configure(Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
             instance_name: tau_proto::ExtensionName::parse("std-utils").expect("instance"),

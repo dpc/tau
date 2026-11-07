@@ -141,6 +141,7 @@ fn renewal_uses_authoritative_storage_and_fences_races() {
         let mut writer = HarnessOutputWriter::new(&mut input);
         writer
             .write_message(&HarnessOutputMessage::Configure(Configure {
+                artifact_limits: Default::default(),
                 purpose: Default::default(),
                 harness_protocol_version: None,
                 config: tau_proto::CborValue::Map(Vec::new()),

@@ -257,6 +257,40 @@ fn artifact_rpc_roundtrip_is_directed_and_allows_persistent_ephemeral_sessions()
     );
 }
 
+/// Startup policy reaches the lazy RPC worker rather than silently reverting
+/// to its default; rejecting an oversized Begin does not consume transfer
+/// slots.
+#[test]
+fn artifact_rpc_enforces_accepted_startup_limit() {
+    let temp = TempDir::new().expect("private root");
+    let mut h = quiet_provider_harness_ephemeral(temp.path()).expect("ephemeral harness");
+    h.config
+        .accepted_harness_settings
+        .artifact_limits
+        .stored_bytes = tau_proto::ArtifactSize::new(1).expect("small policy");
+    let sink = connect_activated_artifact_extension(&mut h);
+    assert_eq!(
+        rpc(
+            &mut h,
+            &sink,
+            ArtifactOp::Begin {
+                size: tau_proto::ArtifactSize::new(2).expect("over-limit size"),
+            }
+        ),
+        Err(ArtifactError::Invalid),
+    );
+    assert!(matches!(
+        rpc(
+            &mut h,
+            &sink,
+            ArtifactOp::Begin {
+                size: tau_proto::ArtifactSize::new(1).expect("exact-limit size"),
+            }
+        ),
+        Ok(ArtifactValue::Upload { .. }),
+    ));
+}
+
 /// Memory-only mode rejects availability and writes before constructing a
 /// worker or inspecting/cleaning an already existing persistent artifact
 /// domain.

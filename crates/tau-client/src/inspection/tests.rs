@@ -25,6 +25,7 @@ impl TauExtension for Runtime {
 /// Build non-secret startup inputs without touching a filesystem.
 fn configure(purpose: ConfigurePurpose) -> Configure {
     Configure {
+        artifact_limits: Default::default(),
         purpose,
         harness_protocol_version: None,
         config: tau_proto::CborValue::Null,

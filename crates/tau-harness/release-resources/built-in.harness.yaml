@@ -4,6 +4,9 @@ session_retention: null
 # Disable automatic shutdown until a positive idle duration is configured.
 session_idle_shutdown: null
 artifact_retention: null
+artifact_limits:
+  stored_bytes: 33554432
+  expanded_bytes: 33554432
 agent_retention: null
 diagnostic_retention: 30d
 inter_session:

@@ -38,7 +38,14 @@ import the returned `<tau-artifact:FULL_KEY>` reference, confirm the import's
 `path` and `size` output headers, compare the imported local file byte-for-byte,
 and confirm its private non-executable permissions. Carry returned `filename`
 and `mime_type` hints to import and verify a sanitized useful filename/suffix;
-also verify key-only import stays generic (hints are not stored by digest).
+also verify key-only regular-file import stays generic (hints are not stored by
+digest).
+Export a small nested directory with an empty directory and binary member, then
+import using only its reference. Check `kind: directory`, the fixed directory
+MIME, exact member bytes and private non-executable permissions. Check that
+directory symlinks are rejected and malformed typed bundles fail closed. MIME hints
+must not turn ordinary bytes into an extraction request. Stored and expanded
+limits each default to 32 MiB; inspect effective configuration before testing bounds.
 Explicit export MIME is a declaration, not verified media. Check a PNG clipboard
 artifact inserts its reference with `mime_type: image/png`, never an invented filename.
 For an image original, pass

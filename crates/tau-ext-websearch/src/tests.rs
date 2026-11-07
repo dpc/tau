@@ -2259,6 +2259,7 @@ fn display_args_project_only_safe_model_submitted_targets() {
 fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         purpose: tau_proto::ConfigurePurpose::Runtime,
+        artifact_limits: Default::default(),
         harness_protocol_version: None,
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),

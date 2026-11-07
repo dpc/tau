@@ -345,6 +345,7 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
             writer
                 .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
                     purpose: tau_proto::ConfigurePurpose::Runtime,
+                    artifact_limits: Default::default(),
                     harness_protocol_version: None,
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
@@ -2703,7 +2704,7 @@ pub(crate) fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_
     assert!(
         tau_client::encoded_outbound_frame_bytes(&oversized_target)
             .expect("remeasure oversized typed report")
-            < tau_proto::MAX_PROTOCOL_MESSAGE_BYTES,
+            < tau_proto::MAX_SEMANTIC_MESSAGE_BYTES,
         "fixture must remain inside the old worker decoder boundary"
     );
     let target_waker = TestReportWaker::default();
@@ -2731,7 +2732,7 @@ pub(crate) fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_
     };
     *text = "rejected before enqueue".repeat(1024 * 1024);
     assert!(
-        tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+        tau_proto::MAX_SEMANTIC_MESSAGE_BYTES
             < tau_client::encoded_outbound_frame_bytes(&beyond_decoder_limit)
                 .expect("measure decoder-limit fixture")
     );
@@ -2923,18 +2924,18 @@ pub(crate) fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_
     ));
 }
 
-/// Worker preparation preserves the streaming decoder's inclusive 16-MiB
+/// Worker preparation preserves the semantic producer's inclusive 16-MiB
 /// boundary before the main loop applies its stricter client admission.
 #[test]
 fn worker_report_preparation_preserves_decoder_limit_boundary() {
-    let boundary = input_message_with_encoded_size(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES);
-    let prepared = prepare_worker_report(boundary).expect("accept exact decoder boundary");
+    let boundary = input_message_with_encoded_size(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES);
+    let prepared = prepare_worker_report(boundary).expect("accept exact semantic boundary");
     assert_eq!(
         prepared.encoded_bytes(),
-        tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+        tau_proto::MAX_SEMANTIC_MESSAGE_BYTES
     );
 
-    let oversized = input_message_with_encoded_size(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES + 1);
+    let oversized = input_message_with_encoded_size(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES + 1);
     assert!(prepare_worker_report(oversized).is_err());
 }
 
@@ -6796,6 +6797,7 @@ fn configured_instance_reaches_runtime_missing_login_status() {
     input.push(encode_frames(&[
         HarnessOutputMessage::Configure(tau_proto::Configure {
             purpose: tau_proto::ConfigurePurpose::Runtime,
+            artifact_limits: Default::default(),
             harness_protocol_version: None,
             tool_prefix: None,
             config: tau_proto::CborValue::Map(Vec::new()),

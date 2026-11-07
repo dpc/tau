@@ -950,7 +950,7 @@ fn bounded_papercut_read_response(
             result: result.clone(),
         }));
     if tau_proto::encode_harness_output_to_vec(&response)
-        .is_ok_and(|bytes| bytes.len() as u64 <= tau_proto::MAX_PROTOCOL_MESSAGE_BYTES)
+        .is_ok_and(|bytes| bytes.len() as u64 <= tau_proto::MAX_SEMANTIC_MESSAGE_BYTES)
     {
         result
     } else {

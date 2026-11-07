@@ -100,7 +100,7 @@ fn provider_prompt_encoded_boundary_includes_complete_envelope() {
     let mut h = echo_harness(td.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let mut prompt = park_prompt(&mut h, &cid);
-    prompt.system_prompt = "x".repeat(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize);
+    prompt.system_prompt = "x".repeat(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize);
     let frame = |prompt| {
         HarnessOutputMessage::Deliver(EventDelivery::live(
             tau_proto::UnixMicros::now(),
@@ -112,14 +112,14 @@ fn provider_prompt_encoded_boundary_includes_complete_envelope() {
         .expect("encode")
         .len();
     prompt.system_prompt.truncate(
-        prompt.system_prompt.len() - (size - tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize),
+        prompt.system_prompt.len() - (size - tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize),
     );
     let exact = frame(prompt.clone());
     assert_eq!(
         tau_proto::encode_message_to_vec(&exact)
             .expect("encode")
             .len() as u64,
-        tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+        tau_proto::MAX_SEMANTIC_MESSAGE_BYTES
     );
     assert!(super::super::protocol_message_fits(&exact));
     let encoded = tau_proto::encode_message_to_vec(&exact).expect("encode");
@@ -134,7 +134,7 @@ fn provider_prompt_encoded_boundary_includes_complete_envelope() {
         tau_proto::encode_message_to_vec(&prompt)
             .expect("prompt payload")
             .len()
-            < tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize,
+            < tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize,
         "payload-only admission would incorrectly accept this frame"
     );
     assert!(!super::super::protocol_message_fits(&frame(prompt.clone())));
@@ -187,7 +187,7 @@ fn oversized_provider_prompts_settle_without_killing_shared_transport() {
                     },
                 ));
         } else {
-            prompt.system_prompt = "x".repeat(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize);
+            prompt.system_prompt = "x".repeat(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize);
         }
         release_prompt(&mut h, prompt);
         let events = event_log_events(&h);
@@ -356,7 +356,7 @@ fn oversized_provider_cache_refresh_is_skipped_without_transport_delivery() {
         ("size-read", fixtures::usage(10, 0)),
     ] {
         let mut prompt = fixtures::prompt("provider", id);
-        prompt.system_prompt = "x".repeat(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize);
+        prompt.system_prompt = "x".repeat(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize);
         h.provider_runtime.cache_residency.track_prompt(
             crate::test_connection_id("provider"),
             &prompt,
@@ -393,7 +393,7 @@ fn oversized_provider_prompt_late_cancel_leaves_local_terminal_intact() {
     let mut prompt = park_prompt(&mut h, &cid);
     let prompt_id = prompt.agent_prompt_id.clone();
     let agent_id = prompt.agent_id.clone();
-    prompt.system_prompt = "x".repeat(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize);
+    prompt.system_prompt = "x".repeat(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize);
     h.runtime_io
         .publication
         .interceptors
@@ -464,7 +464,7 @@ fn oversized_provider_prompt_terminal_survives_admission_backpressure() {
     let cid = ensure_test_user_agent(&mut h);
     let mut prompt = park_prompt(&mut h, &cid);
     let prompt_id = prompt.agent_prompt_id.clone();
-    prompt.system_prompt = "x".repeat(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize);
+    prompt.system_prompt = "x".repeat(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize);
     reject_next_semantic_admission(&h);
     release_prompt(&mut h, prompt);
     assert!(
@@ -544,7 +544,7 @@ fn oversized_provider_prompt_after_tool_result_settles_once() {
                 .flatten_iter()
                 .any(|item| matches!(item, ContextItem::ToolResult(_)))
         );
-        prompt.system_prompt = "x".repeat(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize);
+        prompt.system_prompt = "x".repeat(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize);
         h.runtime_io
             .publication
             .interceptors
@@ -671,7 +671,7 @@ fn oversized_provider_compaction_retains_one_local_failure() {
     let (Event::AgentPromptCreated(mut prompt), _) = intercepted_payload(&interceptor) else {
         panic!("compact prompt");
     };
-    prompt.system_prompt = "x".repeat(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize);
+    prompt.system_prompt = "x".repeat(tau_proto::MAX_SEMANTIC_MESSAGE_BYTES as usize);
     reject_next_semantic_admission(&h);
     release_prompt(&mut h, prompt);
     assert!(

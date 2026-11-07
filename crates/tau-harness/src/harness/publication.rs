@@ -2948,7 +2948,7 @@ impl Harness {
                     &format!(
                         "encoded provider prompt exceeds the {} byte protocol limit; \
                          no model request was made; use a fresh bounded agent context",
-                        tau_proto::MAX_PROTOCOL_MESSAGE_BYTES,
+                        tau_proto::MAX_SEMANTIC_MESSAGE_BYTES,
                     ),
                 );
                 return;
