@@ -13,9 +13,8 @@ owns operational, security and routing documentation.
 
 The bridge uses bot email/API-key HTTP Basic authentication, queue registration
 and long polling, not webhooks. The linked-message producer uses registry
-SDK 0.21.0 / protocol 16.6. Update the installed executable with a compatible
-harness before separately authorized activation. Route changes do not fix a
-wire-version mismatch.
+SDK 0.26.0 / protocol 19. Rebuild all peers with compatible SDKs before separately
+authorized activation. Route changes do not fix a wire-version mismatch.
 
 ## Configuration and routing
 
@@ -90,7 +89,9 @@ unloaded saved agents are not force-loaded.
 
 ### Opt-in canonical-main receiver
 
-`target: canonical_main` requires protocol 16.5 or newer within 16.x.
+`target: canonical_main` requires the SDK's compiled protocol major, currently 19,
+and accepts all minors within that major. The guard rejects missing or other
+majors before submission.
 With automatic registration, admitted input can create a missing main without a
 role or bootstrap prompt. An optional role still constrains eligibility.
 A saved non-main or unavailable main never permits an ordinary substitute.
@@ -205,17 +206,19 @@ Review former text-only roles; remove obsolete `zulip_send_attachment` and
 `zulip:attach` grants. There is no argument-level upload permission.
 
 As designated receiver, supply at most ten attachments and exactly one
-`destination` or `reply_to`. Use canonical Artifact autolinks or bare `blake3:`
-keys, not paths, URLs, inline bytes, `key` or `artifact_key` fields. Filenames
-must be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`, without a
+`destination` or `reply_to`. Use canonical Artifact autolinks containing a
+24-lowercase-hex key or the bare key, not paths, URLs, inline bytes, `key` or
+`artifact_key` fields. The bridge accepts wrapped or bare legacy
+`blake3:<64 lowercase hex>` keys with full-digest verification. Filenames must
+be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`, without a
 leading dot. Without attachments, `message` must be nonempty; with attachments
-it may be omitted or empty. Substitute a real exported digest and authorized
+it may be omitted or empty. Substitute a real exported key and authorized
 destination in this example:
 
 ```json
 {
   "attachments": [{
-    "artifact": "<tau-artifact:blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef>",
+    "artifact": "<tau-artifact:0123456789abcdef01234567>",
     "filename": "chart.png",
     "content_type": "image/png"
   }],
@@ -254,7 +257,7 @@ Both tools refetch the current source and enforce receive/source policy; they do
 not scan history.
 
 Downloads import exact original bytes, up to 16 MiB, and return name, verified
-size and a canonical `blake3:<64 lowercase hex>` key. Use it in `zulip_send` or
+size and a canonical 24-lowercase-hex key. Use it in `zulip_send` or
 core-shell `import`. Byte lookup grants no reply or route authority.
 Edits can replace selections; source/access changes, eviction, registration loss
 and restart can invalidate them. Relist rather than reusing stale selections.
@@ -343,8 +346,11 @@ or establish that a later build fixes the reported avatar incident.
 
 ### Editing the bot's own avatar
 
-`zulip_update_self_profile` accepts `{"avatar":"<tau-artifact:blake3:…>"}` or a bare
-`blake3:…` key. `{"avatar":null}` resets to the realm default, which may not be blank.
+`zulip_update_self_profile` accepts
+`{"avatar":"<tau-artifact:0123456789abcdef01234567>"}` or a bare
+24-lowercase-hex key. The bridge accepts wrapped or bare legacy
+`blake3:<64 lowercase hex>` keys with full-digest verification.
+`{"avatar":null}` resets to the realm default, which may not be blank.
 Enable it through its default-off `zulip:profiles:write` tag, exact tool or Zulip group.
 It requires the current ordinary receiver and is absent in send-only mode.
 Obtain authorization before changing grants or live configuration.
