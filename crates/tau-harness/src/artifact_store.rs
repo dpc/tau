@@ -21,6 +21,8 @@ mod cleanup;
 mod filesystem;
 mod listing;
 mod metadata;
+#[cfg(test)]
+mod migration_tests;
 mod reader;
 mod receipt;
 #[cfg(test)]
@@ -238,7 +240,7 @@ impl ArtifactStore {
                 version: 1,
                 owner: owner.to_owned(),
                 descriptor: ArtifactDescriptor::new(
-                    ArtifactKey::parse(format!("blake3:{}", blake3::hash(&upload.bytes).to_hex()))?,
+                    ArtifactKey::from_digest(blake3::hash(&upload.bytes).to_hex().as_str())?,
                     upload.size.get(),
                 )?,
                 put_at: now,
@@ -279,17 +281,27 @@ impl ArtifactStore {
 
     fn publish_receipt(&self, receipt_path: &Path, receipt: &Receipt) -> Result<(), ArtifactError> {
         let key = &receipt.descriptor.key;
-        let hex = artifact_digest(key).ok_or(ArtifactError::Integrity)?;
         let objects = self.root.join("blake3");
-        let object = objects.join(hex);
         let data = read_bounded(&receipt_path.join("data"))?;
         verify(&receipt.descriptor, &data)?;
+        // Full digests remain private physical locators, not public identities.
+        // The exclusive store lock serializes this collision check and publish.
+        let hash = blake3::hash(&data).to_hex();
+        let hex = hash.as_str();
+        match self.resolve_short_digest(key.canonical()) {
+            Ok(existing) if existing != hex => return Err(ArtifactError::Integrity),
+            Ok(_) | Err(ArtifactError::Unavailable) => {}
+            Err(error) => return Err(error),
+        }
+        let object = objects.join(hex);
         if object.exists() {
             let old = self.metadata(key)?;
             if old.size != receipt.descriptor.size.get() {
                 return Err(ArtifactError::Integrity);
             }
-            verify(&receipt.descriptor, &read_bounded(&object.join("data"))?)?;
+            if read_bounded(&object.join("data"))? != data {
+                return Err(ArtifactError::Integrity);
+            }
             replace_json(
                 &object.join("meta.json"),
                 &Metadata {
@@ -308,10 +320,11 @@ impl ArtifactStore {
             let protected = self.root.join("transcript-objects").join(hex);
             let last_put_at = if transcript_roots::path_present(&protected)? {
                 transcript_roots::require_directory(&protected)?;
-                verify(
-                    &receipt.descriptor,
-                    &transcript_roots::read_regular(&protected.join("data"), ARTIFACT_MAX_BYTES)?,
-                )?;
+                if transcript_roots::read_regular(&protected.join("data"), ARTIFACT_MAX_BYTES)?
+                    != data
+                {
+                    return Err(ArtifactError::Integrity);
+                }
                 fs::hard_link(protected.join("data"), staging.path().join("data"))
                     .map_err(io_error)?;
                 self.metadata(key)?.last_put_at.max(receipt.put_at)

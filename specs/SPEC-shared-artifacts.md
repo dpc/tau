@@ -15,8 +15,26 @@ There is no public overwrite, delete, reference-pin, or implicit remote-fetch AP
 Whole-store discovery is restricted to authenticated UIs; configured extensions
 retain known-key read authority without enumeration.
 Model-facing text names an artifact with the canonical Markdown autolink
-`<tau-artifact:FULL_KEY>`. Shared formatting and parsing preserve the raw digest
-key as the internal content address; consumers may also accept that bare key.
+`<tau-artifact:0123456789abcdef01234567>`: exactly 24 lowercase hexadecimal
+digits, the first 96 bits of BLAKE3, with no algorithm label. Consumers may
+also accept the bare key. This is a fixed identity, not a variable abbreviation.
+The former `blake3:` plus 64-hex key, bare or wrapped, remains accepted as
+deprecated input pending removal; no removal date is set. Parsers and typed
+historical records retain all legacy bits, and legacy downloads still verify
+the full digest.
+
+Private CAS paths retain full BLAKE3 digests, so existing objects, receipts, and
+protected aliases need no renaming. Short identities resolve to one unique
+full digest across ordinary and protected catalogs; duplicate aliases of that
+digest are not ambiguous. Distinct matching digests fail closed, and publication
+under the store lock rejects collisions rather than overwriting or aliasing
+different bytes. Lookup scans have bounded memory and a two-second decision
+budget between filesystem calls. Roots in either format retain the corresponding
+physical object. New publications and model-facing references use short keys;
+historical typed keys and exact legacy lookup are not rewritten.
+
+The 96-bit identity targets mostly trusted local development. It makes no new
+adversarial-content security claim and adds no algorithm-negotiation mechanism.
 Knowing a digest permits lookup through configured Artifact RPC peers; it does
 not grant model-role, tool, or remote-recipient authority. Configured local
 extensions and cooperative peers remain the existing trust boundary, not

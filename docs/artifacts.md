@@ -104,11 +104,21 @@ needed. The UI requires harness protocol 13.1 or newer for this feature.
 
 Tau's Artifact RPC stores **immutable original bytes under their content hash**.
 Model-facing text refers to an artifact with the canonical Markdown autolink
-`<tau-artifact:FULL_KEY>`, for example
-`<tau-artifact:blake3:0123…cdef>`. `FULL_KEY` is the complete internal
-content-address key; the abbreviated example is not usable. Consumers share one
-formatter/parser for this spelling, and `import` and `read_image` also accept a
-bare key for simple existing integrations.
+`<tau-artifact:0123456789abcdef01234567>`: exactly 24 lowercase hex digits,
+the first 96 bits of BLAKE3, without an algorithm label. The example illustrates
+syntax, not an available artifact. Consumers share one formatter/parser;
+`import` and `read_image` also accept the bare 24-digit key.
+The old `blake3:` plus 64-hex syntax, bare or wrapped, remains accepted as
+deprecated input pending removal; no removal date is set.
+Legacy references keep full-digest verification. New references use a fixed
+96-bit identity intended for mostly trusted local development.
+
+Private storage still uses full-digest paths, so existing originals and protected
+transcript objects remain accessible without renaming. Fixed-width lookup rejects
+ambiguous matches, and publication rejects different bytes sharing an identity.
+There is no arbitrary-length abbreviation lookup or hash-algorithm negotiation.
+Protocol 19.0 and source SDK 0.26.0 require peers to rebuild together; changing
+the source does not update an installed runtime or publish an SDK release.
 
 The shell extension registers `export(path, mime_type?)` and
 `import(key, filename?, mime_type?)` under ordinary

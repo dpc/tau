@@ -20,6 +20,16 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Unpublished source SDK 0.26.0
+
+Proto/client 0.26.0 targets protocol 19.0 and emits artifact keys with 24 lowercase
+hex digits (96-bit BLAKE3, no algorithm label). Parsers continue to accept
+deprecated full `blake3:` keys as input and in historical typed records, with
+full-digest verification. Older peers cannot decode short keys, so configured
+extensions and UIs must rebuild together. Journal framing and existing artifact
+paths remain unchanged. This source update does not publish packages or activate
+installed binaries.
+
 ### Unpublished source SDK 0.25.0
 
 Proto/client 0.25.0 targets protocol 18.0: fixed 32 MiB outer framing,

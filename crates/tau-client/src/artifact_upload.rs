@@ -82,8 +82,9 @@ impl ArtifactUpload {
             }
             (Some(ArtifactOp::Finalize { .. }), ArtifactValue::Descriptor(descriptor)) => {
                 if descriptor.size.get() != self.bytes.len() as u64
-                    || tau_proto::artifact_digest(&descriptor.key)
-                        != Some(blake3::hash(&self.bytes).to_hex().as_str())
+                    || !descriptor
+                        .key
+                        .matches_digest(blake3::hash(&self.bytes).to_hex().as_str())
                 {
                     return Err(ArtifactError::Integrity);
                 }

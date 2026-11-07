@@ -15,6 +15,9 @@ advertise: false
   can exceed the rendered-expansion cap.
 - `export`: uploads one regular file or in-process tar+zstd directory bundle and
   returns `<tau-artifact:FULL_KEY>`, `size`, and available `filename`/`mime_type` headers.
+  `FULL_KEY` has exactly 24 lowercase hex digits (96-bit BLAKE3), without an
+  algorithm label. Import continues to accept deprecated full `blake3:` keys
+  pending removal and verifies their full digests.
   MIME is declared or inferred, not verified. Export renews retention even for
   duplicate bytes; originals outlive ephemeral transcripts. Stored and expanded
   bytes each default to 32 MiB under `artifact_limits` in `harness.yaml`, with

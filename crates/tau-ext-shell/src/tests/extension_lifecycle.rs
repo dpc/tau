@@ -92,7 +92,7 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
         fs::remove_dir_all(&source).expect("replace source tree");
         fs::write(&source, &original).expect("write already-encoded bundle");
     }
-    let key = tau_proto::ArtifactKey::parse(format!("blake3:{}", blake3::hash(&original).to_hex()))
+    let key = tau_proto::ArtifactKey::from_digest(blake3::hash(&original).to_hex().as_str())
         .expect("artifact key");
     let descriptor =
         tau_proto::ArtifactDescriptor::new(key.clone(), original.len() as u64).expect("descriptor");

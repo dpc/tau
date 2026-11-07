@@ -2147,8 +2147,8 @@ fn read_image_tool_spec() -> ToolSpec {
             "properties": {
                 "key": {
                     "type": "string",
-                    "pattern": "^(?:blake3:[0-9a-f]{64}|<tau-artifact:blake3:[0-9a-f]{64}>)$",
-                    "description": "Canonical <tau-artifact:FULL_KEY> reference for one PNG, JPEG, or WebP image; a bare key is also accepted"
+                    "pattern": "^(?:[0-9a-f]{24}|blake3:[0-9a-f]{64}|<tau-artifact:(?:[0-9a-f]{24}|blake3:[0-9a-f]{64})>)$",
+                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits> reference for one PNG, JPEG, or WebP image, or a bare key. Full blake3: keys are deprecated and pending removal."
                 },
                 "mode": {
                     "type": "string",

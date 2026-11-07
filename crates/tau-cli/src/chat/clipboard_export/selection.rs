@@ -38,10 +38,7 @@ impl Selection {
         if matches!(mode, Mode::Raw(_)) || (matches!(mode, Mode::Auto) && native) {
             return Ok(Self::Raw(media));
         }
-        let digest = key
-            .as_str()
-            .strip_prefix("blake3:")
-            .expect("validated BLAKE3 key");
+        let digest = tau_proto::artifact_digest(key).expect("validated artifact key");
         ClipboardFileName::new(format!("artifact-{digest}.{}", extension(&media.mime)))
             .map(Self::File)
     }

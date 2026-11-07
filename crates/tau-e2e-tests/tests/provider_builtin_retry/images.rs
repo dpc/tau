@@ -84,7 +84,9 @@ fn provider_builtin_prepared_images_replay_and_ephemeral_fallback()
             image::load_from_memory(&bytes)?.to_rgba8(),
             image::load_from_memory(tau_ext_test_dummy::TYPED_IMAGE_PNG)?.to_rgba8(),
         );
-        let prepared_key = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+        let prepared_digest = blake3::hash(&bytes).to_hex();
+        let prepared_key =
+            tau_proto::ArtifactKey::from_digest(prepared_digest.as_str())?.to_string();
         let finished = wait_text(&mut peer, &mut observed, "image accepted")?;
         let agent_id = finished.agent_id;
         assert_eq!(agent_id, created_agent);
@@ -135,7 +137,7 @@ fn provider_builtin_prepared_images_replay_and_ephemeral_fallback()
             };
             assert_eq!(reference.blob.key.as_str(), prepared_key);
             assert_eq!(reference.blob.size.get(), bytes.len() as u64);
-            let digest = tau_proto::artifact_digest(&reference.blob.key).ok_or("digest")?;
+            let digest = prepared_digest.as_str();
             let artifacts = fixture.harness_state_dir().join("artifacts");
             let roots = std::fs::read_to_string(
                 artifacts
@@ -330,7 +332,7 @@ fn upload_original(
     }
     assert_eq!(
         upload.descriptor().ok_or("descriptor")?.key.as_str(),
-        "blake3:1c22ad7f40a18bbcb1c50dc8a78ac6a1a36b9a0a3c7f9833c965b2ef8100a734"
+        "1c22ad7f40a18bbcb1c50dc8"
     );
     Ok(())
 }

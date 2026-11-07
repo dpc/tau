@@ -1581,7 +1581,7 @@ fn read_image_registration_uses_artifact_reference_and_image_route_gating() {
     assert!(parameters["properties"].get("path").is_none());
     assert_eq!(
         parameters["properties"]["key"]["pattern"],
-        "^(?:blake3:[0-9a-f]{64}|<tau-artifact:blake3:[0-9a-f]{64}>)$"
+        "^(?:[0-9a-f]{24}|blake3:[0-9a-f]{64}|<tau-artifact:(?:[0-9a-f]{24}|blake3:[0-9a-f]{64})>)$"
     );
     assert_eq!(
         parameters["properties"]["mode"]["enum"],

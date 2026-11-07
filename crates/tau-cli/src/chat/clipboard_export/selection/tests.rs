@@ -3,9 +3,7 @@ use super::*;
 
 /// Uses a valid content address without depending on the artifact store.
 fn key() -> ArtifactKey {
-    format!("blake3:{}", "a".repeat(64))
-        .parse()
-        .expect("valid key")
+    "a".repeat(24).parse().expect("valid key")
 }
 
 /// Exercises the actual command-to-policy seam, not a separate test-only mode.
@@ -21,7 +19,7 @@ fn assert_file(options: &str, bytes: &[u8], suffix: &str) {
     };
     assert_eq!(
         name.as_str(),
-        format!("artifact-{}.{suffix}", "a".repeat(64))
+        format!("artifact-{}.{suffix}", "a".repeat(24))
     );
 }
 

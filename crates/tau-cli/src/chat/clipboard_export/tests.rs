@@ -145,9 +145,7 @@ fn completion_rejects_old_prefix_and_keeps_full_keys() {
     );
     let second = request(&mut reader);
     assert!(matches!(&second.op, ArtifactOp::List { prefix, .. } if prefix == "blake3:a"));
-    let key: ArtifactKey = format!("blake3:{}", "a".repeat(64))
-        .parse()
-        .expect("canonical key");
+    let key: ArtifactKey = "a".repeat(24).parse().expect("canonical key");
     reply(
         &control.rpc,
         second,
@@ -179,6 +177,29 @@ fn completion_rejects_old_prefix_and_keeps_full_keys() {
     assert!(rows[0].description.contains("format unknown"));
     control.stop();
     worker.join().expect("completion worker exits");
+}
+
+/// A legacy completion query can return a canonical short key, but its visible
+/// digest bits must still match; a hex `b` must not mean the old label.
+#[test]
+fn completion_validates_short_results_for_legacy_prefixes() {
+    let entries = vec![ArtifactListEntry {
+        descriptor: ArtifactDescriptor::new("a".repeat(24).parse().expect("key"), 1)
+            .expect("descriptor"),
+        last_put_at: 1,
+        signature: None,
+    }];
+    for prefix in [
+        "a",
+        "bl",
+        "blake3:a",
+        &format!("blake3:{}{}", "a".repeat(24), "b".repeat(40)),
+    ] {
+        assert!(valid_page(prefix, &entries), "{prefix}");
+    }
+    for prefix in ["b", "blake3:b", "blake3:G", &"a".repeat(25)] {
+        assert!(!valid_page(prefix, &entries), "{prefix}");
+    }
 }
 
 /// Reply, stop, and cancellation all wake the sole RPC wait; a cancellation

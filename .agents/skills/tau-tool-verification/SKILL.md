@@ -40,6 +40,9 @@ and confirm its private non-executable permissions. Carry returned `filename`
 and `mime_type` hints to import and verify a sanitized useful filename/suffix;
 also verify key-only regular-file import stays generic (hints are not stored by
 digest).
+Require exactly 24 lowercase hex digits without an algorithm label in exported
+references. Verify that import accepts deprecated full `blake3:` references and
+verifies their full digests, and that it rejects arbitrary shorter prefixes.
 Export a small nested directory with an empty directory and binary member, then
 import using only its reference. Check `kind: directory`, the fixed directory
 MIME, exact member bytes and private non-executable permissions. Check that

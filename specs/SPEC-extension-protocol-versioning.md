@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 19.0 / source SDK 0.26.0 emit fixed 96-bit artifact keys (24 lowercase
+hex digits, no algorithm label). Older peers reject these keys, so configured
+extensions and UI peers must rebuild together. Parsers continue to accept
+deprecated full `blake3:` keys as input and in historical typed records,
+preserving full verification. Journal framing, existing artifact bytes, and
+storage paths do not change. SDK publication and runtime activation remain
+separate.
+
 Protocol 18.0 / source SDK 0.25.0 use a fixed 32 MiB outer message ceiling and
 512 MiB artifact object ceiling, with Configure carrying independent operational
 stored/expanded limits. Older peers reject larger objects or frames, so

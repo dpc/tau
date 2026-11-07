@@ -216,11 +216,16 @@ impl ArtifactStore {
                     return Err(error);
                 }
             };
+            // A short root protects its full private locator. Legacy roots
+            // remain exact; never discard their additional integrity bits.
             retained.extend(
-                roots
-                    .artifacts
-                    .into_keys()
-                    .filter(|key| candidates.contains(key)),
+                candidates
+                    .iter()
+                    .filter(|candidate| {
+                        roots.artifacts.contains_key(*candidate)
+                            || roots.artifacts.contains_key(candidate.canonical())
+                    })
+                    .cloned(),
             );
         }
         if started.elapsed() >= budget {

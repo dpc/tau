@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 19.0 / source SDK 0.26.0 use fixed 96-bit artifact keys without an
+algorithm label. The shared key type also retains deprecated full BLAKE3 keys
+when decoding old records or accepting legacy references. Old peers cannot
+decode new keys and must rebuild together. Journal framing is unchanged;
+SDK publication and runtime activation remain separate.
+
 Protocol 18.0 and source SDK 0.25.0 raise the fixed outer message ceiling to
 32 MiB, add Configure artifact limits, and admit original objects up to
 512 MiB via existing 1 MiB chunks. Configured peers must rebuild together.

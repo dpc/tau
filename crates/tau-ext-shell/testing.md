@@ -73,6 +73,9 @@ original-byte equality and private imported-file permissions, asserts
 canonical `<tau-artifact:FULL_KEY>` reference directly into import, and passes
 the returned path as an ordinary filesystem artifact; image inspection consumes
 the same reference directly through `std-utils`.
+Canonical keys have 24 lowercase hex digits and no algorithm label. Coverage
+also checks acceptance of deprecated full `blake3:` keys with full-digest
+verification rather than truncation.
 The same protocol roundtrip covers nested directory export and key-only import.
 Codec tests cover deterministic bytes, empty/binary members, exact stored and
 expanded bounds, link/path/type rejection, tar endings and zstd corruption.

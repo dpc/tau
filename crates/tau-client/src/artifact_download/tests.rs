@@ -1,5 +1,36 @@
 use super::*;
 
+/// A full legacy reference must not silently downgrade to 96-bit verification
+/// when a response contains bytes matching only its short prefix.
+#[test]
+fn legacy_download_verifies_the_digest_suffix() {
+    let bytes = b"original";
+    let full = blake3::hash(bytes).to_hex();
+    let short = ArtifactKey::from_digest(full.as_str()).expect("short key");
+    let wrong_legacy =
+        ArtifactKey::parse(format!("blake3:{}{}", short, "0".repeat(40))).expect("legacy key");
+    for (key, expected) in [
+        (short, Ok(())),
+        (wrong_legacy, Err(ArtifactError::Integrity)),
+    ] {
+        let mut download = ArtifactDownload::new(key.clone());
+        download
+            .accept(ArtifactValue::Opened {
+                read: "read".parse().expect("read"),
+                descriptor: ArtifactDescriptor::new(key, bytes.len() as u64).expect("descriptor"),
+            })
+            .expect("open");
+        assert_eq!(
+            download.accept(ArtifactValue::Chunk {
+                offset: 0,
+                bytes: bytes.to_vec(),
+                eof: true,
+            }),
+            expected
+        );
+    }
+}
+
 /// Explicit consumers can read larger originals, while image/clipboard users of
 /// the legacy constructor reject descriptors before allocating any chunk
 /// buffer.

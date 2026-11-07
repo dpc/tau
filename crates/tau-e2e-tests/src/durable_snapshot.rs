@@ -101,8 +101,8 @@ impl DurableSnapshot {
             .map(|entry| entry.value.clone()))
     }
 
-    /// Returns the BLAKE3 digest for the sole typed image on one canonical tool
-    /// result. References return their declared digest; this does not verify
+    /// Returns the artifact key for the sole typed image on one canonical tool
+    /// result. References return their declared key; this does not verify
     /// external artifact backing.
     ///
     /// # Errors
@@ -112,7 +112,7 @@ impl DurableSnapshot {
     pub fn image_tool_result_digest(
         &self,
         call_id: &ToolCallId,
-    ) -> Result<blake3::Hash, Box<dyn std::error::Error>> {
+    ) -> Result<tau_proto::ArtifactKey, Box<dyn std::error::Error>> {
         let results = self
             .agent_events
             .iter()
@@ -129,10 +129,10 @@ impl DurableSnapshot {
             .into());
         };
         match result.provider_content.as_slice() {
-            [ToolResultContentPart::Image(image)] => Ok(blake3::hash(&image.data)),
-            [ToolResultContentPart::ImageReference(image)] => Ok(blake3::Hash::from_hex(
-                tau_proto::artifact_digest(&image.blob.key).ok_or("invalid image key")?,
+            [ToolResultContentPart::Image(image)] => Ok(tau_proto::ArtifactKey::from_digest(
+                blake3::hash(&image.data).to_hex().as_str(),
             )?),
+            [ToolResultContentPart::ImageReference(image)] => Ok(image.blob.key.clone()),
             _ => {
                 Err(format!("expected one typed image on canonical tool result `{call_id}`").into())
             }

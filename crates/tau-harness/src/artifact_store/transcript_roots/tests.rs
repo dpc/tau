@@ -27,14 +27,16 @@ fn manifest(store: &ArtifactStore, id: &AgentId) -> PathBuf {
         .join("roots.json")
 }
 
-/// Roots survive restart, preserve all historical additions, and never renew
-/// age.
+/// Legacy and new roots survive restart, preserve all historical additions,
+/// and never renew age.
 #[test]
 fn roots_are_a_durable_union_without_age_renewal() {
     let temp = tempfile::tempdir().expect("state");
     let mut store = ArtifactStore::new(temp.path());
     let id = owner(&store, "history");
-    let (_, first) = put(&mut store, "tool", "connection", b"old branch", 1);
+    let (_, mut first) = put(&mut store, "tool", "connection", b"old branch", 1);
+    first.key = ArtifactKey::parse(format!("blake3:{}", blake3::hash(b"old branch").to_hex()))
+        .expect("historical full-digest root");
     let (_, second) = put(&mut store, "tool", "connection", b"replacement window", 2);
     let (_, textual) = put(&mut store, "tool", "connection", b"textual link", 3);
     for descriptor in [&first, &second, &first] {
@@ -132,7 +134,11 @@ fn missing_corrupt_and_wrong_size_objects_cannot_acquire_roots() {
     let data = store
         .root
         .join("blake3")
-        .join(artifact_digest(&descriptor.key).expect("digest"))
+        .join(
+            store
+                .storage_digest(&descriptor.key)
+                .expect("storage digest"),
+        )
         .join("data");
     fs::write(&data, b"other").expect("same-size corruption");
     assert_eq!(

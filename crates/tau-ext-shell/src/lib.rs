@@ -604,8 +604,8 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "properties": {
                 "key": {
                     "type": "string",
-                    "pattern": "^(?:blake3:[0-9a-f]{64}|<tau-artifact:blake3:[0-9a-f]{64}>)$",
-                    "description": "Canonical <tau-artifact:FULL_KEY> reference returned by export; a bare key is also accepted"
+                    "pattern": "^(?:[0-9a-f]{24}|blake3:[0-9a-f]{64}|<tau-artifact:(?:[0-9a-f]{24}|blake3:[0-9a-f]{64})>)$",
+                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits> reference returned by export, or a bare key. Full blake3: keys are deprecated and pending removal."
                 },
                 "filename": {"type": "string", "description": "Optional per-use original filename hint returned by export; sanitized and bounded, never used as a destination path"},
                 "mime_type": {"type": "string", "description": "Optional declared MIME hint accompanying the reference; common types add an extension when filename has none, without verifying content"}

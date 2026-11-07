@@ -125,8 +125,9 @@ impl ArtifactDownload {
                 }
                 self.bytes.extend_from_slice(&bytes);
                 if eof {
-                    if tau_proto::artifact_digest(&self.key)
-                        != Some(blake3::hash(&self.bytes).to_hex().as_str())
+                    if !self
+                        .key
+                        .matches_digest(blake3::hash(&self.bytes).to_hex().as_str())
                     {
                         return Err(ArtifactError::Integrity);
                     }

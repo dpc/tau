@@ -1484,12 +1484,10 @@ fn assert_typed_image_round(
     call_id: &tau_proto::ToolCallId,
     expected_digest: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
+    assert!(
         snapshot
             .image_tool_result_digest(call_id)?
-            .to_hex()
-            .as_str(),
-        expected_digest
+            .matches_digest(expected_digest)
     );
     let events = snapshot
         .agent_events
@@ -1569,10 +1567,7 @@ fn assert_typed_image_round(
         image.blob.size.get(),
         tau_ext_test_dummy::TYPED_IMAGE_PNG.len() as u64
     );
-    assert_eq!(
-        tau_proto::artifact_digest(&image.blob.key),
-        Some(expected_digest)
-    );
+    assert!(image.blob.key.matches_digest(expected_digest));
     Ok(())
 }
 

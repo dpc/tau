@@ -44,12 +44,14 @@ fn rooted_fixture() -> (tempfile::TempDir, ArtifactStore, ArtifactDescriptor) {
 #[test]
 fn legacy_cleanup_preserves_hardlink_and_private_read_fallback() {
     let (_temp, mut store, descriptor) = rooted_fixture();
-    let digest = artifact_digest(&descriptor.key).expect("digest");
-    let canonical = store.root.join("blake3").join(digest).join("data");
+    let digest = store
+        .storage_digest(&descriptor.key)
+        .expect("storage digest");
+    let canonical = store.root.join("blake3").join(&digest).join("data");
     let protected = store
         .root
         .join("transcript-objects")
-        .join(digest)
+        .join(&digest)
         .join("data");
     assert_eq!(
         fs::metadata(&canonical).expect("ordinary").ino(),
@@ -99,8 +101,10 @@ fn legacy_cleanup_preserves_hardlink_and_private_read_fallback() {
 #[test]
 fn duplicate_put_and_receipt_retry_never_mutate_backing() {
     let (_temp, mut store, descriptor) = rooted_fixture();
-    let digest = artifact_digest(&descriptor.key).expect("digest");
-    let protected = store.root.join("transcript-objects").join(digest);
+    let digest = store
+        .storage_digest(&descriptor.key)
+        .expect("storage digest");
+    let protected = store.root.join("transcript-objects").join(&digest);
     let original_inode = fs::metadata(protected.join("data")).expect("data").ino();
     let (upload, duplicate) = put(&mut store, "tool", "connection", b"prepared pixels", 20);
     assert_eq!(duplicate, descriptor);
@@ -138,9 +142,11 @@ fn duplicate_put_and_receipt_retry_never_mutate_backing() {
 #[test]
 fn legacy_reupload_and_metadata_renewal_preserve_protected_bytes() {
     let (_temp, store, descriptor) = rooted_fixture();
-    let digest = artifact_digest(&descriptor.key).expect("digest");
-    let canonical = store.root.join("blake3").join(digest);
-    let protected = store.root.join("transcript-objects").join(digest);
+    let digest = store
+        .storage_digest(&descriptor.key)
+        .expect("storage digest");
+    let canonical = store.root.join("blake3").join(&digest);
+    let protected = store.root.join("transcript-objects").join(&digest);
     let original_inode = fs::metadata(protected.join("data")).expect("data").ino();
     // Audited old duplicate publication verifies bytes and replaces only
     // metadata.
@@ -207,7 +213,9 @@ fn legacy_reupload_and_metadata_renewal_preserve_protected_bytes() {
 #[test]
 fn corrupt_protected_alias_cannot_be_certified_by_ordinary_bytes() {
     let (_temp, store, descriptor) = rooted_fixture();
-    let digest = artifact_digest(&descriptor.key).expect("digest");
+    let digest = store
+        .storage_digest(&descriptor.key)
+        .expect("storage digest");
     let protected = store
         .root
         .join("transcript-objects")
@@ -255,11 +263,13 @@ fn backing_without_root_obeys_age_policy_and_disabled_retention() {
 #[test]
 fn backing_rejects_symlink_and_wrong_size_metadata() {
     let (_temp, store, descriptor) = rooted_fixture();
-    let digest = artifact_digest(&descriptor.key).expect("digest");
-    let protected = store.root.join("transcript-objects").join(digest);
+    let digest = store
+        .storage_digest(&descriptor.key)
+        .expect("storage digest");
+    let protected = store.root.join("transcript-objects").join(&digest);
     let data = protected.join("data");
     fs::remove_file(&data).expect("unlink");
-    symlink(store.root.join("blake3").join(digest).join("data"), &data).expect("symlink");
+    symlink(store.root.join("blake3").join(&digest).join("data"), &data).expect("symlink");
     assert!(store.protect_transcript_object(&descriptor).is_err());
     fs::remove_file(&data).expect("unlink");
     fs::hard_link(store.root.join("blake3").join(digest).join("data"), &data)
@@ -284,7 +294,9 @@ fn backing_rejects_symlink_and_wrong_size_metadata() {
 #[test]
 fn incomplete_receipt_recovery_preserves_protected_inode() {
     let (_temp, mut store, descriptor) = rooted_fixture();
-    let digest = artifact_digest(&descriptor.key).expect("digest");
+    let digest = store
+        .storage_digest(&descriptor.key)
+        .expect("storage digest");
     let protected = store
         .root
         .join("transcript-objects")

@@ -52,7 +52,14 @@ impl ArtifactStore {
             else {
                 continue;
             };
-            if !key.as_str().starts_with(prefix) {
+            // "b" is a canonical hex prefix, not an abbreviation for the old
+            // algorithm label. Longer label prefixes remain transition input.
+            let spelling = if prefix.starts_with("bl") {
+                key.as_str()
+            } else {
+                key.canonical()
+            };
+            if !spelling.starts_with(prefix) {
                 continue;
             }
             let metadata = match self.metadata(&key) {
@@ -61,7 +68,10 @@ impl ArtifactStore {
                 Err(error) => return Err(error),
             };
             entries.push(ArtifactListEntry {
-                descriptor: ArtifactDescriptor::new(key, metadata.size)?,
+                descriptor: ArtifactDescriptor::new(
+                    ArtifactKey::parse(key.canonical())?,
+                    metadata.size,
+                )?,
                 last_put_at: metadata.last_put_at,
                 signature: None,
             });
@@ -74,7 +84,7 @@ impl ArtifactStore {
         }
         for entry in &mut entries {
             check()?;
-            let digest = artifact_digest(&entry.descriptor.key).ok_or(ArtifactError::Invalid)?;
+            let digest = self.storage_digest(&entry.descriptor.key)?;
             if let Ok(mut file) = File::open(self.root.join("blake3").join(digest).join("data")) {
                 let mut header = [0_u8; 32];
                 if let Ok(length) = file.read(&mut header) {

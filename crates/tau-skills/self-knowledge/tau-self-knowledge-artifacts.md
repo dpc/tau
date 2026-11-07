@@ -9,6 +9,10 @@ advertise: false
 Tau stores immutable original bytes under a content-addressed key. The
 model-facing reference is `<tau-artifact:FULL_KEY>`: use the **complete** returned
 reference directly with `import` or `read_image`, without removing the wrapper.
+`FULL_KEY` is exactly 24 lowercase hex digits (96 bits of BLAKE3), with no
+algorithm label. Old `blake3:` plus 64-hex keys remain accepted as deprecated
+input pending removal; no removal date is set. Existing objects remain accessible,
+and legacy input keeps full-digest verification. Do not shorten keys further.
 `export(path)` reads one regular file or directory under the shell instance's
 remembered workdir authority and returns an artifact reference and size. `import(key)`
 verifies the original and writes a private mode-0600 temporary file on the

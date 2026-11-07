@@ -6,7 +6,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 
 use serde::Serialize;
-use tau_proto::{ARTIFACT_MAX_BYTES, ArtifactDescriptor, ArtifactError, artifact_digest};
+use tau_proto::{ARTIFACT_MAX_BYTES, ArtifactDescriptor, ArtifactError};
 
 pub(super) fn new_id() -> String {
     format!("{:032x}", rand::random::<u128>())
@@ -98,7 +98,9 @@ pub(super) fn read_bounded(path: &Path) -> Result<Vec<u8>, ArtifactError> {
 
 pub(super) fn verify(descriptor: &ArtifactDescriptor, bytes: &[u8]) -> Result<(), ArtifactError> {
     if descriptor.size.get() != bytes.len() as u64
-        || artifact_digest(&descriptor.key) != Some(blake3::hash(bytes).to_hex().as_str())
+        || !descriptor
+            .key
+            .matches_digest(blake3::hash(bytes).to_hex().as_str())
     {
         return Err(ArtifactError::Integrity);
     }

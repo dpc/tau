@@ -17,7 +17,7 @@ impl ArtifactStore {
         descriptor: &ArtifactDescriptor,
         put_at: u64,
     ) -> Result<(), ArtifactError> {
-        let digest = artifact_digest(&descriptor.key).ok_or(ArtifactError::Invalid)?;
+        let digest = self.storage_digest(&descriptor.key)?;
         let directory = self.root.join("transcript-objects").join(digest);
         if !path_present(&directory)? {
             return Ok(());
@@ -38,11 +38,62 @@ impl ArtifactStore {
     /// or overwrite it. Reads do not republish an expired ordinary catalog
     /// entry.
     pub(super) fn object_directory(&self, digest: &str) -> Result<PathBuf, ArtifactError> {
+        let resolved;
+        let digest = if digest.len() == tau_proto::ARTIFACT_DIGEST_HEX_LEN {
+            resolved = self.resolve_short_digest(digest)?;
+            resolved.as_str()
+        } else {
+            digest
+        };
         let ordinary = self.root.join("blake3").join(digest);
         if path_present(&ordinary)? {
             return Ok(ordinary);
         }
         Ok(self.root.join("transcript-objects").join(digest))
+    }
+
+    /// Keeps full legacy locators exact; resolves only fixed-width new
+    /// identities.
+    pub(super) fn storage_digest(&self, key: &ArtifactKey) -> Result<String, ArtifactError> {
+        let digest = artifact_digest(key).ok_or(ArtifactError::Invalid)?;
+        if digest.len() == 64 {
+            Ok(digest.to_owned())
+        } else {
+            self.resolve_short_digest(digest)
+        }
+    }
+
+    /// Finds one private full-digest locator across both catalogs, never a
+    /// first arbitrary prefix match. Duplicate hardlink aliases count as
+    /// one object. The bounded scan needs no migration index or writes
+    /// during reads.
+    pub(super) fn resolve_short_digest(&self, digest: &str) -> Result<String, ArtifactError> {
+        let started = Instant::now();
+        let mut found = None;
+        for catalog in ["blake3", "transcript-objects"] {
+            let entries = match fs::read_dir(self.root.join(catalog)) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error(error)),
+            };
+            for entry in entries {
+                if started.elapsed() >= Duration::from_secs(2) {
+                    return Err(ArtifactError::Busy);
+                }
+                let entry = entry.map_err(io_error)?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if !name.starts_with(digest) || artifact_digest(&format!("blake3:{name}")).is_none()
+                {
+                    continue;
+                }
+                if found.as_deref().is_some_and(|previous| previous != name) {
+                    return Err(ArtifactError::Integrity);
+                }
+                found = Some(name.to_owned());
+            }
+        }
+        found.ok_or(ArtifactError::Unavailable)
     }
 
     /// Publishes and verifies a hardlink alias under the caller's exclusive
@@ -55,11 +106,11 @@ impl ArtifactStore {
         &self,
         descriptor: &ArtifactDescriptor,
     ) -> Result<(), ArtifactError> {
-        let digest = artifact_digest(&descriptor.key).ok_or(ArtifactError::Invalid)?;
+        let digest = self.storage_digest(&descriptor.key)?;
         let objects = self.root.join("transcript-objects");
         private_dir(&objects)?;
         require_directory(&objects)?;
-        let protected = objects.join(digest);
+        let protected = objects.join(&digest);
         if path_present(&protected)? {
             require_directory(&protected)?;
             let metadata: Metadata = read_json(&protected.join("meta.json"))?;

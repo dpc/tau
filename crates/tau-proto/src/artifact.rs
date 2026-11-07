@@ -173,11 +173,17 @@ impl std::fmt::Debug for ArtifactRequest {
     }
 }
 
-/// Checks the exact canonical digest spelling without accessing storage.
+/// Number of hexadecimal digits in the fixed 96-bit artifact identity.
+pub const ARTIFACT_DIGEST_HEX_LEN: usize = 24;
+
+/// Returns the validated digest, retaining all 256 bits of deprecated keys.
 #[must_use]
 pub fn artifact_digest(key: &str) -> Option<&str> {
-    let hex = key.strip_prefix("blake3:")?;
-    (hex.len() == 64
+    let (hex, len) = match key.strip_prefix("blake3:") {
+        Some(hex) => (hex, 64),
+        None => (key, ARTIFACT_DIGEST_HEX_LEN),
+    };
+    (hex.len() == len
         && hex
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
@@ -188,7 +194,7 @@ pub fn artifact_digest(key: &str) -> Option<&str> {
 /// used in prompts, tool results, and documentation.
 #[must_use]
 pub fn artifact_reference(key: &ArtifactKey) -> String {
-    format!("<{ARTIFACT_REFERENCE_SCHEME}:{key}>")
+    format!("<{ARTIFACT_REFERENCE_SCHEME}:{}>", key.canonical())
 }
 
 /// Parses either a canonical model-visible artifact reference or a bare

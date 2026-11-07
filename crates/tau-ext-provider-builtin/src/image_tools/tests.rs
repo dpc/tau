@@ -165,7 +165,7 @@ fn images() -> ImageTools {
 #[test]
 fn image_request_display_survives_pending_and_terminal_reports() {
     let prompt = "  描いて 🌿\nKeep every line and trailing space.  ";
-    let reference = format!("<tau-artifact:blake3:{}>", "a".repeat(64));
+    let reference = format!("<tau-artifact:{}>", "a".repeat(24));
     for count in 0..=2 {
         for fail in [false, true] {
             let frames = with_handle(|handle| {
@@ -350,9 +350,7 @@ fn attached(mut call: ToolStarted, originals: &[Vec<u8>]) -> ToolStarted {
 /// Constructs exact content identity and size without a store or user data.
 fn descriptor(bytes: &[u8]) -> ArtifactDescriptor {
     ArtifactDescriptor::new(
-        format!("blake3:{}", blake3::hash(bytes).to_hex())
-            .parse()
-            .expect("key"),
+        tau_proto::ArtifactKey::from_digest(blake3::hash(bytes).to_hex().as_str()).expect("key"),
         bytes.len() as u64,
     )
     .expect("descriptor")
@@ -417,10 +415,18 @@ fn image_attachment_argument_contract() {
     let base = started();
     let key = descriptor(b"synthetic").key;
     let reference = tau_proto::artifact_reference(&key);
-    for values in [
-        Vec::new(),
-        vec![CborValue::Text(reference.clone())],
-        vec![CborValue::Text(key.to_string()); 5],
+    let legacy: tau_proto::ArtifactKey = format!("blake3:{}", blake3::hash(b"synthetic").to_hex())
+        .parse()
+        .expect("legacy");
+    for (values, expected) in [
+        (Vec::new(), key.clone()),
+        (vec![CborValue::Text(reference.clone())], key.clone()),
+        (vec![CborValue::Text(key.to_string()); 5], key.clone()),
+        (vec![CborValue::Text(legacy.to_string())], legacy.clone()),
+        (
+            vec![CborValue::Text(format!("<tau-artifact:{legacy}>"))],
+            legacy,
+        ),
     ] {
         let mut args = base.arguments.clone();
         let CborValue::Map(entries) = &mut args else {
@@ -431,7 +437,7 @@ fn image_attachment_argument_contract() {
             CborValue::Array(values.clone()),
         ));
         let (_, parsed) = parse_arguments(&args).expect("valid attachments");
-        assert_eq!(parsed, vec![key.clone(); values.len()]);
+        assert_eq!(parsed, vec![expected; values.len()]);
     }
     for invalid in [
         CborValue::Null,

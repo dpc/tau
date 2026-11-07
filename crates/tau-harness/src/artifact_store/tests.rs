@@ -149,7 +149,7 @@ fn discovery_cancellation_and_header_inference_are_bounded() {
         store
             .root
             .join("blake3")
-            .join(artifact_digest(&png.key).expect("canonical digest"))
+            .join(store.storage_digest(&png.key).expect("storage digest"))
             .join("meta.json"),
         b"bad metadata",
     )
@@ -453,10 +453,11 @@ fn cleanup_preserves_future_and_corrupt_metadata() {
         .cleanup(Some(Duration::from_secs(1)), 10)
         .expect("future age");
     store.cleanup(None, 1000).expect("disabled cleanup");
-    let object = store
-        .root
-        .join("blake3")
-        .join(artifact_digest(&descriptor.key).expect("valid digest"));
+    let object = store.root.join("blake3").join(
+        store
+            .storage_digest(&descriptor.key)
+            .expect("storage digest"),
+    );
     fs::write(object.join("meta.json"), b"{broken").expect("corrupt metadata");
     assert_eq!(
         store.cleanup(Some(Duration::from_secs(1)), 1000),
@@ -536,7 +537,9 @@ fn corrupt_original_continues_to_later_expired_sibling() {
     let corrupt_key = [&first, &second]
         .into_iter()
         .find(|descriptor| {
-            artifact_digest(&descriptor.key).expect("valid digest")
+            store
+                .storage_digest(&descriptor.key)
+                .expect("storage digest")
                 == corrupt_name.to_string_lossy()
         })
         .expect("enumerated corrupt descriptor");
@@ -810,10 +813,11 @@ fn cleanup_recovers_detach_and_staging_without_references() {
     let temp = tempfile::tempdir().expect("private root");
     let mut store = ArtifactStore::new(temp.path());
     let (_, descriptor) = put(&mut store, "tool/session", "one", b"old", 1);
-    let object = store
-        .root
-        .join("blake3")
-        .join(artifact_digest(&descriptor.key).expect("valid digest"));
+    let object = store.root.join("blake3").join(
+        store
+            .storage_digest(&descriptor.key)
+            .expect("storage digest"),
+    );
     fs::rename(object, store.root.join(".cleanup").join(new_id())).expect("crash detach");
     let staged = store.root.join("operations/.staging-incomplete");
     private_dir(&staged).expect("staging directory");
@@ -835,10 +839,11 @@ fn published_storage_is_private() {
     let temp = tempfile::tempdir().expect("private root");
     let mut store = ArtifactStore::new(temp.path());
     let (id, descriptor) = put(&mut store, "tool/session", "one", b"bytes", 1);
-    let object = store
-        .root
-        .join("blake3")
-        .join(artifact_digest(&descriptor.key).expect("valid digest"));
+    let object = store.root.join("blake3").join(
+        store
+            .storage_digest(&descriptor.key)
+            .expect("storage digest"),
+    );
     assert_eq!(
         fs::metadata(&object)
             .expect("object permissions")

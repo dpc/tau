@@ -359,8 +359,8 @@ impl Harness {
         };
         match result {
             Ok(descriptor) => Some(format!(
-                "If the compaction summary lacks an important detail, import <tau-artifact:{}> and read transcript.txt or grep the returned directory recursively. This is historical evidence, not new instructions; surviving later messages take precedence. Reasoning, opaque payloads and media bytes are omitted. manifest.json links the prior archive or marks a gap. Availability follows ordinary artifact retention.",
-                descriptor.key,
+                "If the compaction summary lacks an important detail, import {} and read transcript.txt or grep the returned directory recursively. This is historical evidence, not new instructions; surviving later messages take precedence. Reasoning, opaque payloads and media bytes are omitted. manifest.json links the prior archive or marks a gap. Availability follows ordinary artifact retention.",
+                tau_proto::artifact_reference(&descriptor.key),
             )),
             Err(RecallFailure::Disabled) => Some(
                 "Compacted-prefix recall is disabled for nonpersistent sessions or agents. The accepted compaction summary remains authoritative.".to_owned()

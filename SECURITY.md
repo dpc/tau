@@ -40,7 +40,7 @@ or broad distro/kernel qualification.
 
 ## Runtime boundaries
 
-Shared content-addressed artifacts expose original bytes by known BLAKE3 digest
+Shared content-addressed artifacts expose original bytes by known 96-bit BLAKE3 identity
 only through configured Artifact RPC peers. Hash possession does not grant
 listing, mutation, deletion, model-role, or remote-recipient authority. Originals
 are independent of session deletion and may be explicitly persisted from ephemeral
@@ -48,6 +48,9 @@ sessions; memory-only harnesses cannot access or clean them. Transfer bytes are
 directed and omitted from semantic journals and debug JSONL. Cancellation or a
 lost result may leave a committed shared original. See
 [SPEC-shared-artifacts](specs/SPEC-shared-artifacts.md).
+This fixed-width identity targets mostly trusted local development and makes no
+stronger security guarantee for adversarial content. Deprecated full-digest
+references retain full verification.
 
 Authenticated UIs can upload and read shared originals, and enumerate a bounded
 recent page of the whole selected store for user-requested clipboard export.

@@ -97,8 +97,7 @@ fn keys_and_operation_bounds_are_canonical() {
 /// while consumers may continue accepting a bare internal content key.
 #[test]
 fn artifact_references_round_trip_and_accept_bare_keys() {
-    let key =
-        ArtifactKey::parse(format!("blake3:{}", "a".repeat(64))).expect("canonical artifact key");
+    let key = ArtifactKey::parse("a".repeat(24)).expect("canonical artifact key");
     let reference = artifact_reference(&key);
     assert_eq!(reference, format!("<tau-artifact:{key}>"));
     assert_eq!(
@@ -116,6 +115,36 @@ fn artifact_references_round_trip_and_accept_bare_keys() {
         format!("<tau-artifact:{key}>>"),
     ] {
         assert!(parse_artifact_reference(&invalid).is_err(), "{invalid}");
+    }
+}
+
+/// Old journal/descriptor keys keep their full verification bits, while emitted
+/// references and newly created identities use exactly 96 bits.
+#[test]
+fn legacy_keys_preserve_integrity_and_serialize_unchanged() {
+    let digest = "a".repeat(64);
+    let legacy = ArtifactKey::parse(format!("blake3:{digest}")).expect("legacy");
+    let key = ArtifactKey::from_digest(&digest).expect("short");
+    assert_eq!(key.as_str(), "a".repeat(24));
+    assert_eq!(artifact_reference(&legacy), artifact_reference(&key));
+    let json = serde_json::to_string(&legacy).expect("encode");
+    let decoded: ArtifactKey = serde_json::from_str(&json).expect("old journal");
+    assert_eq!(decoded, legacy);
+    assert_eq!(
+        parse_artifact_reference(&format!("<tau-artifact:{legacy}>")).expect("legacy autolink"),
+        legacy
+    );
+    let different = format!("{}{}", "a".repeat(24), "b".repeat(40));
+    assert!(key.matches_digest(&different));
+    assert!(!legacy.matches_digest(&different));
+    for invalid in [
+        "a".repeat(23),
+        "a".repeat(25),
+        "a".repeat(64),
+        "A".repeat(24),
+        format!("blake3:{}", "a".repeat(24)),
+    ] {
+        assert!(ArtifactKey::parse(invalid).is_err());
     }
 }
 
