@@ -1456,10 +1456,13 @@ fn assert_production_credential_read(
 }
 
 /// Proves the production prompt path accepts out-of-order Secret replies
-/// asynchronously but emits submitted ownership in original prompt order.
+/// asynchronously but emits submitted ownership in original prompt order, then
+/// exits successfully after input EOF while the harness drains remaining
+/// output.
 #[test]
 fn production_prompt_secret_replies_preserve_admission_fifo() {
     use std::collections::BTreeMap;
+    use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
 
     let provider_name = ProviderName::new("deepseek");
@@ -1606,14 +1609,38 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
         "both receipt observations must publish before shutdown"
     );
 
-    drop(writer);
-    drop(reader);
+    // Closing both directions with unread worker output can reset the socket.
+    // Signal input EOF without closing the provider's output destination, then
+    // drain through clean EOF under one deadline, including already buffered
+    // bytes.
+    writer
+        .get_ref()
+        .shutdown(Shutdown::Write)
+        .expect("half-close harness input");
+    let deadline = path_std_time::Instant::now() + path_std_time::Duration::from_secs(2);
+    let mut output = reader.into_buffered_inner();
+    let mut buffer = [0; 4096];
+    loop {
+        let remaining = deadline
+            .checked_duration_since(path_std_time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .expect("provider output must reach EOF before shutdown deadline");
+        writer
+            .get_ref()
+            .set_read_timeout(Some(remaining))
+            .expect("set remaining shutdown timeout");
+        if path_std_io::Read::read(&mut output, &mut buffer)
+            .expect("drain provider output through clean EOF")
+            == 0
+        {
+            break;
+        }
+    }
     let result = provider.join().expect("join provider");
-    assert!(
-        result
-            .as_ref()
-            .map_or_else(|error| error.contains("Broken pipe"), |_| true),
-        "provider exits after harness close: {result:?}"
+    assert_eq!(
+        result,
+        Ok(()),
+        "provider exits successfully after input EOF"
     );
     let receipt_trace = String::from_utf8(receipt_trace.bytes()).expect("receipt trace UTF-8");
     let receipt_lines = receipt_trace
