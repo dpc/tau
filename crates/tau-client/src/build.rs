@@ -7,6 +7,9 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+mod tests;
+
 /// Captured owned repository identity and the inputs that can change it.
 struct RepositoryMetadata {
     /// Full commit hash of the explicitly selected source checkout.

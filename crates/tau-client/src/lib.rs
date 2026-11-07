@@ -24,7 +24,8 @@ mod artifact_download;
 mod artifact_media;
 mod artifact_upload;
 mod bridge_receiver;
-#[cfg(feature = "build")]
+// Exercise the build helper in ordinary test binaries so coverage includes it.
+#[cfg(any(feature = "build", test))]
 pub mod build;
 pub mod build_info;
 mod builder;

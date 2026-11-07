@@ -880,6 +880,7 @@ dependencies = [
  "git2",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]
