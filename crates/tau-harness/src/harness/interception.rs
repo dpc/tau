@@ -1573,6 +1573,7 @@ impl Harness {
     /// agent, suspend an in-flight responder, and resume unrelated FIFO
     /// work.
     pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
+        self.prompt_coordination.prompt_runtime.recall.remove(cid);
         self.prompt_coordination
             .context_discovery
             .deferred_folds

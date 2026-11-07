@@ -57,6 +57,12 @@ impl UncertainInferenceTerminal {
 /// Runtime-only state associated with provider prompts and their continuations.
 #[derive(Default)]
 pub(crate) struct PromptRuntimeState {
+    /// Rebuildable per-agent archive outcome and at most one parked callback.
+    pub(super) recall: HashMap<AgentId, super::compaction_recall::RecallState>,
+    /// Broad synchronous fixtures pump the real worker before returning;
+    /// focused ownership tests leave completion delivery explicitly delayed.
+    #[cfg(test)]
+    pub(super) recall_eager_test_delivery: bool,
     /// Next runtime-only identity for one ordinary queued-steer publication
     /// batch.
     next_ordinary_steer_batch_id: u64,

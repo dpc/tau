@@ -187,6 +187,46 @@ The format is a reserved `TAU-DIRECTORY` prefix plus NUL, version byte 1, and
 exactly one zstd frame containing restricted tar. The decoder rejects concatenated
 frames and hidden nonzero payload after the tar end.
 
+## Compacted-prefix recall
+
+After successful standalone compaction, Tau prepares a searchable directory
+artifact before the next inference. A short harness-owned notice tells the agent
+to `import` its reference, then read `transcript.txt` or grep the returned directory
+recursively to include large payloads in `payloads/`. In `manifest.json`, Tau
+identifies the exact replaced semantic prefix and includes at most one parent
+archive link or an explicit ancestry gap. The accepted native or local replacement
+stays unchanged. Inline provider compaction without an exact standalone cut does
+not create an archive.
+
+Tau labels historical sources in the transcript and prefixes inline payload lines
+with `| `. It preserves typed watch status and lifecycle payloads, along with
+delivery provenance for sessions, the CLI, and peer reviews. It puts tool arguments
+and rendered results larger than 1 KiB in numbered `payloads/` files. It also puts
+ordinary text larger than 8 KiB and text with control characters other than
+tab/newline in separate files, preserving exact
+UTF-8 bytes. Tau omits reasoning, opaque provider payloads, transport sidecars,
+duplicate raw tool objects, and media bytes. It never follows old paths or artifact
+references to fill in missing output. Archived text is historical evidence, not
+new instructions.
+
+Automatic recall requires a durable session and agent. Archives use ordinary
+shared-store retention, not transcript pinning, and can outlive session deletion.
+Tau may reconstruct archives from the journal after restart without repeating a
+compactor call or adding a durable publication phase. Preparation is best effort:
+if storage is unavailable, work is overloaded, or a limit prevents preparation,
+Tau preserves the summary and adds an unavailable notice.
+The producer caps encoded whole-history journal replay at 64 MiB, so a long journal
+can prevent recall even when the current replaced window is small. It caps stored
+originals and cumulative expanded preparation at 32 MiB or the lower configured
+artifact limit, and considers at most 32 archive generations. The current window
+gets priority; an unavailable older archive leaves an explicit ancestry gap rather
+than disabling current recall. Preparation has one absolute 30-second runtime
+deadline, including waits for journal writes and artifact queueing and work.
+Tau uses existing frontier notifications rather than polling. On expiry, Tau
+resumes inference with an unavailable notice even if a blocking filesystem
+operation is still running. It retains worker and deletion custody until that
+operation finishes; the deadline does not forcibly interrupt filesystem calls.
+
 ## Recover from Busy tool calls
 
 Artifact operations share bounded worker and transfer capacity. Store-lock

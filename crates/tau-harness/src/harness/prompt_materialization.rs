@@ -658,6 +658,9 @@ impl Harness {
             );
             return None;
         }
+        if !self.prepare_compaction_recall(cid, timing.clone()) {
+            return None;
+        }
         let (prompt, discovery_render) =
             self.prepare_agent_prompt_for_dispatch_timed(cid, timing.as_ref())?;
         self.ensure_outer_turn_started(cid);
@@ -1290,10 +1293,33 @@ impl Harness {
                 false,
             ),
         };
-        let contains_payload_envelope_provenance_projection =
-            prompt_context.contains_payload_envelope_provenance_projection;
+        let recall_notice = self.compaction_recall_notice(
+            cid,
+            standalone_window.map_or(head, |(through, _)| through.as_option()),
+            standalone_window.map(|(_, cut)| cut),
+        );
+        let contains_payload_envelope_provenance_projection = prompt_context
+            .contains_payload_envelope_provenance_projection
+            || recall_notice.is_some();
         let history_provenance = contains_payload_envelope_provenance_projection;
         let mut context = prompt_context.context;
+        if let Some(notice) = recall_notice {
+            // A separate harness-owned part preserves native/local replacement
+            // bytes and does not let archived text manufacture provenance.
+            context.blocks.insert(
+                usize::from(!context.blocks.is_empty()),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::Message(tau_proto::MessageItem {
+                        role: tau_proto::ContextRole::User,
+                        content: vec![tau_proto::ContentPart::Text {
+                            text: crate::internal_envelope::frame(&notice),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                }),
+            );
+        }
         if compaction_transaction.is_some() {
             context.blocks.push(tau_proto::ContextBlock::UserInput(
                 tau_proto::UserInputBlock {

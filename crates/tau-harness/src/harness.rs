@@ -1601,6 +1601,7 @@ mod artifact_requests;
 mod bridge_receiver;
 mod cli_messaging;
 mod compaction_image_admission;
+mod compaction_recall;
 mod compaction_runtime;
 mod compaction_runtime_state;
 #[cfg(test)]

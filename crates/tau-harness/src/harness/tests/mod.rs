@@ -1493,6 +1493,10 @@ pub(super) fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, Har
 /// Preserve immediate legacy scheduling in broad fixtures; focused deadline
 /// tests opt back into the shipped policies they exercise.
 fn make_notification_delivery_immediate(harness: &mut Harness) {
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .recall_eager_test_delivery = true;
     let immediate =
         NotificationDeliveryPolicy::from_millis(0, 0, 0).expect("valid immediate policy");
     let policies = &mut harness
@@ -1503,6 +1507,7 @@ fn make_notification_delivery_immediate(harness: &mut Harness) {
     policies.status = immediate;
     policies.agent_message = immediate;
     policies.external_message = immediate;
+    harness.drain_recall_for_test();
 }
 
 /// Builds the echo-provider fixture without persistent session or agent stores
@@ -2840,6 +2845,7 @@ mod artifacts;
 mod bridge_receiver;
 mod canonical_main_capabilities;
 mod cli_messaging;
+mod compaction_recall;
 mod config_error;
 mod dedup;
 mod dispatch;

@@ -32,6 +32,8 @@ pub(crate) enum HarnessCommand {
     HistoryReadCompleted(Box<crate::history_reader::HistoryReadCompleted>),
     /// Route one bounded, transient artifact RPC completion.
     ArtifactCompleted(Box<crate::artifact_worker::ArtifactCompleted>),
+    /// Private replay-derived archive completion, not a semantic event.
+    RecallCompleted(Box<crate::compaction_recall::RecallCompleted>),
     /// Complete verified image preparation after all physical custody is gone.
     ImageVerificationCompleted(Box<crate::image_verification::ImageVerificationCompleted>),
     /// Surface corrupt artifact bookkeeping preserved by startup cleanup.

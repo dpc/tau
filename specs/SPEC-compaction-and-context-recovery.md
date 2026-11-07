@@ -84,6 +84,27 @@ cancellation, and timeout/retry classification remain unchanged.
 
 ## Recovery authority
 
+After successful standalone compaction in a durable session and agent, Tau may
+prepare a best-effort searchable archive of exactly the replaced semantic prefix
+before resuming inference. The accepted replacement, cut, retained suffix, and
+provider retry authority remain unchanged. Tau reports the archive locator or
+its unavailability in a separate harness-framed notice, without changing
+replacement bytes or promoting historical payload text into fresh authority.
+Native inline compaction without an exact standalone cut is excluded.
+
+Tau derives recall from retained journal history through bounded off-loop work
+under exact persistent-agent authority. After restart, Tau may rebuild recall
+without repeating compaction or introducing another semantic publication phase.
+On completion, it resumes only its still-owned checkpoint. The newest window has
+priority over older ancestry: each manifest carries at most one direct parent
+archive link or an explicit gap. Archives follow ordinary artifact retention,
+not durable transcript pinning. If a limit or storage failure prevents recall,
+Tau preserves accepted summary progress. One absolute 30-second runtime deadline
+covers preparation, including waits for journal writes and artifact queueing and
+work. On expiry, Tau resumes inference with an unavailable notice even if a
+blocking filesystem operation is still running, retaining worker and deletion
+custody until that operation finishes.
+
 On agent or session resume, Tau must continue owed execution rather than leave
 the agent silently idle behind an unrecoverable checkpoint. Tau must make
 automatic forward progress when recovery is safe. When the operation's contract

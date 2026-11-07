@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tau_proto::{ArtifactError, ArtifactRequest, ArtifactResult, ConnectionId};
 
 use crate::artifact_store::ArtifactStore;
+use crate::compaction_recall::RecallFailure;
 use crate::event::{HarnessCommand, HarnessEvent};
 #[cfg(test)]
 use crate::image_verification::ImageVerificationCut;
@@ -33,6 +34,8 @@ pub(crate) struct ArtifactWorker {
 
 /// Both work families share the same queue and outstanding-operation budget.
 enum Job {
+    /// Replay-derived compacted-prefix archive; no provider work.
+    Recall(Box<crate::compaction_recall::RecallRequest>, Permit),
     /// Existing directed extension/UI transfer work.
     Artifact(Box<ArtifactJob>),
     /// Internal prepared-image verification, never an extension pin operation.
@@ -163,6 +166,22 @@ impl ArtifactWorker {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     };
                     let command = match job {
+                        Job::Recall(request, permit) => {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    request.run(&mut store)
+                                }))
+                                .unwrap_or(Err(RecallFailure::Unavailable));
+                            HarnessCommand::RecallCompleted(Box::new(
+                                crate::compaction_recall::RecallCompleted {
+                                    agent_id: request.agent_id,
+                                    boundary: request.boundary,
+                                    live: request.live,
+                                    result,
+                                    _permit: permit,
+                                },
+                            ))
+                        }
                         Job::Artifact(job) => {
                             if !job.alive.load(Ordering::Acquire) {
                                 store.disconnect(job.connection.as_str());
@@ -269,6 +288,17 @@ impl ArtifactWorker {
                 alive,
                 permit,
             })))
+            .map_err(|_| ArtifactError::Busy)
+    }
+
+    /// Charges queued, active and unconsumed work uniformly.
+    pub(crate) fn submit_recall(
+        &mut self,
+        request: crate::compaction_recall::RecallRequest,
+    ) -> Result<(), ArtifactError> {
+        let permit = self.reserve()?;
+        self.tx
+            .try_send(Job::Recall(Box::new(request), permit))
             .map_err(|_| ArtifactError::Busy)
     }
 

@@ -1123,6 +1123,7 @@ dependencies = [
  "ciborium",
  "dirs",
  "dpc-tau-actions",
+ "dpc-tau-artifact",
  "dpc-tau-client",
  "dpc-tau-config",
  "dpc-tau-core",

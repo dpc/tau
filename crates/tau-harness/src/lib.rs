@@ -34,6 +34,7 @@ mod background_completion_preview;
 mod client_writer_lifecycle;
 #[cfg(test)]
 mod client_writer_lifecycle_tests;
+mod compaction_recall;
 mod daemon;
 mod debug_log;
 mod dedup;

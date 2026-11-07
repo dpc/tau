@@ -86,6 +86,13 @@ impl PersistenceLease {
 }
 
 impl AgentHistoryPrefix {
+    /// Returns the complete encoded frame bytes in this immutable prefix, so
+    /// derived consumers can enforce independent replay budgets before reading.
+    #[must_use]
+    pub fn encoded_bytes(&self) -> u64 {
+        self.end_offset
+    }
+
     /// Returns the first sequence outside this immutable prefix.
     #[must_use]
     pub fn next_seq(&self) -> PersistedAgentEventSeq {

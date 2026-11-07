@@ -784,6 +784,7 @@ impl Harness {
             let extension = self.next_extension_deadline();
             let cache = self.next_cache_refresh_deadline();
             let discovery = self.next_discovery_refresh_deadline();
+            let recall = self.next_compaction_recall_deadline();
             let preview = self
                 .prompt_coordination
                 .context_discovery
@@ -800,6 +801,7 @@ impl Harness {
                 cache,
                 preview,
                 discovery,
+                recall,
             ]
             .into_iter()
             .flatten()
@@ -819,7 +821,7 @@ impl Harness {
                     .agent_watch
                     .long_wait_materialization_budget
                     .unwrap_or_default();
-                let next_non_work = [input, background, extension, cache, discovery]
+                let next_non_work = [input, background, extension, cache, discovery, recall]
                     .into_iter()
                     .flatten()
                     .min()
@@ -835,6 +837,8 @@ impl Harness {
                 self.process_rendered_preview_deadlines(deadline);
             } else if discovery == Some(deadline) {
                 self.process_discovery_refresh_deadlines(deadline);
+            } else if recall == Some(deadline) {
+                self.expire_compaction_recall(deadline);
             } else {
                 self.process_extension_deadlines_at(deadline, now);
             }
@@ -856,6 +860,7 @@ impl Harness {
             self.next_extension_deadline(),
             self.next_cache_refresh_deadline(),
             self.next_discovery_refresh_deadline(),
+            self.next_compaction_recall_deadline(),
             self.prompt_coordination
                 .context_discovery
                 .pending_rendered_prompts

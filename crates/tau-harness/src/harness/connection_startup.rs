@@ -577,6 +577,9 @@ impl Harness {
         command: HarnessCommand,
     ) -> Result<(), HarnessError> {
         match command {
+            HarnessCommand::RecallCompleted(completed) => {
+                self.complete_compaction_recall(*completed);
+            }
             HarnessCommand::ArtifactCompleted(command) => {
                 self.send_artifact_result(&command.connection, command.result);
             }

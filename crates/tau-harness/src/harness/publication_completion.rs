@@ -168,6 +168,7 @@ impl Harness {
             );
         }
         self.evict_eligible_history();
+        self.retry_compaction_recall_frontiers();
     }
 
     /// Wake every publication owner retained by temporary admission pressure.

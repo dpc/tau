@@ -656,6 +656,7 @@ impl Harness {
         {
             return;
         }
+        self.prompt_coordination.prompt_runtime.recall.remove(cid);
         let dormant_repair_exists = self
             .agent_runtime
             .agent_registry

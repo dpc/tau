@@ -54,13 +54,13 @@ pub use semantic_persistence::{
     SessionPreparationStatus, StreamIdentity,
 };
 pub use session::{
-    AgentEntry, AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics,
-    AgentMessageDirection, AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState,
-    BackgroundToolCompletion, BackgroundToolPlaceholder, InferenceDispatchRecovery,
-    ManualCompactionOutcome, ManualCompactionRecovery, NodeId, OutputLengthContinuationRecovery,
-    OutputLengthDormantRepair, OutputLengthTerminalIncomplete, PersistedAgentEvent,
-    PersistedAgentEventSeq, PersistedEventSource, ReactiveCompactionProgress, SessionMeta,
-    StandaloneCompactionRecovery, validate_inline_provider_image,
+    ActiveProviderWindow, AgentEntry, AgentEventParent, AgentEventValidationError,
+    AgentJournalFoldSemantics, AgentMessageDirection, AgentMetadataEntry, AgentNode, AgentTree,
+    BackgroundToolCallState, BackgroundToolCompletion, BackgroundToolPlaceholder,
+    InferenceDispatchRecovery, ManualCompactionOutcome, ManualCompactionRecovery, NodeId,
+    OutputLengthContinuationRecovery, OutputLengthDormantRepair, OutputLengthTerminalIncomplete,
+    PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource, ReactiveCompactionProgress,
+    SessionMeta, StandaloneCompactionRecovery, validate_inline_provider_image,
     validate_provider_image_reference,
 };
 pub use session_store::{
