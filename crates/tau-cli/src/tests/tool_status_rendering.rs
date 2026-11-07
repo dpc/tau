@@ -1410,6 +1410,7 @@ fn watched_agent_stats_redraws_status_row() {
     assert!(!vt.screen_contains(100, "❓💤 @engineer_1"));
 
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 
@@ -1559,6 +1560,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
         },
     ));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 
@@ -1656,6 +1658,7 @@ fn watched_agent_response_finished_keeps_status_row() {
         },
     ));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 
@@ -2911,6 +2914,29 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     assert!(!completed.contains("complete"), "{completed}");
     assert!(!completed.contains("Compacting…"), "{completed}");
 
+    let key = "0123456789abcdef01234567".parse().expect("artifact key");
+    let mut continuation = agent_prompt_started("ap-after-self", "s1");
+    continuation.compaction_recall_artifact = Some(tau_proto::CompactionRecallArtifact {
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-self").expect("transaction"),
+        key,
+    });
+    renderer.handle(&Event::AgentPromptStarted(continuation.clone()));
+    sync(&handle);
+    let archived = vt.screen_text(100).join("\n");
+    assert!(
+        archived.contains("<tau-artifact:0123456789abcdef01234567>"),
+        "{archived}"
+    );
+    assert_eq!(archived.matches("~#47k/~#150k").count(), 1, "{archived}");
+    renderer.switch_agent(agent_id("other"));
+    renderer.switch_agent(agent_id("main"));
+    sync(&handle);
+    let restored = vt.screen_text(100).join("\n");
+    assert!(
+        restored.contains("<tau-artifact:0123456789abcdef01234567>"),
+        "{restored}"
+    );
+
     renderer.handle(&Event::AgentInferenceDispatchStarted(
         compaction_continuation_started("main", "ct-self", "ap-after-self"),
     ));
@@ -3984,6 +4010,7 @@ fn estimated_cost_status_hides_under_width_pressure() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_id: agent_id("a"),
         ..agent_prompt_started("cost-sp", "s1")
     }));

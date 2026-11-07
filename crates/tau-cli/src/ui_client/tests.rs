@@ -108,7 +108,6 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
     assert!(subscription.live_selectors.contains(&prompt_rejected));
 
     for event in [
-        EventName::AGENT_PROMPT_STARTED,
         EventName::AGENT_PROMPT_TERMINATED,
         EventName::AGENT_PROMPT_RECALLED,
         EventName::PROVIDER_PROMPT_SUBMITTED,
@@ -129,6 +128,7 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
         EventName::TOOL_ERROR,
         // These transient event names also identify current-state snapshots.
         EventName::AGENT_PROMPT_QUEUED,
+        EventName::AGENT_PROMPT_STARTED,
         EventName::AGENT_STATS_UPDATED,
         EventName::AGENT_WATCHES_UPDATED,
     ] {

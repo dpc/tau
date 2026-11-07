@@ -1405,6 +1405,7 @@ fn standalone_execution_accounting_is_idempotent_per_logical_attempt() {
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
     let session_id = tau_proto::SessionId::parse("session-accounting").expect("valid session id");
     let prompt_started = tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_prompt_id: started.compact_prompt_id.clone(),
         agent_id: agent_id(),
         session_id: session_id.clone(),
@@ -1641,6 +1642,7 @@ fn compaction_chain_view_is_live_cold_and_restart_equivalent() {
         &mut live,
         &mut records,
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: started.compact_prompt_id.clone(),
             agent_id: agent_id(),
             session_id: session_id.clone(),
@@ -1828,6 +1830,7 @@ fn compaction_chain_view_tracks_correlated_provider_response_cut() {
         &mut live,
         &mut records,
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: started.compact_prompt_id.clone(),
             agent_id: agent_id(),
             session_id: "provider-cut-session".parse().expect("session id"),
@@ -2727,6 +2730,7 @@ fn automatic_context_retreat_claims_exact_strict_predecessor_plan() {
     };
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(rejected.clone()));
     tree.apply_event(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_prompt_id: rejected.compact_prompt_id.clone(),
         agent_id: agent_id(),
         session_id: tau_proto::SessionId::parse("session").expect("session"),
@@ -6474,6 +6478,7 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let prompt = |id: &str, operation| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 
@@ -6554,6 +6559,7 @@ fn prompt_started_requires_unique_matching_owner() {
         output_length_continuation: None,
     };
     let started = tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 
@@ -6933,6 +6939,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         },
     };
     let source_started = tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_prompt_id: source_prompt_id.clone(),
         agent_id: agent_id.clone(),
         session_id: tau_proto::SessionId::parse("session").expect("session id"),
@@ -6998,6 +7005,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         }),
     };
     let successor_started = tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_prompt_id: owner.agent_prompt_id.clone(),
         agent_id: agent_id.clone(),
         session_id: tau_proto::SessionId::parse("session").expect("session id"),
@@ -7442,6 +7450,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         "successful compaction must not erase protected output-length lineage"
     );
     let descendant_started = tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_prompt_id: descendant_prompt_id.clone(),
         agent_id: fixture.agent_id().clone(),
         session_id: tau_proto::SessionId::parse("session").expect("session id"),
@@ -7773,6 +7782,7 @@ fn output_length_recovery_selects_later_unresolved_plan() {
         11,
         AgentEventParent::Under(fixture.terminal_node()),
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: later_source_prompt_id.clone(),
             agent_id: fixture.agent_id().clone(),
             session_id: tau_proto::SessionId::parse("session").expect("session id"),
@@ -8352,6 +8362,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
     ));
     let tree_without_prompt_start = tree.clone();
     tree.apply_event(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_prompt_id: continuation_prompt_id.clone(),
         agent_id: agent_id.clone(),
         session_id: session_id.clone(),
@@ -8757,6 +8768,7 @@ fn automatic_policy_tool_trace(rounds: usize) -> AutomaticPolicyToolTrace {
         events.push((
             "prompt_started",
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                compaction_recall_artifact: None,
                 agent_prompt_id: prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 session_id: session_id.clone(),

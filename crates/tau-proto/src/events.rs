@@ -5883,6 +5883,10 @@ pub struct AgentToolTerminalClassified {
 /// live.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptStarted {
+    /// Available compacted-prefix archive for this materialized inference.
+    /// Presentation only; absence does not imply failed compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_recall_artifact: Option<crate::CompactionRecallArtifact>,
     /// Prompt that was materialized; this does not assert provider receipt.
     pub agent_prompt_id: AgentPromptId,
     /// Agent transcript this prompt belongs to.
@@ -5912,6 +5916,7 @@ pub struct AgentPromptStarted {
 impl From<&AgentPromptCreated> for AgentPromptStarted {
     fn from(prompt: &AgentPromptCreated) -> Self {
         Self {
+            compaction_recall_artifact: None,
             agent_prompt_id: prompt.agent_prompt_id.clone(),
             agent_id: prompt.agent_id.clone(),
             session_id: prompt.session_id.clone(),

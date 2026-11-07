@@ -2864,6 +2864,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             agent_id.as_str(),
             None,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                compaction_recall_artifact: None,
                 agent_prompt_id: prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 session_id: "s1".parse().expect("session id"),

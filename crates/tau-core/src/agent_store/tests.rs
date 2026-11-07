@@ -603,6 +603,7 @@ fn managed_history_prompt_cursor_covers_all_id_families() {
     let agent_id = AgentId::parse("history-cursor").expect("agent id");
     let prompt = |id: &str| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: id.parse().expect("prompt id"),
             agent_id: agent_id.clone(),
             session_id: "session".parse().expect("session id"),

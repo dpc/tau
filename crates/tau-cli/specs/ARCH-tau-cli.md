@@ -270,6 +270,12 @@ UI shows `compact ok`.
 Provider stream content remains private, and detachable per-agent correlation
 makes live, late-attach, and cold-replay rendering identical.
 
+When a materialized inference reports an available compaction transcript archive,
+the CLI adds its canonical `<tau-artifact:...>` locator to the existing
+transaction-owned compact row. For historical prompt starts, the CLI projects only
+archive metadata and does not recreate activity. Missing or unavailable archives
+leave the row unchanged; showing a locator does not pin the archive.
+
 Prompt `Path` and `PathFuzzy` completion queries advertised extension endpoints
 asynchronously. The terminal reads only a bounded cache, never local filesystem
 or Git fallback results. Draft/cursor/agent/incarnation changes invalidate stale

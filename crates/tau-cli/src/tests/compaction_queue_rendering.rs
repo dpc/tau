@@ -2,6 +2,101 @@
 
 use super::*;
 
+/// Archive locators update the same settled row on attach without resurrecting
+/// the historical inference's activity, and survive detached transcript
+/// storage.
+#[test]
+fn compaction_archive_locator_survives_cold_attach_without_prompt_activity() {
+    for cold in [false, true] {
+        let (_term, handle, vt) = setup(120, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.switch_agent(agent_id("main"));
+        renderer.apply_setting("show-tools", "off");
+        renderer.toggle_verbose_mode();
+        let started = standalone_compaction_started("ct-archive", "ap-archive");
+        let mut prompt = agent_prompt_started("ap-after-archive", "s1");
+        prompt.compaction_recall_artifact = Some(tau_proto::CompactionRecallArtifact {
+            transaction_id: started.transaction_id.clone(),
+            key: "0123456789abcdef01234567".parse().expect("artifact key"),
+        });
+        let events = [
+            Event::AgentStandaloneCompactionStarted(started.clone()),
+            Event::AgentCompacted(AgentCompacted {
+                effectiveness: None,
+                compaction_input_bytes: None,
+                agent_id: agent_id("main"),
+                transaction_id: started.transaction_id,
+                cut: tau_proto::AgentHead::Root,
+                suffix_end: tau_proto::AgentHead::Root,
+                compact_prompt_id: started.compact_prompt_id,
+                model: started.model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                original_input_tokens: None,
+                compaction_output_tokens: None,
+                replacement_window: Vec::new(),
+            }),
+            Event::AgentPromptStarted(prompt),
+        ];
+        for (index, event) in events.iter().enumerate() {
+            if cold {
+                renderer.handle_cold_attach_replay_socket_delivery(
+                    event,
+                    tau_proto::UnixMicros::new(index as u64 + 1),
+                    tau_cli_term::RendererDeliveryId::new(index as u64 + 1),
+                );
+            } else {
+                renderer.handle_replay_socket_delivery(
+                    event,
+                    tau_proto::UnixMicros::new(index as u64 + 1),
+                    tau_cli_term::RendererDeliveryId::new(index as u64 + 1),
+                );
+                sync(&handle);
+                let screen = vt.screen_text(100).join("\n");
+                if index == 1 {
+                    assert!(
+                        screen.contains("compact ") && screen.contains(" ok"),
+                        "{screen}"
+                    );
+                } else if index == 2 {
+                    assert!(
+                        screen.contains("<tau-artifact:0123456789abcdef01234567>"),
+                        "{screen}"
+                    );
+                }
+            }
+        }
+        assert!(!renderer.main_agent_turn_active_for_test());
+        assert!(!renderer.agent_has_active_prompt_for_test(&agent_id("main")));
+        renderer.handle_attach_agent_selection_socket_delivery(
+            &Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+                main_agent_id: Some(agent_id("main")),
+                session_id: test_session_id("s1"),
+                error: None,
+            }),
+            &agent_id("main"),
+            tau_proto::UnixMicros::new(10),
+            tau_cli_term::RendererDeliveryId::new(10),
+        );
+        renderer.toggle_verbose_mode();
+        renderer.apply_setting("show-tools", "compact");
+        renderer.apply_setting("show-tools", "off");
+        renderer.toggle_verbose_mode();
+        renderer.switch_agent(agent_id("other"));
+        renderer.switch_agent(agent_id("main"));
+        sync(&handle);
+        let screen = vt.screen_text(100).join("\n");
+        assert!(
+            screen.contains("<tau-artifact:0123456789abcdef01234567>"),
+            "{screen}"
+        );
+        assert_eq!(screen.matches("compact ").count(), 1, "{screen}");
+    }
+}
+
 /// Actual prefix retreat stays visible in compact mode, with one succinct
 /// warning for the chain in both live delivery and cold attach reconstruction.
 #[test]

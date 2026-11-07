@@ -76,6 +76,7 @@ fn background_result(id: &str) -> Event {
 
 fn prompt_started(id: &str) -> Event {
     Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_prompt_id: id
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),

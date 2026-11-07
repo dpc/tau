@@ -112,6 +112,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
         record(
             2,
             Event::AgentPromptStarted(AgentPromptStarted {
+                compaction_recall_artifact: None,
                 agent_prompt_id: prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
@@ -207,6 +208,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     events.push(record(
         6,
         Event::AgentPromptStarted(AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: "ap-engineer_0-foreign"
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
@@ -352,6 +354,7 @@ fn aggregation_groups_typed_tool_names_and_preserves_lexical_json_order() {
         record(
             0,
             Event::AgentPromptStarted(AgentPromptStarted {
+                compaction_recall_artifact: None,
                 agent_prompt_id: prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
@@ -441,6 +444,7 @@ fn aggregation_reports_legacy_accounting_gaps_without_inference() {
         record(
             1,
             Event::AgentPromptStarted(AgentPromptStarted {
+                compaction_recall_artifact: None,
                 agent_prompt_id: "ap-legacy_0-0"
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),
@@ -477,6 +481,7 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
     let model: tau_proto::ModelId = "openai/gpt-5".parse().expect("model");
     let prompt = |id: &str| {
         Event::AgentPromptStarted(AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: id
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
@@ -566,6 +571,7 @@ fn aggregation_distinguishes_nonnative_effort_from_missing_model_params() {
     let model: tau_proto::ModelId = "openai/gpt-5".parse().expect("model");
     let started = |index: u8, model_params| {
         Event::AgentPromptStarted(AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: format!("ap-nonnative_0-{index}")
                 .parse()
                 .expect("prompt id"),

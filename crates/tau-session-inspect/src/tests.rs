@@ -205,6 +205,7 @@ fn append_trace_prompt_lifecycle(
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                compaction_recall_artifact: None,
                 agent_prompt_id: prompt_id
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),
@@ -263,6 +264,7 @@ fn append_trace_compaction_prompt(
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                compaction_recall_artifact: None,
                 agent_prompt_id: prompt_id
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),

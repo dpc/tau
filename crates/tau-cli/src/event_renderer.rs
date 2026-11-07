@@ -1499,6 +1499,7 @@ impl EventRenderer {
             final_publication_in_progress: false,
             hidden_finalization_in_progress: false,
             cold_attach_redraw: None,
+            replaying_prompt_start: false,
             #[cfg(test)]
             finished_staging_hook: None,
             #[cfg(test)]
@@ -3146,6 +3147,12 @@ impl EventRenderer {
     fn rerender_visible_for_current_settings(&mut self) {
         use tau_themes::names;
         self.rerender_message_history();
+        for entry in &self.transcript.history.compaction_history {
+            self.resources.handle.set_block(
+                entry.block_id,
+                self.render_compact_tool_block(&entry.display),
+            );
+        }
         for entry in &self.transcript.history.tool_history {
             self.resources.handle.set_block(
                 entry.block_id,
@@ -4446,7 +4453,9 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         delivery_id: RendererDeliveryId,
     ) {
+        self.replaying_prompt_start = matches!(event, Event::AgentPromptStarted(_));
         self.handle_recorded_delivery(event, recorded_at, Some(delivery_id), true, false);
+        self.replaying_prompt_start = false;
     }
 
     /// Handles replay retained by an explicit cold attach. These rows can
@@ -4458,7 +4467,9 @@ impl EventRenderer {
         delivery_id: RendererDeliveryId,
     ) {
         self.begin_cold_attach_redraw();
+        self.replaying_prompt_start = matches!(event, Event::AgentPromptStarted(_));
         self.handle_recorded_delivery(event, recorded_at, Some(delivery_id), false, true);
+        self.replaying_prompt_start = false;
     }
 
     /// Selects the validated owner of a reconstructed pending start, then
@@ -4875,6 +4886,16 @@ impl EventRenderer {
             event_name,
             started_at: Instant::now(),
         };
+        if self.replaying_prompt_start
+            && let Event::AgentPromptStarted(prompt) = event
+        {
+            self.handle_recorded_at_for_snapshot_owner(
+                &prepared,
+                recorded_at,
+                UiSnapshotOwner::Agent(prompt.agent_id.clone()),
+            );
+            return;
+        }
         self.record_session_token_usage(event);
         self.apply_initial_create_prompt_lifecycle(event);
         let deferred_metadata_target = (!matches!(event, Event::HarnessAgentContextInitialized(_)))
@@ -6026,6 +6047,14 @@ impl EventRenderer {
         recorded_at: UnixMicros,
     ) {
         let event = prepared.event();
+        if self.replaying_prompt_start
+            && let Event::AgentPromptStarted(prompt) = event
+        {
+            if let Some(artifact) = &prompt.compaction_recall_artifact {
+                self.show_compaction_recall_artifact(artifact);
+            }
+            return;
+        }
         self.sync_agent_activity_for_lifecycle(prepared);
 
         self.sync_main_tools_visibility_for_prompt_lifecycle(prepared);
@@ -7184,6 +7213,14 @@ impl EventRenderer {
             return;
         };
         let mut display = compaction_tool_display(status_text, status);
+        if let Some(key) = tool.transaction_id.as_ref().and_then(|transaction| {
+            self.transcript
+                .runtime
+                .compaction_recall_artifacts
+                .get(transaction)
+        }) {
+            display.args = tau_proto::artifact_reference(key);
+        }
         if let Some(duration) = Self::live_tool_duration(state) {
             Self::upsert_tool_duration_suffix(&mut display, duration, state.effective_tool_timeout);
         }
@@ -7196,6 +7233,9 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
+        if let Some(artifact) = &prompt.compaction_recall_artifact {
+            self.show_compaction_recall_artifact(artifact);
+        }
         if let Some(ctx_id) = prompt.ctx_id.as_ref()
             && let Some(index) = self
                 .transcript
@@ -8433,6 +8473,23 @@ impl EventRenderer {
             Self::tool_result_display(display_name, descriptor, diff.as_ref())
         };
         self.apply_self_compaction_name_style(call_id, &mut display);
+        if let Some(tool) = self.transcript.runtime.self_compaction_tools.get(call_id) {
+            if let Some(key) = tool.transaction_id.as_ref().and_then(|transaction| {
+                self.transcript
+                    .runtime
+                    .compaction_recall_artifacts
+                    .get(transaction)
+            }) {
+                display.args = tau_proto::artifact_reference(key);
+            }
+            if let (Some(transaction), Some(block)) = (&tool.transaction_id, prior.history_block_id)
+            {
+                self.transcript
+                    .runtime
+                    .compaction_history_blocks
+                    .insert(transaction.clone(), block);
+            }
+        }
         let wait_timeout =
             normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
@@ -9399,14 +9456,28 @@ impl EventRenderer {
                         );
                     } else {
                         self.complete_standalone_compaction_prompt(&prompt_id, None);
-                        self.resources.handle.print_output(
+                        let mut display =
+                            compaction_tool_display(&status, CompactionStatus::Success);
+                        if let Some(key) = self
+                            .transcript
+                            .runtime
+                            .compaction_recall_artifacts
+                            .get(&compacted.transaction_id)
+                        {
+                            display.args = tau_proto::artifact_reference(key);
+                        }
+                        let block_id = self.resources.handle.print_output(
                             "standalone-compaction-terminal",
-                            render_compaction_block(
-                                &self.resources.theme,
-                                &status,
-                                CompactionStatus::Success,
-                            ),
+                            self.render_compact_tool_block(&display),
                         );
+                        self.transcript
+                            .history
+                            .compaction_history
+                            .push(ToolBlockEntry { block_id, display });
+                        self.transcript
+                            .runtime
+                            .compaction_history_blocks
+                            .insert(compacted.transaction_id.clone(), block_id);
                         self.resources.handle.redraw();
                     }
                 }

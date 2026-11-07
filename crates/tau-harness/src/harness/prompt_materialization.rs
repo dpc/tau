@@ -631,6 +631,7 @@ impl Harness {
             }
         };
         let admission = tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: owned_prompt_id.clone(),
             agent_id: agent_id.clone(),
             session_id: self.session_runtime.current_session_id.clone(),
@@ -694,6 +695,8 @@ impl Harness {
         }
         let mut started = tau_proto::AgentPromptStarted::from(&prompt);
         if started.operation == tau_proto::PromptOperation::Inference {
+            started.compaction_recall_artifact =
+                self.compaction_recall_artifact(cid, &started.agent_prompt_id);
             started.outer_turn_id = self
                 .agent_runtime
                 .agent_registry
@@ -772,6 +775,7 @@ impl Harness {
             .map(|agent| self.params_for_agent_model(agent, &continuation.plan.dispatch.model))
             .unwrap_or_default();
         let started = tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: continuation.plan.agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
             session_id: self.session_runtime.current_session_id.clone(),

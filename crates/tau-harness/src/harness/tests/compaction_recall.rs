@@ -77,6 +77,25 @@ fn recall_precedes_resumed_inference_and_completion_is_exactly_once() {
     h.handle_harness_command(HarnessCommand::RecallCompleted(done))
         .expect("recall completion");
     let resumed = read_nth_prompt_created(&h, 2);
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptStarted(started)
+                if started.agent_prompt_id == resumed.agent_prompt_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("materialized continuation");
+    let locator = started
+        .compaction_recall_artifact
+        .expect("UI archive locator");
+    assert_eq!(locator.key, descriptor.key);
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentCompacted(compacted) if compacted.transaction_id == locator.transaction_id
+    )));
     let texts: Vec<_> = resumed
         .context
         .flatten()
@@ -175,6 +194,11 @@ fn recall_restart_rebuilds_missing_object_without_repeating_compaction() {
             .expect("cold restore");
     let resumed = read_nth_prompt_created(&restored, 0);
     assert_eq!(resumed.operation, tau_proto::PromptOperation::Inference);
+    assert!(event_log_events(&restored).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptStarted(started)
+            if started.compaction_recall_artifact.as_ref().is_some_and(|artifact| artifact.key == original_key)
+    )));
     assert!(resumed.context.flatten().iter().any(|item| matches!(item,
         ContextItem::Message(message) if message.content.iter().any(|part| matches!(part,
             ContentPart::Text { text } if text.contains(&original_key.to_string())

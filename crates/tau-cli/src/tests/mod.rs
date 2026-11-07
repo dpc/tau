@@ -443,6 +443,7 @@ fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptC
 
 fn agent_prompt_started(agent_prompt_id: &str, session_id: &str) -> tau_proto::AgentPromptStarted {
     tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 
@@ -477,6 +478,7 @@ fn standalone_compaction_started(
 
 fn standalone_compaction_prompt_started(agent_prompt_id: &str) -> tau_proto::AgentPromptStarted {
     tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         operation: tau_proto::PromptOperation::StandaloneCompaction,
         ..agent_prompt_started(agent_prompt_id, "s1")
     }

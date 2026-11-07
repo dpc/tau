@@ -2906,6 +2906,7 @@ fn append_seed_standalone_accounting(
     append_seed_agent_event(
         store,
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: prompt_id.clone(),
             agent_id: agent_id.clone(),
             session_id: session_id.clone(),

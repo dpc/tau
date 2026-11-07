@@ -417,6 +417,7 @@ fn ordinary_preemption_reconciliation_clears_all_target_queue_slots() {
     ));
     renderer.handle(&tau_proto::Event::AgentPromptStarted(
         tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: tau_proto::AgentPromptId::parse("fresh-prompt")
                 .expect("valid prompt id"),
             agent_id: target,
@@ -5712,6 +5713,7 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     let prompt_started = |agent_prompt_id: tau_proto::AgentPromptId,
                           agent_id: tau_proto::AgentId| {
         tau_proto::Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id,
             agent_id,
             session_id: tau_proto::SessionId::parse("session-one").expect("valid session id"),

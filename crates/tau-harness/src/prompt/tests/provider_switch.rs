@@ -55,6 +55,7 @@ impl History {
             },
         ));
         self.append(Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             agent_prompt_id: prompt.parse().expect("prompt"),
             agent_id: crate::parse_agent_id("main"),
             session_id: "switch-test".parse().expect("session"),

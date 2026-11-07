@@ -3555,6 +3555,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                compaction_recall_artifact: None,
                 model_params: Some(tau_proto::ModelParams::default()),
                 outer_turn_id: None,
 
@@ -3698,6 +3699,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                compaction_recall_artifact: None,
                 model_params: Some(tau_proto::ModelParams::default()),
                 outer_turn_id: None,
 

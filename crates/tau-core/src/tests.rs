@@ -476,6 +476,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
     };
     let prompt = |id: &str, operation| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 

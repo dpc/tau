@@ -286,8 +286,11 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   before the matching transient `agent.prompt_created`. Agent-journal replay
   folds it for exact-one materialization and ordinary-inference generation
   authority. Historical subscribers receive it when selected, but replay never
-  recreates provider work. The chat UI selects it only live to track in-flight
-  prompt state.
+  recreates provider work. Optional `compaction_recall_artifact` identifies the
+  standalone transaction and its available searchable transcript archive.
+  This locator is presentation metadata, not retention or recovery authority.
+  The chat UI projects only archive metadata from historical prompt starts; it
+  never recreates in-flight activity from them.
 - **`agent.outer_turn_started` / `agent.outer_turn_finished`** — Durable
   harness-authored boundaries for one non-overlapping accepted activation. They
   carry the stable turn id and session attribution; the start also identifies the

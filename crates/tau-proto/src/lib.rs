@@ -24,6 +24,7 @@ mod build_identity;
 pub use build_identity::BuildIdentity;
 mod byte_count;
 mod compaction_effectiveness;
+mod compaction_recall_artifact;
 pub use compaction_effectiveness::CompactionEffectiveness;
 mod context;
 mod context_visibility;
@@ -79,6 +80,7 @@ pub use artifact::*;
 pub use bridge_receiver::*;
 pub use byte_count::ByteCount;
 pub use ciborium::value::Value as CborValue;
+pub use compaction_recall_artifact::CompactionRecallArtifact;
 pub use context::*;
 pub use context_visibility::*;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
@@ -127,7 +129,7 @@ pub use tool_name_prefix::{
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(20, 0);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(20, 1);
 
 /// Reporter-owned filename used by the locked papercut history RPC.
 pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";

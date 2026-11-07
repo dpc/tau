@@ -610,6 +610,7 @@ fn agent_prompt_terminated_with_reason(
 
 fn agent_prompt_started_for_agent(agent_id: &str, agent_prompt_id: &str) -> Event {
     Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 

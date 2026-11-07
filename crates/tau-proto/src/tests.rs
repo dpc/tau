@@ -1853,6 +1853,7 @@ fn representative_events() -> Vec<Event> {
             operation: PromptOperation::Inference,
         }),
         Event::AgentPromptStarted(AgentPromptStarted {
+            compaction_recall_artifact: None,
             model_params: Some(ModelParams::default()),
             outer_turn_id: None,
 

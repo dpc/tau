@@ -574,6 +574,7 @@ fn persist_false_preserves_every_persistence_exception() {
     };
     let exceptions = [
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 

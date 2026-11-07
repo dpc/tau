@@ -42,6 +42,70 @@ pub(super) fn update_compaction_status(
 }
 
 impl EventRenderer {
+    /// Adds a ready archive to its existing transaction-owned row, never to an
+    /// unrelated compaction or by parsing provider/model text.
+    pub(super) fn show_compaction_recall_artifact(
+        &mut self,
+        artifact: &tau_proto::CompactionRecallArtifact,
+    ) {
+        self.transcript
+            .runtime
+            .compaction_recall_artifacts
+            .insert(artifact.transaction_id.clone(), artifact.key.clone());
+        let call_id = self
+            .transcript
+            .runtime
+            .self_compaction_tools
+            .iter()
+            .find_map(|(call_id, tool)| {
+                if tool.transaction_id.as_ref() != Some(&artifact.transaction_id) {
+                    return None;
+                }
+                Some(call_id.clone())
+            });
+        if let Some(call_id) = call_id
+            && let Some((status, text)) = self.transcript.runtime.self_compaction_tools[&call_id]
+                .status
+                .clone()
+        {
+            self.update_self_compaction_tool_status(&call_id, status, text);
+        }
+        let Some(block_id) = self
+            .transcript
+            .runtime
+            .compaction_history_blocks
+            .get(&artifact.transaction_id)
+            .copied()
+        else {
+            return;
+        };
+        let standalone = self
+            .transcript
+            .history
+            .compaction_history
+            .iter()
+            .any(|entry| entry.block_id == block_id);
+        let Some(entry) = self
+            .transcript
+            .history
+            .tool_history
+            .iter_mut()
+            .chain(self.transcript.history.compaction_history.iter_mut())
+            .find(|entry| entry.block_id == block_id)
+        else {
+            return;
+        };
+        entry.display.args = tau_proto::artifact_reference(&artifact.key);
+        let display = entry.display.clone();
+        let block = if standalone {
+            self.render_compact_tool_block(&display)
+        } else {
+            self.render_tool_history_block(&display)
+        };
+        self.resources.handle.set_block(block_id, block);
+        self.resources.handle.redraw();
+    }
+
     /// Shows accepted intent as transient state, never as a durable notice or
     /// an internal correlation identifier. Self-compaction keeps its tool row.
     pub(super) fn show_queued_compaction(

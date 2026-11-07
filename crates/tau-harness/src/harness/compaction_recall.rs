@@ -57,6 +57,38 @@ impl Drop for RecallState {
 }
 
 impl Harness {
+    /// Returns only a ready archive owned by this materialized checkpoint.
+    pub(super) fn compaction_recall_artifact(
+        &self,
+        cid: &AgentId,
+        prompt: &AgentPromptId,
+    ) -> Option<tau_proto::CompactionRecallArtifact> {
+        let state = self.prompt_coordination.prompt_runtime.recall.get(cid)?;
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
+        if state.prompt != *prompt
+            || state.incarnation != agent.identity.runtime_incarnation
+            || state.generation != self.session_runtime.current_session_generation
+        {
+            return None;
+        }
+        let RecallPhase::Ready(Ok(descriptor)) = &state.phase else {
+            return None;
+        };
+        let tree = self
+            .session_runtime
+            .agent_store
+            .agent(agent.identity.agent_id.as_ref()?.as_str())?;
+        let tau_core::AgentEntry::Compaction { transaction_id, .. } =
+            &tree.node(state.boundary)?.entry
+        else {
+            return None;
+        };
+        Some(tau_proto::CompactionRecallArtifact {
+            transaction_id: transaction_id.clone(),
+            key: descriptor.key.clone(),
+        })
+    }
+
     /// Establishes one source-bound wait before inference materialization.
     /// Replayed metadata selects the boundary; no filesystem work occurs here.
     pub(super) fn prepare_compaction_recall(

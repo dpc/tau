@@ -1576,6 +1576,7 @@ fn selected_agent_empty_quota_state_renders_unknown() {
         model_params: tau_proto::ModelParams::default(),
     }));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model: model.clone(),
         ..agent_prompt_started("quota-empty-sp", "quota-empty")
     }));
@@ -1700,6 +1701,7 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     ));
     for watched in ["engineer_b", "engineer_a"] {
         renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 
@@ -4580,6 +4582,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         ws_pool_delta: None,
     }));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 

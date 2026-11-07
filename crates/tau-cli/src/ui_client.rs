@@ -467,7 +467,6 @@ pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
             .parse()
             .expect("static event name"),
         EventName::EXT_PASSIVE_CONTEXT_APPEND_RESULT,
-        EventName::AGENT_PROMPT_STARTED,
         EventName::AGENT_PROMPT_TERMINATED,
         EventName::AGENT_PROMPT_FAILED,
         EventName::AGENT_PROMPT_REJECTED,

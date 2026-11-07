@@ -1616,6 +1616,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         },
     ));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        compaction_recall_artifact: None,
         agent_id: agent_id("engineer_1"),
         originator: tau_proto::PromptOriginator::Extension {
             name: tau_proto::ExtensionName::parse("__harness__")
@@ -2089,6 +2090,7 @@ fn selected_agent_quota_repaints_for_both_event_orderings() {
             reason: SessionStartReason::Initial,
         }));
         let started = Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             model: model.clone(),
             ..agent_prompt_started("quota-sp", "quota-order")
         });
@@ -2374,6 +2376,7 @@ fn watched_agent_recursive_rows_keep_attribution_and_distinct_witness_context() 
     );
     let prompt_started = |agent: &str| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            compaction_recall_artifact: None,
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 

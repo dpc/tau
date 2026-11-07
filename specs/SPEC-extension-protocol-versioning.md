@@ -8,6 +8,13 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 20.1 adds optional `compaction_recall_artifact` metadata to
+`agent.prompt_started`. Older readers ignore it; new readers treat omission as
+unknown. The locator leaves compaction, retention, replay authority, and journal
+framing semantics unchanged. Rust consumers constructing `AgentPromptStarted`
+literals must initialize the field. No coordinated rebuild is required, and source
+changes do not publish the SDK or activate a runtime.
+
 Protocol 20.0 / source SDK 0.28.0 remove deprecated full-digest artifact keys.
 Only the fixed 24-lowercase-hex identity is accepted in references and typed DTOs.
 Rebuild configured extensions and UI peers together before activation. Old full-key

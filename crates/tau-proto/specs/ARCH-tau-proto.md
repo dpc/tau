@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 20.1 adds an optional compaction transcript archive locator to
+`agent.prompt_started`. The locator carries the accepted transaction and artifact
+key for UI reconstruction; it does not change replacement bytes, retention, or
+recovery authority. Older readers ignore it; new readers treat omission as unknown.
+Rust consumers constructing `AgentPromptStarted` literals must initialize the
+field. SDK publication and runtime activation remain separate.
+
 Protocol 19.1 / source SDK 0.27.0 carry optional observational compaction
 effectiveness estimates. The accepted boundary stores the four same-snapshot
 scalar estimates and estimator provenance; old records default to unknown and old

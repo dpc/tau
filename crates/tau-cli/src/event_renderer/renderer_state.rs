@@ -45,6 +45,8 @@ pub(crate) struct EventRenderer {
     pub(super) hidden_finalization_in_progress: bool,
     /// Cold-attach redraw scope retained through the replay boundary.
     pub(super) cold_attach_redraw: Option<tau_cli_term::RedrawSuppressionGuard>,
+    /// Historical prompt starts project archive metadata, never old activity.
+    pub(super) replaying_prompt_start: bool,
     /// Test-only midpoint invoked after expensive ordinary-final projection.
     #[cfg(test)]
     pub(super) finished_staging_hook: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -189,6 +191,12 @@ pub(super) struct TranscriptRuntimeState {
     pub(super) warned_compaction_retreats: HashSet<tau_proto::CompactionTransactionId>,
     /// Self-compaction tool correlations.
     pub(super) self_compaction_tools: HashMap<tau_proto::ToolCallId, SelfCompactionTool>,
+    /// Settled compaction rows that can receive a later archive locator.
+    pub(super) compaction_history_blocks:
+        HashMap<tau_proto::CompactionTransactionId, tau_cli_term::BlockId>,
+    /// Archive identities retained even when their owning rows arrive later.
+    pub(super) compaction_recall_artifacts:
+        HashMap<tau_proto::CompactionTransactionId, tau_proto::ArtifactKey>,
     /// Transient manual-compaction queue rows owned by this target transcript.
     pub(super) queued_compactions: HashMap<tau_proto::CompactionRequestId, tau_cli_term::BlockId>,
     /// Last unclassified local user echo.
@@ -224,6 +232,8 @@ pub(super) struct TranscriptHistoryState {
     pub(super) turn_stats_predecessor: Option<PreviousTurnUsageProjection>,
     /// Completed tool blocks.
     pub(super) tool_history: Vec<ToolBlockEntry>,
+    /// Standalone lifecycle rows stay visible independently of tool filters.
+    pub(super) compaction_history: Vec<ToolBlockEntry>,
     /// Durable message blocks.
     pub(super) message_history: Vec<MessageBlockEntry>,
     /// Accepted harness notice blocks.
