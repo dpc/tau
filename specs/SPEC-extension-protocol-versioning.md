@@ -61,10 +61,14 @@ adoption remain separate from activation. See
 [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
 
 Protocol 16.5 adds an optional canonical-main target to bridge receiver requests.
-Omitted targets preserve ordinary behavior. Before sending this target,
-extensions must require Configure's advertised revision to be at least 16.5
-within 16.x; older harnesses could ignore the constraint. Ordinary 16.x peers
-remain compatible. The public request and config fields use source SDK 0.20.0.
+Omitted targets preserve ordinary behavior. The original 16.x SDK required
+Configure's advertised revision to be at least 16.5 within 16.x because older
+harnesses could ignore the constraint. After coordinated major migrations, the
+current SDK requires Configure's advertised protocol major to match its compiled
+major, currently 19, and accepts all minors within that major. Missing revisions
+and other majors, including future majors, fail closed. Protocol 16.5 marks the
+historical introduction, not permission for cross-major use. The public
+request and config fields first appeared in source SDK 0.20.0.
 Journal semantics and canonical main identity facts are unchanged. SDK/source
 publication and deployment remain separate operations.
 

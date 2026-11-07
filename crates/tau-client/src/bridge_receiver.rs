@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentId, BridgeReceiverMode, BridgeReceiverRequest, BridgeReceiverTarget, HarnessInputMessage,
-    ProtocolVersion, SessionId,
+    PROTOCOL_VERSION, ProtocolVersion, SessionId,
 };
 
 use crate::{ClientError, ClientHandle};
@@ -116,9 +116,9 @@ impl BridgeReceiverClient {
     }
 
     /// Resolve with an explicit identity constraint using the revision
-    /// advertised by Configure. Canonical-main requests fail locally on
-    /// absent/older revisions: older harnesses could silently ignore the
-    /// target field.
+    /// advertised by Configure. Canonical-main requests require the SDK's
+    /// protocol major: missing or skewed revisions cannot establish support
+    /// for the target constraint.
     pub fn start_request_with_target(
         &self,
         session_id: SessionId,
@@ -144,16 +144,17 @@ impl BridgeReceiverClient {
     }
 }
 
-/// Fail closed before enqueueing a constraint an older harness could ignore.
+/// Fail closed before enqueueing a constraint an unknown/skewed harness could
+/// ignore.
 fn validate_receiver_target_version(
     target: BridgeReceiverTarget,
     version: Option<ProtocolVersion>,
 ) -> Result<(), ClientError> {
     if target == BridgeReceiverTarget::CanonicalMain
-        && !version.is_some_and(|version| version.major == 16 && version.minor >= 5)
+        && !version.is_some_and(|version| version.major == PROTOCOL_VERSION.major)
     {
         return Err(ClientError::handler(
-            "canonical_main bridge receivers require harness protocol 16.5 or newer within 16.x",
+            "canonical_main bridge receivers require the SDK's harness protocol major",
         ));
     }
     Ok(())

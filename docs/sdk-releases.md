@@ -30,6 +30,12 @@ extensions and UIs must rebuild together. Journal framing and existing artifact
 paths remain unchanged. This source update does not publish packages or activate
 installed binaries.
 
+Canonical-main bridge receivers require Configure's advertised protocol major to
+match the SDK's compiled major, currently 19, and accept all minors within that
+major. This replaces the stale guard for the feature's introduction in protocol
+16.5. Missing revisions and other majors, including future majors, fail closed.
+Ordinary receiver requests remain unchanged.
+
 ### Unpublished source SDK 0.25.0
 
 Proto/client 0.25.0 targets protocol 18.0: fixed 32 MiB outer framing,

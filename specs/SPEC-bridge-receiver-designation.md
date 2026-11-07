@@ -50,9 +50,12 @@ applies. Only Ensure after admitted input may call the existing prompt-free main
 construction operation. A pending candidate has no authority until binding
 commits. If bound main is missing or unavailable, the harness must not fall back
 to an ordinary agent or rebind main. This target adds no durable identity fact.
-SDK callers must require the harness's advertised protocol to be 16.5 or newer
-within 16.x before sending this target; older harnesses could ignore the added
-field.
+Before sending this target, SDK callers must require the harness's advertised
+protocol major to match the SDK's compiled major, currently 19. All minors within
+that major pass. Missing revisions and other majors, including future majors,
+fail closed to avoid sending a constraint the harness might ignore. Protocol 16.5
+introduced the target; that historical feature floor does not permit cross-major
+use after coordinated protocol migrations.
 
 ## Bridge-owned designation
 
