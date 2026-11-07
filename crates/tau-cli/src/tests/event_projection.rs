@@ -1484,6 +1484,7 @@ fn standalone_compaction_replay_retires_private_progress() {
         standalone_compaction_started("ct-replay", "ap-replay"),
     ));
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
@@ -1499,7 +1500,7 @@ fn standalone_compaction_replay_retires_private_progress() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact #226.2k -> ? ok"));
+    assert!(vt.screen_contains(100, "compact ?/? -> ?/? ok"));
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!vt.screen_contains(100, "synthetic checkpoint"));
     assert!(!vt.screen_contains(100, "◆"));

@@ -77,6 +77,7 @@ impl Fixture {
         let suffix_end = AgentHead::Node(self.tree.head().expect("source head"));
         self.append(Event::AgentStandaloneCompactionStarted(started.clone()));
         self.append(Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,

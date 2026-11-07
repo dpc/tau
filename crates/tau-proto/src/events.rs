@@ -5242,6 +5242,10 @@ pub struct OutputLengthContinuationOwner {
 /// This is the sole transcript boundary for replacement-window compaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentCompacted {
+    /// Same-snapshot ordinary-context estimates, independent of provider usage.
+    /// Missing values remain unknown and never affect compaction acceptance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effectiveness: Option<crate::CompactionEffectiveness>,
     /// Provider-measured ordinary-input encoding of the replaced and
     /// replacement windows. Absent measurements never imply progress or
     /// token counts.

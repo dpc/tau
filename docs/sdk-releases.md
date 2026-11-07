@@ -20,6 +20,17 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Unpublished source SDK 0.27.0
+
+Proto/client 0.27.0 targets protocol 19.1 and adds optional
+`AgentCompacted.effectiveness`: four same-snapshot token estimates
+(prefix and total before compaction, replacement and total after compaction)
+with a versioned estimator identity.
+Mixed 19.x readers can omit or ignore the field; missing measurements are unknown.
+Source consumers constructing boundary literals must initialize the new field.
+Provider usage fields, byte-growth policy, journal framing, and peer admission
+are unchanged. This source change does not publish crates or activate runtimes.
+
 ### Unpublished source SDK 0.26.0
 
 Proto/client 0.26.0 targets protocol 19.0 and emits artifact keys with 24 lowercase

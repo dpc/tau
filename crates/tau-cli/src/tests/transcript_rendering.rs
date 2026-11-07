@@ -1626,6 +1626,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
     assert!(vt.screen_contains(100, "@1"));
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -4877,6 +4878,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
 
     // The paired harness oracle withholds this fact while admission is Full.
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
         compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
@@ -4893,7 +4895,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "compact #226.2k -> ? ok 2/2"),
+        vt.screen_contains(100, "compact ?/? -> ?/? ok 2/2"),
         "{:?}",
         vt.screen_text(100)
     );
@@ -4906,7 +4908,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert_eq!(
         vt.screen_text(100)
             .join("\n")
-            .matches("compact #226.2k -> ? ok 2/2")
+            .matches("compact ?/? -> ?/? ok 2/2")
             .count(),
         1,
         "one canonical outcome produces one successful row"

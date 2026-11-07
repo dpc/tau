@@ -43,6 +43,9 @@ pub(crate) struct PendingStandaloneAccountingCorrection {
 /// provider.
 #[derive(Clone)]
 pub(crate) struct StandaloneExecutionAccountingOwner {
+    /// Frozen ordinary system/tool estimate from this exact dispatched prompt.
+    /// Never used by billing, scheduling, or recovery.
+    pub(crate) context_recipe_tokens: Option<u64>,
     /// Session whose ledger owns every attempt for this prompt.
     pub(crate) session_id: tau_proto::SessionId,
     /// Durable agent whose journal owns the accounting facts.

@@ -1605,6 +1605,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
     h.publish_for_agent(
         &cid,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
@@ -3303,6 +3304,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
@@ -3711,6 +3713,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         )
         .expect("append standalone provider materialization");
     let compacted = tau_proto::AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -4889,6 +4892,7 @@ fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() 
     h.publish_for_agent(
         &target,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
@@ -6939,6 +6943,7 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
         h.publish_for_agent(
             &cid,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
@@ -9746,6 +9751,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     append_seed_agent_event(
         &mut store,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,

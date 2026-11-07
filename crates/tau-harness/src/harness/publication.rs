@@ -1157,6 +1157,9 @@ impl Harness {
                 .insert(
                     agent_prompt_id.clone(),
                     StandaloneExecutionAccountingOwner {
+                        context_recipe_tokens: super::compaction_effectiveness::recipe_tokens(
+                            prompt,
+                        ),
                         session_id: prompt.session_id.clone(),
                         agent_id: prompt.agent_id.clone(),
                         cid,

@@ -426,6 +426,7 @@ pub(super) fn seed_restored_compaction_checkpoint(
     for event in [
         Event::AgentStandaloneCompactionStarted(started),
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,

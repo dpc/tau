@@ -1600,6 +1600,7 @@ mod agent_watch_provider_deliveries;
 mod artifact_requests;
 mod bridge_receiver;
 mod cli_messaging;
+mod compaction_effectiveness;
 mod compaction_image_admission;
 mod compaction_recall;
 mod compaction_runtime;

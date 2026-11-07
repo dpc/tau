@@ -775,6 +775,7 @@ fn classifier_rejects_tool_compaction_startup_and_accounting_owners() {
             .insert(
                 "busy-accounting".parse().expect("prompt id"),
                 StandaloneExecutionAccountingOwner {
+                    context_recipe_tokens: None,
                     session_id: harness.session_runtime.current_session_id.clone(),
                     agent_id: agent_id.clone(),
                     cid: cid.clone(),

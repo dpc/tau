@@ -965,21 +965,6 @@ struct SelfCompactionTool {
     status: Option<(CompactionStatus, String)>,
 }
 
-/// Stable transcript row retained while the first post-compaction request size
-/// is still unknown.
-#[derive(Clone)]
-struct CompletedCompactionPresentation {
-    /// Transient count retained only for repainting this current-session row.
-    progress: Option<(Option<u64>, Option<u64>)>,
-    /// History block repainted when exact continuation usage arrives.
-    block_id: Option<tau_cli_term::BlockId>,
-    /// Compact request input usage, distinct from the full continuation
-    /// context.
-    original_input_tokens: Option<tau_proto::TokenCount>,
-    /// Self-compaction tool row, or `None` for an independent compaction row.
-    self_tool_call_id: Option<tau_proto::ToolCallId>,
-}
-
 /// In-flight state for a user `!`/`!!` shell block.
 struct ShellBlockState {
     block_id: tau_cli_term::BlockId,
@@ -7459,7 +7444,6 @@ impl EventRenderer {
                 true
             }
             Event::ProviderResponseFinished(finished) => {
-                self.finish_compaction_continuation_measurement(finished);
                 self.handle_provider_response_finished(
                     finished,
                     recorded_at,
@@ -7472,87 +7456,6 @@ impl EventRenderer {
             }
             _ => false,
         }
-    }
-
-    /// Consumes the first inference owned by one completed compaction and
-    /// repaints its stable history row from exact provider input usage.
-    fn finish_compaction_continuation_measurement(
-        &mut self,
-        finished: &tau_proto::ProviderResponseFinished,
-    ) {
-        let Some(transaction_id) = self
-            .transcript
-            .runtime
-            .compaction_continuation_prompts
-            .remove(&finished.agent_prompt_id)
-        else {
-            return;
-        };
-        let Some(presentation) = self
-            .transcript
-            .runtime
-            .completed_compactions
-            .remove(&transaction_id)
-        else {
-            return;
-        };
-        let Some(after) = finished
-            .usage
-            .as_ref()
-            .map(|usage| tau_proto::TokenCount::new(usage.prompt_sent_tokens))
-        else {
-            return;
-        };
-        let mut status = Self::standalone_compaction_success_status(
-            presentation.original_input_tokens,
-            Some(after),
-        );
-        append_compaction_progress(&mut status, presentation.progress, true);
-        if let Some(call_id) = presentation.self_tool_call_id.as_ref() {
-            self.update_self_compaction_tool_status(
-                call_id,
-                CompactionStatus::Success,
-                status.clone(),
-            );
-        }
-        let Some(block_id) = presentation.block_id else {
-            return;
-        };
-        if presentation.self_tool_call_id.is_none() {
-            self.resources.handle.set_block(
-                block_id,
-                render_compaction_block(&self.resources.theme, &status, CompactionStatus::Success),
-            );
-            self.resources.handle.redraw();
-            return;
-        }
-        let Some(entry_index) = self
-            .transcript
-            .history
-            .tool_history
-            .iter()
-            .position(|entry| entry.block_id == block_id)
-        else {
-            return;
-        };
-        let time_suffixes = self
-            .transcript
-            .history
-            .tool_history
-            .get(entry_index)
-            .expect("known tool history index")
-            .display
-            .suffixes
-            .iter()
-            .filter(|suffix| matches!(suffix.status, crate::tool_render::ToolStatus::Time))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut display = compaction_tool_display(status, CompactionStatus::Success);
-        display.suffixes.extend(time_suffixes);
-        let block = self.render_tool_history_block(&display);
-        self.resources.handle.set_block(block_id, block);
-        self.transcript.history.tool_history[entry_index].display = display;
-        self.resources.handle.redraw();
     }
 
     fn handle_provider_prompt_submitted(&mut self, submitted: &tau_proto::ProviderPromptSubmitted) {
@@ -8108,18 +8011,6 @@ impl EventRenderer {
         state.live_display = Some(display);
         state.started_at = Some(Instant::now());
         state.recorded_started_at = Some(recorded_at);
-        let history_block_id = state.history_block_id;
-        for presentation in self
-            .transcript
-            .runtime
-            .completed_compactions
-            .values_mut()
-            .filter(|presentation| {
-                presentation.self_tool_call_id.as_ref() == Some(&started.call_id)
-            })
-        {
-            presentation.block_id = history_block_id;
-        }
         if let Some(timer) = &self.activity.tool_timer {
             timer.tool_started(&started.call_id);
         }
@@ -8519,15 +8410,6 @@ impl EventRenderer {
         else {
             return;
         };
-        for presentation in self
-            .transcript
-            .runtime
-            .completed_compactions
-            .values_mut()
-            .filter(|presentation| presentation.self_tool_call_id.as_ref() == Some(call_id))
-        {
-            presentation.block_id = prior.history_block_id;
-        }
         let display_name = prior.display_name.as_ref().unwrap_or(tool_name);
         let is_blocker = prior.is_blocker || is_blocker_tool_name(tool_name.as_str());
         let diff = (!is_blocker)
@@ -9506,26 +9388,18 @@ impl EventRenderer {
                         .get(&prompt_id)
                         .and_then(|state| state.standalone_compaction_progress);
                     let mut status = Self::standalone_compaction_success_status(
-                        compacted.original_input_tokens,
-                        None,
+                        compacted.effectiveness.as_ref(),
                     );
                     append_compaction_progress(&mut status, progress, true);
                     let self_tool_call_id = self.self_compaction_tool_for_prompt(&prompt_id);
-                    let block_id = if let Some(call_id) = self_tool_call_id.as_ref() {
-                        let block_id = self
-                            .transcript
-                            .runtime
-                            .tool_calls
-                            .get(call_id)
-                            .and_then(|state| state.history_block_id);
+                    if self_tool_call_id.is_some() {
                         self.complete_standalone_compaction_prompt(
                             &prompt_id,
                             Some((&status, CompactionStatus::Success)),
                         );
-                        block_id
                     } else {
                         self.complete_standalone_compaction_prompt(&prompt_id, None);
-                        let block_id = self.resources.handle.print_output(
+                        self.resources.handle.print_output(
                             "standalone-compaction-terminal",
                             render_compaction_block(
                                 &self.resources.theme,
@@ -9534,42 +9408,11 @@ impl EventRenderer {
                             ),
                         );
                         self.resources.handle.redraw();
-                        Some(block_id)
-                    };
-                    self.transcript.runtime.completed_compactions.insert(
-                        compacted.transaction_id.clone(),
-                        CompletedCompactionPresentation {
-                            progress,
-                            block_id,
-                            original_input_tokens: compacted.original_input_tokens,
-                            self_tool_call_id,
-                        },
-                    );
+                    }
                 }
                 true
             }
-            Event::AgentInferenceDispatchStarted(started) => {
-                if matches!(started.operation, tau_proto::PromptOperation::Inference)
-                    && let Some(transaction_id) = started.transaction_id.as_ref()
-                    && self
-                        .transcript
-                        .runtime
-                        .completed_compactions
-                        .contains_key(transaction_id)
-                    && !self
-                        .transcript
-                        .runtime
-                        .compaction_continuation_prompts
-                        .values()
-                        .any(|known| known == transaction_id)
-                {
-                    self.transcript
-                        .runtime
-                        .compaction_continuation_prompts
-                        .insert(started.agent_prompt_id.clone(), transaction_id.clone());
-                }
-                true
-            }
+            Event::AgentInferenceDispatchStarted(_) => true,
             Event::AgentStandaloneCompactionFailed(failed) => {
                 let already_warned = self
                     .transcript

@@ -138,6 +138,7 @@ fn discovery_receipts_follow_live_replay_and_compaction_suffix() {
         append(
             &mut live,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,

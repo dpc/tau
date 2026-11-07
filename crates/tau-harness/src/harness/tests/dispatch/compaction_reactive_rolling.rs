@@ -699,6 +699,7 @@ fn partial_restart_oracle(grew: bool) {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: Some(tau_proto::CompactionInputBytes {
                     before: 100,
                     after: if grew { 101 } else { 99 },

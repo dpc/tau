@@ -3007,6 +3007,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
             None,
             tau_core::AgentEventParent::Root,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,

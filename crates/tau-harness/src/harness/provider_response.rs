@@ -1864,6 +1864,14 @@ impl Harness {
             agent_id.to_string(),
             parent,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: self.compaction_effectiveness(
+                    cid,
+                    response,
+                    &compact_prompt_id,
+                    cut,
+                    suffix_end,
+                    replacement_window.items(),
+                ),
                 compaction_input_bytes: response.compaction_input_bytes,
                 original_input_tokens: response
                     .usage

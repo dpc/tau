@@ -1778,6 +1778,7 @@ fn representative_events() -> Vec<Event> {
             resume_inference: false,
         }),
         Event::AgentCompacted(AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
@@ -4541,7 +4542,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     );
     assert_eq!(
         json["harness_protocol_version"],
-        serde_json::json!({"major": 19, "minor": 0})
+        serde_json::json!({"major": 19, "minor": 1})
     );
     let decoded: Configure = serde_json::from_value(json).expect("decode configure");
     assert_eq!(decoded, with_state);
@@ -4654,7 +4655,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(input_json.get("payload").is_some());
     assert_eq!(
         input_json["payload"]["protocol_version"],
-        serde_json::json!({"major": 19, "minor": 0})
+        serde_json::json!({"major": 19, "minor": 1})
     );
 
     let output = HarnessOutputMessage::Disconnect(Disconnect {
@@ -4747,7 +4748,7 @@ fn ui_session_admission_wire_round_trip() {
     );
     assert_eq!(
         accepted_json["payload"]["harness_protocol_version"],
-        serde_json::json!({"major": 19, "minor": 0})
+        serde_json::json!({"major": 19, "minor": 1})
     );
     assert_eq!(
         serde_json::from_value::<HarnessOutputMessage>(accepted_json)
@@ -7966,6 +7967,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     }
 
     let boundary = AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         agent_id: started.agent_id.clone(),
         transaction_id: started.transaction_id.clone(),
@@ -7989,6 +7991,34 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     assert_eq!(
         decode_cbor_event(&cbor_event(&boundary_event)),
         boundary_event
+    );
+    // Optional observations preserve old journals and have no enum coupling:
+    // older19.x readers ignore an extra map member, newer readers default it.
+    let mut measured = boundary.clone();
+    measured.effectiveness = Some(crate::CompactionEffectiveness {
+        estimator: "future-estimator-v2".to_owned(),
+        prefix_before: Some(crate::TokenCount::new(100)),
+        total_before: None,
+        replacement_after: Some(crate::TokenCount::new(0)),
+        total_after: None,
+    });
+    let measured_event = Event::AgentCompacted(measured.clone());
+    assert_eq!(
+        decode_cbor_event(&cbor_event(&measured_event)),
+        measured_event
+    );
+    let mut measured_json = serde_json::to_value(&measured).expect("encode estimates");
+    assert_eq!(
+        serde_json::from_value::<AgentCompacted>(measured_json.clone()).expect("decode estimates"),
+        measured
+    );
+    measured_json
+        .as_object_mut()
+        .expect("boundary object")
+        .remove("effectiveness");
+    assert_eq!(
+        serde_json::from_value::<AgentCompacted>(measured_json).expect("decode old boundary"),
+        boundary
     );
     for field in [
         "transaction_id",

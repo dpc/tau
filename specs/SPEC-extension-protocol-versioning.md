@@ -8,6 +8,13 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 19.1 / source SDK 0.27.0 add optional same-snapshot compaction
+effectiveness estimates to the canonical boundary. Older readers ignore the field;
+new readers treat omission as unknown. Enum, admission, replay authority, and
+journal framing remain unchanged. Rust consumers constructing `AgentCompacted`
+literals must initialize the new field. SDK publication and runtime activation remain
+separate; this compatible minor revision does not require a coordinated rebuild.
+
 Protocol 19.0 / source SDK 0.26.0 emit fixed 96-bit artifact keys (24 lowercase
 hex digits, no algorithm label). Older peers reject these keys, so configured
 extensions and UI peers must rebuild together. Parsers continue to accept

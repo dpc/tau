@@ -161,6 +161,7 @@ fn cross_model_replacement_recovers_legacy_failure_without_consuming_tool_suffix
             .expect("valid other start");
         h.publish_for_agent(&cid, Event::AgentStandaloneCompactionStarted(start.clone()));
         let compacted = Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             agent_id: agent_id.clone(),
             transaction_id: start.transaction_id,
@@ -972,6 +973,7 @@ fn reactive_replay_terminalizes_plan_suppressed_by_prior_failure_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,

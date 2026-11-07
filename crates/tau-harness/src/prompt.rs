@@ -2201,7 +2201,7 @@ fn project_user_prompt_items(
     projected
 }
 
-fn project_compaction_replacement_items(items: &[ContextItem]) -> Vec<ContextItem> {
+pub(crate) fn project_compaction_replacement_items(items: &[ContextItem]) -> Vec<ContextItem> {
     let mut projected = items.to_vec();
     for item in &mut projected {
         if let ContextItem::Message(message) = item {

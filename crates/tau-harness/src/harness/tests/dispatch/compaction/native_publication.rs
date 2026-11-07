@@ -22,7 +22,6 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
     seed_reactive_compaction_prefix(&mut h, &cid);
-    let initial_tree = agent_tree_for_conversation(&h, &cid).clone();
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .identity
         .agent_id
@@ -34,6 +33,10 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
         Some(&agent_id),
     );
     let compact = read_nth_prompt_created(&h, 0);
+    // Input received during compaction must be on both sides, while a later
+    // recipe refresh must not alter this dispatched operation's frozen recipe.
+    append_byte_fit_text(&mut h, &cid, "retained arrival ".repeat(100));
+    let initial_tree = agent_tree_for_conversation(&h, &cid).clone();
     let replacement = ContextItem::Compaction(
         tau_proto::OpaqueProviderItem::from_raw_json(
             r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#,
@@ -69,7 +72,12 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
-        backend: None,
+        backend: Some(tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::Responses,
+            base_url: "https://example.invalid/codex".to_owned(),
+            transport: tau_proto::ProviderBackendTransport::Websocket,
+            stale_chain_fallback: false,
+        }),
         provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
@@ -121,6 +129,24 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
         .collect::<Vec<_>>();
     assert_eq!(compacted.len(), 1);
     assert_eq!(compacted[0].replacement_window, vec![replacement.clone()]);
+    let estimate = compacted[0]
+        .effectiveness
+        .as_ref()
+        .expect("same-snapshot estimates");
+    assert_eq!(estimate.estimator, "tau-codex-visible-v1");
+    assert_eq!(
+        estimate.replacement_after,
+        Some(tau_proto::TokenCount::new(5))
+    );
+    let common_before = estimate.total_before.expect("total before").get()
+        - estimate.prefix_before.expect("prefix before").get();
+    let common_after = estimate.total_after.expect("total after").get()
+        - estimate.replacement_after.expect("replacement after").get();
+    assert_eq!(common_before, common_after);
+    assert!(
+        common_before > 400,
+        "retained arrival and recipe are included"
+    );
     let installed_tree = agent_tree_for_conversation(&h, &cid).clone();
     assert!(matches!(
         installed_tree.current_branch().last(),
@@ -153,5 +179,6 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
         .collect::<Vec<_>>();
     assert_eq!(replacements.len(), 1);
     assert_eq!(replacements[0].replacement_window, vec![replacement]);
+    assert_eq!(replacements[0].effectiveness, compacted[0].effectiveness);
     resumed.shutdown().expect("shutdown resumed");
 }

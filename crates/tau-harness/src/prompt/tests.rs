@@ -828,6 +828,7 @@ fn compaction_replacement_loses_and_retained_suffix_keeps_preview_provenance() {
     retained.apply_event(&background_completion_prompt(preview));
     let suffix_end = tau_proto::AgentHead::Node(retained.head().expect("preview node"));
     retained.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -2080,6 +2081,7 @@ fn assemble_conversation_starts_at_latest_standalone_compaction() {
     let cut = tau_proto::AgentHead::Node(tree.head().expect("old history"));
     tree.apply_event(&compaction_start_event(cut));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -2502,6 +2504,7 @@ fn materialized_message(text: &str) -> ContextItem {
 
 fn compacted_event(replacement_window: Vec<ContextItem>) -> Event {
     Event::AgentCompacted(tau_proto::AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -2643,6 +2646,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
             seq: tau_core::PersistedAgentEventSeq::new(2),
             source: None,
             event: Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,
@@ -2729,6 +2733,7 @@ fn assemble_conversation_preserves_new_compaction_suffix() {
     tree.apply_event(&user_prompt("late fact B"));
     let suffix_end = tau_proto::AgentHead::Node(tree.head().expect("suffix end"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -2786,6 +2791,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
                     suffix_end: tau_proto::AgentHead,
                     summary: &str| {
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,

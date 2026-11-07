@@ -127,26 +127,23 @@ impl EventRenderer {
         )
     }
 
-    /// Formats successful standalone compaction from request input and exact
-    /// first transaction-owned continuation input, when available.
+    /// Formats the persisted same-snapshot estimates, never unrelated usage.
     pub(crate) fn standalone_compaction_success_status(
-        original: Option<tau_proto::TokenCount>,
-        after: Option<tau_proto::TokenCount>,
+        effectiveness: Option<&tau_proto::CompactionEffectiveness>,
     ) -> String {
-        match (original, after) {
-            (Some(original), Some(after)) => format!(
-                "{} -> {} ok",
-                Self::compaction_token_chip(original.get()),
-                Self::compaction_token_chip(after.get()),
-            ),
-            (Some(original), None) => {
-                format!("{} -> ? ok", Self::compaction_token_chip(original.get()))
-            }
-            (None, Some(after)) => {
-                format!("? -> {} ok", Self::compaction_token_chip(after.get()))
-            }
-            (None, None) => "ok".to_owned(),
-        }
+        let chip = |value: Option<tau_proto::TokenCount>| {
+            value.map_or_else(
+                || "?".to_owned(),
+                |value| format!("~{}", Self::compaction_token_chip(value.get())),
+            )
+        };
+        format!(
+            "{}/{} -> {}/{} ok",
+            chip(effectiveness.and_then(|value| value.prefix_before)),
+            chip(effectiveness.and_then(|value| value.total_before)),
+            chip(effectiveness.and_then(|value| value.replacement_after)),
+            chip(effectiveness.and_then(|value| value.total_after)),
+        )
     }
 
     /// A provider terminal breaks calibration adjacency but cannot finish a

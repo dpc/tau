@@ -213,6 +213,7 @@ fn provider_cost_preparation_preserves_authority_and_defers_effects() {
     h.prompt_coordination.standalone_accounting.owners.insert(
         prompt.clone(),
         StandaloneExecutionAccountingOwner {
+            context_recipe_tokens: None,
             session_id: h.session_runtime.current_session_id.clone(),
             agent_id,
             cid: cid.clone(),

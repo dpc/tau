@@ -71,6 +71,7 @@ fn cross_model_replacement_allows_only_explicit_boundary_recovery_live_and_cold(
         &mut live,
         &mut records,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            effectiveness: None,
             compaction_input_bytes: None,
             original_input_tokens: None,
             compaction_output_tokens: None,
@@ -147,6 +148,7 @@ fn cross_model_replacement_allows_only_explicit_boundary_recovery_live_and_cold(
                     .is_err()
             );
             let compacted = Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 original_input_tokens: None,
                 compaction_output_tokens: None,

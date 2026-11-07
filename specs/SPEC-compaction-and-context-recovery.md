@@ -580,11 +580,26 @@ typed failure; error and typed failure take precedence as provider failures.
 The canonical `agent.compacted` boundary may carry provider-reported compact
 request input and output token counts. The output count measures generation of
 the compact item, not the resulting context, and remains accounting/debug data
-rather than a user-facing after-size. The exact after-size exists only when the
-transaction-owned first continuation reports `prompt_sent_tokens`; until then,
-the UI reports it as unknown. A missing continuation or missing usage remains
-unknown, and unrelated later prompts cannot supply it. These content-free
-fields never become scheduling authority; absent provider usage remains absent.
+rather than a user-facing after-size. Continuation `prompt_sent_tokens` measures
+that later request, not a same-snapshot compaction effect.
+
+The optional `effectiveness` record compares four token estimates: prefix and total
+before compaction, and replacement and total after compaction. Both sides use the
+same provider-projected history through the accepted boundary's `suffix_end` and
+the same frozen ordinary system/tools recipe from its compact prompt. The prefix
+includes any earlier replacement. The replacement estimate uses the new
+replacement's installed role and framing.
+Compact triggers/instructions, later recall notices, arrivals after the boundary,
+and recipe refreshes cannot enter only one side of this comparison. Arrivals
+already retained at the boundary belong to the unchanged suffix on both sides.
+The record stores four optional scalar token estimates and a versioned estimator
+identity with the boundary; replay never recomputes them. The UI marks estimates
+with `~` and absent/unsupported values with `?`. Provider usage never overwrites
+these estimates merely because it belongs to the same transaction.
+Local accounting failure cannot reject a valid replacement, retry paid work,
+or establish recovery authority. No counting request or extra disclosure is made.
+These content-free fields never become scheduling authority; absent provider
+usage remains absent and ordinary-input byte-growth policy is unchanged.
 The accounting fields accept only numeric token counts. The removed
 `{tokens, provenance}` representation fails decoding when used under a current
 field name. The removed `compacted_input_tokens` alias follows the schema's

@@ -1766,6 +1766,7 @@ fn append_context_boundary(
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                effectiveness: None,
                 compaction_input_bytes: None,
                 agent_id: agent_id.clone(),
                 transaction_id: tau_proto::CompactionTransactionId::parse(transaction)

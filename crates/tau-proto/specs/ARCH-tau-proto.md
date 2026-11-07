@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 19.1 / source SDK 0.27.0 carry optional observational compaction
+effectiveness estimates. The accepted boundary stores the four same-snapshot
+scalar estimates and estimator provenance; old records default to unknown and old
+peers may ignore them. Provider usage, admission, scheduling, and journal framing are
+unchanged. See
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
+
 Protocol 19.0 / source SDK 0.26.0 use fixed 96-bit artifact keys without an
 algorithm label. The shared key type also retains deprecated full BLAKE3 keys
 when decoding old records or accepting legacy references. Old peers cannot

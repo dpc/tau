@@ -187,12 +187,6 @@ pub(super) struct TranscriptRuntimeState {
     /// Successor transactions whose prefix-retreat chain already showed its
     /// warning. Reconstructed from the same durable failures on cold attach.
     pub(super) warned_compaction_retreats: HashSet<tau_proto::CompactionTransactionId>,
-    /// Completed compaction rows awaiting exact continuation request usage.
-    pub(super) completed_compactions:
-        HashMap<tau_proto::CompactionTransactionId, CompletedCompactionPresentation>,
-    /// First inference prompts owned by completed compaction transactions.
-    pub(super) compaction_continuation_prompts:
-        HashMap<tau_proto::AgentPromptId, tau_proto::CompactionTransactionId>,
     /// Self-compaction tool correlations.
     pub(super) self_compaction_tools: HashMap<tau_proto::ToolCallId, SelfCompactionTool>,
     /// Transient manual-compaction queue rows owned by this target transcript.

@@ -345,13 +345,16 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   compact prompt id, provider-qualified model, and standalone operation as one
   complete group matching the durable start. Missing ownership fields fail
   decoding and receive no migration or inferred hard-boundary semantics.
-  Optional compact-request input/output token
-  counts are provider-reported accounting only. The output count measures compact
-  item generation, not resulting context; UIs may learn the exact after-size only
-  from the transaction-owned first continuation's provider input usage. Absent
-  fields remain absent. Accounting objects under current field names fail
-  decoding, while the removed `compacted_input_tokens` alias is ignored as an
-  unknown field and therefore supplies no output accounting.
+  Optional compact-request input/output token counts provide provider-reported
+  accounting, not a same-snapshot comparison. The output count measures compact
+  item generation, not resulting context. Optional `effectiveness` stores four
+  versioned same-snapshot scalar token estimates: prefix and total before
+  compaction, and replacement and total after compaction. Both totals share the
+  same retained suffix and frozen ordinary system/tools recipe. The UI marks
+  estimates with `~` and unknown values with `?`; later continuation usage never
+  overwrites them. Absent fields remain absent. Accounting objects under current
+  field names fail decoding, while the removed `compacted_input_tokens` alias is
+  ignored as an unknown field and therefore supplies no output accounting.
   Optional `compaction_input_bytes` records before/after sizes using the provider's
   ordinary-input encoding for exactly the replaced prefix and replacement.
   It excludes fixed controls and compact instructions. Strict growth stops a

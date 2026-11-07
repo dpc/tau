@@ -203,6 +203,7 @@ fn debug_binary_events(data: Vec<u8>) -> Vec<Event> {
         originator: PromptOriginator::User,
     };
     let compacted = tau_proto::AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -1563,6 +1564,7 @@ fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
 #[test]
 fn compacted_window_image_debug_projection_matches_legacy_json() {
     let message = HarnessInputMessage::emit(Event::AgentCompacted(tau_proto::AgentCompacted {
+        effectiveness: None,
         compaction_input_bytes: None,
         original_input_tokens: None,
         compaction_output_tokens: None,
