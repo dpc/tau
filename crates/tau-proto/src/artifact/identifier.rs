@@ -8,6 +8,10 @@ macro_rules! artifact_id {
         #[derive(
             Clone, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
         )]
+        // Typed identity decoding uses each type's strict canonical validator,
+        // never the forgiving tool/UI reference parser (SPEC-shared-artifacts).
+        // This does not rewrite original tool-call argument text retained for
+        // replay (SPEC-tau-proto-provider-data).
         #[serde(try_from = "String", into = "String")]
         pub struct $name(
             /// Validated canonical wire spelling.

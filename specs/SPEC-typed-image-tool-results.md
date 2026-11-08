@@ -86,9 +86,14 @@ durable-store health check. Cache eviction never releases transcript roots and
 does not imply model-token or embedding caching.
 
 The provider-independent surface is `tau-ext-utils`'s one-image
-`read_image(key)` tool. The argument accepts the canonical
-`<tau-artifact:FULL_KEY>` model-facing reference (and a bare internal key for
-simple callers). It verifies immutable original bytes through the
+`read_image(key)` tool. Prefer a bare 24-digit lowercase hex artifact key for the
+argument; it also accepts `tau-artifact:KEY` or `<tau-artifact:KEY>`.
+The input boundary normalizes these spellings once to `ArtifactKey`. Typed artifact
+identity fields serialize only bare keys; original tool-call arguments retain
+the supplied text for replay. UI locators use the plain URI, while
+model-context references use Markdown
+autolinks as defined by [SPEC-shared-artifacts](SPEC-shared-artifacts.md).
+It verifies immutable original bytes through the
 existing directed Artifact RPC without granting shell, workdir, import, or
 provider-account authority. It accepts PNG, JPEG, and WebP and enforces
 source, decoded-allocation, dimension, pixel, output, record, and provider

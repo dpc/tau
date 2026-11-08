@@ -1614,7 +1614,7 @@ fn read_image_registration_uses_artifact_reference_and_image_route_gating() {
     assert!(parameters["properties"].get("path").is_none());
     assert_eq!(
         parameters["properties"]["key"]["pattern"],
-        "^(?:[0-9a-f]{24}|<tau-artifact:[0-9a-f]{24}>)$"
+        tau_proto::ARTIFACT_ARGUMENT_PATTERN
     );
     assert_eq!(
         parameters["properties"]["mode"]["enum"],

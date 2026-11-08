@@ -182,6 +182,13 @@ impl std::fmt::Debug for ArtifactRequest {
 /// Number of hexadecimal digits in the fixed 96-bit artifact identity.
 pub const ARTIFACT_DIGEST_HEX_LEN: usize = 24;
 
+/// Tool-input grammar shared with `parse_artifact_reference`, not wire serde.
+///
+/// Prefer a bare 24-lowercase-hex-digit key; plain URI and Markdown autolink
+/// spellings are conveniences normalized to `ArtifactKey` at the boundary.
+pub const ARTIFACT_ARGUMENT_PATTERN: &str =
+    "^(?:[0-9a-f]{24}|tau-artifact:[0-9a-f]{24}|<tau-artifact:[0-9a-f]{24}>)$";
+
 /// Returns the validated fixed-width public artifact identity.
 #[must_use]
 pub fn artifact_digest(key: &str) -> Option<&str> {
@@ -206,8 +213,15 @@ pub fn artifact_uri(key: &ArtifactKey) -> String {
     format!("{ARTIFACT_REFERENCE_SCHEME}:{}", key.canonical())
 }
 
-/// Parses a Markdown artifact reference, a plain UI URI, or a bare internal
-/// key.
+/// Normalizes a bare 24-lowercase-hex-digit key (preferred for arguments),
+/// plain URI, or Markdown autolink into one public identity.
+///
+/// This forgiving input boundary does not change `ArtifactKey`'s strict
+/// bare-key serde for typed identity fields. Display uses `artifact_uri` for UI
+/// and `artifact_reference` for model context; the identity does not retain a
+/// presentation spelling. Original tool-call arguments still retain supplied
+/// text for replay. See `SPEC-shared-artifacts` and
+/// `SPEC-tau-proto-provider-data`'s tool-call argument dual representation.
 pub fn parse_artifact_reference(text: &str) -> Result<ArtifactKey, ArtifactError> {
     let locator = text
         .strip_prefix('<')

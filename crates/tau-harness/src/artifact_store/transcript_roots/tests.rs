@@ -135,7 +135,8 @@ fn missing_corrupt_and_wrong_size_objects_cannot_acquire_roots() {
         .join(
             store
                 .storage_digest(&descriptor.key)
-                .expect("storage digest"),
+                .expect("storage digest")
+                .as_hex(),
         )
         .join("data");
     fs::write(&data, b"other").expect("same-size corruption");

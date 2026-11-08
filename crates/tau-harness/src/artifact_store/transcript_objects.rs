@@ -18,7 +18,7 @@ impl ArtifactStore {
         put_at: u64,
     ) -> Result<(), ArtifactError> {
         let digest = self.storage_digest(&descriptor.key)?;
-        let directory = self.root.join("transcript-objects").join(digest);
+        let directory = self.root.join("transcript-objects").join(digest.as_hex());
         if !path_present(&directory)? {
             return Ok(());
         }
@@ -37,32 +37,30 @@ impl ArtifactStore {
     /// Corrupt ordinary metadata is an error, not authority to silently repair
     /// or overwrite it. Reads do not republish an expired ordinary catalog
     /// entry.
-    pub(super) fn object_directory(&self, digest: &str) -> Result<PathBuf, ArtifactError> {
-        let resolved;
-        let digest = if digest.len() == tau_proto::ARTIFACT_DIGEST_HEX_LEN {
-            resolved = self.resolve_short_digest(digest)?;
-            resolved.as_str()
-        } else {
-            digest
-        };
-        let ordinary = self.root.join("blake3").join(digest);
+    pub(super) fn object_directory(
+        &self,
+        digest: &StorageDigest,
+    ) -> Result<PathBuf, ArtifactError> {
+        let ordinary = self.root.join("blake3").join(digest.as_hex());
         if path_present(&ordinary)? {
             return Ok(ordinary);
         }
-        Ok(self.root.join("transcript-objects").join(digest))
+        Ok(self.root.join("transcript-objects").join(digest.as_hex()))
     }
 
     /// Resolves a public identity to its full private storage digest.
-    pub(super) fn storage_digest(&self, key: &ArtifactKey) -> Result<String, ArtifactError> {
-        let digest = artifact_digest(key).ok_or(ArtifactError::Invalid)?;
-        self.resolve_short_digest(digest)
+    pub(super) fn storage_digest(&self, key: &ArtifactKey) -> Result<StorageDigest, ArtifactError> {
+        self.resolve_short_digest(key)
     }
 
     /// Finds one private full-digest locator across both catalogs, never a
     /// first arbitrary prefix match. Duplicate hardlink aliases count as
     /// one object. The bounded scan needs no migration index or writes
     /// during reads.
-    pub(super) fn resolve_short_digest(&self, digest: &str) -> Result<String, ArtifactError> {
+    pub(super) fn resolve_short_digest(
+        &self,
+        key: &ArtifactKey,
+    ) -> Result<StorageDigest, ArtifactError> {
         let started = Instant::now();
         let mut found = None;
         for catalog in ["blake3", "transcript-objects"] {
@@ -78,18 +76,16 @@ impl ArtifactStore {
                 let entry = entry.map_err(io_error)?;
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else { continue };
-                if !name.starts_with(digest)
-                    || name.len() != 64
-                    || !name
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                {
+                if !name.starts_with(key.as_str()) {
                     continue;
                 }
-                if found.as_deref().is_some_and(|previous| previous != name) {
+                let Ok(digest) = StorageDigest::parse(name) else {
+                    continue;
+                };
+                if found.as_ref().is_some_and(|previous| *previous != digest) {
                     return Err(ArtifactError::Integrity);
                 }
-                found = Some(name.to_owned());
+                found = Some(digest);
             }
         }
         found.ok_or(ArtifactError::Unavailable)
@@ -109,7 +105,7 @@ impl ArtifactStore {
         let objects = self.root.join("transcript-objects");
         private_dir(&objects)?;
         require_directory(&objects)?;
-        let protected = objects.join(&digest);
+        let protected = objects.join(digest.as_hex());
         if path_present(&protected)? {
             require_directory(&protected)?;
             let metadata: Metadata = read_json(&protected.join("meta.json"))?;
@@ -121,7 +117,7 @@ impl ArtifactStore {
                 &read_regular(&protected.join("data"), descriptor.size.get())?,
             )?;
         } else {
-            let ordinary = self.root.join("blake3").join(digest);
+            let ordinary = self.root.join("blake3").join(digest.as_hex());
             require_directory(&ordinary)?;
             verify(
                 descriptor,

@@ -5,11 +5,15 @@ use super::*;
 #[test]
 fn explicit_file_grammar_and_safe_names() {
     let key = "a".repeat(24);
-    let default = Command::parse(&format!("{key} --file")).expect("default file command");
-    assert!(matches!(default.mode, Mode::File(None)));
-    let plain_uri = Command::parse(&format!("tau-artifact:{key} --file"))
-        .expect("copyable plain UI artifact locator");
-    assert!(matches!(plain_uri.mode, Mode::File(None)));
+    for spelling in [
+        key.clone(),
+        format!("tau-artifact:{key}"),
+        format!("<tau-artifact:{key}>"),
+    ] {
+        let parsed = Command::parse(&format!("{spelling} --file")).expect("equivalent spelling");
+        assert_eq!(parsed.key.as_str(), key);
+        assert!(matches!(parsed.mode, Mode::File(None)));
+    }
     for name in [
         "\"two words.pdf\"",
         "'résumé final.pdf'",

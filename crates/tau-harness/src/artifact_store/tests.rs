@@ -158,7 +158,12 @@ fn discovery_cancellation_and_metadata_only_listing_are_bounded() {
         store
             .root
             .join("blake3")
-            .join(store.storage_digest(&png.key).expect("storage digest"))
+            .join(
+                store
+                    .storage_digest(&png.key)
+                    .expect("storage digest")
+                    .as_hex(),
+            )
             .join("meta.json"),
         b"bad metadata",
     )
@@ -467,7 +472,8 @@ fn cleanup_preserves_future_and_corrupt_metadata() {
     let object = store.root.join("blake3").join(
         store
             .storage_digest(&descriptor.key)
-            .expect("storage digest"),
+            .expect("storage digest")
+            .as_hex(),
     );
     fs::write(object.join("meta.json"), b"{broken").expect("corrupt metadata");
     assert_eq!(
@@ -551,6 +557,7 @@ fn corrupt_original_continues_to_later_expired_sibling() {
             store
                 .storage_digest(&descriptor.key)
                 .expect("storage digest")
+                .as_hex()
                 == corrupt_name.to_string_lossy()
         })
         .expect("enumerated corrupt descriptor");
@@ -839,7 +846,8 @@ fn cleanup_recovers_detach_and_staging_without_references() {
     let object = store.root.join("blake3").join(
         store
             .storage_digest(&descriptor.key)
-            .expect("storage digest"),
+            .expect("storage digest")
+            .as_hex(),
     );
     fs::rename(object, store.root.join(".cleanup").join(new_id())).expect("crash detach");
     let staged = store.root.join("operations/.staging-incomplete");
@@ -865,7 +873,8 @@ fn published_storage_is_private() {
     let object = store.root.join("blake3").join(
         store
             .storage_digest(&descriptor.key)
-            .expect("storage digest"),
+            .expect("storage digest")
+            .as_hex(),
     );
     assert_eq!(
         fs::metadata(&object)

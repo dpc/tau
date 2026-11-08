@@ -34,8 +34,10 @@ available.
 
 When `export` and `import` are exposed, verify a small original round trip:
 export a local regular file and confirm only `kind` and `artifact` output headers,
-with no trailing blank line. Import the returned `<tau-artifact:FULL_KEY>`
-reference, confirm the `kind`, `path`, `size`, and recorded `mime_type` headers,
+with no trailing blank line. Import the returned artifact using each accepted
+spelling: bare 24-digit lowercase hex key (preferred), plain `tau-artifact:KEY`,
+and Markdown `<tau-artifact:KEY>`. Confirm the `kind`, `path`, `size`, and
+recorded `mime_type` headers,
 compare bytes, and confirm a named mode-0600 file inside a fresh mode-0700
 private parent.
 Verify explicit MIME overrides inference and survives import. Changing a name or
@@ -43,7 +45,10 @@ MIME changes identity; repeating the same tuple does not. Legacy missing metadat
 uses a generic private filename and omits MIME. Unsafe names never escape staging.
 Require exactly 24 lowercase hex digits without an algorithm label in exported
 references. Verify import and read_image reject old algorithm-labelled full-digest
-references and arbitrary shorter prefixes. Import accepts only the key argument.
+references, full64hex, uppercase, whitespace, suffix paths/queries/fragments,
+and arbitrary shorter prefixes. Check that schemas admit all three forms and
+normalize to the same identity; typed artifact identity field serde must reject
+URI/autolink spellings. Import accepts only the key argument.
 Export a small nested directory with an empty directory and binary member, then
 import using only its reference. Check `kind: directory`, the fixed directory
 MIME, exact member bytes and private non-executable permissions. Check that

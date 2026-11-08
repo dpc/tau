@@ -27,7 +27,8 @@ advertise: false
 - `import`: verifies bytes and metadata, returns `kind`, `path`, `size` and recorded
   MIME when present. A safe filename is restored inside a fresh mode-0700 private
   parent with a mode-0600 child; legacy or unusable names get a generic private file.
-  Pass only the canonical reference.
+  Pass the bare 24-digit lowercase hex key; plain `tau-artifact:KEY` URIs and
+  Markdown `<tau-artifact:KEY>` references also work. No other arguments are needed.
   Import recognizes versioned directory bundles by their bytes and extracts them
   into a private mode-0700 directory.
   It extracts only regular files and directories, without executable permissions.

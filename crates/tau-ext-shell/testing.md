@@ -88,12 +88,15 @@ Artifact coverage drives fake correlated export and import RPC responses, proves
 original-byte equality and private imported-file permissions, asserts
 minimal `kind`/`artifact` export and `path`/`size`/recorded-MIME import header
 projections, passes the
-canonical `<tau-artifact:FULL_KEY>` reference directly into import, and passes
+canonical `<tau-artifact:KEY>` reference directly into import, and passes
 the returned path as an ordinary filesystem artifact; image inspection consumes
 the same reference directly through `std-utils`.
 Canonical keys have 24 lowercase hex digits and no algorithm label. Coverage
 also checks rejection of deprecated full `blake3:` keys.
 The same protocol roundtrip covers nested directory export and key-only import.
+Argument tests cover equivalent bare-key, plain URI, and Markdown autolink
+imports before transfer scheduling. Registration tests verify the shared schema
+pattern accepts those same three forms and rejects malformed or full64hex keys.
 Codec tests cover deterministic bytes, empty/binary members, exact stored and
 expanded bounds, link/path/type rejection, tar endings and zstd corruption.
 Worker tests cover canceled/failed extraction cleanup and aggregate reservation

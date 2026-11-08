@@ -36,7 +36,7 @@ fn immutable_metadata_roundtrip_restart_and_protected_reads() {
         .retain_transcript_artifact(&tau_proto::AgentId::parse("history").unwrap(), &first)
         .unwrap();
     let digest = store.storage_digest(&first.key).unwrap();
-    fs::remove_dir_all(store.root.join("blake3").join(&digest)).unwrap();
+    fs::remove_dir_all(store.root.join("blake3").join(digest.as_hex())).unwrap();
     drop(store);
     let mut store = ArtifactStore::new(temp.path());
     assert_eq!(store.descriptor(&first.key).unwrap(), first);
@@ -57,7 +57,7 @@ fn immutable_metadata_roundtrip_restart_and_protected_reads() {
     let path = store
         .root
         .join("transcript-objects")
-        .join(digest)
+        .join(digest.as_hex())
         .join("meta.json");
     let mut metadata: Metadata = read_json(&path).unwrap();
     metadata.identity =

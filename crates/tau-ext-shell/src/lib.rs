@@ -613,15 +613,15 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         provider_scope: None,
         name: tau_proto::ToolName::new(IMPORT_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Import a <tau-artifact:KEY> reference as a local path.".to_owned()),
+        description: Some("Import an artifact key as a local path.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "key": {
                     "type": "string",
-                    "pattern": "^(?:[0-9a-f]{24}|<tau-artifact:[0-9a-f]{24}>)$",
-                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits>."
+                    "pattern": tau_proto::ARTIFACT_ARGUMENT_PATTERN,
+                    "description": "24-lowercase-hex-digit artifact key. Also accepts tau-artifact:KEY or <tau-artifact:KEY>."
                 }
             },
             "required": ["key"],

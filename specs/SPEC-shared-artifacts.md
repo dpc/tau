@@ -17,15 +17,22 @@ Whole-store discovery is restricted to authenticated UIs; configured extensions
 retain known-key read authority without enumeration.
 Model-facing text names an artifact with the canonical Markdown autolink
 `<tau-artifact:0123456789abcdef01234567>`: exactly 24 lowercase hexadecimal
-digits, the first 96 bits of BLAKE3, with no algorithm label. Consumers may
-also accept the bare key or the plain `tau-artifact:0123456789abcdef01234567` URI.
+digits, the first 96 bits of BLAKE3, with no algorithm label. For tool arguments,
+prefer the bare 24-digit lowercase hex key. Import, image inspection, image
+attachments, and clipboard export also accept the plain
+`tau-artifact:0123456789abcdef01234567` URI and the Markdown autolink.
 Owned plain-text UI locators use the URI without brackets; prompt and model-facing
 Markdown references use the bracketed autolink. This identity is fixed, not a variable abbreviation.
-Only the fixed-width key is accepted; former algorithm-labelled full-digest
-references and typed keys are rejected.
+Input boundaries normalize these spellings once to `ArtifactKey`; the semantic
+identity does not retain the presentation. Typed artifact identity fields use
+only bare keys in wire and history serialization. Original tool-call arguments,
+including `raw_arguments_json`, retain the supplied text for replay.
+Former algorithm-labelled references and full64hex typed keys are rejected.
 
-Private CAS paths retain full BLAKE3 digests, so existing objects, receipts, and
-protected aliases need no renaming. Short identities resolve to one unique
+Private CAS paths retain full BLAKE3 digests as validated, harness-private
+`StorageDigest` values. Debug output is redacted; the explicit hex accessor is
+for storage joins, not generic notices. Existing objects, receipts, and protected
+aliases need no renaming. Short identities resolve to one unique
 full digest across ordinary and protected catalogs; duplicate aliases of that
 digest are not ambiguous. Distinct matching digests fail closed, and publication
 under the store lock rejects collisions rather than overwriting or aliasing
@@ -240,7 +247,7 @@ ordinary remembered-workdir filesystem authority and performs a new explicit
 upload. Its model-facing result exposes only kind and canonical artifact reference.
 Export persists the bounded basename and the explicit file MIME override, or the
 MIME inferred from a known extension. Directory bundles record their fixed MIME.
-Shell `import` validates a canonical reference or bare key, verifies the complete
+Shell `import` normalizes a bare key, plain URI, or Markdown autolink, verifies the complete
 download, and returns kind, private path, payload size and recorded MIME when
 present. A safe filename becomes a mode-0600 child inside a fresh mode-0700
 `tau-artifact-*` directory. Missing, unsafe or unusable filenames fall back to a

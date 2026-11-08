@@ -7,6 +7,51 @@ use super::*;
 #[test]
 fn artifact_transfer_declarations_are_not_shell_read_tools() {
     let tools = registered_tool_specs(false);
+    let import = tools
+        .iter()
+        .find(|tool| tool.name.as_str() == IMPORT_TOOL_NAME)
+        .expect("import tool");
+    let schema = import.parameters.as_ref().expect("import parameters");
+    assert_eq!(
+        schema["properties"]["key"]["pattern"],
+        tau_proto::ARTIFACT_ARGUMENT_PATTERN
+    );
+    let pattern = regex::Regex::new(
+        schema["properties"]["key"]["pattern"]
+            .as_str()
+            .expect("key pattern"),
+    )
+    .expect("valid key regex");
+    let key = "0123456789abcdef01234567";
+    for text in [
+        key.to_owned(),
+        format!("tau-artifact:{key}"),
+        format!("<tau-artifact:{key}>"),
+    ] {
+        assert!(pattern.is_match(&text));
+        assert_eq!(
+            tau_proto::parse_artifact_reference(&text)
+                .expect("accepted spelling")
+                .as_str(),
+            key
+        );
+    }
+    for invalid in [
+        "a".repeat(64),
+        "A".repeat(24),
+        format!("tau-artifact:{key}/data"),
+        format!("tau-artifact:{key}?query"),
+        format!("tau-artifact:{key}#fragment"),
+        format!("<{key}>"),
+        format!(" {key}"),
+        format!("{key}\n"),
+    ] {
+        assert!(!pattern.is_match(&invalid), "{invalid}");
+        assert!(
+            tau_proto::parse_artifact_reference(&invalid).is_err(),
+            "{invalid}"
+        );
+    }
     for (name, direction) in [
         (EXPORT_TOOL_NAME, "artifact:write"),
         (IMPORT_TOOL_NAME, "artifact:read"),

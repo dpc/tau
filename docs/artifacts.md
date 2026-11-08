@@ -1,5 +1,23 @@
 # Artifact transfers
 
+## Keys and references
+
+Use a bare 24-digit lowercase hex artifact key for tool arguments (`import`,
+`read_image`, and image-generation attachments) and clipboard commands.
+For convenient copying, those inputs also accept `tau-artifact:KEY` and
+`<tau-artifact:KEY>`. The input boundary normalizes them once to `ArtifactKey`;
+the semantic identity does not retain the presentation. Typed artifact identity
+fields serialize only bare keys; original tool-call arguments, including
+`raw_arguments_json`, retain the supplied text for replay.
+Full 64-digit digests, uppercase hex, shorter prefixes, paths, queries, fragments,
+and whitespace are not complete keys.
+
+Model-context output keeps Markdown autolinks; owned plain-text UI locators use
+plain URIs. Harness storage separately uses a private validated `StorageDigest`
+for full64hex physical filenames. It is not a tool argument or public identity,
+and its Debug output is redacted. Neither representation establishes provenance
+or safety. See [SPEC-shared-artifacts](../specs/SPEC-shared-artifacts.md).
+
 ## Copy an artifact to your clipboard
 
 Use `:export-to-clipboard KEY` in the interactive UI. Completion suggests up to
@@ -7,8 +25,8 @@ ten originals from the whole shared store, newest explicit upload first. Typing
 a key prefix searches before limiting, so older originals remain discoverable.
 Rows abbreviate the displayed key but insert the full key, with original byte
 size and recorded MIME when present; missing MIME is omitted rather than guessed.
-Canonical
-`<tau-artifact:FULL_KEY>` references also work when entered directly.
+Plain `tau-artifact:KEY` URIs and Markdown `<tau-artifact:KEY>` references also
+work when entered directly.
 
 Tau downloads and verifies the complete size and BLAKE3 digest, then closes the
 read before sending any clipboard bytes. Copying/listing does not refresh
@@ -53,7 +71,7 @@ target in another application.
 
 Use `:export-to-clipboard KEY --file` to offer a real file for pasting into a
 local file manager, even for text or an image. Automatic binary exports use this
-same file path. The default basename is `artifact-<full BLAKE3 digest>.<extension>`
+same file path. The default basename is `artifact-<24-digit artifact key>.<extension>`
 (for example `.pdf`, `.png`, `.txt`, or `.bin` when unknown).
 Choose a name with `--file --name "quarterly report.pdf"`; single quotes also
 work. Quotes group the whole name literally, without shell expansion or escape

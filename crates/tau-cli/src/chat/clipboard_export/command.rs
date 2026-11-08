@@ -7,7 +7,7 @@ const USAGE: &str = "usage: :export-to-clipboard KEY [--raw [--mime TYPE/SUBTYPE
 
 /// One validated invocation; raw MIME and file intent are mutually exclusive.
 pub(super) struct Command {
-    /// Full original-byte content address.
+    /// Fixed-width public identity of the original artifact.
     pub(super) key: ArtifactKey,
     /// User intent, resolved against verified bytes rather than catalog hints.
     pub(super) mode: Mode,
@@ -28,7 +28,7 @@ impl Command {
     pub(super) fn parse(args: &str) -> Result<Self, &'static str> {
         let (key, rest) = word(args);
         let key = tau_proto::parse_artifact_reference(key)
-            .map_err(|_| "Expected a full artifact key or canonical artifact reference")?;
+            .map_err(|_| "Expected a 24-lowercase-hex-digit artifact key, tau-artifact:KEY, or <tau-artifact:KEY>")?;
         let (option, rest) = word(rest);
         let mut command = Self {
             key,

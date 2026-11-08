@@ -48,10 +48,10 @@ impl ArtifactStore {
                 continue;
             }
             let name = entry.file_name();
-            let digest = name.to_string_lossy();
-            let Ok(key) = ArtifactKey::from_digest(&digest) else {
+            let Ok(digest) = StorageDigest::parse(&name.to_string_lossy()) else {
                 continue;
             };
+            let key = digest.key();
             if !key.as_str().starts_with(prefix) {
                 continue;
             }

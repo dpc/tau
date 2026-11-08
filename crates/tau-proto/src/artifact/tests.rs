@@ -98,15 +98,17 @@ fn artifact_references_round_trip_and_accept_bare_keys() {
     assert_eq!(reference, format!("<tau-artifact:{key}>"));
     let uri = artifact_uri(&key);
     assert_eq!(uri, format!("tau-artifact:{key}"));
-    assert_eq!(parse_artifact_reference(&uri).expect("plain UI URI"), key);
-    assert_eq!(
-        parse_artifact_reference(&reference).expect("canonical reference"),
-        key
-    );
-    assert_eq!(
-        parse_artifact_reference(key.as_str()).expect("bare compatibility key"),
-        key
-    );
+    for text in [key.as_str(), &uri, &reference] {
+        assert_eq!(
+            parse_artifact_reference(text).expect("accepted spelling"),
+            key
+        );
+        // Forgiving tool input must not widen durable identity decoding.
+        assert_eq!(
+            serde_json::from_value::<ArtifactKey>(serde_json::json!(text)).is_ok(),
+            text == key.as_str()
+        );
+    }
     for invalid in [
         format!("tau-artifact:{key}>"),
         format!("tau-artifact:<{key}>"),
@@ -116,6 +118,10 @@ fn artifact_references_round_trip_and_accept_bare_keys() {
         format!("<tau-data:{key}>"),
         format!("<tau-artifact:{key}"),
         format!("<tau-artifact:{key}>>"),
+        format!("tau-artifact:{key}?query"),
+        format!("tau-artifact:{key}#fragment"),
+        format!("{key} "),
+        format!("tau-artifact:{}", "a".repeat(64)),
     ] {
         assert!(parse_artifact_reference(&invalid).is_err(), "{invalid}");
     }

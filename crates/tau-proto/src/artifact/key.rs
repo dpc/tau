@@ -2,7 +2,13 @@ use super::identifier::artifact_id;
 
 artifact_id!(
     ArtifactKey,
-    "Fixed 96-bit BLAKE3 artifact identity.",
+    "Fixed 96-bit BLAKE3 public artifact identity: exactly 24 lowercase hex digits.\n\
+     Parsing and serde of typed identity fields accept only the bare key. Tool and UI\n\
+     input uses `parse_artifact_reference` to normalize bare keys, plain URIs,\n\
+     and Markdown autolinks; formatting never changes stored identity. Original\n\
+     tool-call arguments separately retain supplied text for replay. Full\n\
+     64-digit physical locators stay private to harness storage. See\n\
+     `SPEC-shared-artifacts` for the distributed identity/display contract.",
     valid_key
 );
 

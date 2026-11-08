@@ -7,10 +7,18 @@ advertise: false
 # Artifacts and large pastes
 
 Tau stores immutable original bytes under a content-addressed key. The
-model-facing reference is `<tau-artifact:FULL_KEY>`: use the **complete** returned
-reference directly with `import` or `read_image`, without removing the wrapper.
-`FULL_KEY` is exactly 24 lowercase hex digits (96 bits of BLAKE3), with no
-algorithm label. No old full-digest syntax or shorter prefixes are accepted.
+model-facing reference is `<tau-artifact:KEY>`. Prefer the bare key in `import`,
+`read_image`, image-generation attachments, and clipboard commands; the complete
+plain `tau-artifact:KEY` URI or Markdown autolink also works.
+`KEY` is exactly 24 lowercase hex digits (96 bits of BLAKE3), with no
+algorithm label. Inputs normalize once to `ArtifactKey`; typed artifact identity
+fields serialize only bare keys. Original tool-call arguments, including
+`raw_arguments_json`, retain the supplied text for replay. No old full-digest
+syntax, uppercase, or shorter prefixes are accepted.
+Owned plain-text UI locators use plain URIs; model-context references keep
+Markdown autolinks. The harness-private `StorageDigest` represents the full64hex
+physical filename, not public read authority or a tool argument. Its Debug
+output is redacted; generic notices must not expose physical locators.
 Existing stored originals remain accessible through short keys.
 `export(path, mime_type?)` reads one regular file or directory under the shell
 instance's remembered workdir authority and returns only kind and artifact reference.

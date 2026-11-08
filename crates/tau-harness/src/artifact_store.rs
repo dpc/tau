@@ -13,8 +13,7 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 use tau_proto::{
     ARTIFACT_CHUNK_BYTES, ARTIFACT_MAX_BYTES, ArtifactDescriptor, ArtifactError, ArtifactKey,
-    ArtifactOp, ArtifactReadId, ArtifactUploadId, ArtifactValue, artifact_digest,
-    artifact_identifier,
+    ArtifactOp, ArtifactReadId, ArtifactUploadId, ArtifactValue, artifact_identifier,
 };
 
 mod cleanup;
@@ -27,6 +26,7 @@ mod metadata;
 mod migration_tests;
 mod reader;
 mod receipt;
+mod storage_digest;
 #[cfg(test)]
 mod tests;
 mod transcript_objects;
@@ -39,6 +39,7 @@ use filesystem::*;
 use metadata::Metadata;
 use reader::Reader;
 use receipt::Receipt;
+use storage_digest::StorageDigest;
 use upload::Upload;
 
 /// Maximum simultaneously open uploads and reads in one harness.
@@ -290,14 +291,13 @@ impl ArtifactStore {
         verify(&receipt.descriptor, &data)?;
         // Full digests remain private physical locators, not public identities.
         // The exclusive store lock serializes this collision check and publish.
-        let hash = receipt.descriptor.identity.digest(&data).to_hex();
-        let hex = hash.as_str();
-        match self.resolve_short_digest(key.canonical()) {
-            Ok(existing) if existing != hex => return Err(ArtifactError::Integrity),
+        let digest = StorageDigest::from_hash(receipt.descriptor.identity.digest(&data));
+        match self.resolve_short_digest(key) {
+            Ok(existing) if existing != digest => return Err(ArtifactError::Integrity),
             Ok(_) | Err(ArtifactError::Unavailable) => {}
             Err(error) => return Err(error),
         }
-        let object = objects.join(hex);
+        let object = objects.join(digest.as_hex());
         if object.exists() {
             let old = self.metadata(key)?;
             if old.descriptor(key.clone())? != receipt.descriptor {
@@ -322,7 +322,7 @@ impl ArtifactStore {
                 .map_err(io_error)?;
             fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))
                 .map_err(io_error)?;
-            let protected = self.root.join("transcript-objects").join(hex);
+            let protected = self.root.join("transcript-objects").join(digest.as_hex());
             let last_put_at = if transcript_roots::path_present(&protected)? {
                 transcript_roots::require_directory(&protected)?;
                 if transcript_roots::read_regular(&protected.join("data"), ARTIFACT_MAX_BYTES)?
@@ -357,14 +357,14 @@ impl ArtifactStore {
     }
 
     fn metadata(&self, key: &ArtifactKey) -> Result<Metadata, ArtifactError> {
-        let hex = artifact_digest(key).ok_or(ArtifactError::Invalid)?;
-        self.metadata_at_digest(hex)
+        let digest = self.storage_digest(key)?;
+        self.metadata_at_digest(&digest)
     }
 
     /// Reads metadata at a validated physical digest without scanning catalogs;
-    /// public short identities still resolve through `object_directory`.
-    fn metadata_at_digest(&self, hex: &str) -> Result<Metadata, ArtifactError> {
-        let metadata: Metadata = read_json(&self.object_directory(hex)?.join("meta.json"))?;
+    /// public identities must resolve through `storage_digest` first.
+    fn metadata_at_digest(&self, digest: &StorageDigest) -> Result<Metadata, ArtifactError> {
+        let metadata: Metadata = read_json(&self.object_directory(digest)?.join("meta.json"))?;
         if !metadata.valid() {
             return Err(ArtifactError::Integrity);
         }
@@ -384,8 +384,8 @@ impl ArtifactStore {
         if descriptor.size.get() > self.max_bytes {
             return Err(ArtifactError::Invalid);
         }
-        let hex = artifact_digest(&key).ok_or(ArtifactError::Invalid)?;
-        let data = File::open(self.object_directory(hex)?.join("data")).map_err(io_error)?;
+        let digest = self.storage_digest(&key)?;
+        let data = File::open(self.object_directory(&digest)?.join("data")).map_err(io_error)?;
         if data.metadata().map_err(io_error)?.len() != descriptor.size.get() {
             return Err(ArtifactError::Integrity);
         }

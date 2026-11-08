@@ -14,6 +14,20 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
         .write_to(&mut bytes, ImageFormat::Png)
         .expect("encode fixture");
     let key = ArtifactKey::from_digest(&"0".repeat(64)).expect("artifact key");
+    for text in [
+        key.to_string(),
+        tau_proto::artifact_uri(&key),
+        tau_proto::artifact_reference(&key),
+    ] {
+        let request = ReadImageRequest::from_arguments(&CborValue::Map(vec![(
+            CborValue::Text("key".to_owned()),
+            CborValue::Text(text),
+        )]))
+        .expect("accepted argument spelling");
+        let output = request.prepare(bytes.get_ref()).expect("same original");
+        assert_eq!(output.display.args, tau_proto::artifact_uri(&key));
+        assert_eq!(render_image_result(&output), "size: 4x3\n");
+    }
     let reference = tau_proto::artifact_reference(&key);
     let request = ReadImageRequest::from_arguments(&CborValue::Map(vec![(
         CborValue::Text("key".to_owned()),

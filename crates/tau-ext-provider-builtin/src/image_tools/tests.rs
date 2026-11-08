@@ -304,6 +304,10 @@ fn image_declarations_default_on_but_remain_role_authorized() {
         let schema = tool.tool.parameters.expect("schema");
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
+            schema["properties"]["attachments"]["items"]["pattern"],
+            tau_proto::ARTIFACT_ARGUMENT_PATTERN
+        );
+        assert_eq!(
             schema["properties"].as_object().expect("properties").len(),
             2
         );
@@ -425,6 +429,10 @@ fn image_attachment_argument_contract() {
     for (values, expected) in [
         (Vec::new(), key.clone()),
         (vec![CborValue::Text(reference.clone())], key.clone()),
+        (
+            vec![CborValue::Text(tau_proto::artifact_uri(&key))],
+            key.clone(),
+        ),
         (vec![CborValue::Text(key.to_string()); 5], key.clone()),
         (vec![CborValue::Text(legacy.to_string())], legacy.clone()),
         (

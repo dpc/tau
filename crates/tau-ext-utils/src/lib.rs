@@ -2182,15 +2182,15 @@ fn read_image_tool_spec() -> ToolSpec {
         provider_scope: None,
         name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Read one tau-artifact reference for visual inspection. Result size is the delivered raster; source_size, when present, is the full EXIF-oriented source before cropping or resizing.".to_owned()),
+        description: Some("Read one artifact key for visual inspection. Result size is the delivered raster; source_size, when present, is the full EXIF-oriented source before cropping or resizing.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "key": {
                     "type": "string",
-                    "pattern": "^(?:[0-9a-f]{24}|<tau-artifact:[0-9a-f]{24}>)$",
-                    "description": "Canonical <tau-artifact:24-lowercase-hex-digits> reference for one PNG, JPEG, or WebP image, or a bare key."
+                    "pattern": tau_proto::ARTIFACT_ARGUMENT_PATTERN,
+                    "description": "24-lowercase-hex-digit artifact key for one PNG, JPEG, or WebP image. Also accepts tau-artifact:KEY or <tau-artifact:KEY>."
                 },
                 "mode": {
                     "type": "string",

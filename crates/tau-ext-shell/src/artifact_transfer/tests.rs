@@ -5,6 +5,32 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
+/// Every accepted tool spelling normalizes before any transfer is scheduled.
+#[test]
+fn import_argument_spellings_normalize_to_the_same_download() {
+    let key = tau_proto::ArtifactKey::parse("0123456789abcdef01234567").expect("canonical key");
+    for spelling in [
+        key.to_string(),
+        tau_proto::artifact_uri(&key),
+        tau_proto::artifact_reference(&key),
+    ] {
+        let (mut invoke, lifecycle, _output, _rx) =
+            active_invocation("import-spelling", IMPORT_TOOL_NAME);
+        invoke.arguments = CborValue::Map(vec![(
+            CborValue::Text("key".into()),
+            CborValue::Text(spelling),
+        )]);
+        let Ok(Command::StartImport { download, .. }) =
+            prepare_import_with_limit(invoke, lifecycle, tau_proto::ARTIFACT_MAX_BYTES)
+        else {
+            panic!("accepted import spelling")
+        };
+        assert!(
+            matches!(download.next_op(), Some(tau_proto::ArtifactOp::Open { key: parsed }) if parsed == key)
+        );
+    }
+}
+
 /// Named imports retain a file kind, private parent ownership, exact metadata,
 /// and independent paths; cancellation and undelivered completions clean
 /// parents.

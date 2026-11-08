@@ -108,15 +108,15 @@ pub(super) fn declarations(
                 name: ToolName::new(format!("codex_image_{index}")),
                 provider_scope: Some(provider.clone()),
                 model_visible_name: Some(ToolName::new("generate_image")),
-                description: Some("Generate one original PNG using the selected ChatGPT account, or edit with optional ordered attachments (up to 5 canonical <tau-artifact:FULL_KEY> references to static PNG, JPEG or WebP originals). Omitted or empty attachments generate a new image. Attached original bytes, including metadata, are disclosed to that account; references can expire. Returns a canonical artifact reference, size and MIME headers; pass directly to import or read_image. Originals persist independently of this session, including ephemeral sessions. No masks or batches.".to_owned()),
+                description: Some("Generate one original PNG using the selected ChatGPT account, or edit with optional ordered attachments (up to 5 artifact keys for static PNG, JPEG or WebP originals). Omitted or empty attachments generate a new image. Attached original bytes, including metadata, are disclosed to that account; references can expire. Returns a canonical artifact reference, size and MIME headers; pass directly to import or read_image. Originals persist independently of this session, including ephemeral sessions. No masks or batches.".to_owned()),
                 tool_type: tau_proto::ToolType::Function,
                 parameters: Some(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "prompt": {"type": "string", "minLength": 1, "maxLength": image_generation::MAX_PROMPT_BYTES},
                         "attachments": {"type": "array", "maxItems": image_generation::MAX_ATTACHMENTS,
-                            "items": {"type": "string"},
-                            "description": "Ordered original artifact references; image 1, image 2, etc. No paths, URLs, previews, file IDs or automatic history selection."}
+                            "items": {"type": "string", "pattern": tau_proto::ARTIFACT_ARGUMENT_PATTERN},
+                            "description": "Ordered 24-lowercase-hex-digit artifact keys; also accepts tau-artifact:KEY or <tau-artifact:KEY>. Image 1, image 2, etc. No paths, URLs, previews, file IDs or automatic history selection."}
                     },
                     "required": ["prompt"],
                     "additionalProperties": false

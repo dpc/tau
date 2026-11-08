@@ -106,8 +106,8 @@ impl ArtifactStore {
         if self.descriptor(&descriptor.key)? != *descriptor {
             return Err(ArtifactError::Integrity);
         }
-        let digest = artifact_digest(&descriptor.key).ok_or(ArtifactError::Invalid)?;
-        let directory = self.object_directory(digest)?;
+        let digest = self.storage_digest(&descriptor.key)?;
+        let directory = self.object_directory(&digest)?;
         require_directory(&directory)?;
         let bytes = read_regular(&directory.join("data"), descriptor.size.get())?;
         verify(descriptor, &bytes)?;
