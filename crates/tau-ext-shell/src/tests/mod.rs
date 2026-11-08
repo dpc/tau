@@ -123,6 +123,8 @@ struct SaturationWriter {
     mandatory: mpsc::Sender<()>,
     /// Complete framed bytes accumulated across fragmented protocol writes.
     pending_bytes: Vec<u8>,
+    /// Simulate a disconnected output transport when the gate opens.
+    fail_on_release: bool,
 }
 
 impl std::io::Write for SaturationWriter {
@@ -138,6 +140,9 @@ impl std::io::Write for SaturationWriter {
             let mut closed = lock.lock().expect("writer gate");
             while *closed {
                 closed = condvar.wait(closed).expect("writer gate wait");
+            }
+            if self.fail_on_release {
+                return Err(path_std_io::Error::other("test writer disconnected"));
             }
         }
         self.bytes.lock().expect("writer bytes").extend(bytes);
@@ -994,6 +999,7 @@ fn run_after_production_fifo_saturation(
         blocked: false,
         mandatory: mandatory_tx,
         pending_bytes: Vec::new(),
+        fail_on_release: false,
     };
     let runner = thread::spawn(move || {
         run_impl(

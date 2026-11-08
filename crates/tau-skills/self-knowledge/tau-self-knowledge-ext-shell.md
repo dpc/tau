@@ -159,6 +159,15 @@ deepest existing ancestor. Split unrelated source/scratch edits.
 
 Lock-wait progress names requested directories and, when known, the blocking
 owner/directory/kind. Contact that owner and check running work before unlocking.
+Blocked explicit `dir_lock(update)` also emits one nonterminal header-only source
+with `status: waiting` and a bounded admission snapshot: `blocker_agent`,
+`blocker_directory`, and `blocker_kind` (`manual_lock`, `automatic_lock`, or
+`earlier_queued_request`). It names one actual overlapping ancestor or descendant,
+which may not be the only blocker. The snapshot may be stale; it does not prove
+current ownership.
+Success still waits for acquisition, and automatic mutators keep UI-only
+diagnostics. Ordinary tool header/payload text and harness-injected provenance
+envelopes are separate layers; producers do not author context envelopes.
 An interrupted `wait` does not establish the operation's terminal outcome.
 
 ## Instructions and skills

@@ -538,7 +538,8 @@ fn tool_output_rejects_foreign_reports_and_peer_canonical_facts() {
 
 /// Every wait mode applies the same owner-wide nonterminal mask, including
 /// output queued before registration. Capture continues and actual completion
-/// still settles the wait exactly once.
+/// still settles the wait exactly once. Use the real dir_lock declaration's
+/// tags so this also covers its producer opt-in, without cloning the matrix.
 #[test]
 fn complete_only_filters_queued_and_live_updates_in_each_wait_mode() {
     for mode in ["exact", "all", "any", "input"] {
@@ -555,8 +556,15 @@ fn complete_only_filters_queued_and_live_updates_in_each_wait_mode() {
                     tau_proto::ClientKind::Tool,
                 );
                 let mut spec = instant_background_test_tool_spec("streaming");
-                spec.tags
-                    .push(tau_proto::ToolTag::new(tau_proto::TOOL_OUTPUT_STREAM_TAG));
+                spec.tags = h
+                    .tool_routing
+                    .registry
+                    .all_tools()
+                    .into_iter()
+                    .find(|tool| tool.name.as_str() == "dir_lock")
+                    .expect("real shell dir_lock registration")
+                    .tags
+                    .clone();
                 h.tool_routing.registry.register(&connection, spec.clone());
                 let cid = ensure_test_user_agent(&mut h);
                 h.prompt_coordination

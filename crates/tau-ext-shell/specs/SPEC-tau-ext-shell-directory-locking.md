@@ -93,6 +93,21 @@ one blocking agent, the lock kind (or earlier queued request), and the overlappi
 directory. Use this snapshot as a contact hint; it may become stale and does not
 establish current lock ownership.
 
+Explicit `dir_lock(update)` also publishes one immediate nonterminal source when
+it first queues. The bounded admission snapshot names one actual blocking agent,
+its overlapping canonical directory (which may be an ancestor or descendant),
+and whether it is a manual lock, automatic lock, or earlier queued request.
+Other blockers may exist, and the named blocker may have changed.
+Uncontended updates and unlocks publish no nonterminal source; success still
+requires actual acquisition or release. Automatic mutators retain UI-only
+diagnostics.
+
+Delivery, source ordering, cancellation closure, and wait suppression follow
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
+The source uses ordinary header/payload tool text, not a producer-authored
+prompt envelope; see
+[SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md).
+
 ## Security boundary
 
 Directory locks coordinate cooperating Tau/ext-shell tools. They are not an

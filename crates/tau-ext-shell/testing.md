@@ -3,6 +3,19 @@
 This document owns the evolving test catalog for shell tools. Behavioral authority
 remains in the applicable Linked Specs.
 
+`manual_admission_snapshot_survives_holder_release` covers admission-time
+ancestor/descendant snapshots for manual and automatic holders in both backends,
+including escaped newline paths and cancellation after holder release.
+`explicit_wait_stream_precedes_acquisition_or_cancellation` checks the explicit
+tool emits one sequence-zero nonterminal source before acquisition or cancellation.
+`dir_lock_stream_retries_capacity_and_closes_on_disconnect` saturates the real
+tau-client detached FIFO with a gated writer, then cancels the registered waiter
+and releases the holder while the source waits for capacity. It checks that the
+source precedes the cancelled terminal after drain, or that the publisher exits
+promptly on writer disconnect.
+Generic stream ordering, replay, and `complete_only` suppression remain governed
+by [SPEC-streamed-tool-output](../../specs/SPEC-streamed-tool-output.md).
+
 ## Protocol and UI
 
 User-endpoint tests distinguish execution intent from live authenticated activity

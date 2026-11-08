@@ -8,6 +8,8 @@ use super::fs::{
     set_fail_reap_for_test, wait_after_observed_wake_for_test, wait_backoff_delays_for_test,
 };
 use super::*;
+use crate::argument::optional_argument_bool;
+use crate::tool_lifecycle::ToolLifecycleRegistry;
 
 fn path(value: &str) -> PathBuf {
     PathBuf::from(value)
@@ -15,6 +17,214 @@ fn path(value: &str) -> PathBuf {
 
 fn agent_id(value: &str) -> AgentId {
     AgentId::parse(value).expect("valid test agent id")
+}
+
+/// Path abbreviations stay bounded after control escaping, retain the owner,
+/// and explicitly distinguish omitted path bytes from a usable complete path.
+#[test]
+fn blocker_source_bounds_and_escapes_path_headers() {
+    let directory = path(&format!("/{}\nstatus: injected", "界\u{1b}".repeat(8192)));
+    let blocker = WaitBlocker::new(&agent_id("holder"), BlockerKind::Manual, &directory);
+    let text = blocker.render();
+    assert!(text.len() <= tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
+    assert!(text.contains("blocker_agent: holder\n"));
+    assert!(text.contains("blocker_directory_omitted_bytes: "));
+    assert!(text.contains("...\n"));
+    assert!(!text.contains('\u{1b}'));
+    assert!(!text.contains("\nstatus: injected"));
+    let short = WaitBlocker::new(
+        &agent_id("holder"),
+        BlockerKind::Manual,
+        Path::new("/a\nb\u{1b}"),
+    );
+    let text = short.render();
+    assert!(!text.contains("omitted_bytes"));
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("b\\") || line == "b")
+    );
+    assert!(!text.contains('\u{1b}'));
+}
+
+/// Admission captures the actual ancestor/descendant blocker before a callback
+/// can release it; both backends preserve cancellation and holder identity.
+#[test]
+fn manual_admission_snapshot_survives_holder_release() {
+    for filesystem in [false, true] {
+        for automatic in [false, true] {
+            for descendant in [false, true] {
+                let tempdir = tempfile::TempDir::new().expect("tempdir");
+                let manager = if filesystem {
+                    filesystem_lock_manager(tempdir.path())
+                } else {
+                    DirLockManager::default()
+                };
+                let holder = if filesystem {
+                    filesystem_lock_manager(tempdir.path())
+                } else {
+                    manager.clone()
+                };
+                let parent = path("/snapshot/parent");
+                let child = parent.join("child\nstatus: fake");
+                let (held, requested) = if descendant {
+                    (child, parent)
+                } else {
+                    (parent, child)
+                };
+                let owner = agent_id("holder");
+                let guard = if automatic {
+                    Some(
+                        holder
+                            .acquire_auto("holder".into(), owner.clone(), vec![held.clone()], || {})
+                            .expect("automatic holder"),
+                    )
+                } else {
+                    holder
+                        .acquire_manual("holder".into(), owner.clone(), held.clone(), || {})
+                        .expect("manual holder");
+                    None
+                };
+                let result = manager.acquire_manual_snapshot(
+                    "waiter".into(),
+                    agent_id("waiter"),
+                    requested,
+                    |snapshot| {
+                        drop(guard);
+                        if !automatic {
+                            holder.unlock_manual(&owner, &held).expect("release holder");
+                        }
+                        let text = snapshot.expect("admission blocker").render();
+                        assert!(text.contains("blocker_agent: holder"));
+                        assert!(text.contains(if automatic {
+                            "blocker_kind: automatic_lock"
+                        } else {
+                            "blocker_kind: manual_lock"
+                        }));
+                        assert!(!text.contains("\nstatus: fake"));
+                        assert!(text.contains(if descendant {
+                            "/snapshot/parent/child"
+                        } else {
+                            "blocker_directory: /snapshot/parent\n"
+                        }));
+                        assert!(manager.cancel_waiting_call(&"waiter".into()));
+                    },
+                    LockWaitPolicy::default(),
+                );
+                assert!(matches!(result, Err(ManualLockAcquireError::Cancelled)));
+            }
+        }
+    }
+}
+
+/// Explicit dispatch publishes exactly one source before acquisition, while
+/// cancellation still removes the waiter and publishes exactly one terminal.
+#[test]
+fn explicit_wait_stream_precedes_acquisition_or_cancellation() {
+    for cancel in [false, true] {
+        let manager = DirLockManager::default();
+        let held = path("/stream/root");
+        let owner = agent_id("holder");
+        manager
+            .acquire_manual("holder".into(), owner.clone(), held.clone(), || {})
+            .expect("holder");
+        let (tx, rx) = path_std_sync::mpsc::channel();
+        let output = Output::channel(tx);
+        let invoke = ToolStarted {
+            invocation_policy: Default::default(),
+            call_id: "stream-waiter".into(),
+            tool_name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),
+            arguments: CborValue::Null,
+            agent_id: agent_id("waiter"),
+            originator: tau_proto::PromptOriginator::User,
+        };
+        let registry = ToolLifecycleRegistry::default();
+        let lifecycle = registry.admit(
+            invoke.call_id.clone(),
+            invoke.tool_name.clone(),
+            invoke.agent_id.clone(),
+            output.clone(),
+        );
+        let worker_manager = manager.clone();
+        let worker = std::thread::spawn(move || {
+            dispatch_dir_lock_update(
+                invoke,
+                &worker_manager,
+                &output,
+                DirLockToolRequest {
+                    command: DirLockCommand::Update,
+                    dir: path("/stream/root/child"),
+                    input_directory: "/stream/root/child".to_owned(),
+                },
+                lifecycle,
+            )
+        });
+        loop {
+            let frame = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("waiting source");
+            let tau_proto::HarnessInputMessage::Emit(emit) = frame else {
+                continue;
+            };
+            match *emit.event {
+                Event::ToolOutputReported(report) => {
+                    assert_eq!(report.sequence, 0);
+                    assert!(report.text.contains("blocker_directory: /stream/root\n"));
+                    break;
+                }
+                Event::ToolProgressReported(_) => {}
+                event => panic!("terminal before release: {event:?}"),
+            }
+        }
+        assert!(!worker.is_finished());
+        if cancel {
+            assert!(manager.cancel_waiting_call(&"stream-waiter".into()));
+        } else {
+            manager.unlock_manual(&owner, &held).expect("release");
+        }
+        worker.join().expect("dispatch");
+        let events: Vec<_> = rx
+            .try_iter()
+            .filter_map(|message| match message {
+                tau_proto::HarnessInputMessage::Emit(emit) => Some(*emit.event),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ToolResultReported(_) | Event::ToolCancelledReported(_)
+                ))
+                .count(),
+            1
+        );
+        if cancel {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::ToolCancelledReported(_)))
+            );
+        } else {
+            let result = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::ToolResultReported(result) => Some(result),
+                    _ => None,
+                })
+                .expect("successful acquisition");
+            assert_eq!(
+                optional_argument_bool(&result.result, "locked").expect("locked flag"),
+                Some(true)
+            );
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::ToolOutputReported(_)))
+        );
+    }
 }
 
 /// Wait diagnostics identify parent/child holders in both backends without
@@ -161,14 +371,20 @@ fn wait_diagnostics_identify_earlier_overlapping_request() {
         };
         let requested = path("/diagnostic/parent/other");
         let mut progress = waiting_progress(&invoke, std::slice::from_ref(&requested), None);
-        let result = manager.acquire_manual(
+        let result = manager.acquire_manual_snapshot(
             invoke.call_id.clone(),
             invoke.agent_id.clone(),
             requested,
-            || {
-                manager.annotate_wait_progress(&mut progress);
+            |blocker| {
+                let blocker = blocker.expect("queued admission blocker");
+                let text = blocker.render();
+                assert!(text.contains("blocker_kind: earlier_queued_request"));
+                assert!(text.contains("blocker_agent: earlier"));
+                assert!(text.contains("blocker_directory: /diagnostic/parent\n"));
+                DirLockManager::annotate_blocker(&mut progress, Some(&blocker));
                 assert!(manager.cancel_waiting_call(&invoke.call_id));
             },
+            LockWaitPolicy::default(),
         );
         // Always unblock the helper before asserting its diagnostic.
         resume_tx.send(()).expect("resume");

@@ -8,6 +8,12 @@ presentation; no single implementation area can own it.
 
 ## Source and completion
 
+Tool text formatting belongs to
+[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md).
+Producers submit ordinary header/payload tool text. When the harness injects it
+into generic user-role context, it supplies the registered envelope, as governed by
+[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+
 Tools opt into ordered text output with the `tool:output-stream` declaration tag.
 The harness freezes the policy from the effective prompt tool snapshot and
 records the exact opted-in output-item indices on the canonical provider

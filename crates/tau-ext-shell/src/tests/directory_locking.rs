@@ -3,6 +3,166 @@
 use super::*;
 use crate::tool_started_identity::ownership_probe;
 
+/// Minimal real tau-client runtime for deterministic publisher pressure tests.
+struct LockPublisherFixture;
+
+impl tau_client::TauExtension for LockPublisherFixture {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "lock-publisher-fixture"
+    }
+
+    fn register(self, _builder: &mut tau_client::ExtensionBuilder<Self::State>) {}
+}
+
+/// A saturated production publisher must not hold directory coordination
+/// guards, lose its source, overtake it with cancellation, or hang when output
+/// closes.
+#[test]
+fn dir_lock_stream_retries_capacity_and_closes_on_disconnect() {
+    for disconnect in [false, true] {
+        let (reader, mut input) = UnixStream::pair().expect("input pair");
+        let mut configure = EventWriter::new(&mut input);
+        configure
+            .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+                purpose: tau_proto::ConfigurePurpose::Runtime,
+                artifact_limits: Default::default(),
+                harness_protocol_version: None,
+                tool_prefix: None,
+                instance_name: test_extension_name("publisher-fixture"),
+                config: CborValue::Map(Vec::new()),
+                state_dir: None,
+                secrets: Default::default(),
+                absent_optional_secrets: Default::default(),
+                settings_files: Default::default(),
+            }))
+            .expect("configure");
+        configure.flush().expect("configure flush");
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new((Mutex::new(true), Condvar::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (overloaded_tx, overloaded_rx) = mpsc::channel();
+        let (mandatory_tx, _) = mpsc::channel();
+        let _hook = SaturationHookGuard::install(overloaded_tx);
+        let runtime = tau_client::TauExtensionRunner::new(LockPublisherFixture)
+            .start_manual_loop(
+                reader,
+                SaturationWriter {
+                    bytes: Arc::clone(&bytes),
+                    gate: Arc::clone(&gate),
+                    entered: entered_tx,
+                    blocked: false,
+                    mandatory: mandatory_tx,
+                    pending_bytes: Vec::new(),
+                    fail_on_release: disconnect,
+                },
+                (),
+            )
+            .expect("runtime");
+        let output = Output::client(runtime.handle());
+        let frame = HarnessInputMessage::emit(Event::ActionErrorReported(ActionError {
+            invocation_id: tau_proto::ActionInvocationId::parse("saturation").expect("invocation"),
+            action_id: "saturation".to_owned(),
+            message: "filler".to_owned(),
+            details: None,
+        }));
+        output.send(frame.clone()).expect("block writer");
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer blocked");
+        while output.send(frame.clone()).is_ok() {}
+        // Discard the filler producer's overload edge.
+        overloaded_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("saturated");
+        let tempdir = TempDir::new().expect("lock directory");
+        let directory = tempdir.path().canonicalize().expect("canonical");
+        let manager = DirLockManager::default();
+        let owner = tau_proto::AgentId::parse("holder").expect("owner");
+        manager
+            .acquire_manual("holder".into(), owner.clone(), directory.clone(), || {})
+            .expect("holder");
+        let Event::ToolStarted(invoke) = tool_started(
+            "pressured-waiter",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", directory.to_str().expect("path")),
+            ]),
+            "waiter",
+        ) else {
+            panic!("tool started")
+        };
+        let lifecycles = ToolLifecycleRegistry::default();
+        let lifecycle = lifecycles.admit(
+            invoke.call_id.clone(),
+            invoke.tool_name.clone(),
+            invoke.agent_id.clone(),
+            output.clone(),
+        );
+        let worker_manager = manager.clone();
+        let worker_output = output.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            crate::dir_lock::dispatch_dir_lock_tool(
+                invoke,
+                &worker_manager,
+                true,
+                &worker_output,
+                lifecycle,
+            );
+            done_tx.send(()).expect("dispatch completion");
+        });
+        // The UI progress send follows waiter registration and publisher spawn.
+        overloaded_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiting callback");
+        assert!(manager.cancel_waiting_call(&"pressured-waiter".into()));
+        assert!(!manager.cancel_waiting_call(&"pressured-waiter".into()));
+        manager
+            .unlock_manual(&owner, &directory)
+            .expect("release independent of publisher");
+        assert!(
+            done_rx.try_recv().is_err(),
+            "terminal cannot overtake pending source"
+        );
+        let (lock, condvar) = &*gate;
+        *lock.lock().expect("writer gate") = false;
+        condvar.notify_all();
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("publisher drains or closes");
+        worker.join().expect("worker");
+        if disconnect {
+            assert!(output.failure.lock().expect("failure").failed);
+            let () = runtime.finish_detached();
+        } else {
+            runtime.finish().expect("flush");
+            let output = bytes.lock().expect("bytes").clone();
+            let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(output));
+            let events: Vec<_> = std::iter::from_fn(|| reader.read_message().transpose())
+                .map(|frame| frame.expect("valid frame"))
+                .filter_map(|frame| match frame {
+                    HarnessInputMessage::Emit(emit) => Some(*emit.event),
+                    _ => None,
+                })
+                .filter(|event| {
+                    matches!(
+                        event,
+                        Event::ToolOutputReported(_) | Event::ToolCancelledReported(_)
+                    )
+                })
+                .collect();
+            assert_eq!(events.len(), 2);
+            assert!(
+                matches!(&events[0], Event::ToolOutputReported(report) if report.sequence == 0)
+            );
+            assert!(matches!(&events[1], Event::ToolCancelledReported(_)));
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
@@ -1211,7 +1371,10 @@ fn startup_registers_dir_lock_disabled_by_default() {
             assert!(!register.tool.enabled_by_default);
             assert_eq!(
                 register.tool.tags,
-                vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)],
+                vec![
+                    tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG),
+                    tau_proto::ToolTag::new(tau_proto::TOOL_OUTPUT_STREAM_TAG),
+                ],
                 "disabled dir_lock retains static activity classification"
             );
             found_dir_lock = true;

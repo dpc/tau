@@ -152,6 +152,11 @@ deferred placement and replay, sanitizes provider controls, and uses the registr
 exact-close escaping for the untrusted body. See
 [SPEC-streamed-tool-output](SPEC-streamed-tool-output.md).
 
+The harness uses this envelope to frame injected context. The producer supplies
+ordinary tool text; its header/payload format belongs to
+[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md);
+native typed tool results do not need this generic-user carrier.
+
 These durable typed-span and tool-presentation semantics have the explicit approval
 required by
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).

@@ -171,7 +171,7 @@ pub(super) struct FsManualAcquireRequest<'a> {
 impl FsLockBackend {
     /// Read one best-effort snapshot; diagnostic failure never fails
     /// acquisition.
-    pub(super) fn wait_blocker(&self, call_id: &ToolCallId) -> Option<String> {
+    pub(super) fn wait_blocker(&self, call_id: &ToolCallId) -> Option<super::WaitBlocker> {
         with_registry_lock(&self.state_dir, |registry| {
             Ok(registry
                 .waiters
@@ -393,7 +393,7 @@ impl FsLockBackend {
         admission_guard: MutexGuard<'_, ()>,
     ) -> Result<(), ManualLockAcquireError>
     where
-        F: FnOnce(),
+        F: FnOnce(Option<super::WaitBlocker>),
     {
         let owner = self.owner(request.agent_id);
         let dirs = vec![request.dir];
@@ -489,7 +489,9 @@ impl FsLockBackend {
                         return Ok(FsManualOutcome::Abandoned(blocker));
                     }
                 }
-                Ok(FsManualOutcome::Waiting)
+                Ok(FsManualOutcome::Waiting(
+                    on_wait.as_ref().and_then(|_| registry.wait_blocker(pos)),
+                ))
             })
             .map_err(|error| {
                 cleanup_waiter_after_backend_error(self, waiter_id);
@@ -511,11 +513,12 @@ impl FsLockBackend {
                     admission_guard = Some(request.manager.backend_admission_gate());
                     continue;
                 }
-                FsManualOutcome::Waiting => {}
-            }
-            drop(admission_guard.take());
-            if let Some(on_wait) = on_wait.take() {
-                on_wait();
+                FsManualOutcome::Waiting(blocker) => {
+                    drop(admission_guard.take());
+                    if let Some(on_wait) = on_wait.take() {
+                        on_wait(blocker);
+                    }
+                }
             }
             if next_liveness_check <= Instant::now() {
                 next_liveness_check = Instant::now() + policy.liveness_interval;
@@ -738,7 +741,7 @@ enum FsAcquireOutcome {
 
 enum FsManualOutcome {
     Granted,
-    Waiting,
+    Waiting(Option<super::WaitBlocker>),
     NeedsAdmission,
     Cancelled,
     AlreadyHeld(PathBuf),
@@ -748,7 +751,7 @@ enum FsManualOutcome {
 impl FsRegistry {
     /// Describe one actual admission blocker using full instance-aware
     /// ownership.
-    fn wait_blocker(&self, pos: usize) -> Option<String> {
+    fn wait_blocker(&self, pos: usize) -> Option<super::WaitBlocker> {
         let waiter = self.waiters.get(pos)?;
         let owner = &waiter.owner;
         let dirs = &waiter.dirs;
@@ -763,9 +766,9 @@ impl FsRegistry {
                 .iter()
                 .find(|active| dirs.iter().any(|dir| paths_overlap(active, dir)))
             {
-                return Some(super::blocker_display(
+                return Some(super::WaitBlocker::new(
                     &lock.owner.agent_id,
-                    "automatic lock",
+                    super::BlockerKind::Automatic,
                     dir,
                 ));
             }
@@ -775,9 +778,9 @@ impl FsRegistry {
                 continue;
             }
             if dirs.iter().any(|dir| paths_overlap(&lock.dir, dir)) {
-                return Some(super::blocker_display(
+                return Some(super::WaitBlocker::new(
                     &lock.owner.agent_id,
-                    "manual lock",
+                    super::BlockerKind::Manual,
                     &lock.dir,
                 ));
             }
@@ -789,9 +792,9 @@ impl FsRegistry {
                     .iter()
                     .find(|active| dirs.iter().any(|dir| paths_overlap(active, dir)))
                 {
-                    return Some(super::blocker_display(
+                    return Some(super::WaitBlocker::new(
                         &earlier.owner.agent_id,
-                        "earlier queued request",
+                        super::BlockerKind::EarlierQueued,
                         dir,
                     ));
                 }

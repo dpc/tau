@@ -1373,9 +1373,16 @@ fn set_process_working_directory(working_directory: &Path) -> Result<(), String>
 
 fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
     let tags = if enabled_by_default {
-        tool_tags(&["shell:lock", tau_proto::TURN_WAIT_TOOL_TAG])
+        tool_tags(&[
+            "shell:lock",
+            tau_proto::TURN_WAIT_TOOL_TAG,
+            tau_proto::TOOL_OUTPUT_STREAM_TAG,
+        ])
     } else {
-        tool_tags(&[tau_proto::TURN_WAIT_TOOL_TAG])
+        tool_tags(&[
+            tau_proto::TURN_WAIT_TOOL_TAG,
+            tau_proto::TOOL_OUTPUT_STREAM_TAG,
+        ])
     };
     ToolSpec {
         provider_scope: None,

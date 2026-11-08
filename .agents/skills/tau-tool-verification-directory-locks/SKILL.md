@@ -29,6 +29,27 @@ disabled or unavailable and mutation tools do not wait on directory locks.
 
 When locking is enabled, verify all of these behaviors:
 
+* A blocked explicit `dir_lock(update)` emits exactly one immediate nonterminal
+  source with `status: waiting`, `blocker_snapshot: true`, `blocker_agent`,
+  `blocker_kind`, and `blocker_directory`. The directory names the observed
+  blocker path, which may equal the requested path or be its ancestor or
+  descendant; do not simply echo the requested path. For an abbreviated long
+  path, an ellipsis is visible and `blocker_directory_omitted_bytes` reports
+  omitted display-path bytes before header escaping. Do not use an abbreviated
+  path for recovery. Kinds distinguish `manual_lock`, `automatic_lock`, and
+  `earlier_queued_request`. This is one
+  admission-time contact hint, not proof of current ownership. Uncontended
+  updates and unlocks emit no nonterminal source; a waiting report never claims
+  `locked: true`. Cancellation still emits one terminal and removes the waiter.
+  Automatic mutation tools keep their existing UI-only lock diagnostics.
+* Tool text uses the shared header/payload format, independently of the
+  harness-owned context envelope. Follow
+  [SPEC-tau-proto-provider-data](../../../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md),
+  [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md), and
+  [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+  Incremental source may wake an eligible wait without consuming completion;
+  `complete_only` suppresses that wake, not source retention.
+
 * `dir_lock` accepts only `command: update` and `command: unlock` with an existing directory.
 * Directories are canonicalized before locking. Relative paths, `.` components,
   and symlinked directories behave as the canonical absolute directory.
