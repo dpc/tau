@@ -4,7 +4,11 @@ use super::*;
 /// accepting output, honoring end_turn=false, or changing error classification.
 #[test]
 fn failed_envelopes_preserve_accounting_without_completion_authority() {
-    for kind in ["response.incomplete", "response.failed"] {
+    for (kind, code) in [
+        ("response.incomplete", "invalid_prompt"),
+        ("response.failed", "invalid_prompt"),
+        ("response.failed", "misalignment_policy_violation"),
+    ] {
         for mode in [
             path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
@@ -14,7 +18,11 @@ fn failed_envelopes_preserve_accounting_without_completion_authority() {
                 "response": {
                     "id": "resp_failed",
                     "end_turn": false,
-                    "error": {"code": "invalid_prompt"},
+                    "error": {
+                        "code": code,
+                        "message": "private policy canary",
+                        "headers": {"Retry-After": "12"}
+                    },
                     "incomplete_details": {"reason": "interrupted"},
                     "usage": {
                         "input_tokens": 100, "output_tokens": 7,

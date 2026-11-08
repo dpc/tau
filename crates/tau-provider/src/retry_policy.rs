@@ -163,12 +163,15 @@ fn find_error_code(value: &serde_json::Value) -> Option<&str> {
 pub fn classify_error_code(code: &str) -> RetryClass {
     match code {
         "usage_limit_reached" => RetryClass::UsageWindow,
-        "rate_limit_exceeded" => RetryClass::Throttle,
+        "rate_limit_exceeded" | "slow_down" => RetryClass::Throttle,
         "quota_exceeded"
         | "billing_hard_limit_reached"
         | "insufficient_quota"
         | "usage_not_included"
-        | "credits_exhausted" => RetryClass::Account,
+        | "credits_exhausted"
+        | "credit_balance_exhausted"
+        | "organization_spend_limit_exceeded"
+        | "project_spend_limit_exceeded" => RetryClass::Account,
         "invalid_api_key"
         | "authentication_error"
         | "invalid_authentication"

@@ -7,6 +7,8 @@ pub(crate) enum RequestRejectionReason {
     CyberPolicy,
     /// The provider rejected the request under its biological safety policy.
     BioPolicy,
+    /// The provider rejected the request under its misalignment policy.
+    MisalignmentPolicy,
     /// The provider rejected the prompt as invalid.
     InvalidPrompt,
     /// The requested model does not exist or is unavailable to this account.
@@ -19,6 +21,7 @@ impl RequestRejectionReason {
         match code {
             Some("cyber_policy") => Some(Self::CyberPolicy),
             Some("bio_policy") => Some(Self::BioPolicy),
+            Some("misalignment_policy_violation") => Some(Self::MisalignmentPolicy),
             Some("invalid_prompt") => Some(Self::InvalidPrompt),
             Some("model_not_found") => Some(Self::ModelNotFound),
             _ => None,
@@ -30,6 +33,7 @@ impl RequestRejectionReason {
         match self {
             Self::CyberPolicy => "cyber_policy",
             Self::BioPolicy => "bio_policy",
+            Self::MisalignmentPolicy => "misalignment_policy_violation",
             Self::InvalidPrompt => "invalid_prompt",
             Self::ModelNotFound => "model_not_found",
         }

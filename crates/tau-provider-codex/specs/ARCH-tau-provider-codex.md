@@ -83,9 +83,11 @@ image bytes, or base64 enters diagnostic output; callers own artifact storage
 and ordinary tool lifecycle. Both Standard and Lite profiles may opt in, without
 claiming account entitlement or probing it.
 
-The audited ChatGPT/Codex models explicitly publish image input and
-image tool-result support: GPT-6 Sol, Sol 6.1, Terra 6.1, Luna, and Astra; GPT-5.6 Sol,
-Terra, and Luna; GPT-5.5, GPT-5.4, GPT-5.4 Mini, and GPT-5.3 Codex.
+Tau advertises image input and image tool-result support for these audited
+ChatGPT/Codex models: GPT-6 Sol, Sol 6.1, Terra 6.1, Luna, and Astra; GPT-5.6
+Sol, Terra, and Luna; and GPT-5.3 Codex. Tau no longer advertises retired GPT-5.5,
+GPT-5.4, and GPT-5.4 Mini. Explicitly configured historical IDs retain their
+audited image support without claiming current account entitlement.
 One exact-model predicate controls both publication and wire lowering; catalog
 addition alone does not grant image disclosure. Successful typed function
 results lower to one `function_call_output` whose `output` array contains the

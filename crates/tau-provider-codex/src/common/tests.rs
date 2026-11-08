@@ -901,3 +901,81 @@ fn deterministic_status_transient_override_uses_only_canonical_fields() {
         Some(tau_proto::ProviderFailureKind::RequestRejected)
     );
 }
+
+/// Exact Codex throttle/account identifiers retain structured advice and select
+/// the shared account/profile cooldown, including HTTP 503 rather than
+/// overload.
+#[test]
+fn maintenance_http_codes_preserve_shared_retry_policy() {
+    for (code, class) in [
+        ("slow_down", RetryClass::Throttle),
+        ("credit_balance_exhausted", RetryClass::Account),
+        ("organization_spend_limit_exceeded", RetryClass::Account),
+        ("project_spend_limit_exceeded", RetryClass::Account),
+    ] {
+        for status in [400, 429, 503] {
+            let body = serde_json::json!({"error": {
+                "code": code, "message": "private canary; try in 999 seconds"
+            }})
+            .to_string();
+            for hint in [None, Some(Duration::from_secs(12))] {
+                let error = match hint {
+                    Some(hint) => LlmError::HttpStatusRetryAfter(status, body.clone(), hint),
+                    None => LlmError::HttpStatus(status, body.clone()),
+                };
+                let decision = error.retry_decision().expect("recognized retry class");
+                assert_eq!(decision.class, class, "{status}: {code}");
+                assert_eq!(decision.retry_after, hint);
+                assert!(decision.class.shares_cooldown());
+                assert_eq!(error.failure_kind(), None);
+                assert!(
+                    !crate::CodexError(error)
+                        .to_string()
+                        .contains("private canary")
+                );
+            }
+        }
+    }
+}
+
+/// Only canonical misalignment codes at the documented HTTP 400/403 boundary
+/// terminalize; retry advice, prose and echoes cannot change that authority.
+#[test]
+fn http_misalignment_policy_is_terminal_only_at_supported_boundary() {
+    for status in [400, 403] {
+        let error = LlmError::HttpStatusRetryAfter(
+            status,
+            r#"{"error":{"code":"misalignment_policy_violation","message":"private canary"}}"#
+                .to_owned(),
+            Duration::from_secs(12),
+        );
+        assert_eq!(error.retry_decision(), None);
+        assert_eq!(
+            error.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::RequestRejected)
+        );
+        assert!(
+            !crate::CodexError(error)
+                .to_string()
+                .contains("private canary")
+        );
+    }
+    for body in [
+        r#"{"error":{"message":"misalignment_policy_violation"}}"#,
+        r#"{"echo":{"code":"misalignment_policy_violation"}}"#,
+        r#"{"error":{"code":"Misalignment_Policy_Violation"}}"#,
+        r#"{"error":{"code":"slow_down","type":"misalignment_policy_violation"}}"#,
+    ] {
+        let error = LlmError::HttpStatus(403, body.to_owned());
+        assert!(error.retry_decision().is_some(), "{body}");
+        assert_eq!(error.failure_kind(), None);
+    }
+    let error = LlmError::HttpStatus(
+        503,
+        r#"{"error":{"code":"misalignment_policy_violation"}}"#.to_owned(),
+    );
+    assert_eq!(
+        error.retry_decision().expect("transient").class,
+        RetryClass::Overload
+    );
+}

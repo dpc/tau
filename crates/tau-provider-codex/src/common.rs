@@ -512,7 +512,13 @@ fn http_failure_kind(status: u16, body: &str) -> Option<ProviderFailureKind> {
         .any(|code| classify_error_code(code) != RetryClass::Unknown);
     let model_not_found = matches!(status, 400 | 403 | 404)
         && identifiers.iter().any(|code| code == "model_not_found");
-    if !known_transient && (model_not_found || matches!(status, 400 | 404 | 413 | 422)) {
+    let misalignment_policy = matches!(status, 400 | 403)
+        && identifiers
+            .iter()
+            .any(|code| code == "misalignment_policy_violation");
+    if !known_transient
+        && (model_not_found || misalignment_policy || matches!(status, 400 | 404 | 413 | 422))
+    {
         Some(ProviderFailureKind::RequestRejected)
     } else {
         None

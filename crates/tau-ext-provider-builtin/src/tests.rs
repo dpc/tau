@@ -3638,6 +3638,98 @@ fn refresh_failure_falls_back_only_to_still_valid_access_token() {
     );
 }
 
+/// Permanent refresh codes suppress only the exact Secret-RPC credential/mode
+/// generation. Replacement credentials recover without refreshing, mode changes
+/// retry, and unknown or server failures never poison the generation cache.
+#[test]
+fn maintenance_refresh_rejections_are_generation_scoped() {
+    let provider = ProviderName::new("chatgpt");
+    let reference = oauth_test_credential_reference();
+    let original = OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: "refresh-a".to_owned(),
+        expires_at_ms: 1,
+        account_id: Some("account-a".to_owned()),
+    };
+    for (code, status, permanent) in [
+        ("refresh_token_expired", 400, true),
+        ("refresh_token_expired", 401, true),
+        ("refresh_token_invalidated", 400, true),
+        ("refresh_token_invalidated", 401, true),
+        ("refresh_token_expired", 500, false),
+        ("refresh_token_invalidated", 500, false),
+        ("temporarily_unavailable", 401, false),
+        ("unknown", 400, false),
+    ] {
+        let body = serde_json::json!({"error": {"code": code}}).to_string();
+        let error = path_tau_provider_codex_oauth::OAuthError::from_http_response(status, &body);
+        let mut cache = OAuthRefreshRejectionCache::default();
+        let attempts = Cell::new(0);
+        for (index, mode) in [
+            CodexMode::Standard,
+            CodexMode::Standard,
+            CodexMode::LiteCompatibility,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = refresh_chatgpt_credentials_with(
+                &provider,
+                &reference,
+                mode,
+                &mut cache,
+                false,
+                |op| {
+                    assert!(matches!(
+                        op,
+                        tau_proto::ExtensionDataRequestOp::ReadFile { .. }
+                    ));
+                    Ok(tau_proto::ExtensionDataValue::ReadFile {
+                        contents: serde_json::to_vec(
+                            &credential_record::ChatGptOAuthCredential::from(original.clone()),
+                        )
+                        .expect("credential"),
+                    })
+                },
+                |_| {
+                    attempts.set(attempts.get() + 1);
+                    Err(error.clone())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                matches!(result, Err(RefreshCredentialsError::Suppressed { .. })),
+                permanent && index == 1,
+                "{code}: {status}"
+            );
+        }
+        assert_eq!(attempts.get(), if permanent { 2 } else { 3 });
+        let mut replacement = original.clone();
+        replacement.access_token = oauth_test_jwt("account-a");
+        replacement.refresh_token = "replacement".to_owned();
+        replacement.expires_at_ms = u64::MAX;
+        let recovered = refresh_chatgpt_credentials_with(
+            &provider,
+            &reference,
+            CodexMode::LiteCompatibility,
+            &mut cache,
+            false,
+            |_| {
+                Ok(tau_proto::ExtensionDataValue::ReadFile {
+                    contents: serde_json::to_vec(&credential_record::ChatGptOAuthCredential::from(
+                        replacement.clone(),
+                    ))
+                    .expect("replacement credential"),
+                })
+            },
+            |_| panic!("valid replacement must not refresh"),
+        )
+        .expect("replacement recovers");
+        assert_eq!(recovered.refresh_token, "replacement");
+        assert!(!cache.contains(&provider));
+    }
+}
+
 /// Startup-selected modes independently control same-process publication and
 /// overwrite later disk edits until restart.
 #[test]

@@ -5619,7 +5619,12 @@ fn apply_event_error_nested_type_fallback_is_propagated() {
 /// `response.failed`, including the nested code shape seen in the incident.
 #[test]
 fn apply_event_error_policy_codes_are_typed_terminal_rejections() {
-    for code in ["cyber_policy", "invalid_prompt", "bio_policy"] {
+    for code in [
+        "cyber_policy",
+        "invalid_prompt",
+        "bio_policy",
+        "misalignment_policy_violation",
+    ] {
         for detail in [
             serde_json::json!({"code": code}),
             serde_json::json!({"error": {"code": code}}),
@@ -5655,6 +5660,11 @@ fn apply_event_error_policy_codes_are_typed_terminal_rejections() {
 #[test]
 fn apply_event_error_policy_rejection_requires_canonical_identifier() {
     for (detail, expected_class) in [
+        (
+            serde_json::json!({"message": "misalignment_policy_violation",
+                "metadata": {"code": "misalignment_policy_violation"}}),
+            RetryClass::Unknown,
+        ),
         (
             serde_json::json!({"message": "cyber_policy"}),
             RetryClass::Unknown,
@@ -5697,6 +5707,103 @@ fn apply_event_error_policy_rejection_requires_canonical_identifier() {
             crate::CodexError(error).to_string(),
             "provider WebSocket stream failed"
         );
+    }
+}
+
+/// Both WS failure envelopes use exact throttle/account identifiers, preserve
+/// structured advice and leave context exhaustion and opaque prose
+/// authoritative only through their existing paths.
+#[test]
+fn maintenance_stream_codes_select_existing_shared_cooldowns() {
+    for (code, class) in [
+        ("slow_down", RetryClass::Throttle),
+        ("credit_balance_exhausted", RetryClass::Account),
+        ("organization_spend_limit_exceeded", RetryClass::Account),
+        ("project_spend_limit_exceeded", RetryClass::Account),
+        ("Slow_Down", RetryClass::Unknown),
+        ("slow_down_extra", RetryClass::Unknown),
+    ] {
+        for kind in ["error", "response.failed"] {
+            for hint in [None, Some(12)] {
+                let mut detail = serde_json::json!({
+                    "code": code, "message": "private canary; try in 999 seconds"
+                });
+                if let Some(seconds) = hint {
+                    detail["headers"] = serde_json::json!({"Retry-After": seconds.to_string()});
+                    detail["resets_in_seconds"] = serde_json::json!(seconds);
+                }
+                let event = if kind == "error" {
+                    serde_json::json!({"type": kind, "error": detail})
+                } else {
+                    serde_json::json!({"type": kind, "response": {"error": detail}})
+                };
+                let error = apply_event(
+                    &mut path_crate_common::StreamState::new(),
+                    &event,
+                    &mut |_| panic!("failure cannot emit output"),
+                )
+                .expect_err("failed event");
+                let decision = error.retry_decision().expect("retryable code");
+                assert_eq!(decision.class, class, "{event}");
+                assert_eq!(decision.retry_after, hint.map(Duration::from_secs));
+                assert_eq!(
+                    decision.class.shares_cooldown(),
+                    class != RetryClass::Unknown
+                );
+                assert_eq!(error.failure_kind(), None);
+            }
+        }
+    }
+}
+
+/// Newly recognized identifiers cannot gain authority from echoed metadata or
+/// prose; a canonical context error still outranks throttle/account hints.
+#[test]
+fn maintenance_stream_codes_preserve_canonical_authority() {
+    for code in [
+        "slow_down",
+        "credit_balance_exhausted",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+        "misalignment_policy_violation",
+    ] {
+        for kind in ["error", "response.failed"] {
+            let mut event = serde_json::json!({
+                "type": kind,
+                "error": {"code": "unrecognized_failure", "message": code},
+                "echo": {"code": code},
+            });
+            if kind == "response.failed" {
+                event["response"] = serde_json::json!({"error": event["error"].take()});
+            }
+            let error = apply_event(
+                &mut path_crate_common::StreamState::new(),
+                &event,
+                &mut |_| {},
+            )
+            .expect_err("opaque failure");
+            assert_eq!(
+                error.retry_decision().expect("retry").class,
+                RetryClass::Unknown
+            );
+            assert_eq!(error.failure_kind(), None);
+
+            event["code"] = serde_json::json!(code);
+            event["response"] = serde_json::json!({
+                "error": {"type": "context_length_exceeded"}
+            });
+            let error = apply_event(
+                &mut path_crate_common::StreamState::new(),
+                &event,
+                &mut |_| {},
+            )
+            .expect_err("context failure");
+            assert_eq!(error.retry_decision(), None);
+            assert_eq!(
+                error.failure_kind(),
+                Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            );
+        }
     }
 }
 
@@ -6289,7 +6396,12 @@ fn response_incomplete_is_a_typed_terminal_rejection() {
 /// terminalize a failed Responses request before the scheduler sees it.
 #[test]
 fn response_failed_canonical_policy_codes_are_typed_terminal_rejections() {
-    for code in ["cyber_policy", "invalid_prompt", "bio_policy"] {
+    for code in [
+        "cyber_policy",
+        "invalid_prompt",
+        "bio_policy",
+        "misalignment_policy_violation",
+    ] {
         let event = serde_json::json!({
             "type": "response.failed",
             "response": {

@@ -55,9 +55,6 @@ const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.6-luna",
     "gpt-6-astra",
     "gpt-6.2-astra",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
     "gpt-5.3-codex",
 ];
 

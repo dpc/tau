@@ -560,7 +560,8 @@ fn debug_response_producer_submits_typed_compressed_capture_job() {
     );
 }
 
-/// Published ChatGPT models carry public ordinary/output comparison prices but
+/// Current and explicitly configured historical ChatGPT models carry public
+/// ordinary/output comparison prices but
 /// leave private-route cache billing to the non-authoritative central fallback.
 #[test]
 fn chatgpt_models_publish_basic_non_cache_prices() {
@@ -580,16 +581,10 @@ fn chatgpt_models_publish_basic_non_cache_prices() {
         .find(|model| model.id.model.as_str() == "gpt-5.6-luna")
         .expect("luna model")
         .estimated_api_cost_rates();
-    let gpt_5_4 = models
-        .iter()
-        .find(|model| model.id.model.as_str() == "gpt-5.4")
-        .expect("gpt-5.4 model")
-        .estimated_api_cost_rates();
-    let mini = models
-        .iter()
-        .find(|model| model.id.model.as_str() == "gpt-5.4-mini")
-        .expect("mini model")
-        .estimated_api_cost_rates();
+    let provider = ProviderName::new("chatgpt");
+    let gpt_5_4 = model_info(&provider, "gpt-5.4", CodexMode::Standard).estimated_api_cost_rates();
+    let mini =
+        model_info(&provider, "gpt-5.4-mini", CodexMode::Standard).estimated_api_cost_rates();
 
     assert_eq!(sol.uncached_input.as_micro_usd(), 4_000_000);
     assert_eq!(
@@ -3170,9 +3165,6 @@ fn publishes_chatgpt_model_metadata() {
             "work-chatgpt/gpt-5.6-luna",
             "work-chatgpt/gpt-6-astra",
             "work-chatgpt/gpt-6.2-astra",
-            "work-chatgpt/gpt-5.5",
-            "work-chatgpt/gpt-5.4",
-            "work-chatgpt/gpt-5.4-mini",
             "work-chatgpt/gpt-5.3-codex",
         ],
     );
@@ -3298,22 +3290,6 @@ fn publishes_chatgpt_model_metadata() {
             .max_input_tokens,
         Some(effective_context_window_for_model("gpt-5.6-sol"))
     );
-    assert_eq!(
-        models
-            .iter()
-            .find(|model| model.id.model.as_str() == "gpt-5.5")
-            .expect("gpt-5.5 model")
-            .context_window,
-        DEFAULT_RAW_CONTEXT_WINDOW
-    );
-    assert_eq!(
-        models
-            .iter()
-            .find(|model| model.id.model.as_str() == "gpt-5.5")
-            .expect("gpt-5.5 model")
-            .max_input_tokens,
-        Some(effective_context_window_for_model("gpt-5.5"))
-    );
     assert!(
         models
             .iter()
@@ -3343,6 +3319,28 @@ fn publishes_chatgpt_model_metadata() {
                         .contains(&tau_proto::InputModality::Image)
             })
     );
+}
+
+/// Retirement changes discovery only: saved historical models still resolve
+/// with their original capabilities in both startup-selected modes.
+#[test]
+fn retired_chatgpt_models_remain_explicitly_configurable() {
+    let provider = ProviderName::new("chatgpt");
+    for mode in [CodexMode::Standard, CodexMode::LiteCompatibility] {
+        let published = models_for_provider_mode(&provider, mode);
+        for name in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] {
+            assert!(
+                !published
+                    .iter()
+                    .any(|model| model.id.model.as_str() == name)
+            );
+            let config =
+                config_for_model_mode(&ModelName::new(name), "token".to_owned(), None, mode);
+            assert_eq!(config.model_id, name);
+            assert_eq!(config.mode, CodexMode::Standard);
+            assert!(config.supports_compaction);
+        }
+    }
 }
 
 /// Publication must agree with the source-audited image wire contract for every
@@ -3593,7 +3591,7 @@ fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
         .expect("Lite Sol");
     let older_info = lite_models
         .iter()
-        .find(|model| model.id.model.as_str() == "gpt-5.5")
+        .find(|model| model.id.model.as_str() == "gpt-5.3-codex")
         .expect("older model");
 
     assert_eq!(older.mode, responses::ResponsesMode::Standard);

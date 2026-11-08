@@ -106,6 +106,8 @@ impl OAuthError {
                     "invalid_grant"
                         | "invalid_refresh_token"
                         | "refresh_token_reused"
+                        | "refresh_token_expired"
+                        | "refresh_token_invalidated"
                         | "refresh_token_revoked"
                 )
             )

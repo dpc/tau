@@ -424,11 +424,16 @@ fn permanent_refresh_rejection_requires_known_provider_code() {
         "invalid_grant",
         "invalid_refresh_token",
         "refresh_token_reused",
+        "refresh_token_expired",
+        "refresh_token_invalidated",
         "refresh_token_revoked",
     ] {
         let body = serde_json::json!({"error": {"code": code}}).to_string();
         assert!(super::OAuthError::from_http_response(400, &body).is_permanent_refresh_rejection());
         assert!(super::OAuthError::from_http_response(401, &body).is_permanent_refresh_rejection());
+        assert!(
+            !super::OAuthError::from_http_response(500, &body).is_permanent_refresh_rejection()
+        );
     }
 
     assert!(
