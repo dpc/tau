@@ -867,6 +867,105 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     assert!(!status_row.contains("@engineer_abc"));
 }
 
+/// Long selected-agent titles and display names must share the available row
+/// with metrics instead of evicting those metrics and then disappearing whole.
+/// Wide rows retain the full text, and tiny rows still protect the identity.
+#[test]
+fn selected_agent_status_free_text_shares_width_with_metrics() {
+    let (_term, handle, _vt) = setup(160, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let agent = agent_id("coordinator-c7Vw");
+    let title = "Tau activation report recorded; scope and runtime gates remain unverified";
+    let model = tau_proto::ModelId::from("chatgpt/gpt-5.6-sol");
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        agent_id: agent.clone(),
+        model: model.clone(),
+        ..agent_prompt_started("status-width", "s1")
+    }));
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent.clone(),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
+        tools: Default::default(),
+        context: tau_proto::AgentContextStats {
+            input_tokens: Some(22_000),
+            cached_tokens: None,
+            context_window: Some(998_000),
+            percent_used: Some(2),
+        },
+        inner_turns_total: Some(11),
+        estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(590_000_000_000),
+        creator_subtree_estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(
+            590_000_000_000,
+        ),
+        work_status: tau_proto::SessionAgentWorkStatus::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            Some(title.to_owned()),
+        )
+        .expect("valid work status"),
+    }));
+    renderer.handle(&Event::HarnessAgentContextUsageChanged(
+        tau_proto::HarnessAgentContextUsageChanged {
+            agent_id: agent.clone(),
+            input_tokens: Some(22_000),
+            cached_tokens: None,
+            context_window: Some(998_000),
+            percent_used: Some(2),
+        },
+    ));
+    renderer.handle(&danger_quota_event(&model));
+
+    // Exercise a title alone and alongside a long display name with wide
+    // graphemes.
+    for display_name in [None, Some("界".repeat(36))] {
+        if let Some(name) = &display_name {
+            renderer.handle(&Event::AgentDisplayNameSet(
+                tau_proto::AgentDisplayNameSet {
+                    agent_id: agent.clone(),
+                    display_name: name.clone(),
+                },
+            ));
+        }
+        let block = renderer.build_model_status_block();
+        let wide = priority_header_text(&block, 220);
+        assert!(wide.contains(title), "{wide:?}");
+        if let Some(name) = &display_name {
+            assert!(wide.contains(&format!("({name})")), "{wide:?}");
+        }
+        for width in [70, 80, 100] {
+            let row = priority_header_text(&block, width);
+            assert!(
+                row.starts_with("✅💤 @coordinator-c7Vw "),
+                "{width}: {row:?}"
+            );
+            assert!(
+                row.ends_with("#22k/998k *11 $.59/$.59 ▁"),
+                "{width}: {row:?}"
+            );
+            assert!(row.contains('┄'), "{width}: {row:?}");
+            assert!(
+                !row.contains("   "),
+                "unused width while free text is truncated at {width}: {row:?}"
+            );
+            assert_eq!(unicode_width::UnicodeWidthStr::width(row.as_str()), width);
+        }
+        let identity = "✅💤 @coordinator-c7Vw";
+        let identity_width = unicode_width::UnicodeWidthStr::width(identity);
+        assert_eq!(priority_header_text(&block, identity_width), identity);
+        assert!(priority_header_text(&block, identity_width - 1).is_empty());
+    }
+}
+
 /// An authoritative display name remains supplemental and visible when its text
 /// equals the operational role; equality must not be treated as synthetic.
 #[test]

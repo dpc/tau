@@ -3544,12 +3544,18 @@ impl EventRenderer {
 
     pub(crate) fn build_model_status_block(&mut self) -> tau_cli_term::StyledBlock {
         use tau_cli_term::resolve::convert_color;
-        use tau_cli_term::{PriorityLine, PriorityLineAlignment, StyledBlock};
+        use tau_cli_term::{
+            PriorityLine, PriorityLineAlignment, PriorityLineTruncation, StyledBlock,
+        };
         use tau_themes::{StyleName, names};
 
         let mut line = PriorityLine::new();
         let left = PriorityLineAlignment::Left;
         let right = PriorityLineAlignment::Right;
+        // Reserve a readable excerpt before expanding free text into spare
+        // columns. Atomic titles can evict metrics and then disappear
+        // themselves, wasting space.
+        let free_text_bounds = PriorityLineTruncation::new(5, usize::MAX);
 
         match (
             self.selection.current_agent_id.as_ref(),
@@ -3573,17 +3579,19 @@ impl EventRenderer {
                     ),
                 );
                 if let Some(title) = title {
-                    line.push(
+                    line.push_truncated(
                         StatusElement::WorkTitle.priority(),
                         left,
                         status_chip(&self.resources.theme, names::TOOL_STATUS_INFO, title),
+                        free_text_bounds,
                     );
                 }
                 if let Some(description) = self.agent_status_description(agent_id) {
-                    line.push(
+                    line.push_truncated(
                         StatusElement::Description.priority(),
                         left,
                         status_chip(&self.resources.theme, names::STATUS_ROLE, description),
+                        free_text_bounds,
                     );
                 }
                 if let Some(watched_by) = self.watched_by_status(agent_id) {

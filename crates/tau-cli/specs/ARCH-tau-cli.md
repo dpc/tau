@@ -201,6 +201,12 @@ counter `70`. Larger priorities disappear first at narrow widths; equal
 priorities disappear in reverse visual declaration order. Retained elements
 keep their normal left/right placement and spacing. If identity itself cannot
 fit, the status line stays empty rather than wrapping or clipping it.
+Task titles and agent descriptions each reserve up to five display columns and
+expand into the remaining space without a fixed maximum. When shortened, they
+retain a prefix and suffix around `┄`. They hide according to their existing
+priority when their minimum representations cannot fit. Metrics can therefore
+coexist with useful excerpts instead of disappearing before an oversized atomic
+title is hidden.
 The reusable fitting and grouping behavior comes from
 [ARCH-tau-term-screen](../../tau-term-screen/specs/ARCH-tau-term-screen.md).
 Authoritative `session.started` events reconcile the displayed context and the
