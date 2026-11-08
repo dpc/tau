@@ -20,13 +20,13 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Unpublished source SDK 0.28.0
+### Published SDK 0.28.0
 
-The current source uses protocol **21.0**, adding ordered tool report, update,
+The current source uses protocol **21.0**, which adds ordered tool report, update,
 and final-capture types, declaration-frozen policy, and receipt-only background
 waits. Configured extensions and UI peers require a coordinated rebuild. The
-source SDK package version remains **0.28.0**; this change requests no new SDK
-release, version bump, publication, or runtime activation. See
+SDK package version is **0.28.0**. Publication does not rebuild configured
+extensions or activate runtimes. See
 [SPEC-streamed-tool-output](../specs/SPEC-streamed-tool-output.md).
 
 Protocol 20.0 / source SDK 0.28.0 remove deprecated full-digest artifact keys.
@@ -34,8 +34,34 @@ Only the fixed 24-lowercase-hex identity is accepted in references and typed DTO
 Rebuild configured extensions and UI peers together before activation. Old full-key
 typed image/history records and upload receipts no longer decode; plain-text
 history, current short-key records, and physical full-digest object paths remain
-unchanged. There is no migration. Source changes do not publish the SDK or deploy
-a runtime.
+unchanged. There is no migration; SDK publication does not deploy a runtime.
+
+Proto and client 0.28.0 were published in dependency order on November 8, 2026
+(UTC) from clean source `c3af02b03cd8362b3128550611dcb82b9ee0b278`, after final
+SelfCI, normal merge-queue run 2, and locked verified publish dry-runs passed.
+The merge queue preserved that source identity. Radicle canonical master and the
+GitHub mirror both identified that revision before either upload.
+
+Both official sparse-index entries are unyanked. Downloaded registry archives
+match the verified dry-run archives byte for byte. Their checksums match the index.
+Their Cargo VCS metadata identifies that clean source and the respective
+`crates/tau-proto` and `crates/tau-client` directories:
+
+| Package | SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `cb6c3e17345a659f933bb12ef3cb4f7b545b23ff3428adb3698ceac0e105d450` |
+| `dpc-tau-client` | `251232d9d86d23626671df39d079fe8fddf7cb8c9788518cdfb9e900eab93114` |
+
+The registry-only consumer passed all 18 tests on Rust 1.91.1 with a fresh Cargo
+home and no local SDK patches. It checks protocol 21.0, the streamed output,
+capture, frozen policy, receipt, and compaction-effectiveness surfaces, and
+rejection of removed legacy artifact keys.
+
+After registry acceptance, the source-identifying `dpc-tau-proto-v0.28.0` and
+`dpc-tau-client-v0.28.0` tags were published at that source on Radicle and
+GitHub. The unchanged 0.1.0 leaf packages were not republished. This publication
+did not change the application version, publish an application release, migrate
+external extensions, activate services, or reset stored state.
 
 ### Unpublished source SDK 0.27.0
 
