@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.26.0",
+        "dpc-tau-proto": "=0.28.0",
     },
 }
 
@@ -182,7 +182,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(19, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(21, 0));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 
@@ -508,7 +508,7 @@ fn packaged_sdk_round_trips_explicit_response_continuation() {
 fn packaged_sdk_round_trips_prepared_image_reference_and_invocation_policy() {
     let content = tau_proto::ToolResultContentPart::ImageReference(tau_proto::ImageReference {
         blob: tau_proto::ArtifactDescriptor::new(
-            tau_proto::ArtifactKey::parse(format!("blake3:{}", "ab".repeat(32))).expect("key"),
+            tau_proto::ArtifactKey::parse("ab".repeat(12)).expect("key"),
             3,
         ).expect("descriptor"),
         media_type: tau_proto::ImageMediaType::Png,
@@ -522,8 +522,161 @@ fn packaged_sdk_round_trips_prepared_image_reference_and_invocation_policy() {
     assert_eq!(decoded, content);
     assert!(decoded.is_image_reference());
     assert_eq!(decoded.encoded_image_bytes(), 3);
+    let legacy = format!("blake3:{}", "ab".repeat(32));
+    assert!(tau_proto::ArtifactKey::parse(&legacy).is_err());
+    let encoded = tau_proto::encode_message_to_vec(&legacy).expect("encode legacy key");
+    assert!(tau_proto::decode_message_from_slice::<tau_proto::ArtifactKey>(&encoded).is_err());
     let policy = tau_proto::ToolInvocationPolicy::default();
     assert_eq!(policy.prepared_image_storage, tau_proto::PreparedImageStorage::Inline);
+}
+
+/// Archive consumers retain exact declaration identity and bounded final source,
+/// rather than confusing incremental reports with canonical updates or receipts.
+#[test]
+fn packaged_sdk_preserves_streamed_output_and_completion() {
+    use tau_proto::*;
+    assert_eq!(TOOL_OUTPUT_STREAM_TAG, "tool:output-stream");
+    let call_id = ToolCallId::new("call");
+    let tool_name = ToolName::new("consumer");
+    let call = ToolCallRef {
+        declaration: ObservationId::from_bytes([7; 16]),
+        item_index: 2,
+    };
+    let report = ToolOutputReport {
+        call_id: call_id.clone(),
+        tool_name: tool_name.clone(),
+        sequence: 0,
+        text: "first batch".into(),
+        omitted_bytes: 17,
+    };
+    let update = ToolOutputUpdate { call, output: report.clone() };
+    let capture = ToolFinalOutput::capture(
+        &CborValue::Text("final diagnostic".into()),
+        ProviderToolResultStatus::Success,
+    );
+    assert_eq!(capture.text, "final diagnostic");
+    assert_eq!(capture.omitted_bytes, 0);
+    let terminal = ToolBackgroundError {
+        outcome: ToolBackgroundErrorOutcome::Cancelled,
+        captured_output: Some(capture),
+        call_id: call_id.clone(),
+        tool_name,
+        tool_type: ToolType::Function,
+        message: "cancelled".into(),
+        details: None,
+        display: None,
+        originator: PromptOriginator::User,
+    };
+    for event in [
+        Event::ToolOutputReported(report),
+        Event::ToolOutputUpdated(update),
+        Event::ToolResult(ToolResult {
+            captured_output: terminal.captured_output.clone(),
+            call_id: call_id.clone(),
+            tool_name: terminal.tool_name.clone(),
+            tool_type: ToolType::Function,
+            result: CborValue::Null,
+            presentation: ToolResultPresentation::ToolStreamReceipt,
+            provider_content: vec![],
+            kind: ToolResultKind::default(),
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+        Event::ToolBackgroundError(terminal),
+    ] {
+        let bytes = encode_message_to_vec(&event).expect("encode output event");
+        assert_eq!(decode_message_from_slice::<Event>(&bytes).expect("decode output event"), event);
+    }
+    let page = ToolOutputPage {
+        call, text: "first batch".into(), offset: 0, next_offset: Some(11),
+        retained_bytes: 27, terminal: true,
+    };
+    let bytes = encode_message_to_vec(&page).expect("encode lookup page");
+    assert_eq!(decode_message_from_slice::<ToolOutputPage>(&bytes).expect("decode lookup page"), page);
+    for outcome in [
+        ToolCompletionOutcome::Completed,
+        ToolCompletionOutcome::Error,
+        ToolCompletionOutcome::Cancelled,
+    ] {
+        let receipt = tool_completion_receipt(&call_id, outcome);
+        assert_eq!(receipt, CborValue::Map(vec![
+            (CborValue::Text("original_tool_call_id".into()), CborValue::Text("call".into())),
+            (CborValue::Text("target_outcome".into()), CborValue::Text(outcome.as_str().into())),
+        ]));
+    }
+}
+
+/// Frozen item indices must survive packaging on the canonical declaration;
+/// they are not inferred from a later registry or producer report.
+#[test]
+fn packaged_sdk_preserves_declaration_frozen_output_policy() {
+    use tau_proto::*;
+    let declaration = ProviderResponseFinished {
+        streamed_tool_items: vec![0],
+        compaction_input_bytes: None,
+        interrupted_retry: false,
+        final_status_disposition: FinalStatusDisposition::Accepted,
+        agent_prompt_id: "prompt".parse().expect("prompt"),
+        agent_id: "agent".parse().expect("agent"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: ToolCallId::new("call"),
+            name: ToolName::new("consumer"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Null,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        error_category: None,
+        context_limit_telemetry: None,
+        recovery_disposition: ContextRecoveryDisposition::default(),
+        output_length_disposition: OutputLengthDisposition::default(),
+        provider_attempt: ProviderAttempt::default(),
+        automatic_compaction_decision: None,
+        originator: PromptOriginator::User,
+        usage: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        compaction_original_input_tokens: None,
+        compaction_output_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    let event = Event::ProviderResponseFinished(declaration);
+    let bytes = encode_message_to_vec(&event).expect("encode declaration");
+    assert_eq!(decode_message_from_slice::<Event>(&bytes).expect("decode declaration"), event);
+}
+
+/// Consumers preserve measured zero separately from an unknown estimate.
+#[test]
+fn packaged_sdk_preserves_compaction_effectiveness() {
+    use tau_proto::*;
+    let effectiveness = CompactionEffectiveness {
+        estimator: "consumer-estimator-v1".into(),
+        prefix_before: Some(TokenCount::new(100)),
+        total_before: Some(TokenCount::new(150)),
+        replacement_after: Some(TokenCount::new(0)),
+        total_after: None,
+    };
+    let event = Event::AgentCompacted(AgentCompacted {
+        effectiveness: Some(effectiveness),
+        compaction_input_bytes: None,
+        agent_id: "agent".parse().expect("agent"),
+        transaction_id: CompactionTransactionId::parse("transaction").expect("transaction"),
+        cut: AgentHead::Root,
+        suffix_end: AgentHead::Root,
+        compact_prompt_id: "prompt".parse().expect("prompt"),
+        model: "openai/consumer".parse().expect("model"),
+        operation: PromptOperation::StandaloneCompaction,
+        original_input_tokens: None,
+        compaction_output_tokens: None,
+        replacement_window: vec![],
+    });
+    let bytes = encode_message_to_vec(&event).expect("encode estimates");
+    assert_eq!(decode_message_from_slice::<Event>(&bytes).expect("decode estimates"), event);
 }
 
 /// UI discovery DTOs and consumer-local MIME inference must survive packaging.
@@ -611,5 +764,6 @@ nix shell \
     [[ "$(rustc --version)" == "rustc 1.91."* ]]
     [[ "$(cargo --version)" == "cargo 1.91."* ]]
     cd "$1"
-    cargo test --manifest-path Cargo.toml -- --color never
+    cargo generate-lockfile --manifest-path Cargo.toml
+    cargo test --locked --manifest-path Cargo.toml -- --color never
   ' bash "$tmp/consumer"
