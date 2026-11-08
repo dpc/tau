@@ -178,6 +178,12 @@ Newlines are assumed to be `\n`, but other styles are supported
 and displayed as `crlf` (`\r\n`), `cr` (`\r`) or `no_nl` (missing trailing newline).
 This applies to both `read` line-number prefixes and `shell` stdout/stderr prefixes.
 
+Incremental shell source uses `out (fragment)` and `err (fragment)` for stream
+fragments, not complete lines. Apply the line-ending rules above to line-rendered
+output, not to fragment boundaries.
+Use `tau-tool-verification-file-shell` for streaming UTF-8 and retention probes,
+and `tau-tool-verification-background-cancel` for source ordering and receipts.
+
 Lines containing invalid UTF-8 bytes should show Unicode replacement characters and an `invalid-utf8` flag,
 so useful surrounding content remains visible while the agent knows the bytes were not exact.
 Lines which are too long show a `truncated` flag and have content skipped.

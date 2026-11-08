@@ -23,6 +23,15 @@ successful receipt with `original_tool_call_id` and `target_outcome` (`completed
 source body. Use `tool_output` deliberately for bounded recovery; omitted raw
 bytes and expired temporary files are not recoverable through it.
 
+Verify source by call ID and sequence, including the terminal source after all
+accepted updates. A shell terminal can contain only a suffix; look for earlier
+content in prior updates rather than treating it as missing completion output.
+Pair these checks with the file-shell fragment and bounded-retention probes. A receipt's
+`target_outcome: completed` means tool execution completed, not that the process
+exited zero: assert a nonzero status in source and a completed receipt. For
+plural waits, check receipts in request order without expecting copies of the
+source inside them.
+
 Verify that a real shell prints a sentinel and stays alive: the sentinel must arrive
 after 15 seconds idle or 30 seconds of continuing output, before completion,
 and the agent must be able to cancel in response. Silence must not produce

@@ -182,6 +182,38 @@ path-labelled expected-context excerpt in `details.output`, where real
 newlines are valid. Preserve escaped metadata paths, no-mutation evidence, and
 any partial-change fields/UI diffs from earlier successful hunks.
 
+#### Streaming fragments and saved output
+
+Probe a command that writes partial stdout and stderr, pauses across an update,
+then completes both lines and exits with new no-newline tails. Incremental
+`out (fragment)` / `err (fragment)` records are not complete lines or individual
+process writes: adjacent observations from one stream can coalesce. Do not
+require `no_nl` on fragments or infer a global process-write order across the two
+streams. Check each stream's content and call identity across ordered updates.
+
+Split a valid multibyte UTF-8 character across writes and an update boundary.
+Check that each stream keeps its incomplete bytes pending, without a premature
+replacement character or an empty update just for those bytes.
+Complete the character and check that decoding preserves it. Also test malformed
+bytes and an incomplete character at termination: fragment decoding uses replacement
+characters, not the line renderer's `invalid-utf8` flags.
+
+Use a burst larger than the incremental allowance followed by a recent
+diagnostic and a nonzero exit. Each update retains a bounded recent tail
+(currently at most 8 KiB); `omitted_bytes` counts discarded normalized rendered
+bytes, including fragment labels, not raw process bytes or missing lines.
+Lifetime update limits can stop publication without stopping pipe draining or
+retention of a final diagnostic tail. Omission in this view is distinct from
+native line/byte truncation and the saved-output cap.
+
+After any published batches, check that the terminal shell body contains only
+the unsent tail, without repeating earlier source. Check terminal tails on normal
+exit, nonzero exit, timeout, and cancellation; cancellation does not promise a saved
+file. For completed streamed commands, inspect the reported saved-output file
+separately: within its cap it preserves the complete line-rendered output,
+even when incremental updates omitted bytes. Apply the index's partial-file and
+unavailable-file rules rather than assuming every saved file is complete.
+
 For shell truncation, independently construct the expected rendered records.
 `total_bytes` and saved artifacts count the complete UTF-8 rendering, including
 `out` / `err` prefixes, flags such as `crlf`, `no_nl`, and `invalid-utf8`, plus
