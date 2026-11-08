@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 
 mod message_release;
 mod status;
-mod tool_output;
 
 #[cfg(test)]
 use status::parse_args as parse_status_args;
@@ -31,7 +30,6 @@ use tau_proto::{PromptOriginator, ToolResult};
 const SKILL_TOOL_NAME: &str = "skill";
 const AGENT_START_TOOL_NAME: &str = "agent_start";
 const WAIT_TOOL_NAME: &str = "wait";
-const TOOL_OUTPUT_NAME: &str = "tool_output";
 const CANCEL_TOOL_NAME: &str = "cancel";
 const MESSAGE_TOOL_NAME: &str = "message";
 const MESSAGE_RELEASE_TOOL_NAME: &str = "message_release";
@@ -261,7 +259,6 @@ impl InternalToolHandler for BuiltinTools {
             skill_tool_spec(),
             agent_start_tool_spec(),
             wait_tool_spec(),
-            tool_output::tool_spec(),
             cancel_tool_spec(),
             message_tool_spec(),
             message_release::tool_spec(),
@@ -294,7 +291,6 @@ impl InternalToolHandler for BuiltinTools {
             SKILL_TOOL_NAME
                 | AGENT_START_TOOL_NAME
                 | WAIT_TOOL_NAME
-                | TOOL_OUTPUT_NAME
                 | CANCEL_TOOL_NAME
                 | MESSAGE_TOOL_NAME
                 | MESSAGE_RELEASE_TOOL_NAME
@@ -349,12 +345,6 @@ impl InternalToolHandler for BuiltinTools {
                     WAIT_TOOL_NAME => {
                         host.handle_wait_tool_call(&conversation_id, &call, visible_tool_name)
                     }
-                    TOOL_OUTPUT_NAME => tool_output::handle_tool_call(
-                        host,
-                        &conversation_id,
-                        &call,
-                        visible_tool_name,
-                    ),
                     MESSAGE_TOOL_NAME => {
                         handle_message_tool_call(host, &conversation_id, &call, visible_tool_name)
                     }
@@ -2226,8 +2216,8 @@ fn wait_tool_spec() -> ToolSpec {
              nonempty IDs and settle only after every member terminates, returning receipts in \
              request order. All completion receipts are successful synchronization results with \
              outcome completed, error, or cancelled; they never repeat target output. \
-             Output arrives separately in ordered tool-origin context. Use tool_output for \
-             deliberate bounded recovery. Bare wait remains pending while an owned background \
+             Output arrives separately in ordered tool-origin context. \
+             Bare wait remains pending while an owned background \
              call runs; with no available or running call it fails. Input timeouts are positive \
              minutes clamped to configured bounds (normally 1–1,440), and consume no input or \
              completion. Activating input may interrupt any wait successfully without consuming \

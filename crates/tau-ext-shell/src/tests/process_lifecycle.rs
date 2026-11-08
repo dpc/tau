@@ -1244,7 +1244,55 @@ fn shell_tool_accepts_exact_model_output_byte_cap() {
     assert_eq!(combined, expected);
     assert_eq!(combined.len(), EXPECTED_MODEL_SHELL_OUTPUT_BYTES);
     assert!(cbor_map_field(&output.result, "truncated").is_none());
-    assert!(cbor_map_field(&output.result, "full_output_path").is_none());
+    let path = cbor_map_text(&output.result, "full_output_path").expect("final overflow path");
+    assert_eq!(
+        std::fs::read_to_string(path).expect("saved rendering"),
+        expected
+    );
+    let captured = tau_proto::ToolFinalOutput::capture(
+        &output.result,
+        tau_proto::ProviderToolResultStatus::Success,
+    );
+    assert!(captured.omitted_bytes > 0);
+    assert!(captured.text.contains(&format!("full_output_path: {path}")));
+}
+
+/// Output below the native cap must still expose a complete shell file when
+/// the smaller harness final-rendering allowance drops UTF-8 diagnostics.
+#[test]
+fn shell_tool_final_capture_overflow_keeps_visible_file_header() {
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".into()),
+        CborValue::Text("i=0; while [ \"$i\" -lt 2200 ]; do printf '\\360\\237\\231\\202'; i=$((i + 1)); done; printf '\\n'".into()),
+    )]);
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
+        panic!("finished command");
+    };
+    let expected = format!("out {}", "🙂".repeat(2200));
+    assert_eq!(
+        cbor_map_text(&output.result, "output"),
+        Some(expected.as_str())
+    );
+    assert!(cbor_map_field(&output.result, "truncated").is_none());
+    let path = cbor_map_text(&output.result, "full_output_path").expect("overflow file");
+    assert_eq!(
+        std::fs::read_to_string(path).expect("ordinary file inspection"),
+        expected
+    );
+    let captured = tau_proto::ToolFinalOutput::capture(
+        &output.result,
+        tau_proto::ProviderToolResultStatus::Success,
+    );
+    assert!(captured.omitted_bytes > 0);
+    assert!(captured.text.contains(&format!("full_output_path: {path}")));
+    assert!(!captured.text.contains('\u{FFFD}'));
 }
 
 /// Ensures byte-cap truncation preserves UTF-8 boundaries and saves the
@@ -1305,6 +1353,13 @@ fn shell_tool_multibyte_output_over_model_cap_keeps_exact_artifact() {
     )
     .expect("read complete saved output");
     assert_eq!(saved, expected);
+    let path = cbor_map_text(&output.result, "full_output_path").expect("full path");
+    let captured = tau_proto::ToolFinalOutput::capture(
+        &output.result,
+        tau_proto::ProviderToolResultStatus::Success,
+    );
+    assert!(captured.omitted_bytes > 0);
+    assert!(captured.text.contains(&format!("full_output_path: {path}")));
 }
 
 /// Ensures shell truncation publishes complete totals and a readable,

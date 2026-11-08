@@ -57,14 +57,6 @@ pub trait InternalToolHandler: Send + Sync {
 /// Shared reference-counted internal tool handler.
 pub type InternalToolHandlers = Vec<Arc<dyn InternalToolHandler>>;
 
-/// Exactly one declaration selector for accepted-output recovery.
-pub enum ToolOutputTarget {
-    /// Resolve the most recent matching display ID on the selected branch.
-    DisplayId(ToolCallId),
-    /// Recover the exact declaration occurrence.
-    Reference(tau_proto::ToolCallRef),
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct InternalToolDispatchWork {
@@ -837,36 +829,6 @@ impl<'a> InternalToolHost<'a> {
     /// Complete a prebuilt internal tool error, routing foreground/background.
     pub fn finish_prebuilt_tool_error(&mut self, error: ToolError) {
         self.harness.finish_prebuilt_internal_tool_error(error);
-    }
-
-    /// Recover one bounded accepted-output page from the owning selected
-    /// branch.
-    pub fn tool_output_page(
-        &self,
-        conversation_id: &AgentId,
-        target: ToolOutputTarget,
-        offset: usize,
-    ) -> Result<tau_proto::ToolOutputPage, String> {
-        let agent = self
-            .harness
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(conversation_id)
-            .ok_or_else(|| "Unknown owning agent".to_owned())?;
-        let tree = agent
-            .identity
-            .agent_id
-            .as_ref()
-            .and_then(|id| self.harness.session_runtime.agent_store.agent(id.as_str()))
-            .ok_or_else(|| "Tool output history is unavailable for this agent".to_owned())?;
-        let reference = match target {
-            ToolOutputTarget::Reference(reference) => Some(reference),
-            ToolOutputTarget::DisplayId(id) => tree.tool_output_call(&id, agent.identity.head),
-        }
-        .ok_or_else(|| "No matching tool declaration on this agent's selected branch".to_owned())?;
-        tree.tool_output_page(reference, agent.identity.head, offset)
-            .map_err(|error| error.to_string())
     }
 
     /// Handle the built-in `wait` tool.

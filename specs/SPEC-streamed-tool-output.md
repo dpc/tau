@@ -101,12 +101,12 @@ by the existing finite canonical declaration and one-open-round rules. Persisten
 staging applies finite frame/byte limits and reserves separate capacity for
 terminal/control work rather than letting incremental output consume it all.
 
-An explicit `tool_output` lookup returns at most 8 KiB from accepted canonical
-source on the owning agent's selected physical branch. A display ID selects its
-latest declaration on that branch; subsequent pages use the returned exact
-reference and UTF-8 byte cursor. It can read accepted deferred context without
-forcing placement. Compaction does not erase physical source ancestry. This
-deliberate lookup may repeat text; ordinary waits and notices do not.
+There is no dedicated output lookup tool. Use ordinary shell commands to inspect
+saved output through the terminal's temporary-file path, when available. Use
+existing best-effort compaction transcript archives to inspect accepted source
+in replaced semantic windows, as described in
+[SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md).
+Neither route recovers omitted raw bytes or expired temporary files.
 
 Normal semantic journal/replay rules apply. Accepted source survives replay;
 unaccepted reports, omitted raw bytes, and temporary saved-output files have no
@@ -141,9 +141,8 @@ The producer continues draining output and executing the command when output
 exceeds an allowance. It preserves recent diagnostics and reports omissions
 rather than cancelling the process. A private saved-output spool has an
 independent finite cap and truthful complete, truncated, or unavailable metadata;
-it is not the durable
-source-recovery API. Shell VCR replay preserves accepted batch order and relative
-timing without executing the command.
+it is not durable storage. Shell VCR replay preserves accepted batch order and
+relative timing without executing the command.
 
 This refines
 [SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md)

@@ -50,25 +50,6 @@ impl ToolFinalOutput {
     }
 }
 
-/// One explicitly requested page of accepted output. This does not claim that
-/// omitted process bytes or temporary saved-output files remain available.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolOutputPage {
-    /// Exact declaration whose output was requested.
-    pub call: ToolCallRef,
-    /// Canonical retained text, bounded independently of the aggregate.
-    pub text: String,
-    /// Requested UTF-8 byte offset.
-    pub offset: usize,
-    /// Continuation cursor, absent when the current retained output is
-    /// exhausted.
-    pub next_offset: Option<usize>,
-    /// Currently retained rendered bytes across all accepted occurrences.
-    pub retained_bytes: usize,
-    /// Whether the invocation has a canonical terminal.
-    pub terminal: bool,
-}
-
 /// A producer-owned immutable output batch. Sequence numbers count reports, not
 /// reads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -122,13 +122,7 @@ fn unsolicited_cancellation_preserves_live_and_restored_wait_outcome() {
             );
             let replayed = tau_core::AgentTree::try_from_events(agent.clone(), &records)
                 .expect("replay final source");
-            let reference = replayed
-                .tool_output_call(&"cancel-source".into(), replayed.head())
-                .expect("source declaration");
-            let page = replayed
-                .tool_output_page(reference, replayed.head(), 0)
-                .expect("replayed source");
-            assert!(page.text.contains("cancelled: tool cancelled"));
+            assert!(materialized_source_text(&replayed).contains("cancelled: tool cancelled"));
             h.handle_provider_response_finished(provider_text_response(
                 &prompt,
                 agent.clone(),
@@ -2498,7 +2492,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     assert_eq!(
         completion_prompt,
         "Tool call `bg-any-after` completed. Its output is recorded separately. Call `wait` for a \
-         completion receipt, or `tool_output` to deliberately recover retained output."
+         completion receipt."
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]

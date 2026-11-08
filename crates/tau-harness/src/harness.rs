@@ -526,7 +526,7 @@ fn protocol_message_fits(message: &HarnessOutputMessage) -> bool {
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
     format!(
         "Tool call `{call_id}` completed. Its output is recorded separately. Call `wait` for \
-         a completion receipt, or `tool_output` to deliberately recover retained output."
+         a completion receipt."
     )
 }
 

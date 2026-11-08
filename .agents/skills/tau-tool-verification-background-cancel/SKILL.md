@@ -20,8 +20,9 @@ Tool source and synchronization are separate. Accepted incremental updates and
 final output appear once in ordered `tool_output` context. `wait` returns a
 successful receipt with `original_tool_call_id` and `target_outcome` (`completed`,
 `error`, or `cancelled`), including when the target failed. It never copies the
-source body. Use `tool_output` deliberately for bounded recovery; omitted raw
-bytes and expired temporary files are not recoverable through it.
+source body. There is no separate output lookup tool. Inspect shell overflow
+through its temporary-file path, or historical accepted text through an available
+compaction transcript archive. Neither recovers omitted raw bytes or expired files.
 
 Verify source by call ID and observed context order, including the terminal
 source after all accepted updates. When canonical events are available, also

@@ -198,6 +198,12 @@ discovery.
 
 ## `apply_patch` recovery and shell accounting
 
+Shell overflow coverage checks both the native 15 KiB body budget and the
+smaller harness final-rendering budget. The final capture must retain a truthful
+complete, partial, or unavailable saved-output header, including after earlier
+live batches. Ordinary file reads verify exact saved text and UTF-8 boundaries;
+VCR replay checks unavailable metadata when a recorded side file is missing.
+
 `apply_patch` regressions keep expected-context mismatch headers single-line,
 place bounded multiline recovery in `details.output`, and combine that recovery
 with truthful `partial_changes` plus UI-only diffs when a later hunk fails after

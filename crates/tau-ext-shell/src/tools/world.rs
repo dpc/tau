@@ -659,13 +659,15 @@ impl WorldShellOutcome {
         else {
             return;
         };
+        let originally_unavailable = has_field(result, "saved_output_unavailable");
         remove_field(result, "full_output_path");
         remove_field(result, "saved_output_path");
         remove_field(result, "saved_output_truncated");
         remove_field(result, "saved_output_bytes");
         remove_field(result, "saved_output_unavailable");
         enforce_current_shell_output_cap(result);
-        let artifact_required = has_field(result, "truncated");
+        let artifact_required =
+            has_field(result, "truncated") || saved_output.is_some() || originally_unavailable;
         if artifact_required && !has_field(result, "truncation_warning") {
             insert_text_field(
                 result,

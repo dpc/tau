@@ -1,5 +1,62 @@
 use super::*;
 
+/// Canonical source projected into materialized or deferred context.
+#[derive(Debug, PartialEq)]
+struct AcceptedSource {
+    /// Complete accepted envelope text, with no paging or byte cursor.
+    text: String,
+    /// Whether a canonical terminal closed the declaration.
+    terminal: bool,
+}
+
+impl AgentTree {
+    /// Select the declaration created by the test's current foreground round.
+    fn declared_call(&self, id: &str) -> tau_proto::ToolCallRef {
+        self.indexes.tool_output_calls[id].to_owned()
+    }
+
+    /// Assert accepted context directly, including both deferred input queues.
+    fn accepted_source(&self, call: tau_proto::ToolCallRef) -> AcceptedSource {
+        let state = &self.indexes.tool_outputs[&call];
+        let mut text = String::new();
+        for seq in &state.occurrences {
+            let entry = self
+                .node_for_durable_event_seq(*seq)
+                .and_then(|id| self.node(id))
+                .map(|node| &node.entry)
+                .or_else(|| {
+                    self.pending_context_inputs
+                        .iter()
+                        .find(|input| input.durable_event_seq == *seq)
+                        .map(|input| input.entry.as_ref())
+                })
+                .or_else(|| {
+                    self.pending_inference_inputs
+                        .iter()
+                        .find(|input| input.durable_event_seq == *seq)
+                        .map(|input| input.entry.as_ref())
+                })
+                .expect("accepted occurrence must have context");
+            let AgentEntry::UserInput { items, .. } = entry else {
+                panic!("accepted source must be user context");
+            };
+            for item in items {
+                if let ContextItem::Message(message) = item {
+                    for part in &message.content {
+                        if let ContentPart::Text { text: body, .. } = part {
+                            text.push_str(body);
+                        }
+                    }
+                }
+            }
+        }
+        AcceptedSource {
+            text,
+            terminal: state.terminal,
+        }
+    }
+}
+
 fn streaming_response(main: &AgentId) -> tau_proto::ProviderResponseFinished {
     let mut response =
         tool_calling_response(main, "ap-stream", vec!["stream".into(), "sibling".into()]);
@@ -54,79 +111,12 @@ fn final_capture_is_bounded_and_charged_before_deferred_projection() {
     );
     tree.apply_persisted_record(&large).expect("bounded final");
     records.push(large);
-    let call = tree
-        .tool_output_call(&"stream".into(), tree.head())
-        .expect("call");
-    let page = tree
-        .tool_output_page(call, tree.head(), 0)
-        .expect("deferred final");
+    let call = tree.declared_call("stream");
+    let page = tree.accepted_source(call);
     assert!(page.text.contains("omitted_bytes=\"17\""));
-    assert!(page.next_offset.is_some());
+    assert!(page.text.len() > tau_proto::MAX_TOOL_OUTPUT_FINAL_BYTES);
     let cold = AgentTree::try_from_events(main, &records).expect("cold capture");
-    assert_eq!(
-        cold.tool_output_page(call, cold.head(), 0)
-            .expect("cold page"),
-        page
-    );
-}
-
-#[test]
-fn display_id_recovery_selects_the_latest_declaration_on_its_branch() {
-    let main = agent_id();
-    let mut tree = AgentTree::from_events(main.clone(), &[]);
-    let mut records = Vec::new();
-    let mut branches = Vec::new();
-    for text in ["left-output", "right-output"] {
-        append(
-            &mut tree,
-            &mut records,
-            Event::ProviderResponseFinished(streaming_response(&main)),
-        );
-        let call = tree
-            .tool_output_call(&"stream".into(), tree.head())
-            .expect("call");
-        append(&mut tree, &mut records, update(call, 0, text));
-        for id in ["stream", "sibling"] {
-            append(
-                &mut tree,
-                &mut records,
-                Event::ProviderToolResult(tau_proto::ToolResult {
-                    captured_output: None,
-                    call_id: id.into(),
-                    tool_name: ToolName::new("tool"),
-                    tool_type: ToolType::Function,
-                    result: tau_proto::CborValue::Null,
-                    presentation: if id == "stream" {
-                        tau_proto::ToolResultPresentation::ToolStreamReceipt
-                    } else {
-                        Default::default()
-                    },
-                    provider_content: Vec::new(),
-                    kind: ToolResultKind::Final,
-                    display: None,
-                    originator: PromptOriginator::User,
-                }),
-            );
-        }
-        branches.push((tree.head(), call, text));
-        append(
-            &mut tree,
-            &mut records,
-            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
-                agent_id: main.clone(),
-                head: tau_proto::AgentHead::Root,
-            }),
-        );
-    }
-    let cold = AgentTree::try_from_events(main, &records).expect("cold branches");
-    for (head, call, text) in branches {
-        for tree in [&tree, &cold] {
-            assert_eq!(tree.tool_output_call(&"stream".into(), head), Some(call));
-            let page = tree.tool_output_page(call, head, 0).expect("branch page");
-            assert!(page.text.contains(text));
-            assert!(tree.tool_output_page(call, None, 0).is_err());
-        }
-    }
+    assert_eq!(cold.accepted_source(call), page);
 }
 
 /// Declaration-side authority is exact, ordered and durable even before any
@@ -149,9 +139,7 @@ fn streamed_policy_rejects_invalid_indices_and_non_opted_sibling() {
         &mut records,
         Event::ProviderResponseFinished(streaming_response(&main)),
     );
-    let sibling = tree
-        .tool_output_call(&"sibling".into(), tree.head())
-        .expect("sibling");
+    let sibling = tree.declared_call("sibling");
     let mut event = update(sibling, 0, "not opted in");
     let Event::ToolOutputUpdated(value) = &mut event else {
         unreachable!()
@@ -174,9 +162,7 @@ fn cold_output_debt_preserves_off_branch_foreground_but_not_historical_backgroun
             &mut records,
             Event::ProviderResponseFinished(streaming_response(&main)),
         );
-        let call = tree
-            .tool_output_call(&"stream".into(), tree.head())
-            .expect("stream");
+        let call = tree.declared_call("stream");
         if with_output {
             append(
                 &mut tree,
@@ -231,10 +217,9 @@ fn cold_output_debt_preserves_off_branch_foreground_but_not_historical_backgroun
     }
 }
 
-/// Recovery offsets count retained canonical UTF-8 bytes, not producer bytes or
-/// chars. Fixed-size pages neither split scalars nor lose cross-frame suffixes.
+/// Deferred context preserves exact UTF-8 source across frames and cold replay.
 #[test]
-fn tool_output_utf8_pages_match_cold_deferred_capture() {
+fn tool_output_utf8_matches_cold_deferred_context() {
     let main = agent_id();
     let mut tree = AgentTree::from_events(main.clone(), &[]);
     let mut records = Vec::new();
@@ -243,9 +228,7 @@ fn tool_output_utf8_pages_match_cold_deferred_capture() {
         &mut records,
         Event::ProviderResponseFinished(streaming_response(&main)),
     );
-    let call = tree
-        .tool_output_call(&"stream".into(), tree.head())
-        .expect("stream");
+    let call = tree.declared_call("stream");
     for (sequence, text) in [
         "é".repeat(4096),
         "🦀".repeat(2048),
@@ -257,40 +240,12 @@ fn tool_output_utf8_pages_match_cold_deferred_capture() {
         append(&mut tree, &mut records, update(call, sequence as u64, text));
     }
     let cold = AgentTree::try_from_events(main, &records).expect("cold deferred capture");
-    let mut offset = 0;
-    let mut aggregate = String::new();
-    loop {
-        let live = tree
-            .tool_output_page(call, tree.head(), offset)
-            .expect("live page");
-        assert_eq!(
-            cold.tool_output_page(call, cold.head(), offset)
-                .expect("cold page"),
-            live
-        );
-        assert!(live.text.len() <= tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
-        aggregate.push_str(&live.text);
-        if let Some(next) = live.next_offset {
-            assert!(next > offset);
-            assert_eq!(next, aggregate.len());
-            offset = next;
-        } else {
-            assert_eq!(aggregate.len(), live.retained_bytes);
-            break;
-        }
-    }
+    let live = tree.accepted_source(call);
+    assert_eq!(cold.accepted_source(call), live);
+    let aggregate = live.text;
     assert_eq!(aggregate.matches('é').count(), 4096);
     assert_eq!(aggregate.matches('🦀').count(), 2048);
     assert_eq!(aggregate.matches("final incremental").count(), 1);
-    let first_accent = aggregate.find('é').expect("accent");
-    assert!(
-        tree.tool_output_page(call, tree.head(), first_accent + 1)
-            .is_err()
-    );
-    assert!(
-        tree.tool_output_page(call, tree.head(), aggregate.len() + 1)
-            .is_err()
-    );
 }
 
 fn append(tree: &mut AgentTree, records: &mut Vec<PersistedAgentEvent>, event: Event) {
@@ -333,14 +288,10 @@ fn ordered_tool_output_and_recovery_match_live_and_cold_deferred_round() {
         &mut records,
         Event::ProviderResponseFinished(streaming_response(&main)),
     );
-    let call = tree
-        .tool_output_call(&"stream".into(), tree.head())
-        .expect("declared call");
+    let call = tree.declared_call("stream");
     append(&mut tree, &mut records, update(call, 0, "first-unique"));
     append(&mut tree, &mut records, update(call, 1, "second-unique"));
-    let page = tree
-        .tool_output_page(call, tree.head(), 0)
-        .expect("deferred recovery");
+    let page = tree.accepted_source(call);
     assert!(page.text.contains("first-unique"));
     assert!(page.text.find("first-unique") < page.text.find("second-unique"));
     assert!(!page.terminal);
@@ -349,11 +300,7 @@ fn ordered_tool_output_and_recovery_match_live_and_cold_deferred_round() {
             .is_none()
     );
     let cold = AgentTree::try_from_events(main.clone(), &records).expect("cold open round");
-    assert_eq!(
-        cold.tool_output_page(call, cold.head(), 0)
-            .expect("cold page"),
-        page
-    );
+    assert_eq!(cold.accepted_source(call), page);
 
     for (id, presentation, text) in [
         (
@@ -384,18 +331,12 @@ fn ordered_tool_output_and_recovery_match_live_and_cold_deferred_round() {
             }),
         );
     }
-    let page = tree
-        .tool_output_page(call, tree.head(), 0)
-        .expect("closed recovery");
+    let page = tree.accepted_source(call);
     assert!(page.terminal);
     assert_eq!(page.text.matches("last-unique").count(), 1);
     assert!(page.text.find("second-unique") < page.text.find("last-unique"));
     let cold = AgentTree::try_from_events(main, &records).expect("cold closed round");
-    assert_eq!(
-        cold.tool_output_page(call, cold.head(), 0)
-            .expect("cold page"),
-        page
-    );
+    assert_eq!(cold.accepted_source(call), page);
     let result = tree
         .terminal_tool_result_at(
             *tree
@@ -425,9 +366,7 @@ fn failed_stream_terminals_omit_self_cause_without_losing_final_source() {
             &mut records,
             Event::ProviderResponseFinished(response),
         );
-        let call = tree
-            .tool_output_call(&"stream".into(), tree.head())
-            .expect("call");
+        let call = tree.declared_call("stream");
         let capture = Some(tau_proto::ToolFinalOutput {
             text: "terminal-source-unique".into(),
             omitted_bytes: 0,
@@ -474,7 +413,7 @@ fn failed_stream_terminals_omit_self_cause_without_losing_final_source() {
                     "outcome: error\n"
                 },
             );
-            let page = tree.tool_output_page(call, tree.head(), 0).expect("source");
+            let page = tree.accepted_source(call);
             assert!(page.terminal);
             assert_eq!(page.text.matches("terminal-source-unique").count(), 1);
         }
@@ -493,12 +432,8 @@ fn tool_output_rejects_wrong_identity_gap_and_empty_heartbeat() {
         &mut records,
         Event::ProviderResponseFinished(streaming_response(&main)),
     );
-    let call = tree
-        .tool_output_call(&"stream".into(), tree.head())
-        .expect("stream");
-    let sibling = tree
-        .tool_output_call(&"sibling".into(), tree.head())
-        .expect("sibling");
+    let call = tree.declared_call("stream");
+    let sibling = tree.declared_call("sibling");
     for event in [
         update(sibling, 0, "wrong"),
         update(call, 1, "gap"),

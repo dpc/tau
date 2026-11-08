@@ -108,7 +108,9 @@ ends of a nonblocking wake pipe; non-Unix callbacks use the existing coalesced
 output channel. The producer uses an explicitly ordered checked send to flush
 final output after accepted detached frames.
 The optional saved-output spool is capped at 16 MiB and reports incompleteness
-truthfully. Shell VCR replay preserves recorded batches without executing the
+truthfully. Completed model commands report complete, partial, or unavailable
+saved-output metadata independently of native body truncation, including when
+the final harness capture omits bytes or earlier live batches leave a terminal tail. Shell VCR replay preserves recorded batches without executing the
 command. User-shell endpoints and non-model adapters retain their existing
 separate lifecycle.
 

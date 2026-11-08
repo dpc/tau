@@ -8961,13 +8961,8 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
         )
     }));
     let tree = default_agent_tree(&h);
-    let source = tree
-        .tool_output_call(&"c1".into(), tree.head())
-        .expect("declared stream");
-    let page = tree
-        .tool_output_page(source, tree.head(), 0)
-        .expect("unavailable source error");
-    assert!(expected_prefix.lines().all(|line| page.text.contains(line)));
+    let source = materialized_source_text(tree);
+    assert!(expected_prefix.lines().all(|line| source.contains(line)));
 
     h.shutdown().expect("shutdown");
 }

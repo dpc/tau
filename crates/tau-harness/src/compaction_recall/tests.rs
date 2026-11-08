@@ -170,6 +170,99 @@ fn exact_cut_survives_restart_and_later_input_for_local_and_native() {
     }
 }
 
+/// Accepted streamed diagnostics remain searchable through the existing archive
+/// import route, without a dedicated output reader or raw producer payload.
+#[test]
+fn accepted_streamed_source_survives_compaction_archive_import() {
+    let mut fixture = Fixture::new();
+    fixture.append(Event::ProviderResponseFinished(
+        tau_proto::ProviderResponseFinished {
+            agent_id: fixture.agent.clone(),
+            agent_prompt_id: "archive-stream".parse().expect("prompt id"),
+            output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
+                call_id: "archive-call".into(),
+                name: tau_proto::ToolName::new("shell_command"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: tau_proto::CborValue::Null,
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+            streamed_tool_items: vec![0],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            error_category: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            interrupted_retry: false,
+            final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            compaction_input_bytes: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        },
+    ));
+    let update = tau_proto::ToolOutputUpdate {
+        call: tau_proto::ToolCallRef {
+            declaration: fixture.records[0].observation_id,
+            item_index: 0,
+        },
+        output: tau_proto::ToolOutputReport {
+            call_id: "archive-call".into(),
+            tool_name: tau_proto::ToolName::new("shell_command"),
+            sequence: 0,
+            text: format!("accepted incremental diagnostic\n{}", "é".repeat(4070)),
+            omitted_bytes: 0,
+        },
+    };
+    let expected_update = update.render();
+    fixture.append(Event::ToolOutputUpdated(update));
+    fixture.append(Event::ProviderToolResult(tau_proto::ToolResult {
+        call_id: "archive-call".into(),
+        tool_name: tau_proto::ToolName::new("shell_command"),
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Null,
+        captured_output: Some(tau_proto::ToolFinalOutput {
+            text: "accepted final diagnostic".into(),
+            omitted_bytes: 37,
+        }),
+        presentation: tau_proto::ToolResultPresentation::ToolStreamReceipt,
+        provider_content: vec![],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    let cut = fixture.tree.head().expect("closed source round");
+    let boundary = fixture.compact(cut, summary("keep useful summary"));
+    let cold = AgentTree::try_from_events(fixture.agent.clone(), &fixture.records)
+        .expect("cold accepted stream");
+    for tree in [&fixture.tree, &cold] {
+        let (directory, _) = render(tree, &fixture.agent, boundary);
+        let bytes = tau_artifact::pack(directory.path(), Default::default(), || false)
+            .expect("archive bundle");
+        let imported = tau_artifact::unpack(&bytes, Default::default(), || false)
+            .expect("ordinary archive import");
+        let transcript = std::fs::read_to_string(imported.path().join("transcript.txt"))
+            .expect("searchable transcript");
+        assert!(transcript.contains("accepted final diagnostic"));
+        assert!(transcript.contains("omitted_bytes=\"37\""));
+        let payloads: Vec<_> = std::fs::read_dir(imported.path().join("payloads"))
+            .expect("payload directory")
+            .map(|entry| std::fs::read_to_string(entry.expect("payload").path()).expect("text"))
+            .collect();
+        assert!(payloads.iter().any(|text| text == &expected_update));
+    }
+}
+
 /// A recursive replacement-only cut archives only the previous summary while
 /// retaining one direct ancestry locator, not embedded older transcripts.
 #[test]

@@ -133,6 +133,96 @@ fn cancellation_retains_available_tail_without_repeating_accepted_batches() {
     }
 }
 
+/// A small command that emitted a live batch must expose its complete ordered
+/// shell file at natural completion even though neither native body was
+/// clipped.
+#[cfg(unix)]
+#[test]
+fn live_batch_then_natural_completion_exposes_complete_shell_file() {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let directory = tempfile::tempdir().expect("directory");
+    let fifo = directory.path().join("release");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("FIFO")
+            .success()
+    );
+    let arguments = shell_args(
+        &format!(
+            "printf 'EARLY\\n'; read ignored < '{}'; printf 'FINAL\\n' >&2",
+            fifo.display()
+        ),
+        45,
+    );
+    let (output_tx, output_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let stream = OutputStreamCapture::new(
+            crate::Output::channel(output_tx),
+            "natural-stream".into(),
+            tau_proto::ToolName::new("shell"),
+        )
+        .expect("stream capture");
+        let outcome = run_command_live_for_surface_with_authorized_cwd(
+            path_crate_tools::ShellSurface::Generic,
+            &arguments,
+            &ShellConfig::default(),
+            ShellCommandMode::READ_WRITE_HIDDEN,
+            false,
+            None,
+            ShellRunControl {
+                cancel_rx: None,
+                output_stream: Some(stream),
+            },
+        );
+        done_tx.send(outcome).expect("outcome");
+    });
+    let message = output_rx
+        .recv_timeout(path_std_time::Duration::from_secs(30))
+        .expect("live batch before command completes");
+    let tau_proto::HarnessInputMessage::Emit(emit) = message else {
+        panic!("emitted batch");
+    };
+    let Event::ToolOutputReported(report) = *emit.event else {
+        panic!("output report");
+    };
+    assert!(report.text.contains("EARLY"));
+    assert!(
+        done_rx.try_recv().is_err(),
+        "source must precede completion"
+    );
+    OpenOptions::new()
+        .write(true)
+        .open(&fifo)
+        .expect("release writer")
+        .write_all(b"go\n")
+        .expect("release child");
+    let CommandOutcome::Finished(output) = done_rx
+        .recv_timeout(path_std_time::Duration::from_secs(10))
+        .expect("completion")
+        .expect("shell")
+    else {
+        panic!("natural completion");
+    };
+    worker.join().expect("worker");
+    assert_eq!(output_text(&output.result), "err FINAL");
+    assert!(tau_proto::cbor_field(&output.result, "truncated").is_none());
+    let path =
+        tau_proto::cbor_text_field(&output.result, "full_output_path").expect("complete path");
+    let captured = tau_proto::ToolFinalOutput::capture(
+        &output.result,
+        tau_proto::ProviderToolResultStatus::Success,
+    );
+    assert!(captured.text.contains(&format!("full_output_path: {path}")));
+    assert_eq!(
+        std::fs::read_to_string(path).expect("ordinary file read"),
+        "out EARLY\nerr FINAL"
+    );
+}
+
 /// If the optional lifecycle wake pipe is unavailable, the pre-effect capacity
 /// endpoint still wakes closed-output waits for a later child exit or cancel.
 #[cfg(unix)]
@@ -854,10 +944,6 @@ fn shell_vcr_regenerates_saved_output_from_side_artifact() {
                 CborValue::Text("out x".to_owned()),
             ),
             (
-                CborValue::Text("truncated".to_owned()),
-                CborValue::Bool(true),
-            ),
-            (
                 CborValue::Text("saved_output_path".to_owned()),
                 CborValue::Text(source_path.to_string_lossy().into_owned()),
             ),
@@ -930,6 +1016,161 @@ fn shell_vcr_regenerates_saved_output_from_side_artifact() {
         std::fs::read_to_string(replay_path).expect("fresh artifact"),
         saved
     );
+    std::fs::remove_file(cassette_dir.path().join("saved_vcr.shell-output"))
+        .expect("remove recorded side artifact");
+    let mut replay = ShellWorld::for_tool(
+        "shell",
+        "saved_vcr",
+        &args,
+        Some(tau_vcr::VcrConfig::new(
+            tau_vcr::VcrMode::ReplayOnly,
+            cassette_dir.path(),
+        )),
+    )
+    .expect("missing-side replay world");
+    let WorldShellOutcome::Finished { result, .. } = replay
+        .replay_shell_outcome()
+        .expect("replay missing side")
+        .expect("outcome")
+    else {
+        panic!("finished");
+    };
+    assert_eq!(
+        tau_proto::cbor_bool_field(&result, "saved_output_unavailable"),
+        Some(true)
+    );
+    assert!(tau_proto::cbor_field(&result, "truncated").is_none());
+}
+
+/// Replay must retain an original spool failure even without native truncation,
+/// rather than silently dropping the only recovery-state header.
+#[test]
+fn shell_vcr_preserves_originally_unavailable_saved_output() {
+    let cassette = tempfile::tempdir().expect("cassette");
+    let args = shell_args("printf short", 30);
+    for mode in [
+        tau_vcr::VcrMode::RecordIfMissing,
+        tau_vcr::VcrMode::ReplayOnly,
+    ] {
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "unavailable_vcr",
+            &args,
+            Some(tau_vcr::VcrConfig::new(mode, cassette.path())),
+        )
+        .expect("world");
+        if mode == tau_vcr::VcrMode::RecordIfMissing {
+            world.record_shell_outcome(WorldShellOutcome::Finished {
+                result: CborValue::Map(vec![
+                    (
+                        CborValue::Text("output".into()),
+                        CborValue::Text("out short".into()),
+                    ),
+                    (
+                        CborValue::Text("saved_output_unavailable".into()),
+                        CborValue::Bool(true),
+                    ),
+                ]),
+                display: Box::new(ok_display("recorded unavailable spool")),
+                elapsed_ms: 1,
+                saved_output: None,
+            });
+            world.finish().expect("record unavailable");
+        } else {
+            let WorldShellOutcome::Finished { result, .. } = world
+                .replay_shell_outcome()
+                .expect("replay")
+                .expect("recorded result")
+            else {
+                panic!("finished");
+            };
+            let captured = tau_proto::ToolFinalOutput::capture(
+                &result,
+                tau_proto::ProviderToolResultStatus::Success,
+            );
+            assert!(captured.text.contains("saved_output_unavailable: true"));
+            assert!(tau_proto::cbor_field(&result, "truncated").is_none());
+        }
+    }
+}
+
+/// Earlier live batches need a visible file header even when the native total
+/// fits its cap; complete, capped, and unavailable spools must remain truthful.
+#[test]
+fn earlier_stream_batches_keep_truthful_saved_headers_without_native_truncation() {
+    let mut overflow = CapturedOutput::default();
+    overflow.push_bytes(
+        OutputStream::Stdout,
+        "é".repeat(MAX_SAVED_OUTPUT_BYTES / 2 + 100).as_bytes(),
+    );
+    overflow.finish();
+    assert!(overflow.saved_output_incomplete);
+    for saved in [
+        SavedArtifact::Available(
+            crate::shell_output_spool::save("out first\nerr second", false)
+                .expect("complete spool"),
+        ),
+        SavedArtifact::Available(
+            crate::shell_output_spool::save(
+                &overflow.saved_output,
+                overflow.saved_output_incomplete,
+            )
+            .expect("capped spool"),
+        ),
+        SavedArtifact::Unavailable,
+    ] {
+        let expected = match &saved {
+            SavedArtifact::Available(saved) => {
+                Some((saved.path.clone(), saved.incomplete, saved.saved_bytes))
+            }
+            SavedArtifact::Unavailable => None,
+        };
+        let result = command_details_value(CommandDetails {
+            status: Some(0),
+            signal: None,
+            timed_out: false,
+            duration_seconds: None,
+            termination_reason: "exit",
+            total_lines: None,
+            total_bytes: None,
+            output: "out final".into(),
+            truncated: false,
+            valid_utf8: true,
+            saved_output: Some(saved),
+        });
+        assert!(tau_proto::cbor_field(&result, "truncated").is_none());
+        let captured = tau_proto::ToolFinalOutput::capture(
+            &result,
+            tau_proto::ProviderToolResultStatus::Success,
+        );
+        match expected {
+            Some((path, incomplete, saved_bytes)) => {
+                let key = if incomplete {
+                    "saved_output_path"
+                } else {
+                    "full_output_path"
+                };
+                assert!(
+                    captured
+                        .text
+                        .contains(&format!("{key}: {}", path.display()))
+                );
+                let bytes = std::fs::read(&path).expect("ordinary shell spool access");
+                assert_eq!(bytes.len(), saved_bytes);
+                assert!(std::str::from_utf8(&bytes).is_ok());
+                if incomplete {
+                    assert!(bytes.len() <= MAX_SAVED_OUTPUT_BYTES);
+                    assert!(captured.text.contains("saved_output_truncated: true"));
+                    assert!(!captured.text.contains("full_output_path"));
+                } else {
+                    assert_eq!(bytes, b"out first\nerr second");
+                }
+            }
+            None => {
+                assert!(captured.text.contains("saved_output_unavailable: true"))
+            }
+        }
+    }
 }
 
 /// Ensures a line beyond the saved hard cap becomes an honestly incomplete

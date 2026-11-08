@@ -2,8 +2,8 @@
 slow-timeout = { period = "10s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-# This live-shell oracle exercises the real 15-second idle output deadline.
-filter = "package(dpc-tau-ext-shell) & test(/^tools::shell::tests::live_stream_can_cancel_running_shell_and_replay_preserves_batches$/)"
+# These live-shell oracles exercise the real 15-second idle output deadline.
+filter = "package(dpc-tau-ext-shell) & (test(/^tools::shell::tests::live_stream_can_cancel_running_shell_and_replay_preserves_batches$/) | test(/^tools::shell::tests::live_batch_then_natural_completion_exposes_complete_shell_file$/))"
 slow-timeout = { period = "45s", terminate-after = 1 }
 
 [[profile.default.overrides]]

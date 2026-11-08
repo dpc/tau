@@ -96,6 +96,39 @@ enum TestMessage {
     UiQuitResult(tau_proto::UiQuitResult),
 }
 
+/// Read the actual model-facing source context after canonical materialization.
+fn materialized_source_text(tree: &tau_core::AgentTree) -> String {
+    tree.all_entries()
+        .filter_map(|entry| {
+            let tau_core::AgentEntry::UserInput { items, .. } = entry else {
+                return None;
+            };
+            Some(
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let tau_proto::ContextItem::Message(message) = item else {
+                            return None;
+                        };
+                        Some(
+                            message
+                                .content
+                                .iter()
+                                .filter_map(|part| {
+                                    let tau_proto::ContentPart::Text { text, .. } = part else {
+                                        return None;
+                                    };
+                                    text.starts_with("<tool_output ").then_some(text.as_str())
+                                })
+                                .collect::<String>(),
+                        )
+                    })
+                    .collect::<String>(),
+            )
+        })
+        .collect()
+}
+
 /// Designate main in the accepted role snapshot for focused routing fixtures.
 fn configure_main_role(harness: &mut Harness, role: &str) {
     if let Some(configured) = harness.config.available_roles.get(role) {

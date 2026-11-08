@@ -92,6 +92,14 @@ selected-agent `:skill` expansion must wait for the installed replacement.
 Restore the original workdir with a separate setter when the probe finishes.
 
 ### Tool result output structure
+
+For model shell output, test both the native 15 KiB body budget and the separate
+8 KiB harness final capture. If either drops rendered bytes, the final header
+must expose a readable `full_output_path`, truthful partial `saved_output_path`
+metadata, or `saved_output_unavailable`. Also check a small terminal tail after
+earlier live batches: saved-file metadata must not depend on native truncation.
+Inspect files with ordinary shell commands; there is no dedicated output reader.
+
 All tools should return a normalized HTTP-protocol-like structure:
 
 ```

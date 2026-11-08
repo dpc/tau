@@ -240,96 +240,13 @@ fn start_stream_with_foreground_sibling(h: &mut Harness, cid: &AgentId) {
     );
 }
 
-#[test]
-fn output_recovery_host_enforces_owner_and_selected_branch() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.config.selected_model = Some("test/model".into());
-    let owner = ensure_test_user_agent(&mut h);
-    let other = h.create_durable_user_agent(
-        h.session_runtime.current_session_id.clone(),
-        &h.config.selected_role.clone(),
-    );
-    start_stream_with_foreground_sibling(&mut h, &owner);
+/// Release the test's native adjacency barrier before inspecting model context.
+fn finish_stream_sibling(h: &mut Harness) {
     h.handle_extension_event_inner(
         &crate::test_connection_id("stream-worker"),
-        Event::ToolOutputReported(tau_proto::ToolOutputReport {
-            call_id: "stream-call".into(),
-            tool_name: ToolName::new("streaming"),
-            sequence: 0,
-            text: "private accepted output".into(),
-            omitted_bytes: 0,
-        }),
+        Event::ToolResultReported(final_tool_result("block-call", "blocking", "sibling done")),
     )
-    .expect("output");
-    let call_id = ToolCallId::from("stream-call");
-    let page = crate::InternalToolHost::new(&mut h)
-        .tool_output_page(
-            &owner,
-            crate::ToolOutputTarget::DisplayId(call_id.clone()),
-            0,
-        )
-        .expect("own display lookup");
-    assert!(page.text.contains("private accepted output"));
-    assert_eq!(
-        crate::InternalToolHost::new(&mut h)
-            .tool_output_page(&owner, crate::ToolOutputTarget::Reference(page.call), 0)
-            .expect("own exact lookup"),
-        page
-    );
-    assert!(
-        crate::InternalToolHost::new(&mut h)
-            .tool_output_page(
-                &other,
-                crate::ToolOutputTarget::DisplayId(call_id.clone()),
-                0
-            )
-            .is_err()
-    );
-    assert!(
-        crate::InternalToolHost::new(&mut h)
-            .tool_output_page(&other, crate::ToolOutputTarget::Reference(page.call), 0)
-            .is_err()
-    );
-    let head = h.agent_runtime.agent_registry.agents[&owner]
-        .identity
-        .head
-        .expect("selected head");
-    let agent_id = durable_agent_id_for_conversation(&h, &owner);
-    h.publish_for_agent(
-        &owner,
-        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
-            agent_id: agent_id.clone(),
-            head: tau_proto::AgentHead::Root,
-        }),
-    );
-    assert!(
-        crate::InternalToolHost::new(&mut h)
-            .tool_output_page(
-                &owner,
-                crate::ToolOutputTarget::DisplayId(call_id.clone()),
-                0
-            )
-            .is_err()
-    );
-    assert!(
-        crate::InternalToolHost::new(&mut h)
-            .tool_output_page(&owner, crate::ToolOutputTarget::Reference(page.call), 0)
-            .is_err()
-    );
-    h.publish_for_agent(
-        &owner,
-        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
-            agent_id,
-            head: tau_proto::AgentHead::Node(head),
-        }),
-    );
-    assert_eq!(
-        crate::InternalToolHost::new(&mut h)
-            .tool_output_page(&owner, crate::ToolOutputTarget::Reference(page.call), 0)
-            .expect("returned branch"),
-        page
-    );
+    .expect("sibling completion");
 }
 
 /// Arbitrary opted-in producers cannot move an unbounded terminal payload into
@@ -420,13 +337,16 @@ fn streamed_terminal_capture_bounds_payload_and_preserves_process_outcome() {
                 .exit_code(),
             Some(7)
         );
+        finish_stream_sibling(&mut h);
+        let records = h
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(agent.as_str())
+            .expect("closed records");
         let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold capture");
-        let call = cold
-            .tool_output_call(&"stream-call".into(), cold.head())
-            .expect("call");
-        let page = cold.tool_output_page(call, cold.head(), 0).expect("source");
-        assert!(page.text.contains("first-diagnostic"));
-        assert!(!page.text.contains("forged capture"));
+        let source = materialized_source_text(&cold);
+        assert!(source.contains("first-diagnostic"));
+        assert!(!source.contains("forged capture"));
     }
 }
 
@@ -483,15 +403,16 @@ fn streamed_cancellation_preserves_bounded_available_final_source() {
     assert!(capture.text.contains("first-cancel-diagnostic"));
     assert!(capture.text.contains("last-cancel-diagnostic"));
     assert!(!capture.text.contains("forged source"));
+    finish_stream_sibling(&mut h);
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(agent.as_str())
+        .expect("closed cancellation");
     let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("replay");
-    let call = cold
-        .tool_output_call(&"stream-call".into(), cold.head())
-        .expect("declaration");
-    let page = cold
-        .tool_output_page(call, cold.head(), 0)
-        .expect("source page");
-    assert!(page.text.contains("first-cancel-diagnostic"));
-    assert!(!page.text.contains("final capture unavailable"));
+    let source = materialized_source_text(&cold);
+    assert!(source.contains("first-cancel-diagnostic"));
+    assert!(!source.contains("final capture unavailable"));
 }
 
 fn start_stream_round(h: &mut Harness, cid: &AgentId, calls: Vec<(&str, &str)>) {
@@ -716,14 +637,18 @@ fn complete_only_filters_queued_and_live_updates_in_each_wait_mode() {
                     .agent_store
                     .agent(agent.as_str())
                     .expect("tree");
-                let call = tree
-                    .tool_output_call(&"background-stream".into(), tree.head())
-                    .expect("source declaration");
+                let records = h
+                    .session_runtime
+                    .agent_store
+                    .snapshot_agent_events_for_test(agent.as_str())
+                    .expect("accepted update");
+                assert!(records.iter().any(|record| matches!(&record.event,
+                    Event::ToolOutputUpdated(update) if update.output.text
+                        .contains("visible even with completion-only mask"))));
                 assert!(
-                    tree.tool_output_page(call, tree.head(), 0)
-                        .expect("captured source")
-                        .text
+                    materialized_source_text(tree)
                         .contains("visible even with completion-only mask")
+                        || tree.pending_tool_output_residencies().next().is_some()
                 );
                 h.handle_extension_event_inner(
                     &connection,
@@ -803,15 +728,10 @@ fn excess_stream_declarations_reject_before_effects_with_tiny_controls() {
     );
     let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold rejected round");
     for error in rejected {
-        let call = cold
-            .tool_output_call(&error.call_id, cold.head())
-            .expect("rejected declaration");
-        let page = cold
-            .tool_output_page(call, cold.head(), 0)
-            .expect("rejection control");
-        assert!(page.terminal);
+        assert!(cold.pending_terminal_tool_result(&error.call_id).is_some());
+        let capture = error.captured_output.as_ref().expect("rejection control");
         assert!(
-            page.text.len() < 512,
+            capture.text.len() < 512,
             "control must not copy arguments or captured output"
         );
     }
@@ -934,23 +854,19 @@ fn rejected_stream_head_retries_before_terminal_without_reinterception() {
         })
         .collect();
     assert_eq!(ordered, ["output", "terminal"]);
-    let reference = records
-        .iter()
-        .find_map(|record| match &record.event {
-            Event::ToolOutputUpdated(update) => Some(update.call),
-            _ => None,
-        })
-        .expect("accepted source");
+    finish_stream_sibling(&mut h);
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(agent.as_str())
+        .expect("closed records");
     let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold output");
-    let page = cold
-        .tool_output_page(reference, cold.head(), 0)
-        .expect("recover retained output");
-    assert_eq!(page.text.matches("retained before completion").count(), 1);
-    assert_eq!(page.text.matches("terminal after retained head").count(), 1);
-    assert!(!page.text.contains("late report"));
+    let source = materialized_source_text(&cold);
+    assert_eq!(source.matches("retained before completion").count(), 1);
+    assert_eq!(source.matches("terminal after retained head").count(), 1);
+    assert!(!source.contains("late report"));
     assert!(
-        page.text.find("retained before completion")
-            < page.text.find("terminal after retained head")
+        source.find("retained before completion") < source.find("terminal after retained head")
     );
 }
 
@@ -1004,12 +920,15 @@ fn streamed_terminal_holds_residency_until_foreground_sibling_closes() {
     let cold =
         tau_core::AgentTree::try_from_events(agent.clone(), &records).expect("cold deferred");
     assert!(cold.tool_output_needs_residency(reference));
-    let page = cold
-        .tool_output_page(reference, cold.head(), 0)
-        .expect("deferred page");
-    assert!(page.terminal);
-    assert!(page.text.contains("first accepted bytes"));
-    assert!(page.text.contains("final diagnostic"));
+    assert!(
+        materialized_source_text(&cold).is_empty(),
+        "sibling must defer source placement"
+    );
+    assert!(records.iter().any(|record| matches!(&record.event,
+        Event::ToolOutputUpdated(update) if update.output.text.contains("first accepted bytes"))));
+    assert!(records.iter().any(|record| matches!(&record.event,
+        Event::ProviderToolResult(result) if result.captured_output.as_ref()
+            .is_some_and(|capture| capture.text.contains("final diagnostic")))));
     // Cold custody blocks new captures without minting slots or processes.
     h.tool_routing.tool_runtime.output_residencies.clear();
     let session = h.session_runtime.current_session_id.clone();
@@ -1042,11 +961,10 @@ fn streamed_terminal_holds_residency_until_foreground_sibling_closes() {
         .expect("closed records");
     let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold closed");
     assert!(!cold.tool_output_needs_residency(reference));
-    assert_eq!(
-        cold.tool_output_page(reference, cold.head(), 0)
-            .expect("closed page"),
-        page
-    );
+    let source = materialized_source_text(&cold);
+    assert_eq!(source.matches("first accepted bytes").count(), 1);
+    assert_eq!(source.matches("final diagnostic").count(), 1);
+    assert!(source.find("first accepted bytes") < source.find("final diagnostic"));
 }
 
 /// A provider cannot grant itself streaming authority. A silent opted-in call
@@ -1141,11 +1059,9 @@ fn silent_stream_policy_is_frozen_and_repair_uses_durable_declaration() {
             streamed,
         );
         let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold repair");
-        let page = cold
-            .tool_output_page(reference, cold.head(), 0)
-            .expect("retained output");
-        assert_eq!(!page.text.is_empty(), streamed);
-        assert!(page.terminal);
+        assert_eq!(!materialized_source_text(&cold).is_empty(), streamed);
+        assert!(!cold.tool_output_needs_residency(reference));
+        assert!(!cold.has_open_foreground_tool_round());
         assert_eq!(h.repair_restored_foreground_tool_calls(&session), 0);
     }
 }

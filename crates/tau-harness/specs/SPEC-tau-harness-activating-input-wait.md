@@ -120,8 +120,9 @@ results:
 
 Each member contains a synchronization receipt without a source body.
 Cancellation uses `outcome: cancelled` in the same successful receipt shape.
-Accepted text remains in the canonical ordered source stream; callers can
-explicitly recover it through bounded `tool_output` pages. See
+Accepted text remains in the canonical ordered source stream. Wait does not
+provide an output reader; shell overflow paths and existing best-effort
+compaction transcript archives provide ordinary inspection routes. See
 [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 Invalid invocation, ownership, reservation, and wait-operation failures remain
 tool errors. The runtime consumes all member completion receipts atomically only

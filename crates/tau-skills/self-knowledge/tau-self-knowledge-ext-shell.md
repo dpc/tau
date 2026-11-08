@@ -104,16 +104,19 @@ separate bounded final diagnostic capture. Tau drains excess output, retains
 recent text, and reports omissions; overflow does not cancel the command.
 `wait` returns a successful receipt with `cause` (the source call ID) and
 `outcome` (`completed`, `error`, or `cancelled`), without a copy of the output.
-Use `tool_output` for deliberate bounded recovery of accepted source, including
-after compaction or restart. It does not recover omitted raw bytes or expired
-temporary files.
+There is no dedicated output lookup tool. Inspect oversized shell output using
+ordinary shell commands and the terminal's temporary-file path header. Existing
+best-effort compaction transcript archives support historical inspection of
+accepted text; neither route recovers omitted raw bytes or expired files.
 
 Inspection/edit-recovery/user-command surfaces cap visible output at 10 KiB;
 model `shell`/`shell_command` additionally cap their producer-side aggregate at
 15 KiB and, where applicable, 2,000 lines. The harness's bounded final source
 capture is separate from that aggregate.
 
-Truncated results include totals and a saved rendering up to 16 MiB:
+Native truncation includes totals. Completed commands also expose saved output
+when the smaller final harness capture omits bytes or earlier live batches
+leave only a terminal tail. The saved rendering is capped at 16 MiB:
 `full_output_path` means complete; `saved_output_path` with
 `saved_output_truncated: true` and `saved_output_bytes` means incomplete.
 `saved_output_unavailable: true` means no private saved file could be created.

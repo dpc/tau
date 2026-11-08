@@ -647,8 +647,9 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   ordinary terminal payload, from which the harness derives a bounded final
   source occurrence. Successful wait receipts contain an `outcome` of `completed`,
   `error`, or `cancelled`, without a source body. Completion notices
-  carry control receipts without payload copies. Callers can explicitly recover
-  accepted source through bounded `tool_output` pages. UI clients receive the
+  carry control receipts without payload copies. Callers can inspect saved shell
+  output through a reported temporary-file path, when available, and compacted
+  accepted text through available compaction transcript archives. UI clients receive the
   separate display projection below. The earlier synthetic provider placeholder also produces
   `tool.result` and `tool.result_display` projections after its canonical
   `provider.tool_result` commit. Once a call has emitted a background placeholder,

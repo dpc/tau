@@ -53,6 +53,11 @@ Its native `output` body is capped separately from the larger ephemeral saved
 rendering. Small result metadata and fully rendered provider text are outside
 that body budget, and hitting the saved-rendering cap must be reported as an
 incomplete artifact rather than as full output.
+Completed model commands also expose the spool metadata when the harness's
+smaller final-rendering allowance omits bytes or earlier live batches leave
+only a terminal tail. The temporary file remains ordinary shell-instance
+storage, not a shared artifact. Cancellation keeps its existing available-tail
+contract without starting a new saved-output spool.
 
 Shell lifecycle waits should use event/readiness channels or platform wait
 primitives where available. Fixed sleep polling of child exit, cancellation, or

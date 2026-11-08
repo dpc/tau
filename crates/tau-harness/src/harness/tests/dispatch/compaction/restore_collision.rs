@@ -305,18 +305,13 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
         .agent_store
         .agent(caller_id.as_str())
         .expect("caller");
-    let source = tree
-        .tool_output_call(&cross_call.id, tree.head())
-        .expect("source declaration");
-    let page = tree
-        .tool_output_page(source, tree.head(), 0)
-        .expect("retained source output");
+    let source = materialized_source_text(tree);
     if let Some(message) = expected_cross_error {
-        assert!(page.text.contains(&message));
+        assert!(source.contains(&message));
     } else {
-        assert!(page.text.contains(cross_request_id.as_str()));
-        assert!(page.text.contains(target_id.as_str()));
-        assert!(page.text.contains("compacted"));
+        assert!(source.contains(cross_request_id.as_str()));
+        assert!(source.contains(target_id.as_str()));
+        assert!(source.contains("compacted"));
     }
     assert!(!resumed.wait_completion_is_retained_for_test(&resumed_caller, &cross_call.id));
 }

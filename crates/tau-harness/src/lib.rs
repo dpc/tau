@@ -134,7 +134,6 @@ pub use crate::harness::{
 };
 pub use crate::internal_tools::{
     AgentOwnedInternalToolCall, InternalToolHandler, InternalToolHandlers, InternalToolHost,
-    ToolOutputTarget,
 };
 pub use crate::settings::{
     EXTENSION_CLI_OVERRIDES_ENV, ExtensionConfig, HARNESS_CONFIG_CLI_OVERRIDES_ENV,

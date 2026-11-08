@@ -440,7 +440,8 @@ fn run_command_live_for_surface_with_authorized_cwd(
     let use_stream_tail = streamed || (tail.is_some() && output_trunc.was_truncated);
     let combined = output_trunc.content.clone();
 
-    let saved_output = (output_trunc.was_truncated || streamed).then(|| {
+    let save_requested = output_trunc.was_truncated || streamed;
+    let saved_output = save_requested.then(|| {
         match crate::shell_output_spool::save(
             &wait.output.saved_output,
             wait.output.saved_output_incomplete,
@@ -449,7 +450,7 @@ fn run_command_live_for_surface_with_authorized_cwd(
             Err(_) => SavedArtifact::Unavailable,
         }
     });
-    let result = command_details_value(CommandDetails {
+    let mut result = command_details_value(CommandDetails {
         status: status_code,
         signal,
         timed_out: wait.timed_out,
@@ -470,6 +471,26 @@ fn run_command_live_for_surface_with_authorized_cwd(
         valid_utf8: !wait.had_invalid_utf8,
         saved_output,
     });
+    // The harness has a separate, smaller final-rendering allowance. Preserve
+    // ordinary shell-file inspection when that rendering (including headers and
+    // sanitization) omits bytes even though the native body fitted its budget.
+    if !save_requested
+        && tau_proto::ToolFinalOutput::capture(
+            &result,
+            tau_proto::ProviderToolResultStatus::Success,
+        )
+        .omitted_bytes
+            != 0
+    {
+        let CborValue::Map(entries) = &mut result else {
+            unreachable!("command details are a map");
+        };
+        crate::shell_output_spool::append_prefix_metadata(
+            entries,
+            &wait.output.saved_output,
+            wait.output.saved_output_incomplete,
+        );
+    }
 
     let mut display = if success {
         ok_display(display_args)
@@ -3248,7 +3269,8 @@ pub(crate) struct CommandDetails {
     pub(crate) truncated: bool,
     /// Whether all captured bytes were valid UTF-8.
     pub(crate) valid_utf8: bool,
-    /// Ephemeral artifact metadata for truncated output.
+    /// Ephemeral artifact metadata for native/final omissions or earlier
+    /// batches.
     pub(crate) saved_output: Option<SavedArtifact>,
 }
 
@@ -3310,42 +3332,42 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
                     .to_owned(),
             ),
         ));
-        match &saved_output {
-            Some(SavedArtifact::Available(saved_output)) => entries.push((
-                CborValue::Text(
-                    if saved_output.incomplete {
-                        "saved_output_path"
-                    } else {
-                        "full_output_path"
-                    }
+    }
+    match &saved_output {
+        Some(SavedArtifact::Available(saved_output)) => entries.push((
+            CborValue::Text(
+                if saved_output.incomplete {
+                    "saved_output_path"
+                } else {
+                    "full_output_path"
+                }
+                .to_owned(),
+            ),
+            CborValue::Text(
+                saved_output
+                    .path
+                    .to_str()
+                    .expect("spool accepts only safe UTF-8 paths")
                     .to_owned(),
-                ),
-                CborValue::Text(
-                    saved_output
-                        .path
-                        .to_str()
-                        .expect("spool accepts only safe UTF-8 paths")
-                        .to_owned(),
-                ),
-            )),
-            Some(SavedArtifact::Unavailable) => entries.push((
-                CborValue::Text("saved_output_unavailable".to_owned()),
-                CborValue::Bool(true),
-            )),
-            None => {}
-        }
-        if let Some(SavedArtifact::Available(saved_output)) = &saved_output
-            && saved_output.incomplete
-        {
-            entries.push((
-                CborValue::Text("saved_output_truncated".to_owned()),
-                CborValue::Bool(true),
-            ));
-            entries.push((
-                CborValue::Text("saved_output_bytes".to_owned()),
-                CborValue::Integer((saved_output.saved_bytes as i64).into()),
-            ));
-        }
+            ),
+        )),
+        Some(SavedArtifact::Unavailable) => entries.push((
+            CborValue::Text("saved_output_unavailable".to_owned()),
+            CborValue::Bool(true),
+        )),
+        None => {}
+    }
+    if let Some(SavedArtifact::Available(saved_output)) = &saved_output
+        && saved_output.incomplete
+    {
+        entries.push((
+            CborValue::Text("saved_output_truncated".to_owned()),
+            CborValue::Bool(true),
+        ));
+        entries.push((
+            CborValue::Text("saved_output_bytes".to_owned()),
+            CborValue::Integer((saved_output.saved_bytes as i64).into()),
+        ));
     }
     if let Some(status) = status {
         entries.push((
