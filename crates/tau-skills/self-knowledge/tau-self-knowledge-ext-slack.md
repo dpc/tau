@@ -22,7 +22,7 @@ as `disable_tools: ["fedi_slack_join_room"]` apply after group grants, but expli
 that were previously outside the group; review those grants before upgrading.
 Grouping changes no receiver, route, sender, installation or OAuth policy.
 Slack text is always untrusted external content. This source uses published Tau
-SDK 0.26.0 and protocol 19.0. It requires a protocol-19-compatible harness.
+SDK 0.28.0 and protocol 21.0. It requires a harness compatible with protocol 21.
 This source change does not install or activate a bridge.
 The Hello greeting reports the Slack package's own release and source revision,
 not the SDK or harness version. Supporting harnesses show the ready instance's
@@ -230,7 +230,7 @@ immutable creation-role constraint. Defaults are automatic registration off,
 ordinary target, and no role constraint. Startup uses Select only; fully admitted
 plain input may use Ensure to create main without an explicit role or bootstrap
 prompt.
-Canonical-main targeting requires advertised protocol 19.x,
+Canonical-main targeting requires a harness advertising protocol 21.x,
 never selects an ordinary substitute, and cannot replace an unavailable bound main.
 Configured manual registration uses exact harness caller validation with the same
 constraints. Automatic mode rejects unregister; disable it in configuration and
@@ -392,9 +392,9 @@ does not prove live OAuth permissions. No new events or `files:read` are needed.
 
 Provide `attachments: [{artifact, filename, content_type?}]`, with at most ten
 entries and 16 MiB total original bytes. `artifact` accepts canonical
-`<tau-artifact:24-lowercase-hex>` or bare 24-lowercase-hex keys. Old
-algorithm-labelled full-digest references are rejected. The larger shared SDK
-object ceiling does not enlarge Slack's limits.
+`<tau-artifact:24-lowercase-hex>` references or bare 24-lowercase-hex keys.
+Slack rejects deprecated full `blake3:64-lowercase-hex` keys, bare or wrapped.
+The larger shared SDK object ceiling does not enlarge Slack's limits.
 The tool rejects unknown fields. Use the same outbound destination and optional
 reply/thread selectors as text sends. Omitting `attachments` or passing an empty list preserves
 text-only behavior. A nonempty list permits an omitted or empty `message`; text
