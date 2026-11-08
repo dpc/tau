@@ -87,7 +87,10 @@ fn completed_inspection_allows_cooperative_process_teardown() {
         ]),
     )
     .expect("inspection frames");
-    let mut extension = extension("cat \"$1\"; sleep 0.05; printf complete > \"$2\"".to_owned());
+    // Keep stdin open through Configure and wait for the collector to finish
+    // inspection before starting teardown. A sleep alone races its write.
+    let mut extension =
+        extension("cat \"$1\"; cat >/dev/null; sleep 0.05; printf complete > \"$2\"".to_owned());
     extension.args.extend([
         "inspection-teardown".to_owned(),
         frames.to_str().expect("UTF-8 frame path").to_owned(),

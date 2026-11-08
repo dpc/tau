@@ -51,15 +51,17 @@ fn run_one(session_id: &tau_proto::SessionId) -> Result<(), CliError> {
             "failed to request shutdown for session `{session_id}`: {error}"
         ))
     })?;
-    drop(writer);
-    drop(reader);
-
     let Some(peer_exit) = peer_exit else {
         return Err(CliError::Participant(format!(
             "shutdown requested for session `{session_id}`, but this platform cannot confirm the daemon's exit"
         )));
     };
-    match peer_exit.wait(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT) {
+    // Keep admission alive until the daemon exits. Closing immediately after
+    // flushing can make a concurrent downlink write fail and disconnect this
+    // client before the harness handles its queued shutdown request.
+    let exited = peer_exit.wait(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
+    drop((reader, writer));
+    match exited {
         Ok(true) => {
             crate::line_output::write_stdout(&format!("Session `{session_id}` terminated\n"))
         }

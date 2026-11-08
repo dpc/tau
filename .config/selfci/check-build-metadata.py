@@ -12,7 +12,6 @@ ENV = dict(os.environ)
 for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
     ENV.pop(key, None)
 ENV.update(
-    CARGO_TARGET_DIR=str(ROOT / "target" / "build-metadata-regression"),
     GIT_CONFIG_NOSYSTEM="1",
     GIT_CONFIG_GLOBAL=os.devnull,
     TAU_BUILD="inherited-core",
@@ -55,6 +54,7 @@ def fixture(directory, root=None):
         '[package]\nname="tau-build-metadata-probe"\nversion="9.8.7"\n'
         'edition="2024"\ninclude=["build.rs", "src/**"]\n'
         '[workspace]\nresolver="2"\n'
+        '[profile.dev]\ndebug=false\n'
         f'[dependencies]\ntau-client={{package="dpc-tau-client",path="{client}"}}\n'
         f'[build-dependencies]\ntau-client={{package="dpc-tau-client",path="{client}",features=["build"]}}\n'
     )
@@ -94,6 +94,12 @@ def check(directory, revision, dirty=False):
 
 with tempfile.TemporaryDirectory(prefix="tau-build-metadata-") as temporary:
     base = pathlib.Path(temporary)
+    # Keep CARGO_TARGET_DIR unchanged across every scenario. The later output-link
+    # check needs build artifacts inside the unborn repo, so start there even
+    # before that repo is initialized. Switching to a fresh target for that check
+    # would compile the entire dependency graph twice.
+    # SelfCI checkouts are disposable; keep these shared artifacts fixture-owned.
+    ENV["CARGO_TARGET_DIR"] = str(base / "unborn" / "target")
     own = base / "own"
     fixture(own)
     initialize(own)
@@ -202,16 +208,14 @@ with tempfile.TemporaryDirectory(prefix="tau-build-metadata-") as temporary:
     git(unborn, "hash-object", "-w", str(object_source))
     assert check(unborn, None) == count, "Git object writes must not be watched recursively"
 
-    previous_target = ENV["CARGO_TARGET_DIR"]
-    ENV["CARGO_TARGET_DIR"] = str(unborn / "target")
-    (unborn / "target").mkdir()
+    # Reuse the target chosen before the first build; do not switch directories
+    # here just to put the symlink's destination inside this repository.
     (unborn / "output-link").symlink_to("target", target_is_directory=True)
     git(unborn, "add", "output-link")
     git(unborn, "commit", "-qm", "unsupported build-output symlink")
     count = check(unborn, None)
     (unborn / "target" / "unrelated-output").write_text("build output\n")
     assert check(unborn, None) == count, "build output directories must not be watched"
-    ENV["CARGO_TARGET_DIR"] = previous_target
     for marker in (".cargo_vcs_info.json", ".cargo-checksum.json"):
         marked = enclosing / marker.removeprefix(".")
         fixture(marked, "..")
