@@ -103,9 +103,17 @@ pub(crate) fn target_dir(
 
 /// Build a successful committed `workdir` setter result.
 pub(crate) fn output(path: &Path) -> ToolOutput {
-    let text = format!("Workdir changed to {}.", path.display());
     ToolOutput {
-        result: CborValue::Text(text.clone()),
+        result: CborValue::Map(vec![
+            (
+                CborValue::Text("status".to_owned()),
+                CborValue::Text("changed".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(path.display().to_string()),
+            ),
+        ]),
         provider_content: Vec::new(),
         display: WorkdirOperation::Set.display(path.display().to_string()),
     }

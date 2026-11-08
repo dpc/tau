@@ -12,6 +12,11 @@ use tau_proto::{
 
 use super::*;
 
+/// Check the actual provider projection of a semantic tool result.
+fn rendered(value: &CborValue) -> String {
+    tau_proto::ToolResponse::from_cbor(value).render()
+}
+
 /// Ensures JSONL decoding constructs only current-schema papercut records and
 /// keeps an unsupported schema distinct from malformed typed attribution.
 #[test]
@@ -479,7 +484,10 @@ fn replay_terminal_correlation_preserves_typed_call_ids_and_fallback_timer_ids()
         call_id: first.call_id.clone(),
         tool_name: first.tool_name.clone(),
         tool_type: ToolType::Function,
-        result: CborValue::Text("ok".to_owned()),
+        result: runtime()
+            .handle_live_tool(&first, UnixMicros::new(0))
+            .expect("live generated-id schedule")
+            .result,
         provider_content: Vec::new(),
         kind: ToolResultKind::Final,
         display: None,
@@ -745,6 +753,10 @@ fn restored_local_timer_recovers_after_timezone_lookup_failure() {
         display: None,
         originator: tau_proto::PromptOriginator::User,
     });
+    assert_eq!(
+        rendered(&rt.list_timers(&agent, started_at).result),
+        "count: 1\nformat: timer_id: deadline, recurrence\n\nlocal: awaiting local timezone, daily at 08:00 local"
+    );
     rt.replay_complete_agents.insert(agent.clone());
     rt.timezone_checked_at = None;
 
@@ -1180,9 +1192,11 @@ fn timer_display_and_list_summarize_daily_utc_schedule() {
     )
     .expect("schedule");
     assert_eq!(
-        rt.list_timers(&agent, UnixMicros::new(1_767_254_400_000_000))
-            .result,
-        CborValue::Text("agenda: due in 86400s, daily at 08:00 UTC".to_owned())
+        rendered(
+            &rt.list_timers(&agent, UnixMicros::new(1_767_254_400_000_000))
+                .result
+        ),
+        "count: 1\nformat: timer_id: deadline, recurrence\n\nagenda: due in 86400s, daily at 08:00 UTC"
     );
 }
 
@@ -1208,8 +1222,8 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         .handle_live_tool(&schedule, UnixMicros::new(0))
         .expect("schedule");
     assert_eq!(
-        scheduled.result,
-        CborValue::Text("scheduled timer `standup`".to_owned())
+        rendered(&scheduled.result),
+        "status: scheduled\ntimer_id: standup\n"
     );
     assert_eq!(scheduled.display.args, "schedule standup in 10m every 1h");
     assert!(scheduled.display.info_chips.is_empty());
@@ -1229,8 +1243,8 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         .handle_live_tool(&list, UnixMicros::new(0))
         .expect("list");
     assert_eq!(
-        listed.result,
-        CborValue::Text("standup: due in 600s, repeats every 3600s".to_owned())
+        rendered(&listed.result),
+        "count: 1\nformat: timer_id: deadline, recurrence\n\nstandup: due in 600s, repeats every 3600s"
     );
     assert_eq!(listed.display.args, "list");
     assert_eq!(listed.display.stats.matches, Some(1));
@@ -1248,10 +1262,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     let cancelled = rt
         .handle_live_tool(&cancel, UnixMicros::new(0))
         .expect("cancel");
-    assert_eq!(
-        cancelled.result,
-        CborValue::Text("cancelled timer `standup`".to_owned())
-    );
+    assert_eq!(rendered(&cancelled.result), "status: cancelled\n");
     assert_eq!(cancelled.display.args, "cancel standup");
     assert!(cancelled.display.info_chips.is_empty());
     assert!(cancelled.display.payload.is_none());
@@ -1259,16 +1270,16 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     let absent = rt
         .handle_live_tool(&cancel, UnixMicros::new(0))
         .expect("cancel absent timer");
-    assert_eq!(
-        absent.result,
-        CborValue::Text("timer `standup` was not active".to_owned())
-    );
+    assert_eq!(rendered(&absent.result), "status: not active\n");
     assert_eq!(absent.display.info_chips, ["not active"]);
 
     let empty = rt
         .handle_live_tool(&list, UnixMicros::new(0))
         .expect("empty list");
-    assert_eq!(empty.result, CborValue::Text("no active timers".to_owned()));
+    assert_eq!(
+        rendered(&empty.result),
+        "count: 0\nformat: timer_id: deadline, recurrence\n"
+    );
     assert_eq!(empty.display.stats.matches, Some(0));
     if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
         std::fs::write(Path::new(&directory).join("timer.json"),
@@ -1278,6 +1289,80 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
                 {"case":"timer-cancel-intentionally-body-free", "tool_name":"timer", "display":cancelled.display},
             ])).expect("serialize samples")).expect("write samples");
     }
+}
+
+/// Actual compact receipts must restore the same active timer map as live
+/// actions, including generated ids, one-shot lists, and idempotent
+/// cancellation.
+#[test]
+fn compact_timer_receipts_replay_live_mutations() {
+    let mut live = runtime();
+    let mut replay = runtime();
+    let now = UnixMicros::new(0);
+    let schedule = started(
+        "generated",
+        "agent-one",
+        cbor_map(vec![
+            ("action", text_result("schedule".to_owned())),
+            ("delay_seconds", CborValue::Integer(10.into())),
+            ("message", text_result("wake".to_owned())),
+        ]),
+    );
+    let scheduled = live.handle_live_tool(&schedule, now).expect("schedule");
+    let timer_id = tau_proto::cbor_text_field(&scheduled.result, "timer_id")
+        .expect("generated id is essential for cancellation");
+    assert_eq!(timer_id, "call-generated");
+    assert_eq!(
+        rendered(&scheduled.result),
+        "status: scheduled\ntimer_id: call-generated\n"
+    );
+    let list = started(
+        "list",
+        "agent-one",
+        cbor_map(vec![("action", text_result("list".to_owned()))]),
+    );
+    let cancel = started(
+        "cancel",
+        "agent-one",
+        cbor_map(vec![
+            ("action", text_result("cancel".to_owned())),
+            ("timer_id", text_result(timer_id)),
+        ]),
+    );
+    let listed = live.handle_live_tool(&list, now).expect("list");
+    assert_eq!(
+        rendered(&listed.result),
+        "count: 1\nformat: timer_id: deadline, recurrence\n\ncall-generated: due in 10s, one-shot"
+    );
+    let cancelled = live.handle_live_tool(&cancel, now).expect("cancel");
+    let mut absent_call = cancel.clone();
+    absent_call.call_id = ToolCallId::new("cancel-absent");
+    let absent = live
+        .handle_live_tool(&absent_call, now)
+        .expect("cancel absent");
+    for (invoke, completion, expected_count) in [
+        (schedule, scheduled, 1),
+        (list, listed, 1),
+        (cancel, cancelled, 0),
+        (absent_call, absent, 0),
+    ] {
+        replay.handle_started_replay(&invoke, Some(now));
+        replay.handle_result_replay(&ToolResult {
+            captured_output: None,
+            presentation: Default::default(),
+            call_id: invoke.call_id,
+            tool_name: invoke.tool_name,
+            tool_type: ToolType::Function,
+            result: completion.result,
+            provider_content: Vec::new(),
+            kind: ToolResultKind::Final,
+            display: None,
+            originator: invoke.originator,
+        });
+        assert_eq!(replay.timers.len(), expected_count);
+        assert!(replay.pending_invocations.is_empty());
+    }
+    assert!(live.timers.is_empty());
 }
 
 /// Timer display args do not echo unknown actions or unsafe timer ids.
@@ -2516,13 +2601,9 @@ fn archive_generation_arguments(generation: &str) -> CborValue {
 }
 
 /// Extract the opaque receipt from the list's snapshot header.
-fn archive_read_arguments(read: &str) -> CborValue {
+fn archive_read_arguments(read: &CborValue) -> CborValue {
     archive_generation_arguments(
-        read.lines()
-            .next()
-            .unwrap()
-            .strip_prefix("generation: ")
-            .unwrap(),
+        &tau_proto::cbor_text_field(read, "generation").expect("generation"),
     )
 }
 
@@ -2684,14 +2765,27 @@ fn papercut_history_empty_read_and_archive() {
         let read = rt
             .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
             .unwrap();
-        assert!(read.contains("0 active papercut report(s)"));
+        assert_eq!(
+            rendered(&read),
+            format!(
+                "generation: {}\ncount: 0\nformat: index: timestamp agent [session]\n",
+                blake3::hash(b"").to_hex()
+            )
+        );
         let result = rt
             .run_papercut_history(
                 PapercutHistoryAction::Archive,
                 &archive_read_arguments(&read),
             )
             .unwrap();
-        assert!(result.starts_with("archived 0 papercut report(s)"));
+        assert_eq!(
+            rendered(&result),
+            if existed {
+                "archived: 0\narchive: papercuts.archive-0000000000000001.jsonl\n"
+            } else {
+                "archived: 0\narchive: none\n"
+            }
+        );
         assert_eq!(*requests.borrow(), if existed { 3 } else { 2 });
     }
 }
@@ -2713,8 +2807,13 @@ fn papercut_history_tools_separate_metadata_full_read_and_archive() {
     let list = rt
         .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
         .expect("list");
-    assert!(list.contains("1: 1970-01-01T00:00:01Z agent-one [session-one]"));
-    assert!(!list.contains("secret report"));
+    assert_eq!(
+        rendered(&list),
+        format!(
+            "generation: {}\ncount: 1\nformat: index: timestamp agent [session]\n\n1: 1970-01-01T00:00:01Z agent-one [session-one]\n",
+            blake3::hash(active.borrow().as_ref().unwrap()).to_hex()
+        )
+    );
     let CborValue::Map(mut arguments) = archive_read_arguments(&list) else {
         panic!("arguments");
     };
@@ -2725,20 +2824,32 @@ fn papercut_history_tools_separate_metadata_full_read_and_archive() {
     let read = rt
         .run_papercut_history(PapercutHistoryAction::Read, &CborValue::Map(arguments))
         .expect("read");
-    assert!(read.contains("secret report"));
     assert_eq!(
-        rt.run_papercut_history(
-            PapercutHistoryAction::Archive,
-            &archive_read_arguments(&list)
+        read,
+        text_result(
+            papercut_history::format_markdown(
+                &papercut_history::parse_records(active.borrow().as_ref().unwrap()).unwrap()
+            )
+            .unwrap()
         )
-        .expect("archive"),
-        "archived 1 papercut report(s) at papercuts.archive-0000000000000001.jsonl"
+    );
+    assert_eq!(
+        rendered(
+            &rt.run_papercut_history(
+                PapercutHistoryAction::Archive,
+                &archive_read_arguments(&list)
+            )
+            .expect("archive")
+        ),
+        "archived: 1\narchive: papercuts.archive-0000000000000001.jsonl\n"
     );
     assert!(active.borrow().is_none());
     assert!(
-        rt.run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
-            .expect("empty list")
-            .contains("0 active papercut report(s)")
+        rendered(
+            &rt.run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
+                .expect("empty list")
+        )
+        .contains("\ncount: 0\n")
     );
 }
 
@@ -2881,7 +2992,7 @@ fn papercut_read_selects_one_report_and_rejects_stale_or_invalid_indices() {
     let listed = rt
         .run_papercut_history(PapercutHistoryAction::List, &cbor_map(vec![]))
         .expect("valid papercut test fixture");
-    assert!(!listed.contains("body"));
+    assert!(!rendered(&listed).contains("body"));
     let CborValue::Map(mut args) = archive_read_arguments(&listed) else {
         panic!("arguments")
     };
@@ -2892,9 +3003,9 @@ fn papercut_read_selects_one_report_and_rejects_stale_or_invalid_indices() {
     let read = rt
         .run_papercut_history(PapercutHistoryAction::Read, &CborValue::Map(args.clone()))
         .expect("valid papercut test fixture");
-    assert!(read.contains("second body"));
-    assert!(!read.contains("first body"));
-    assert!(!read.contains("third body"));
+    assert!(rendered(&read).contains("second body"));
+    assert!(!rendered(&read).contains("first body"));
+    assert!(!rendered(&read).contains("third body"));
     for index in [0, -1, 4] {
         args[1].1 = CborValue::Integer(index.into());
         assert!(
@@ -2976,8 +3087,8 @@ fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
     let invoke = papercut_started("call-1", "agent-one", "tool output was confusing");
 
     assert_eq!(
-        rt.record_papercut(&invoke, UnixMicros::new(1_234)),
-        "recorded; continue the primary task and do not retry"
+        rendered(&rt.record_papercut(&invoke, UnixMicros::new(1_234))),
+        "status: recorded\n"
     );
     let lines = lines.borrow();
     assert_eq!(lines.len(), 1);
@@ -2998,11 +3109,11 @@ fn papercut_without_active_session_does_not_append() {
     rt.papercut_storage = Some(Box::new(storage));
 
     assert_eq!(
-        rt.record_papercut(
+        rendered(&rt.record_papercut(
             &papercut_started("call-1", "agent-one", "missing lifecycle state"),
             UnixMicros::new(1),
-        ),
-        "not recorded: no active session is available; continue the primary task and do not retry"
+        )),
+        "status: not recorded\nreason: no active session is available\n"
     );
     assert!(lines.borrow().is_empty());
 }
@@ -3026,9 +3137,10 @@ fn papercut_append_failure_does_not_distract_the_primary_task() {
         UnixMicros::new(1),
     );
 
-    assert!(outcome.starts_with("not recorded:"));
-    assert!(outcome.contains("continue the primary task"));
-    assert!(outcome.contains("do not retry"));
+    assert_eq!(
+        rendered(&outcome),
+        "status: not recorded\nreason: papercut storage rejected the report\n"
+    );
     assert!(lines.borrow().is_empty());
 }
 
@@ -3045,8 +3157,8 @@ fn replayed_papercut_does_not_duplicate_append() {
     let invoke = papercut_started("call-1", "agent-one", "one-time report");
 
     assert!(
-        rt.record_papercut(&invoke, UnixMicros::new(1))
-            .starts_with("recorded")
+        rendered(&rt.record_papercut(&invoke, UnixMicros::new(1)))
+            .starts_with("status: recorded\n")
     );
     rt.handle_started_replay(&invoke, None);
 

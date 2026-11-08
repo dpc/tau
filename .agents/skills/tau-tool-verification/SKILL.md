@@ -93,6 +93,19 @@ Restore the original workdir with a separate setter when the probe finishes.
 
 ### Tool result output structure
 
+Persistent `workdir` setters return header-only `status: changed` and the
+canonical committed `path`; getters retain their structured availability result.
+Check relative paths and symlinks without changing discovery ordering. Utility
+receipts use the same shared projection: papercut reports distinguish `recorded`
+from successful best-effort `not recorded` with a reason; archive receipts retain
+the generated archive path or explicit `none`. Papercut lists contain
+generation/count/format headers and metadata records only; reads return only a
+Markdown payload. Timer schedules retain the generated timer ID, cancels
+distinguish `cancelled` from `not active`, and lists contain count/format headers
+with optional records. Verify that empty lists have no blank payload region and
+that timer records preserve one-shot, fixed-interval, daily, and awaiting-timezone
+states. Replay must recognize compact timer successes.
+
 The normative entry point is
 [SPEC-tau-proto-provider-data](../../../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions).
 `ToolResponse` owns optional headers/payload serialization. Injected user-role

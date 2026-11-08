@@ -217,6 +217,8 @@ fn provider_tool_result_separators_depend_on_rendered_body() {
             "status: 0\n\nxyz",
         ),
         (map(&[("output", "xyz")]), "xyz"),
+        (CborValue::Text("xyz".into()), "xyz"),
+        (CborValue::Text(" \n".into()), " \n"),
         (map(&[("status", "0"), ("output", "\n")]), "status: 0\n\n\n"),
         (map(&[("status", "0"), ("output", " ")]), "status: 0\n\n "),
         (

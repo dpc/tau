@@ -23,18 +23,18 @@ fn available_read_uses_path_only_display() {
     ));
 }
 
-/// Successful setters show the resulting path, not the model-visible
-/// compatibility prose.
+/// Successful setters preserve the committed canonical path in compact
+/// metadata without adding an empty payload region.
 #[test]
-fn setter_uses_path_only_display_without_changing_result() {
+fn setter_uses_path_only_display_and_canonical_receipt() {
     let path = Path::new("/tmp/result");
     let output = output(path);
 
     assert_eq!(output.display.mode, "set");
     assert_eq!(output.display.args, "/tmp/result");
     assert_eq!(
-        output.result,
-        CborValue::Text("Workdir changed to /tmp/result.".to_owned())
+        tau_proto::ToolResponse::from_cbor(&output.result).render(),
+        "status: changed\npath: /tmp/result\n"
     );
 }
 

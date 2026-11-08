@@ -1125,7 +1125,7 @@ impl TimerRuntime {
         &self,
         action: PapercutHistoryAction,
         arguments: &CborValue,
-    ) -> Result<String, String> {
+    ) -> Result<CborValue, String> {
         let (expected_generation, index) = papercut_history_arguments(action, arguments)?;
         if !self.session_active {
             return Err("no active session is available".to_owned());
@@ -1145,10 +1145,7 @@ impl TimerRuntime {
         let records = papercut_history::parse_records(contents.as_deref().unwrap_or_default())?;
         match action {
             PapercutHistoryAction::List => {
-                let mut output = format!(
-                    "generation: {generation}\n{} active papercut report(s)\n",
-                    records.len()
-                );
+                let mut output = String::new();
                 for (index, record) in records.iter().enumerate() {
                     let _ = write!(&mut output, "{}: ", index + 1);
                     output.push_str(&papercut_history::format_timestamp(record.timestamp_us())?);
@@ -1158,25 +1155,36 @@ impl TimerRuntime {
                     output.push_str(record.session_id().as_str());
                     output.push_str("]\n");
                 }
-                Ok(output)
+                Ok(result_fields(vec![
+                    ("generation", text_result(generation.to_string())),
+                    ("count", CborValue::Integer(records.len().into())),
+                    (
+                        "format",
+                        text_result("index: timestamp agent [session]".to_owned()),
+                    ),
+                    ("output", text_result(output)),
+                ]))
             }
             PapercutHistoryAction::Read => {
                 let record = records
                     .get(index.expect("read requires an index") - 1)
                     .ok_or_else(|| "papercut index is out of range".to_owned())?;
-                papercut_history::format_markdown(std::slice::from_ref(record))
+                papercut_history::format_markdown(std::slice::from_ref(record)).map(text_result)
             }
             PapercutHistoryAction::Archive => {
                 let Some(_) = contents else {
-                    return Ok("archived 0 papercut report(s); no archive created".to_owned());
+                    return Ok(result_fields(vec![
+                        ("archived", CborValue::Integer(0.into())),
+                        ("archive", text_result("none".to_owned())),
+                    ]));
                 };
                 let archive = storage.archive(
                     expected_generation.expect("archive arguments require a generation"),
                 )?;
-                Ok(format!(
-                    "archived {} papercut report(s) at {archive}",
-                    records.len()
-                ))
+                Ok(result_fields(vec![
+                    ("archived", CborValue::Integer(records.len().into())),
+                    ("archive", text_result(archive)),
+                ]))
             }
         }
     }
@@ -1234,7 +1242,7 @@ impl TimerRuntime {
         Ok(TimerToolCompletion { result, display })
     }
 
-    fn record_papercut(&self, invoke: &ToolStarted, now: UnixMicros) -> String {
+    fn record_papercut(&self, invoke: &ToolStarted, now: UnixMicros) -> CborValue {
         let report = match parse_papercut_report(&invoke.arguments) {
             Ok(report) => report,
             Err(message) => return papercut_not_recorded(&message),
@@ -1258,7 +1266,7 @@ impl TimerRuntime {
         };
         line.push(b'\n');
         match storage.append_papercut(line) {
-            Ok(()) => "recorded; continue the primary task and do not retry".to_owned(),
+            Ok(()) => result_fields(vec![("status", text_result("recorded".to_owned()))]),
             Err(error) => {
                 tracing::debug!(%error, "papercut append was not recorded");
                 papercut_not_recorded("papercut storage rejected the report")
@@ -1377,7 +1385,10 @@ impl TimerRuntime {
             },
             entry,
         );
-        Ok(text_result(format!("scheduled timer `{}`", args.timer_id)))
+        Ok(result_fields(vec![
+            ("status", text_result("scheduled".to_owned())),
+            ("timer_id", text_result(args.timer_id)),
+        ]))
     }
 
     fn cancel_timer(&mut self, agent_id: &AgentId, timer_id: &str) -> TimerActionResult {
@@ -1390,12 +1401,12 @@ impl TimerRuntime {
             .is_some();
         if removed {
             TimerActionResult {
-                result: text_result(format!("cancelled timer `{timer_id}`")),
+                result: result_fields(vec![("status", text_result("cancelled".to_owned()))]),
                 outcome: TimerActionOutcome::NoAdditionalContext,
             }
         } else {
             TimerActionResult {
-                result: text_result(format!("timer `{timer_id}` was not active")),
+                result: result_fields(vec![("status", text_result("not active".to_owned()))]),
                 outcome: TimerActionOutcome::NotActive,
             }
         }
@@ -1451,16 +1462,16 @@ impl TimerRuntime {
             .collect();
         let matches = u64::try_from(lines.len())
             .expect("the bounded timer list contains no more than 64 entries");
-        if lines.is_empty() {
-            TimerActionResult {
-                result: text_result("no active timers".to_owned()),
-                outcome: TimerActionOutcome::Listed { matches },
-            }
-        } else {
-            TimerActionResult {
-                result: text_result(lines.join("\n")),
-                outcome: TimerActionOutcome::Listed { matches },
-            }
+        TimerActionResult {
+            result: result_fields(vec![
+                ("count", CborValue::Integer(matches.into())),
+                (
+                    "format",
+                    text_result("timer_id: deadline, recurrence".to_owned()),
+                ),
+                ("output", text_result(lines.join("\n"))),
+            ]),
+            outcome: TimerActionOutcome::Listed { matches },
         }
     }
 }
@@ -1836,7 +1847,7 @@ fn report_papercut_tool(
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,
-        result: text_result(state.record_papercut(invoke, UnixMicros::now())),
+        result: state.record_papercut(invoke, UnixMicros::now()),
         provider_content: Vec::new(),
         kind: ToolResultKind::Final,
         display: Some(ok_display("papercut".to_owned())),
@@ -1908,17 +1919,17 @@ fn papercut_history_arguments(
 /// Select a bounded terminal before sending anything through the writer.
 fn papercut_history_terminal(
     invoke: &ToolStarted,
-    result: Result<String, String>,
+    result: Result<CborValue, String>,
 ) -> tau_client::ToolTerminalOutcome {
     match result {
-        Ok(text) => {
+        Ok(output) => {
             let result = ToolResult {
                 captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
                 tool_type: ToolType::Function,
-                result: text_result(text),
+                result: output,
                 provider_content: Vec::new(),
                 kind: ToolResultKind::Final,
                 display: Some(ok_display(invoke.tool_name.as_str().to_owned())),
@@ -2230,8 +2241,11 @@ fn parse_papercut_report(value: &CborValue) -> Result<String, String> {
     Ok(report)
 }
 
-fn papercut_not_recorded(reason: &str) -> String {
-    format!("not recorded: {reason}; continue the primary task and do not retry")
+fn papercut_not_recorded(reason: &str) -> CborValue {
+    result_fields(vec![
+        ("status", text_result("not recorded".to_owned())),
+        ("reason", text_result(reason.to_owned())),
+    ])
 }
 
 fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String> {
@@ -2357,6 +2371,16 @@ fn generated_timer_id(call_id: &str) -> String {
 
 fn text_result(text: String) -> CborValue {
     CborValue::Text(text)
+}
+
+/// Build semantic result fields for the shared `ToolResponse` projection.
+fn result_fields(fields: Vec<(&str, CborValue)>) -> CborValue {
+    CborValue::Map(
+        fields
+            .into_iter()
+            .map(|(name, value)| (CborValue::Text(name.to_owned()), value))
+            .collect(),
+    )
 }
 
 fn timer_ctx_id(timer_id: &str, fired_count: u64) -> String {
