@@ -514,6 +514,12 @@ impl<'a> InternalToolHost<'a> {
             .normalized_input_wait_timeout_minutes(arguments)
     }
 
+    /// Resolve a wait target's visible tool name from owner-scoped runtime
+    /// tracking, including background calls and retained completions.
+    pub fn wait_target_tool_name(&self, owner: &AgentId, target: &ToolCallId) -> Option<ToolName> {
+        self.harness.wait_target_tool_name(owner, target)
+    }
+
     /// Return a cloned snapshot of skills discovered by the harness.
     pub fn discovered_skills(&self, conversation_id: &AgentId) -> Vec<InternalSkill> {
         let role = self

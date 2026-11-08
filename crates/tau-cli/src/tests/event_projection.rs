@@ -1506,6 +1506,72 @@ fn standalone_compaction_replay_retires_private_progress() {
     assert!(!vt.screen_contains(100, "◆"));
 }
 
+/// Exact and plural waits render tool-owned target labels with elapsed time,
+/// without leaking call IDs or mistaking them for an input timeout.
+#[test]
+fn wait_target_names_render_with_elapsed_time() {
+    for (field, targets, label) in [
+        (
+            "tool_call_id",
+            CborValue::Text("opaque-target".into()),
+            "shell_command",
+        ),
+        (
+            "tool_call_ids",
+            CborValue::Array(vec![
+                CborValue::Text("opaque-target".into()),
+                CborValue::Text("opaque-other".into()),
+            ]),
+            "shell_command, web_fetch",
+        ),
+    ] {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.handle_recorded_at(
+            &tool_started(
+                "named-wait",
+                "wait",
+                CborValue::Map(vec![(CborValue::Text(field.into()), targets)]),
+            ),
+            tau_proto::UnixMicros::new(1_000_000),
+        );
+        renderer.handle_recorded_at(
+            &initial_tool_progress("named-wait", "wait", label, ""),
+            tau_proto::UnixMicros::new(1_100_000),
+        );
+        sync(&handle);
+        assert!(vt.screen_contains(80, &format!("wait {label}")));
+        assert!(!vt.screen_contains(80, "opaque-"));
+        assert!(!vt.screen_contains(80, "/3600s"));
+        renderer.handle_recorded_at(
+            &Event::ToolResult(ToolResult {
+                captured_output: None,
+                presentation: Default::default(),
+                call_id: "named-wait".into(),
+                tool_name: tau_proto::ToolName::new("wait"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Null,
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: Some(tau_proto::ToolUseState {
+                    args: label.into(),
+                    status: tau_proto::ToolUseStatus::Success,
+                    status_text: "ok".into(),
+                    ..Default::default()
+                }),
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(2_000_000),
+        );
+        sync(&handle);
+        assert!(vt.screen_contains(80, &format!("wait {label} 1s ok")));
+    }
+}
+
 /// Activating-input waits identify their target and show the normalized wait
 /// bound alongside their own elapsed time both live and after completion.
 #[test]

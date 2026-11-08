@@ -866,18 +866,21 @@ fn message_recipient_parser_validates_external_address_grammar() {
     }
 }
 
+/// Running display resolves source names without requiring source start events
+/// to have been delivered to the built-in tool handler.
 #[test]
 fn wait_initial_display_uses_tracked_target_tool_name() {
     // Regression for provider-owned running display: the wait tool should
     // show the logical source tool name, not the opaque target call id.
-    let mut state = BuiltinState::default();
-    state.record_tool_started("shell-call".into(), ToolName::new("shell"));
+    let state = BuiltinState::default();
 
     let display = state
-        .initial_display(&wait_call("shell-call"))
+        .initial_display_with_timeout(&wait_call("shell-call"), None, &|target| {
+            (target == "shell-call").then(|| ToolName::new("shell_command"))
+        })
         .expect("wait display");
 
-    assert_eq!(display.args, "shell");
+    assert_eq!(display.args, "shell_command");
     assert_eq!(display.status, ToolUseStatus::InProgress);
 }
 
@@ -885,24 +888,30 @@ fn wait_initial_display_uses_tracked_target_tool_name() {
 /// without exposing opaque call IDs for unknown targets.
 #[test]
 fn wait_initial_display_shows_plural_targets_in_request_order() {
-    let mut state = BuiltinState::default();
-    state.record_tool_started("call-a".into(), ToolName::new("shell"));
-    state.record_tool_started("call-b".into(), ToolName::new("workdir"));
+    let state = BuiltinState::default();
     let display = state
-        .initial_display(&AgentToolCall {
-            call_ref: None,
-            id: "wait-call".into(),
-            name: ToolName::new(WAIT_TOOL_NAME),
-            tool_type: ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("tool_call_ids".to_owned()),
-                CborValue::Array(vec![
-                    CborValue::Text("call-b".to_owned()),
-                    CborValue::Text("call-unknown".to_owned()),
-                    CborValue::Text("call-a".to_owned()),
-                ]),
-            )]),
-        })
+        .initial_display_with_timeout(
+            &AgentToolCall {
+                call_ref: None,
+                id: "wait-call".into(),
+                name: ToolName::new(WAIT_TOOL_NAME),
+                tool_type: ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("tool_call_ids".to_owned()),
+                    CborValue::Array(vec![
+                        CborValue::Text("call-b".to_owned()),
+                        CborValue::Text("call-unknown".to_owned()),
+                        CborValue::Text("call-a".to_owned()),
+                    ]),
+                )]),
+            },
+            None,
+            &|target| match target {
+                "call-a" => Some(ToolName::new("shell")),
+                "call-b" => Some(ToolName::new("workdir")),
+                _ => None,
+            },
+        )
         .expect("plural wait display");
     assert_eq!(display.args, "workdir, tool, shell");
 }
@@ -967,20 +976,17 @@ fn wait_initial_display_shows_normalized_input_timeout() {
             CborValue::Integer(7.into()),
         ),
     ]);
-    assert_eq!(state.wait_initial_display_args(&invalid, None), "");
+    assert_eq!(
+        state.wait_initial_display_args(&invalid, None, &|_| None),
+        ""
+    );
 }
 
 /// Large plural waits keep a bounded target preview and report the omitted
 /// count so one tool row cannot be dominated by target labels.
 #[test]
 fn wait_initial_display_bounds_plural_target_names() {
-    let mut state = BuiltinState::default();
-    for index in 0..6 {
-        state.record_tool_started(
-            format!("call-{index}").into(),
-            ToolName::new(format!("tool_{index}")),
-        );
-    }
+    let state = BuiltinState::default();
     let arguments = CborValue::Map(vec![(
         CborValue::Text("tool_call_ids".to_owned()),
         CborValue::Array(
@@ -991,7 +997,9 @@ fn wait_initial_display_bounds_plural_target_names() {
     )]);
 
     assert_eq!(
-        state.wait_initial_display_args(&arguments, None),
+        state.wait_initial_display_args(&arguments, None, &|target| {
+            Some(ToolName::new(target.replace("call-", "tool_")))
+        }),
         "tool_0, tool_1, tool_2, tool_3, +2"
     );
 }
@@ -1252,10 +1260,10 @@ fn message_error_display_keeps_recipient_when_message_is_invalid() {
     }
 }
 
-/// Runtime bookkeeping retains a logical tool name through a background
-/// placeholder, then clears both tracking maps for every terminal event.
+/// Runtime bookkeeping retains cancellation requests through background
+/// placeholders, then clears them for every terminal event.
 #[test]
-fn wait_initial_display_tracks_only_running_or_backgrounded_tools() {
+fn cancellation_bookkeeping_tracks_only_running_or_backgrounded_tools() {
     let terminal_events = [
         Event::ToolResult(tool_result("shell-call", ToolResultKind::Final)),
         Event::ProviderToolResult(tool_result("shell-call", ToolResultKind::Final)),
@@ -1283,31 +1291,20 @@ fn wait_initial_display_tracks_only_running_or_backgrounded_tools() {
 
     let mut placeholder_state = BuiltinState::default();
     let call_id = ToolCallId::from("shell-call");
-    placeholder_state.record_tool_started(call_id.clone(), ToolName::new("shell"));
     placeholder_state.cancel_requested.insert(call_id.clone());
     placeholder_state.record_runtime_bookkeeping_event(&Event::ProviderToolResult(tool_result(
         "shell-call",
         ToolResultKind::BackgroundPlaceholder,
     )));
-    assert!(
-        placeholder_state
-            .in_progress_tool_names
-            .contains_key(&call_id)
-    );
     assert!(placeholder_state.cancel_requested.contains(&call_id));
 
     for event in terminal_events {
         let mut state = BuiltinState::default();
         let call_id = ToolCallId::from("shell-call");
-        state.record_tool_started(call_id.clone(), ToolName::new("shell"));
         state.cancel_requested.insert(call_id.clone());
 
         state.record_runtime_bookkeeping_event(&event);
 
-        assert!(
-            !state.in_progress_tool_names.contains_key(&call_id),
-            "{event:?} must clear its tool name"
-        );
         assert!(
             !state.cancel_requested.contains(&call_id),
             "{event:?} must clear its cancellation request"
@@ -1361,7 +1358,6 @@ fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
     let mut state = BuiltinState::default();
     let call_id = ToolCallId::from("shell-call");
     state.cancel_requested.insert(call_id.clone());
-    state.record_tool_started(call_id.clone(), ToolName::new("shell"));
 
     state.record_runtime_bookkeeping_event(&Event::SessionShutdown(tau_proto::SessionShutdown {
         session_id: "session-next"
@@ -1370,7 +1366,6 @@ fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
     }));
 
     assert!(state.cancel_requested.is_empty());
-    assert!(state.in_progress_tool_names.is_empty());
 }
 
 /// Ensures whitespace-only cancellation targets are rejected as empty rather

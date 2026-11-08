@@ -2337,6 +2337,63 @@ fn background_notification_suppression_removes_queued_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// Wait UI names come from owner-scoped source tracking, not start-event
+/// broadcasts to unrelated internal handlers. Completion retains the name even
+/// after pending routing is gone, without exposing it to another agent.
+#[test]
+fn wait_target_display_name_survives_background_completion() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    let connection = crate::test_connection_id("conn-wait-name");
+    let _events = connect_ready_configured_extension(
+        &mut h,
+        connection.as_str(),
+        "configured-wait-name",
+        tau_proto::ClientKind::Tool,
+    );
+    h.tool_routing.registry.register(
+        &connection,
+        instant_background_test_tool_spec("shell_command"),
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    let target: ToolCallId = "wait-name-source".into();
+    start_background_tool_and_finish_placeholder_turn(
+        &mut h,
+        &cid,
+        target.as_str(),
+        "shell_command",
+    );
+    let other = AgentId::parse("other-agent").expect("agent id");
+    for completed in [false, true] {
+        if completed {
+            h.handle_extension_event_inner(
+                &connection,
+                Event::ToolResultReported(final_tool_result(
+                    target.as_str(),
+                    "shell_command",
+                    "done",
+                )),
+            )
+            .expect("background completion");
+            assert!(
+                !h.tool_routing
+                    .tool_runtime
+                    .pending_tools
+                    .contains_key(&target)
+            );
+        }
+        let host = crate::InternalToolHost::new(&mut h);
+        assert_eq!(
+            host.wait_target_tool_name(&cid, &target),
+            Some(ToolName::new("shell_command"))
+        );
+        assert_eq!(host.wait_target_tool_name(&other, &target), None);
+        assert_eq!(host.wait_target_tool_name(&cid, &"unknown".into()), None);
+    }
+    h.shutdown().expect("shutdown");
+}
+
 /// A no-arg wait that is already blocked when its background call completes
 /// must consume the result and suppress the normal internal completion prompt.
 #[test]

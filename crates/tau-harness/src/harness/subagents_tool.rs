@@ -582,6 +582,19 @@ impl Harness {
             .terminal_observation(call_id)
     }
 
+    /// Return a retained wait target's visible name only for its owning agent.
+    pub(crate) fn wait_target_tool_name(
+        &self,
+        owner: &AgentId,
+        target: &ToolCallId,
+    ) -> Option<ToolName> {
+        let tracker = &self.agent_runtime.subagents.wait_tracker;
+        tracker
+            .call_is_owned_by(target, owner)
+            .then(|| tracker.call_tool_name(target))
+            .flatten()
+    }
+
     /// Reports whether the wait projection tracks one pending tool call.
     #[cfg(test)]
     pub(crate) fn wait_tracks_call_for_test(&self, call_id: &ToolCallId) -> bool {

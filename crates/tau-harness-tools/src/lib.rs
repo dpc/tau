@@ -57,7 +57,6 @@ struct BuiltinTools {
 #[derive(Default)]
 struct BuiltinState {
     cancel_requested: HashSet<ToolCallId>,
-    in_progress_tool_names: HashMap<ToolCallId, ToolName>,
     next_delegate_query_id: u64,
     pending_delegate_acceptance: HashMap<String, PendingDelegateAcceptance>,
 }
@@ -76,12 +75,7 @@ struct PendingDelegateAcceptance {
 impl BuiltinState {
     fn clear_session_runtime_state(&mut self) {
         self.cancel_requested.clear();
-        self.in_progress_tool_names.clear();
         self.pending_delegate_acceptance.clear();
-    }
-
-    fn record_tool_started(&mut self, call_id: ToolCallId, tool_name: ToolName) {
-        self.in_progress_tool_names.insert(call_id, tool_name);
     }
 
     fn record_runtime_bookkeeping_event(&mut self, event: &Event) {
@@ -115,7 +109,6 @@ impl BuiltinState {
     }
 
     fn record_tool_finished(&mut self, call_id: &ToolCallId) {
-        self.in_progress_tool_names.remove(call_id);
         self.cancel_requested.remove(call_id);
     }
 
@@ -145,6 +138,7 @@ impl BuiltinState {
             tau_harness::normalized_wait_timeout_minutes(&call.arguments)
                 .ok()
                 .flatten(),
+            &|_| None,
         )
     }
 
@@ -152,6 +146,7 @@ impl BuiltinState {
         &self,
         call: &AgentToolCall,
         input_wait_timeout_minutes: Option<u64>,
+        target_tool_name: &impl Fn(&str) -> Option<ToolName>,
     ) -> Option<ToolUseState> {
         let (args, status_text, payload) = match call.name.as_str() {
             SKILL_TOOL_NAME => {
@@ -172,7 +167,11 @@ impl BuiltinState {
                 return Some(agent_start_display(&parsed.role, &parsed.prompt));
             }
             WAIT_TOOL_NAME => (
-                self.wait_initial_display_args(&call.arguments, input_wait_timeout_minutes),
+                self.wait_initial_display_args(
+                    &call.arguments,
+                    input_wait_timeout_minutes,
+                    target_tool_name,
+                ),
                 tau_proto::PROGRESS_INDICATOR_TEXT,
                 None,
             ),
@@ -219,6 +218,7 @@ impl BuiltinState {
         &self,
         arguments: &CborValue,
         input_wait_timeout_minutes: Option<u64>,
+        target_tool_name: &impl Fn(&str) -> Option<ToolName>,
     ) -> String {
         if let Some(minutes) = input_wait_timeout_minutes {
             return format!("{minutes}m");
@@ -230,10 +230,8 @@ impl BuiltinState {
             return String::new();
         }
         if let Some(call_id) = wait_target_call_id(arguments) {
-            return self
-                .in_progress_tool_names
-                .get(call_id)
-                .map_or_else(|| "tool".to_owned(), ToString::to_string);
+            return target_tool_name(call_id)
+                .map_or_else(|| "tool".to_owned(), |name| name.to_string());
         }
         if let Some(call_ids) = wait_target_call_ids(arguments) {
             let remaining = call_ids.len().saturating_sub(WAIT_DISPLAY_TARGET_LIMIT);
@@ -241,9 +239,8 @@ impl BuiltinState {
                 .into_iter()
                 .take(WAIT_DISPLAY_TARGET_LIMIT)
                 .map(|call_id| {
-                    self.in_progress_tool_names
-                        .get(call_id)
-                        .map_or_else(|| "tool".to_owned(), ToString::to_string)
+                    target_tool_name(call_id)
+                        .map_or_else(|| "tool".to_owned(), |name| name.to_string())
                 })
                 .collect::<Vec<_>>();
             if remaining != 0 {
@@ -322,13 +319,13 @@ impl InternalToolHandler for BuiltinTools {
                     return Ok(());
                 };
                 let display = {
-                    let mut state = self.state.lock().expect("builtin tool state poisoned");
-                    state.record_tool_started(call.id.clone(), visible_tool_name.clone());
+                    let state = self.state.lock().expect("builtin tool state poisoned");
                     state.initial_display_with_timeout(
                         &call,
                         host.normalized_wait_timeout_minutes(&call.arguments)
                             .ok()
                             .flatten(),
+                        &|target| host.wait_target_tool_name(&conversation_id, &target.into()),
                     )
                 };
                 if let Some(display) = display {
