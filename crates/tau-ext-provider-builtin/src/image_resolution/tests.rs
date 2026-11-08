@@ -298,7 +298,7 @@ fn resolver_failures_do_not_cache_partial_or_unverified_bytes() {
 /// A verified cache hit cannot bless altered size, MIME or decoded dimensions.
 #[test]
 fn resolver_validates_each_cached_occurrence_metadata() {
-    for damage in ["size", "mime", "dimensions"] {
+    for damage in ["size", "mime", "dimensions", "identity"] {
         with_transport(|handle, waker| {
             let mut state = State::default();
             let (tx, rx) = mpsc::channel();
@@ -322,6 +322,13 @@ fn resolver_validates_each_cached_occurrence_metadata() {
                             tau_proto::ArtifactSize::new(png().len() as u64 + 1).expect("size")
                     }
                     "mime" => image.media_type = tau_proto::ImageMediaType::Jpeg,
+                    "identity" => {
+                        image.blob.identity = tau_proto::ArtifactIdentity::metadata(
+                            Some("substituted.png".into()),
+                            Some("image/png".into()),
+                        )
+                        .unwrap()
+                    }
                     _ => image.width += 1,
                 }
                 let mut context = PromptContext {

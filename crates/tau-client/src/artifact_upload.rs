@@ -19,6 +19,8 @@ pub struct ArtifactUpload {
     bytes: Vec<u8>,
     /// Validated original byte length, retained through request construction.
     size: tau_proto::ArtifactSize,
+    /// Exact metadata requested by this producer, not a server-selected hint.
+    identity: tau_proto::ArtifactIdentity,
     /// Upload identity after successful Begin.
     upload: Option<ArtifactUploadId>,
     /// Next acknowledged byte offset.
@@ -30,10 +32,20 @@ pub struct ArtifactUpload {
 impl ArtifactUpload {
     /// Validates the object bound before beginning any upload.
     pub fn new(bytes: Vec<u8>) -> Result<Self, ArtifactError> {
+        Self::with_metadata(bytes, None, None)
+    }
+
+    /// Creates a new metadata-bound upload with bounded original metadata.
+    pub fn with_metadata(
+        bytes: Vec<u8>,
+        filename: Option<String>,
+        mime_type: Option<String>,
+    ) -> Result<Self, ArtifactError> {
         let size = tau_proto::ArtifactSize::new(bytes.len() as u64)?;
         Ok(Self {
             bytes,
             size,
+            identity: tau_proto::ArtifactIdentity::metadata(filename, mime_type)?,
             upload: None,
             offset: 0,
             descriptor: None,
@@ -47,7 +59,10 @@ impl ArtifactUpload {
             return None;
         }
         let Some(upload) = &self.upload else {
-            return Some(ArtifactOp::Begin { size: self.size });
+            return Some(ArtifactOp::Begin {
+                size: self.size,
+                identity: self.identity.clone(),
+            });
         };
         if self.offset == self.bytes.len() {
             Some(ArtifactOp::Finalize {
@@ -81,13 +96,10 @@ impl ArtifactUpload {
                 self.offset = next_offset as usize;
             }
             (Some(ArtifactOp::Finalize { .. }), ArtifactValue::Descriptor(descriptor)) => {
-                if descriptor.size.get() != self.bytes.len() as u64
-                    || !descriptor
-                        .key
-                        .matches_digest(blake3::hash(&self.bytes).to_hex().as_str())
-                {
+                if descriptor.identity != self.identity {
                     return Err(ArtifactError::Integrity);
                 }
+                descriptor.verify(&self.bytes)?;
                 self.descriptor = Some(descriptor);
             }
             _ => return Err(ArtifactError::Invalid),

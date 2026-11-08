@@ -45,7 +45,8 @@ fn larger_original_roundtrip_restart_and_policy() {
         store.begin(
             "owner",
             "connection",
-            tau_proto::ArtifactSize::new(16 * 1024 * 1024 + 1).expect("above operational limit")
+            tau_proto::ArtifactSize::new(16 * 1024 * 1024 + 1).expect("above operational limit"),
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         ),
         Err(ArtifactError::Invalid)
     );
@@ -61,19 +62,30 @@ fn large_upload_reservations_are_exclusive_and_released() {
     let largest = tau_proto::ArtifactSize::new(ARTIFACT_MAX_BYTES).expect("maximum object size");
     store.set_max_bytes(largest);
     store
-        .begin("owner", "one", largest)
+        .begin(
+            "owner",
+            "one",
+            largest,
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
+        )
         .expect("exclusive large upload");
     assert_eq!(
         store.begin(
             "owner",
             "two",
-            tau_proto::ArtifactSize::new(1).expect("small size")
+            tau_proto::ArtifactSize::new(1).expect("small size"),
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         ),
         Err(ArtifactError::Busy)
     );
     store.disconnect("one");
     store
-        .begin("owner", "two", largest)
+        .begin(
+            "owner",
+            "two",
+            largest,
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
+        )
         .expect("capacity released");
 }
 
@@ -105,7 +117,7 @@ fn discovery_ranks_full_store_and_finds_older_prefixes() {
         panic!("list")
     };
     assert_eq!(entries[0].descriptor, old);
-    assert!(entries[0].signature.is_none()); // A header cannot prove text.
+    assert!(entries[0].descriptor.identity.mime_type().is_none());
     assert_eq!(
         store
             .metadata(&old.key)
@@ -126,7 +138,7 @@ fn discovery_ranks_full_store_and_finds_older_prefixes() {
 /// Canceled scans never return a plausible partial top-N page; corrupt entries
 /// are ignored.
 #[test]
-fn discovery_cancellation_and_header_inference_are_bounded() {
+fn discovery_cancellation_and_metadata_only_listing_are_bounded() {
     let temp = tempfile::tempdir().expect("private root");
     let mut store = ArtifactStore::new(temp.path());
     assert_eq!(store.list("", 10, || false), Err(ArtifactError::Busy));
@@ -137,14 +149,11 @@ fn discovery_cancellation_and_header_inference_are_bounded() {
         b"\x89PNG\r\n\x1a\nnot a decoded image",
         1,
     );
-    let ArtifactValue::Listed { entries } = store.list("", 10, || true).expect("header hints")
-    else {
+    let ArtifactValue::Listed { entries } = store.list("", 10, || true).expect("metadata") else {
         panic!("list")
     };
-    assert_eq!(
-        entries[0].signature,
-        Some(tau_proto::ArtifactSignature::Png)
-    );
+    assert_eq!(entries[0].descriptor, png);
+    assert!(entries[0].descriptor.identity.mime_type().is_none());
     fs::write(
         store
             .root
@@ -174,6 +183,7 @@ pub(crate) fn put(
             owner,
             connection,
             ArtifactOp::Begin {
+                identity: tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
                 size: tau_proto::ArtifactSize::new(bytes.len() as u64).expect("bounded fixture"),
             },
             now,
@@ -303,6 +313,7 @@ fn writes_are_bounded_and_retry_safe() {
             "owner/session",
             "one",
             tau_proto::ArtifactSize::new(4).expect("size"),
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         )
         .expect("begin upload")
     else {
@@ -571,8 +582,12 @@ fn corrupt_original_continues_to_later_expired_sibling() {
 }
 
 fn put_corrupt_duplicate(store: &mut ArtifactStore) -> Result<ArtifactValue, ArtifactError> {
-    let ArtifactValue::Upload { upload } =
-        store.begin("tool/one", "one", tau_proto::ArtifactSize::new(6)?)?
+    let ArtifactValue::Upload { upload } = store.begin(
+        "tool/one",
+        "one",
+        tau_proto::ArtifactSize::new(6)?,
+        tau_proto::ArtifactIdentity::metadata(None, None)?,
+    )?
     else {
         panic!("upload")
     };
@@ -604,7 +619,12 @@ fn durable_intent_recovery_and_completed_receipt_expiry() {
         complete: false,
     };
     write_synced(&path.join("data"), b"bytes").expect("intent bytes");
-    write_json(&path.join("receipt.json"), &receipt).expect("intent metadata");
+    let mut historical = serde_json::to_value(&receipt).expect("receipt JSON");
+    historical["descriptor"]
+        .as_object_mut()
+        .unwrap()
+        .remove("identity");
+    write_json(&path.join("receipt.json"), &historical).expect("historical intent metadata");
     sync_dir(&path).expect("sync intent");
     sync_dir(&store.root.join("operations")).expect("sync publication");
     drop(_lock);
@@ -652,6 +672,7 @@ fn cancellation_expiry_and_admission_are_bounded() {
                 "tool/session",
                 "one",
                 tau_proto::ArtifactSize::new(16 * 1024 * 1024).expect("size"),
+                tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
             )
             .expect("admit bounded upload");
     }
@@ -659,7 +680,8 @@ fn cancellation_expiry_and_admission_are_bounded() {
         store.begin(
             "tool/session",
             "one",
-            tau_proto::ArtifactSize::new(0).expect("size")
+            tau_proto::ArtifactSize::new(0).expect("size"),
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         ),
         Err(ArtifactError::Busy)
     );
@@ -669,6 +691,7 @@ fn cancellation_expiry_and_admission_are_bounded() {
             "tool/session",
             "two",
             tau_proto::ArtifactSize::new(0).expect("size"),
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         )
         .expect("capacity recovered");
     store.expire(Instant::now() + TRANSFER_LIFETIME);
@@ -706,6 +729,7 @@ fn busy_finalize_preserves_upload_until_abort_releases_it() {
             "tool/session",
             "uploader",
             tau_proto::ArtifactSize::new(3).expect("size"),
+            tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         )
         .expect("begin upload")
     else {

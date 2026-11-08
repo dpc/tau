@@ -349,9 +349,9 @@ fn attached(mut call: ToolStarted, originals: &[Vec<u8>]) -> ToolStarted {
 
 /// Constructs exact content identity and size without a store or user data.
 fn descriptor(bytes: &[u8]) -> ArtifactDescriptor {
-    ArtifactDescriptor::new(
-        tau_proto::ArtifactKey::from_digest(blake3::hash(bytes).to_hex().as_str()).expect("key"),
-        bytes.len() as u64,
+    ArtifactDescriptor::from_bytes(
+        bytes,
+        tau_proto::ArtifactIdentity::metadata(None, Some("image/png".into())).unwrap(),
     )
     .expect("descriptor")
 }
@@ -934,12 +934,9 @@ fn image_availability_failure_does_not_generate() {
 #[test]
 fn image_original_upload_returns_reference_without_path_or_inline_bytes() {
     let original = vec![0x9b; tau_proto::ARTIFACT_CHUNK_BYTES + 7];
-    let descriptor = ArtifactDescriptor::new(
-        blake3::hash(&original).to_hex()[..24]
-            .to_owned()
-            .parse()
-            .expect("key"),
-        original.len() as u64,
+    let descriptor = ArtifactDescriptor::from_bytes(
+        &original,
+        tau_proto::ArtifactIdentity::metadata(None, Some("image/png".into())).unwrap(),
     )
     .expect("descriptor");
     let frames = with_handle(|handle| {

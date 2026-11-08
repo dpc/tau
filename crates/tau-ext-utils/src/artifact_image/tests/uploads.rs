@@ -114,9 +114,9 @@ fn source_bytes() -> Vec<u8> {
 /// Produces the exact immutable descriptor expected by the upload state
 /// machine.
 fn descriptor(bytes: &[u8]) -> ArtifactDescriptor {
-    ArtifactDescriptor::new(
-        ArtifactKey::from_digest(blake3::hash(bytes).to_hex().as_str()).expect("key"),
-        bytes.len() as u64,
+    ArtifactDescriptor::from_bytes(
+        bytes,
+        tau_proto::ArtifactIdentity::metadata(None, Some("image/png".into())).unwrap(),
     )
     .expect("descriptor")
 }
@@ -785,7 +785,7 @@ fn utility_loop_uploads_prepared_bytes_before_reference_terminal() {
                         closed = true;
                         ArtifactValue::Done
                     }
-                    ArtifactOp::Begin { size } => {
+                    ArtifactOp::Begin { size, .. } => {
                         assert!(closed, "source transfer releases its slot before upload");
                         assert_eq!(size, expected.size);
                         ArtifactValue::Upload {

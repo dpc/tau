@@ -80,8 +80,6 @@ enum Command {
         lifecycle: ToolLifecycle,
         /// Retry-safe upload state.
         upload: ArtifactUpload,
-        /// Bounded per-use filename hint.
-        filename: Option<String>,
     },
     /// A key has been validated and is ready to open.
     StartImport {
@@ -119,8 +117,6 @@ enum Transfer {
         lifecycle: ToolLifecycle,
         /// Retry-safe typed upload helper.
         upload: ArtifactUpload,
-        /// Bounded per-use filename hint.
-        filename: Option<String>,
     },
     /// Download of one validated key.
     Import {
@@ -166,6 +162,10 @@ struct RetainedTemp {
     reservation: Option<buffer_budget::Reservation>,
     /// Directory trees need recursive cleanup rather than unlink.
     directory: bool,
+    /// Private parent owned independently of the returned file's kind/path.
+    cleanup_parent: Option<PathBuf>,
+    /// Verified immutable declaration returned with the imported path.
+    mime_type: Option<String>,
     /// Owned path removed on drop until successfully published to the caller.
     path: Option<PathBuf>,
 }
@@ -260,7 +260,6 @@ impl ArtifactTransferManager {
                     invoke,
                     lifecycle,
                     upload,
-                    filename,
                 } => {
                     if lifecycle.effect_cancel_requested() {
                         report_cancelled(output, invoke, lifecycle);
@@ -275,7 +274,6 @@ impl ArtifactTransferManager {
                             invoke,
                             lifecycle,
                             upload,
-                            filename,
                         },
                     );
                     self.start_next(&call_id, output);
@@ -323,19 +321,18 @@ impl ArtifactTransferManager {
                     }
                     match result {
                         Ok(mut temp) => {
-                            let reported = report_result(
-                                output,
-                                &invoke,
-                                CborValue::Map(vec![
-                                    text_entry(
-                                        "kind",
-                                        if temp.directory { "directory" } else { "file" }
-                                            .to_owned(),
-                                    ),
-                                    text_entry("path", temp.path().display().to_string()),
-                                    int_entry("size", size),
-                                ]),
-                            );
+                            let mut entries = vec![
+                                text_entry(
+                                    "kind",
+                                    if temp.directory { "directory" } else { "file" }.to_owned(),
+                                ),
+                                text_entry("path", temp.path().display().to_string()),
+                                int_entry("size", size),
+                            ];
+                            if let Some(mime_type) = &temp.mime_type {
+                                entries.push(text_entry("mime_type", mime_type.clone()));
+                            }
+                            let reported = report_result(output, &invoke, CborValue::Map(entries));
                             if reported {
                                 let _ = temp.publish();
                             }
@@ -398,33 +395,15 @@ impl ArtifactTransferManager {
                 invoke,
                 lifecycle,
                 upload,
-                filename,
             } if upload.descriptor().is_some() => {
                 let descriptor = upload.descriptor().expect("checked descriptor");
-                let mut entries = vec![
+                let entries = vec![
                     text_entry(
                         "kind",
                         if directory { "directory" } else { "file" }.to_owned(),
                     ),
                     text_entry("artifact", artifact_reference(&descriptor.key)),
-                    int_entry("size", descriptor.size.get()),
                 ];
-                if directory {
-                    entries.push(text_entry(
-                        "mime_type",
-                        tau_artifact::DIRECTORY_MIME.to_owned(),
-                    ));
-                    if let Some(filename) = filename {
-                        entries.push(text_entry("filename", filename));
-                    }
-                } else if let Some(filename) = filename {
-                    if let Some(mime_type) = hints::export_mime(&invoke, Some(&filename)) {
-                        entries.push(text_entry("mime_type", mime_type));
-                    }
-                    entries.push(text_entry("filename", filename));
-                } else if let Some(mime_type) = hints::export_mime(&invoke, None) {
-                    entries.push(text_entry("mime_type", mime_type));
-                }
                 report_result(output, &invoke, CborValue::Map(entries));
                 lifecycle.finish();
             }
@@ -434,6 +413,11 @@ impl ArtifactTransferManager {
                 lifecycle,
                 download,
             } if download.next_op().is_none() => {
+                let identity = download
+                    .descriptor()
+                    .expect("completed download descriptor")
+                    .identity
+                    .clone();
                 let size = download
                     .into_bytes()
                     .map(|bytes| (bytes.len() as u64, bytes));
@@ -465,10 +449,11 @@ impl ArtifactTransferManager {
                             queued_bytes: 0,
                         };
                         let enqueue = scheduler.enqueue(WorkPriority::Cheap, meta, move || {
-                            let result = write_import(&bytes, &cancel, limits).map(|mut temp| {
-                                temp.reservation = buffer_reservation;
-                                temp
-                            });
+                            let result =
+                                write_import(&bytes, &cancel, limits, &identity).map(|mut temp| {
+                                    temp.reservation = buffer_reservation;
+                                    temp
+                                });
                             drop(reservation);
                             let _ = tx.send(Command::ImportWritten {
                                 call_id,
@@ -785,24 +770,29 @@ fn prepare_export_with_limits(
     // Kind follows the reserved byte identity even when the source is an
     // already-encoded regular file. Import still validates the whole bundle.
     let directory = tau_artifact::is_directory(&bytes);
-    let upload = ArtifactUpload::new(bytes).map_err(|error| {
-        (
-            invoke.clone(),
-            lifecycle.clone(),
-            artifact_error_message(error),
-        )
-    })?;
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .map(bounded_hint);
+    let mime_type = if directory {
+        Some(tau_artifact::DIRECTORY_MIME.to_owned())
+    } else {
+        hints::export_mime(&invoke, filename.as_deref())
+    };
+    let upload =
+        ArtifactUpload::with_metadata(bytes, filename.clone(), mime_type).map_err(|error| {
+            (
+                invoke.clone(),
+                lifecycle.clone(),
+                artifact_error_message(error),
+            )
+        })?;
     Ok(Command::StartExport {
         reservation: None,
         directory,
         invoke,
         lifecycle,
         upload,
-        filename,
     })
 }
 
@@ -876,6 +866,8 @@ fn write_private_temp(bytes: &[u8], cancel: &AtomicBool) -> Result<RetainedTemp,
     Ok(RetainedTemp {
         path: Some(path),
         directory: false,
+        cleanup_parent: None,
+        mime_type: None,
         reservation: None,
     })
 }
@@ -884,6 +876,7 @@ fn write_import(
     bytes: &[u8],
     cancel: &AtomicBool,
     limits: tau_artifact::Limits,
+    identity: &tau_proto::ArtifactIdentity,
 ) -> Result<RetainedTemp, String> {
     if bytes.len() as u64 > limits.stored_bytes {
         return Err("artifact exceeds configured stored-byte limit".to_owned());
@@ -894,11 +887,71 @@ fn write_import(
         Ok(RetainedTemp {
             path: Some(temp.keep()),
             directory: true,
+            cleanup_parent: None,
+            mime_type: identity.mime_type().map(str::to_owned),
             reservation: None,
         })
     } else {
-        write_private_temp(bytes, cancel)
+        let mut temp = if let Some(name) = identity.filename().filter(|name| safe_import_name(name))
+        {
+            write_named_temp(bytes, cancel, name)?
+        } else {
+            write_private_temp(bytes, cancel)?
+        };
+        temp.mime_type = identity.mime_type().map(str::to_owned);
+        Ok(temp)
     }
+}
+
+/// Names are a single portable component, never traversal or path authority.
+fn safe_import_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= tau_proto::ARTIFACT_METADATA_BYTES
+        && !name
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == ':' || c.is_control())
+}
+
+/// Creates a named mode-0600 file inside a fresh private mode-0700 parent.
+fn write_named_temp(bytes: &[u8], cancel: &AtomicBool, name: &str) -> Result<RetainedTemp, String> {
+    let parent = tempfile::Builder::new()
+        .prefix("tau-artifact-")
+        .tempdir()
+        .map_err(|error| format!("failed to create private import directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("failed to secure import directory: {error}"))?;
+    }
+    let path = parent.path().join(name);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // An unusable basename is metadata, not a reason to lose the payload.
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(_) => return write_private_temp(bytes, cancel),
+    };
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("failed to write imported original: {error}"))?;
+    if cancel.load(Ordering::Acquire) {
+        return Err("artifact import was cancelled".to_owned());
+    }
+    Ok(RetainedTemp {
+        reservation: None,
+        directory: false,
+        path: Some(path),
+        cleanup_parent: Some(parent.keep()),
+        mime_type: None,
+    })
 }
 
 fn finish_error(output: &Output, transfer: Transfer, message: String) {
@@ -1002,11 +1055,7 @@ fn absolute_path(workdir: &Path, path: &str) -> PathBuf {
 }
 
 fn bounded_hint(value: &str) -> String {
-    let mut end = value.len().min(255);
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
+    tau_proto::bounded_artifact_metadata(value)
 }
 
 fn text_entry(name: &str, value: String) -> (CborValue, CborValue) {
@@ -1055,12 +1104,17 @@ impl RetainedTemp {
 
     /// Transfers cleanup ownership to the successful tool result.
     fn publish(&mut self) -> PathBuf {
+        self.cleanup_parent.take();
         self.path.take().expect("retained temp path")
     }
 }
 
 impl Drop for RetainedTemp {
     fn drop(&mut self) {
+        if let Some(parent) = self.cleanup_parent.take() {
+            let _ = fs::remove_dir_all(parent);
+            return;
+        }
         if let Some(path) = self.path.take() {
             if self.directory {
                 let _ = fs::remove_dir_all(path);

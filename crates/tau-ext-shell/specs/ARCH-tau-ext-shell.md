@@ -6,9 +6,13 @@
 the same remembered workdir authority, then the main loop drives one typed
 Artifact upload operation at a time. `import` drives a verified typed download on
 that loop and hands the completed bounded bytes to a shell worker, which creates
-an unpredictable mode-0600 temporary file or validates and extracts a typed
+an original-basename mode-0600 file inside a fresh mode-0700 private parent, a
+generic private fallback file, or validates and extracts a typed
 directory bundle on the shell host. `tau-artifact` owns the directory codec;
 hints never choose the decoder.
+Export binds filename and effective MIME before upload and returns only kind and
+reference. Import returns recorded MIME after identity verification. File kind
+and exposed path are independent of private-parent cleanup ownership.
 Exact request correlation and complete Artifact
 frame validation precede transfer-state acceptance; cancellation submits
 Abort/Close best-effort and suppresses the normal tool result.

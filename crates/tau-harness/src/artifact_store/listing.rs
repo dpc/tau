@@ -61,9 +61,8 @@ impl ArtifactStore {
                 Err(error) => return Err(error),
             };
             entries.push(ArtifactListEntry {
-                descriptor: ArtifactDescriptor::new(key, metadata.size)?,
+                descriptor: metadata.descriptor(key)?,
                 last_put_at: metadata.last_put_at,
-                signature: None,
             });
             entries.sort_unstable_by(|a, b| {
                 b.last_put_at
@@ -72,17 +71,11 @@ impl ArtifactStore {
             });
             entries.truncate(limit as usize);
         }
-        for entry in &mut entries {
+        for entry in &entries {
             check()?;
             // Resolve only the bounded selected page. Ambiguous identities
             // invalidate it without rescanning the store for every candidate.
-            let digest = self.storage_digest(&entry.descriptor.key)?;
-            if let Ok(mut file) = File::open(self.root.join("blake3").join(digest).join("data")) {
-                let mut header = [0_u8; 32];
-                if let Ok(length) = file.read(&mut header) {
-                    entry.signature = tau_client::artifact_signature(&header[..length]);
-                }
-            }
+            self.storage_digest(&entry.descriptor.key)?;
         }
         check()?;
         Ok(ArtifactValue::Listed { entries })

@@ -11,6 +11,8 @@ pub(super) struct Upload {
     pub(super) connection: String,
     /// Exact expected original length.
     pub(super) size: ArtifactSize,
+    /// Immutable hash scheme and metadata admitted at Begin.
+    pub(super) identity: tau_proto::ArtifactIdentity,
     /// Already accepted original bytes.
     pub(super) bytes: Vec<u8>,
     /// Non-renewable expiry.

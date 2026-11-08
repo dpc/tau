@@ -1320,7 +1320,7 @@ fn deterministic_clean_resume_restores_fake_cursor_without_replay_consumption()
 fn deterministic_typed_image_tool_result_replays_after_clean_restart()
 -> Result<(), Box<dyn std::error::Error>> {
     const CALL_ID: &str = "typed-image-call";
-    const IMAGE_DIGEST: &str = "1c22ad7f40a18bbcb1c50dc8a78ac6a1a36b9a0a3c7f9833c965b2ef8100a734";
+    const IMAGE_DIGEST: &str = "c8bc6ccc266fb3d80c7fe1bb865d05d4aa6967c288bed247bed5e42fc0d42dbf";
     let fixture = DeterministicFixture::new_typed_image_v2(
         "deterministic_typed_image_tool_result_replays_after_clean_restart",
         &ScenarioV2::new(

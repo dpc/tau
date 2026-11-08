@@ -12,8 +12,6 @@ pub struct ArtifactListEntry {
     pub descriptor: ArtifactDescriptor,
     /// Latest explicit put timestamp; reads do not refresh it.
     pub last_put_at: u64,
-    /// Optional header inference, never a content validity claim.
-    pub signature: Option<ArtifactSignature>,
 }
 
 impl std::fmt::Debug for ArtifactListEntry {

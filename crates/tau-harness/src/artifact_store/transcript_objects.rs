@@ -24,7 +24,7 @@ impl ArtifactStore {
         }
         require_directory(&directory)?;
         let mut metadata: Metadata = read_json(&directory.join("meta.json"))?;
-        if metadata.version != 1 || metadata.size != descriptor.size.get() {
+        if metadata.descriptor(descriptor.key.clone())? != *descriptor {
             return Err(ArtifactError::Integrity);
         }
         metadata.last_put_at = metadata.last_put_at.max(put_at);
@@ -113,7 +113,7 @@ impl ArtifactStore {
         if path_present(&protected)? {
             require_directory(&protected)?;
             let metadata: Metadata = read_json(&protected.join("meta.json"))?;
-            if metadata.version != 1 || metadata.size != descriptor.size.get() {
+            if metadata.descriptor(descriptor.key.clone())? != *descriptor {
                 return Err(ArtifactError::Integrity);
             }
             verify(

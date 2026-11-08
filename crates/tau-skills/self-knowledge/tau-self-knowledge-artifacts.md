@@ -12,10 +12,13 @@ reference directly with `import` or `read_image`, without removing the wrapper.
 `FULL_KEY` is exactly 24 lowercase hex digits (96 bits of BLAKE3), with no
 algorithm label. No old full-digest syntax or shorter prefixes are accepted.
 Existing stored originals remain accessible through short keys.
-`export(path)` reads one regular file or directory under the shell instance's
-remembered workdir authority and returns an artifact reference and size. `import(key)`
-verifies the original and writes a private mode-0600 temporary file on the
-shell execution host, returning its path and size. `read_image(key)` consumes
+`export(path, mime_type?)` reads one regular file or directory under the shell
+instance's remembered workdir authority and returns only kind and artifact reference.
+Filename and effective MIME are immutable hash-bound metadata; an explicit file MIME
+overrides extension inference. `import(key)` verifies bytes and metadata, restores
+a safe filename inside a fresh private directory, and returns kind, path, size and
+recorded MIME when present. Legacy or unusable filenames use a generic private file.
+Files are mode 0600 and their parents mode 0700. `read_image(key)` consumes
 the original without granting shell or filesystem authority; use it for images
 when available. All three remain subject to their respective tool-role policy.
 Directory export packs a versioned tar+zstd bundle in-process. Key-only import

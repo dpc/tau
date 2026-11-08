@@ -7,10 +7,11 @@ startup configuration/retention, and extension consumers jointly implement
 original-byte identity, authority, durability, and lifetime, so none can own the
 complete contract locally.
 
-Artifacts are immutable original bytes addressed directly by their BLAKE3
-digest. The selected persistent state root defines a shared cross-session
-namespace. Identical bytes share one original and age; filenames and media
-claims are per-use hints, not canonical identity or first-writer metadata.
+Artifacts bind immutable original bytes and optional filename/media declarations
+into one BLAKE3 identity. The selected persistent state root defines a shared
+cross-session namespace. Identical bytes and metadata share one original and
+age; different metadata produces a different identity rather than overwriting
+first- or last-writer hints. Metadata remains a declaration, not media validation.
 There is no public overwrite, delete, reference-pin, or implicit remote-fetch API.
 Whole-store discovery is restricted to authenticated UIs; configured extensions
 retain known-key read authority without enumeration.
@@ -37,6 +38,20 @@ Knowing a digest permits lookup through configured Artifact RPC peers; it does
 not grant model-role, tool, or remote-recipient authority. Configured local
 extensions and cooperative peers remain the existing trust boundary, not
 untrusted Internet ingress.
+
+New uploads use the shared version-one identity framing: the ASCII domain
+`tau.artifact` followed by a zero byte and version byte one; optional filename
+then MIME; unsigned 64-bit big-endian payload length; then raw payload bytes.
+Each optional UTF-8 field has a zero absent tag or a one present tag followed by
+its unsigned 64-bit big-endian byte length and bytes. Each field is bounded to
+255 UTF-8 bytes; absent and present-empty are distinct. Payload limits exclude
+framing. Upload clients require the returned scheme and metadata to equal their
+request, and downloads verify the complete framed identity before use.
+Stored metadata without an identity remains legacy payload-only data. Legacy
+objects and short-key receipts remain readable without migration or invented
+metadata; re-export creates a new metadata-bound identity. Unknown schemes fail
+closed. Descriptors, protected aliases, roots, retry receipts and listing preserve
+the exact immutable identity.
 
 Persistent ephemeral sessions may explicitly create and read shared artifacts.
 Consumers must disclose that this persists original bytes independently of
@@ -70,7 +85,8 @@ original draft unchanged and may leave a committed shared original.
 
 Validated native clipboard file bundles upload exact original bodies through
 the same UI authority, without granting remote path resolution. Per-use filename
-and media hints do not become digest metadata or content authority. A multi-file
+and bounded media/name hints become immutable digest metadata, not content
+authority. A multi-file
 paste inserts its complete reference list only after every original finalizes;
 this grouped editor update does not make backing-store publication transactional.
 Failure/cancellation may retain finalized predecessors, and explicit retry
@@ -81,7 +97,8 @@ full-key ties ascending. Prefix filtering precedes the page limit. A scan
 returns a complete advisory top-N page or fails, never presents an incomplete
 traversal as globally recent. Discovery is off-loop, bounded in retained memory
 and decision time, revocable on disconnect, and does not renew retention.
-Header media inference is advisory; no name/media catalog is persisted.
+Listing returns stored metadata only, without reading or classifying payload
+headers. Completion displays recorded MIME when present and omits it otherwise.
 
 Clipboard export is an explicit UI-local operation. The consumer verifies the
 complete original size/digest and closes its read before admitting terminal
@@ -120,8 +137,9 @@ Consumers verify original size and digest before use; a digest proves equality,
 not provenance, safe content, or media validity.
 
 Directory exports use an in-process versioned tar+zstd codec shared with other
-producers. The identifying bytes are part of the digest; MIME remains an
-unverified per-use hint and cannot trigger extraction. Key-only import recognizes
+producers. The identifying bytes are part of the digest; recorded MIME remains
+an unverified declaration and cannot trigger extraction. Key-only import
+recognizes
 directory bundles, verifies the full stored original, then validates and extracts
 regular files and directories into private staging. Unsupported versions,
 unsafe paths, links, special entries, exceeded limits and malformed/trailing
@@ -134,7 +152,8 @@ Artifact transfer bytes remain outside event logs.
 
 Finalization publishes complete originals and explicit metadata atomically,
 synchronizing files and publication directories before a successful descriptor.
-New explicit uploads of duplicate bytes renew shared age, without rewriting
+New explicit uploads of duplicate bytes and metadata renew shared age, without
+rewriting
 the original. Recognized same-upload retries recover a durable receipt and do
 not renew age, including after restart. Interrupted finalization intents retain
 their original fixed put timestamp. Receipt recovery is bounded independently
@@ -155,7 +174,8 @@ Startup cleanup is opportunistic, not a hard TTL. It revalidates age under the
 same stable cross-process coordination as finalization, durably detaches before
 recursive removal, and recovers prior detached staging. Ordinary textual references do not pin
 originals; a later read may be unavailable even while a transcript preserves
-its digest. A later new put of identical bytes can restore that same key.
+its digest. A later new put of identical bytes and metadata can restore that same
+key.
 Processes sharing a root should use consistent retention settings: any enabled
 cleaner may apply its own configured policy.
 
@@ -215,13 +235,16 @@ authoritative empty set.
 
 The shell `export` consumer reads one bounded local regular file using its
 ordinary remembered-workdir filesystem authority and performs a new explicit
-upload. Its model-facing result exposes the canonical artifact reference and
-byte size and available per-use filename/media hints as output headers.
-Hints travel beside references, never as digest-indexed metadata; key-only
-imports cannot recover them. Shell `import` validates a canonical reference or
-bare key, verifies the complete download, and publishes only private
-non-executable temporary-path and byte-size output headers on the shell execution
-host. Import accepts only the key and creates a generic temporary name.
+upload. Its model-facing result exposes only kind and canonical artifact reference.
+Export persists the bounded basename and the explicit file MIME override, or the
+MIME inferred from a known extension. Directory bundles record their fixed MIME.
+Shell `import` validates a canonical reference or bare key, verifies the complete
+download, and returns kind, private path, payload size and recorded MIME when
+present. A safe filename becomes a mode-0600 child inside a fresh mode-0700
+`tau-artifact-*` directory. Missing, unsafe or unusable filenames fall back to a
+generic private file. The returned file kind/path is separate from ownership of
+its private parent, which is removed on failure or cancellation before successful
+result publication. Directory extraction layout remains unchanged.
 These tools never expose harness store paths or original bytes through
 model text; import and inspection do not renew age.
 

@@ -1167,6 +1167,7 @@ dependencies = [
 name = "dpc-tau-proto"
 version = "0.28.0"
 dependencies = [
+ "blake3",
  "ciborium",
  "dpc-tau-actions",
  "indexmap",

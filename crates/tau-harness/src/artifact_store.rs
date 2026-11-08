@@ -19,6 +19,8 @@ use tau_proto::{
 
 mod cleanup;
 mod filesystem;
+#[cfg(test)]
+mod identity_tests;
 mod listing;
 mod metadata;
 #[cfg(test)]
@@ -101,7 +103,7 @@ impl ArtifactStore {
         match op {
             ArtifactOp::List { prefix, limit } => self.list(&prefix, limit, || true),
             ArtifactOp::Available => Ok(ArtifactValue::Done),
-            ArtifactOp::Begin { size } => self.begin(owner, connection, size),
+            ArtifactOp::Begin { size, identity } => self.begin(owner, connection, size, identity),
             ArtifactOp::Write {
                 upload,
                 offset,
@@ -146,8 +148,12 @@ impl ArtifactStore {
         owner: &str,
         connection: &str,
         size: tau_proto::ArtifactSize,
+        identity: tau_proto::ArtifactIdentity,
     ) -> Result<ArtifactValue, ArtifactError> {
-        if size.get() > self.max_bytes {
+        if size.get() > self.max_bytes
+            || !identity.is_bounded()
+            || !matches!(identity, tau_proto::ArtifactIdentity::MetadataV1 { .. })
+        {
             return Err(ArtifactError::Invalid);
         }
         // Preserve the former eight-times-16-MiB concurrent allocation ceiling.
@@ -173,6 +179,7 @@ impl ArtifactStore {
                 owner: owner.to_owned(),
                 connection: connection.to_owned(),
                 size,
+                identity,
                 bytes: Vec::new(),
                 expires: Instant::now() + TRANSFER_LIFETIME,
             },
@@ -239,10 +246,7 @@ impl ArtifactStore {
             let receipt = Receipt {
                 version: 1,
                 owner: owner.to_owned(),
-                descriptor: ArtifactDescriptor::new(
-                    ArtifactKey::from_digest(blake3::hash(&upload.bytes).to_hex().as_str())?,
-                    upload.size.get(),
-                )?,
+                descriptor: ArtifactDescriptor::from_bytes(&upload.bytes, upload.identity.clone())?,
                 put_at: now,
                 expires_at: now.saturating_add(RECEIPT_LIFETIME),
                 complete: false,
@@ -286,7 +290,7 @@ impl ArtifactStore {
         verify(&receipt.descriptor, &data)?;
         // Full digests remain private physical locators, not public identities.
         // The exclusive store lock serializes this collision check and publish.
-        let hash = blake3::hash(&data).to_hex();
+        let hash = receipt.descriptor.identity.digest(&data).to_hex();
         let hex = hash.as_str();
         match self.resolve_short_digest(key.canonical()) {
             Ok(existing) if existing != hex => return Err(ArtifactError::Integrity),
@@ -296,7 +300,7 @@ impl ArtifactStore {
         let object = objects.join(hex);
         if object.exists() {
             let old = self.metadata(key)?;
-            if old.size != receipt.descriptor.size.get() {
+            if old.descriptor(key.clone())? != receipt.descriptor {
                 return Err(ArtifactError::Integrity);
             }
             if read_bounded(&object.join("data"))? != data {
@@ -305,7 +309,8 @@ impl ArtifactStore {
             replace_json(
                 &object.join("meta.json"),
                 &Metadata {
-                    version: 1,
+                    version: Metadata::version(&receipt.descriptor.identity),
+                    identity: receipt.descriptor.identity.clone(),
                     size: receipt.descriptor.size.get(),
                     last_put_at: old.last_put_at.max(receipt.put_at),
                 },
@@ -335,7 +340,8 @@ impl ArtifactStore {
             write_json(
                 &staging.path().join("meta.json"),
                 &Metadata {
-                    version: 1,
+                    version: Metadata::version(&receipt.descriptor.identity),
+                    identity: receipt.descriptor.identity.clone(),
                     size: receipt.descriptor.size.get(),
                     last_put_at,
                 },
@@ -359,14 +365,14 @@ impl ArtifactStore {
     /// public short identities still resolve through `object_directory`.
     fn metadata_at_digest(&self, hex: &str) -> Result<Metadata, ArtifactError> {
         let metadata: Metadata = read_json(&self.object_directory(hex)?.join("meta.json"))?;
-        if metadata.version != 1 || metadata.size > ARTIFACT_MAX_BYTES {
+        if !metadata.valid() {
             return Err(ArtifactError::Integrity);
         }
         Ok(metadata)
     }
 
     fn descriptor(&self, key: &ArtifactKey) -> Result<ArtifactDescriptor, ArtifactError> {
-        ArtifactDescriptor::new(key.clone(), self.metadata(key)?.size)
+        self.metadata(key)?.descriptor(key.clone())
     }
 
     fn open(&mut self, connection: &str, key: ArtifactKey) -> Result<ArtifactValue, ArtifactError> {

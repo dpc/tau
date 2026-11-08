@@ -4238,10 +4238,10 @@ fn require_typed_image_tool_result(
         [tau_proto::ToolResultContentPart::ImageReference(reference)] => {
             // This strict fake checks descriptor continuity, not storage. The
             // production-provider acceptance separately verifies actual fetch.
-            if reference.blob.size.get() != tau_ext_test_dummy::TYPED_IMAGE_PNG.len() as u64
-                || !reference.blob.key.matches_digest(
-                    "1c22ad7f40a18bbcb1c50dc8a78ac6a1a36b9a0a3c7f9833c965b2ef8100a734",
-                )
+            if reference
+                .blob
+                .verify(tau_ext_test_dummy::TYPED_IMAGE_PNG)
+                .is_err()
             {
                 return Err("typed image descriptor mismatch");
             }

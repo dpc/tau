@@ -14,16 +14,20 @@ advertise: false
   metadata, and missing-path suggestions. Input cap: 10 MiB; overlapping ranges
   can exceed the rendered-expansion cap.
 - `export`: uploads one regular file or in-process tar+zstd directory bundle and
-  returns `<tau-artifact:FULL_KEY>`, `size`, and available `filename`/`mime_type` headers.
+  returns only `kind` and `<tau-artifact:FULL_KEY>` in the `artifact` header.
+  Optional `mime_type` overrides file extension inference. The bounded filename
+  and effective MIME persist immutably and participate in the artifact identity.
   `FULL_KEY` has exactly 24 lowercase hex digits (96-bit BLAKE3), without an
   algorithm label. Old full-digest reference syntax is rejected.
   MIME is declared or inferred, not verified. Export renews retention even for
-  duplicate bytes; originals outlive ephemeral transcripts. Stored and expanded
+  duplicate bytes and metadata; originals outlive ephemeral transcripts. Stored and expanded
   bytes each default to 32 MiB under `artifact_limits` in `harness.yaml`, with
   a 512 MiB configuration ceiling. Directory MIME is fixed; directory roots and
   members cannot be symlinks or special files. Use a quiescent source tree.
-- `import`: verifies artifact size/digest and returns a private mode-0600 `path`.
-  Pass only the canonical reference; rename the returned file locally if needed.
+- `import`: verifies bytes and metadata, returns `kind`, `path`, `size` and recorded
+  MIME when present. A safe filename is restored inside a fresh mode-0700 private
+  parent with a mode-0600 child; legacy or unusable names get a generic private file.
+  Pass only the canonical reference.
   Import recognizes versioned directory bundles by their bytes and extracts them
   into a private mode-0700 directory.
   It extracts only regular files and directories, without executable permissions.

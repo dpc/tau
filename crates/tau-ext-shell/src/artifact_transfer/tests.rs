@@ -4,6 +4,76 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use super::*;
+
+/// Named imports retain a file kind, private parent ownership, exact metadata,
+/// and independent paths; cancellation and undelivered completions clean
+/// parents.
+#[test]
+fn named_imports_restore_metadata_and_clean_private_parents() {
+    let identity = tau_proto::ArtifactIdentity::metadata(
+        Some("example.txt".into()),
+        Some("text/plain".into()),
+    )
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    let limits = tau_artifact::Limits::default();
+    let first = write_import(b"same", &cancel, limits, &identity).unwrap();
+    let second = write_import(b"same", &cancel, limits, &identity).unwrap();
+    let parent = first.path().parent().unwrap().to_owned();
+    assert_ne!(first.path(), second.path());
+    assert_eq!(first.path().file_name().unwrap(), "example.txt");
+    assert!(!first.directory);
+    assert_eq!(first.mime_type.as_deref(), Some("text/plain"));
+    assert_eq!(fs::read(first.path()).unwrap(), b"same");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(first.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let mut manager = ArtifactTransferManager::unavailable();
+    assert!(
+        manager
+            .control
+            .send(Command::ImportWritten {
+                call_id: "named".into(),
+                size: 4,
+                result: Ok(first),
+            })
+            .is_ok()
+    );
+    manager.shutdown();
+    drop(manager);
+    assert!(!parent.exists());
+    let second_parent = second.path().parent().unwrap().to_owned();
+    drop(second);
+    assert!(!second_parent.exists());
+    cancel.store(true, Ordering::Release);
+    assert!(write_import(b"same", &cancel, limits, &identity).is_err());
+    cancel.store(false, Ordering::Release);
+    for name in [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "/absolute",
+        "a\\b",
+        "a\0b",
+        "a\nb",
+        "C:drive",
+    ] {
+        let identity = tau_proto::ArtifactIdentity::metadata(Some(name.into()), None).unwrap();
+        let temp = write_import(b"same", &cancel, limits, &identity).unwrap();
+        assert!(temp.cleanup_parent.is_none(), "{name:?}");
+        assert_eq!(temp.mime_type, None);
+    }
+}
 #[cfg(unix)]
 use crate::config::ExtConfig;
 #[cfg(unix)]
@@ -19,7 +89,8 @@ fn directory_import_cleanup_and_type_identity() {
     let limits = tau_artifact::Limits::default();
     let bytes = tau_artifact::pack(source.path(), limits, || false).expect("encode fixture");
     let cancel = AtomicBool::new(false);
-    let temp = write_import(&bytes, &cancel, limits).expect("import fixture");
+    let identity = tau_proto::ArtifactIdentity::LegacyPayload;
+    let temp = write_import(&bytes, &cancel, limits, &identity).expect("import fixture");
     let path = temp.path().to_owned();
     assert!(temp.directory);
     assert_eq!(
@@ -29,10 +100,11 @@ fn directory_import_cleanup_and_type_identity() {
     drop(temp);
     assert!(!path.exists());
     cancel.store(true, Ordering::Release);
-    assert!(write_import(&bytes, &cancel, limits).is_err());
+    assert!(write_import(&bytes, &cancel, limits, &identity).is_err());
     cancel.store(false, Ordering::Release);
-    assert!(write_import(&bytes[..bytes.len() - 1], &cancel, limits).is_err());
-    let ordinary = write_import(b"not a directory", &cancel, limits).expect("ordinary import");
+    assert!(write_import(&bytes[..bytes.len() - 1], &cancel, limits, &identity).is_err());
+    let ordinary =
+        write_import(b"not a directory", &cancel, limits, &identity).expect("ordinary import");
     assert!(
         !ordinary.directory,
         "only typed bundle bytes select extraction"
@@ -335,18 +407,15 @@ fn regular_file_export_preparation_preserves_bytes() {
     fs::write(&path, &expected).expect("write fixture");
     let (invoke, lifecycle, _output, _rx) = export_preparation_fixture(&path);
 
-    let Ok(Command::StartExport {
-        mut upload,
-        filename,
-        ..
-    }) = prepare_export(invoke, lifecycle, tempdir.path())
+    let Ok(Command::StartExport { mut upload, .. }) =
+        prepare_export(invoke, lifecycle, tempdir.path())
     else {
         panic!("regular file should prepare an export command");
     };
-    assert_eq!(filename.as_deref(), Some("original.bin"));
-    let Some(tau_proto::ArtifactOp::Begin { size }) = upload.next_op() else {
+    let Some(tau_proto::ArtifactOp::Begin { size, identity }) = upload.next_op() else {
         panic!("expected upload begin");
     };
+    assert_eq!(identity.filename(), Some("original.bin"));
     assert_eq!(size.get(), expected.len() as u64);
     upload
         .accept(tau_proto::ArtifactValue::Upload {
@@ -570,7 +639,6 @@ fn export_transfer_fixture() -> (
             invoke,
             lifecycle,
             upload: ArtifactUpload::new(b"x".to_vec()).expect("upload"),
-            filename: None,
         },
     );
     let request_id: tau_proto::ArtifactRequestId =
@@ -662,6 +730,8 @@ fn queued_import_completion_unlinks_unreported_temp_on_shutdown_drop() {
                 call_id: "finished-import".into(),
                 size: 0,
                 result: Ok(RetainedTemp {
+                    cleanup_parent: None,
+                    mime_type: None,
                     reservation: None,
                     directory: false,
                     path: Some(path.clone()),
@@ -701,6 +771,8 @@ fn full_artifact_completion_queue_rejects_without_blocking_or_leaking() {
         call_id: "rejected".into(),
         size: 0,
         result: Ok(RetainedTemp {
+            cleanup_parent: None,
+            mime_type: None,
             reservation: None,
             directory: false,
             path: Some(path.clone()),
@@ -779,7 +851,6 @@ fn correlated_upload_error_aborts_known_upload_once() {
             invoke,
             lifecycle,
             upload,
-            filename: None,
         },
     );
 
@@ -909,7 +980,6 @@ fn local_request_failure_releases_only_known_transfer_identity() {
             invoke: invoke.clone(),
             lifecycle,
             upload,
-            filename: None,
         },
     );
     manager.reject_next_request = true;
@@ -935,7 +1005,6 @@ fn local_request_failure_releases_only_known_transfer_identity() {
             invoke: initial.clone(),
             lifecycle: initial_lifecycle,
             upload: ArtifactUpload::new(b"x".to_vec()).expect("upload"),
-            filename: None,
         },
     );
     manager.reject_next_request = true;
@@ -999,7 +1068,6 @@ fn cleanup_admission_failure_preserves_original_terminal() {
             invoke,
             lifecycle,
             upload,
-            filename: None,
         },
     );
 

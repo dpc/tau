@@ -251,7 +251,8 @@ impl ImageTools {
             Ok(bytes) => bytes,
             Err(error) => return report_error(&call.started, &error.to_string(), handle),
         };
-        let Ok(upload) = ArtifactUpload::new(bytes) else {
+        let Ok(upload) = ArtifactUpload::with_metadata(bytes, None, Some("image/png".into()))
+        else {
             return report_error(
                 &call.started,
                 "generated image exceeds artifact limits",

@@ -604,7 +604,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             title: Some("Export an original".to_owned()),
             arguments: CborValue::Map(vec![example_field("path", example_text("output.png"))]),
             note: Some(
-                "Pass the reference to read_image; pass reference plus filename/mime_type hints to import.".to_owned(),
+                "Pass only the reference to read_image or import; import restores the recorded filename and MIME.".to_owned(),
             ),
             subcommand: None,
         }],

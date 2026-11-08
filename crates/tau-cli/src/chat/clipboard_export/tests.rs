@@ -5,6 +5,33 @@ use std::sync::atomic::AtomicUsize;
 use tau_proto::{ArtifactDescriptor, ArtifactRequest, HarnessInputMessage};
 
 use super::*;
+
+/// Completion uses immutable metadata verbatim, never payload classification
+/// or a guessed label for legacy missing MIME.
+#[test]
+fn completion_displays_recorded_mime_only() {
+    let descriptor = ArtifactDescriptor::from_bytes(
+        b"not an archive",
+        tau_proto::ArtifactIdentity::metadata(None, Some("application/vnd.tau.directory".into()))
+            .unwrap(),
+    )
+    .unwrap();
+    let item = row(ArtifactListEntry {
+        descriptor,
+        last_put_at: 1,
+    });
+    assert_eq!(item.description, "application/vnd.tau.directory · 14 bytes");
+    let descriptor = ArtifactDescriptor::from_bytes(
+        b"\x89PNG\r\n\x1a\n",
+        tau_proto::ArtifactIdentity::LegacyPayload,
+    )
+    .unwrap();
+    let item = row(ArtifactListEntry {
+        descriptor,
+        last_put_at: 1,
+    });
+    assert_eq!(item.description, "8 bytes");
+}
 use crate::chat::{UiIoMeter, UiWriter};
 
 /// Creates an isolated protocol socket; no clipboard or external harness is
@@ -154,7 +181,6 @@ fn completion_rejects_old_prefix_and_keeps_full_keys() {
             entries: vec![ArtifactListEntry {
                 descriptor: ArtifactDescriptor::new(key.clone(), 14).expect("bounded original"),
                 last_put_at: 10,
-                signature: None,
             }],
         },
     );
@@ -175,7 +201,7 @@ fn completion_rejects_old_prefix_and_keeps_full_keys() {
             .expect("abbreviated label")
             .contains('…')
     );
-    assert!(rows[0].description.contains("format unknown"));
+    assert_eq!(rows[0].description, "14 bytes");
     control.stop();
     worker.join().expect("completion worker exits");
 }
@@ -188,7 +214,6 @@ fn completion_validates_short_results_against_canonical_prefixes() {
         descriptor: ArtifactDescriptor::new("a".repeat(24).parse().expect("key"), 1)
             .expect("descriptor"),
         last_put_at: 1,
-        signature: None,
     }];
     for prefix in ["a", "aa"] {
         assert!(valid_page(prefix, &entries), "{prefix}");

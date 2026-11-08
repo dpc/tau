@@ -16,11 +16,7 @@ fn full_digest_objects_and_short_key_receipts_survive_restart() {
     write_synced(&object.join("data"), bytes).expect("original");
     write_json(
         &object.join("meta.json"),
-        &Metadata {
-            version: 1,
-            size: bytes.len() as u64,
-            last_put_at: 1,
-        },
+        &serde_json::json!({"version": 1, "size": bytes.len(), "last_put_at": 1}),
     )
     .expect("legacy metadata");
     let mut download = tau_client::ArtifactDownload::new(short.clone());
@@ -31,21 +27,20 @@ fn full_digest_objects_and_short_key_receipts_survive_restart() {
     }
     assert_eq!(download.into_bytes().expect("original"), bytes);
     let (upload, descriptor) = tests::put(&mut store, "owner", "connection", bytes, 3);
-    assert_eq!(descriptor.key, short);
+    assert_ne!(descriptor.key, short);
     drop(store);
     let mut restarted = ArtifactStore::new(root.path());
     assert_eq!(
         restarted
             .finalize("owner", "connection", &upload, 4)
             .expect("old retry"),
-        ArtifactValue::Descriptor(
-            ArtifactDescriptor::new(short.clone(), bytes.len() as u64).expect("descriptor")
-        )
+        ArtifactValue::Descriptor(descriptor.clone())
     );
     let ArtifactValue::Listed { entries } = restarted.list("", 10, || true).expect("list") else {
         panic!("list");
     };
-    assert_eq!(entries[0].descriptor.key, short);
+    assert_eq!(entries[0].descriptor, descriptor);
+    assert_eq!(entries[1].descriptor.key, short);
     assert_eq!(entries[0].last_put_at, 3);
     for prefix in ["b", "0", "f"] {
         let ArtifactValue::Listed { entries } =
@@ -56,6 +51,7 @@ fn full_digest_objects_and_short_key_receipts_survive_restart() {
         assert_eq!(
             entries.len(),
             usize::from(short.as_str().starts_with(prefix))
+                + usize::from(descriptor.key.as_str().starts_with(prefix))
         );
     }
 }
@@ -108,7 +104,7 @@ fn short_identity_collision_never_selects_or_overwrites_an_object() {
         .protect_transcript_object(&descriptor)
         .expect("same-digest alias");
     assert!(store.descriptor(&descriptor.key).is_ok());
-    let full = blake3::hash(bytes).to_hex();
+    let full = descriptor.identity.digest(bytes).to_hex();
     let different = format!("{}{}", descriptor.key, "0".repeat(40));
     assert_ne!(different, full.as_str());
     let collision = store.root.join("transcript-objects").join(&different);

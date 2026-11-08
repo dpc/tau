@@ -92,10 +92,23 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
         fs::remove_dir_all(&source).expect("replace source tree");
         fs::write(&source, &original).expect("write already-encoded bundle");
     }
-    let key = tau_proto::ArtifactKey::from_digest(blake3::hash(&original).to_hex().as_str())
-        .expect("artifact key");
-    let descriptor =
-        tau_proto::ArtifactDescriptor::new(key.clone(), original.len() as u64).expect("descriptor");
+    let descriptor = tau_proto::ArtifactDescriptor::from_bytes(
+        &original,
+        tau_proto::ArtifactIdentity::metadata(
+            Some("original.png".into()),
+            Some(
+                if directory {
+                    tau_artifact::DIRECTORY_MIME
+                } else {
+                    "application/x-custom"
+                }
+                .into(),
+            ),
+        )
+        .expect("metadata"),
+    )
+    .expect("descriptor");
+    let key = descriptor.key.clone();
 
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
@@ -110,7 +123,10 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
         .write_event(&tool_started(
             "export-call",
             EXPORT_TOOL_NAME,
-            cbor_text_map(vec![("path", source_text.as_str())]),
+            cbor_text_map(vec![
+                ("path", source_text.as_str()),
+                ("mime_type", "application/x-custom"),
+            ]),
             "agent-artifact",
         ))
         .expect("export");
@@ -156,32 +172,24 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
         cbor_map_text(&export.result, "artifact"),
         Some(reference.as_str())
     );
-    assert_eq!(
-        tau_proto::cbor_int_field(&export.result, "size"),
-        Some(original.len() as i128)
-    );
+    assert_eq!(tau_proto::cbor_int_field(&export.result, "size"), None);
     let rendered_export = tau_proto::ToolResponse::from_cbor(&export.result).render();
-    assert!(rendered_export.contains(&format!("artifact: {reference}\n")));
-    assert!(rendered_export.contains(&format!("size: {}\n", original.len())));
     assert_eq!(
-        cbor_map_text(&export.result, "filename"),
-        Some("original.png")
+        rendered_export,
+        format!(
+            "kind: {}\nartifact: {reference}\n",
+            if directory { "directory" } else { "file" }
+        )
     );
-    assert_eq!(
-        cbor_map_text(&export.result, "mime_type"),
-        Some(if directory {
-            tau_artifact::DIRECTORY_MIME
-        } else {
-            "image/png"
-        })
-    );
+    assert_eq!(cbor_map_text(&export.result, "filename"), None);
+    assert_eq!(cbor_map_text(&export.result, "mime_type"), None);
     assert_eq!(
         cbor_map_text(&export.result, "kind"),
         Some(if directory { "directory" } else { "file" })
     );
     let display = export.display.as_ref().expect("export display");
     assert_eq!(display.args, source_text);
-    assert_eq!(display.stats.bytes, Some(original.len() as u64));
+    assert_eq!(display.stats.bytes, None);
     assert_eq!(display.status, tau_proto::ToolUseStatus::Success);
     assert_eq!(
         display.payload,
@@ -206,7 +214,7 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
         open.request_id,
         Ok(tau_proto::ArtifactValue::Opened {
             read: "read-1".parse().expect("read id"),
-            descriptor,
+            descriptor: descriptor.clone(),
         }),
     );
     let read = next_artifact_request(&mut reader);
@@ -238,13 +246,21 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
     assert!(rendered_import.contains(&format!("size: {}\n", original.len())));
     assert!(rendered_import.contains("path: "));
     let path = PathBuf::from(cbor_map_text(&imported.result, "path").expect("import path"));
-    assert!(
-        !path
-            .file_name()
-            .expect("basename")
-            .to_string_lossy()
-            .contains("original")
+    assert_eq!(
+        cbor_map_text(&imported.result, "mime_type"),
+        descriptor.identity.mime_type()
     );
+    if !directory {
+        assert_eq!(path.file_name().unwrap(), "original.png");
+        assert!(
+            path.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("tau-artifact-")
+        );
+    }
     let display = imported.display.as_ref().expect("import display");
     assert_eq!(display.args, path.display().to_string());
     assert_eq!(display.stats.bytes, Some(original.len() as u64));
@@ -280,7 +296,7 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
     if directory {
         fs::remove_dir_all(path).expect("remove imported tree");
     } else {
-        fs::remove_file(path).expect("remove imported temp");
+        fs::remove_dir_all(path.parent().unwrap()).expect("remove imported parent");
     }
     writer
         .write_frame(&disconnect_frame(None))

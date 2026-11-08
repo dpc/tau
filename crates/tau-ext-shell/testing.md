@@ -73,7 +73,8 @@ passive append, and no provider activation.
 Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
 Artifact coverage drives fake correlated export and import RPC responses, proves
 original-byte equality and private imported-file permissions, asserts
-`artifact`/`size` and `path`/`size` provider header projections, passes the
+minimal `kind`/`artifact` export and `path`/`size`/recorded-MIME import header
+projections, passes the
 canonical `<tau-artifact:FULL_KEY>` reference directly into import, and passes
 the returned path as an ordinary filesystem artifact; image inspection consumes
 the same reference directly through `std-utils`.
@@ -157,10 +158,11 @@ lock-wait snapshots, and unchanged local-to-wire terminal names.
 
 ## Discovery
 
-Artifact transfer tests import using only the reference and require generic private
-names, unchanged original bytes, mode-0600 permissions, and distinct temporary
-files for identical bytes. Export-only hint tests cover declared MIME precedence,
-known extension inference, unknown types, and bounded hints.
+Artifact transfer tests import using only the reference and require restored safe
+basenames, private-parent cleanup, unchanged bytes, mode-0600 files, and distinct
+mode-0700 parents. Legacy or unsafe names use a generic fallback. Metadata coverage
+checks explicit MIME precedence, inference, absent types, bounds and immutable
+metadata identity across store restart and protected reads.
 
 AGENTS.md tests cover ancestor and local ordering, size caps, user roots before
 project roots, and trusted symlink following. Skill tests cover project/user and

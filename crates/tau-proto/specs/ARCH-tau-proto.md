@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 22.0 adds metadata-bound artifact identities and metadata-only UI listing.
+The shared identity type owns bounded filename/MIME fields and streaming hash
+framing. Missing historical descriptor identity means payload-only verification;
+new Begin operations require the metadata scheme. Configured peers must rebuild
+together because old clients hash a different preimage.
+
 Protocol 21.0 separates ordered tool source from native completion receipts.
 The protocol owns bounded output/update/final-capture DTOs, exact declaration
 references, and the shared `tool_output` envelope. The harness owns canonical

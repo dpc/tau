@@ -33,10 +33,14 @@ tool-specific checks that cannot be run because the corresponding tool is not
 available.
 
 When `export` and `import` are exposed, verify a small original round trip:
-export a local regular file, confirm its `artifact` and `size` output headers,
-import the returned `<tau-artifact:FULL_KEY>` reference, confirm the import's
-`path` and `size` output headers, compare the imported local file byte-for-byte,
-and confirm its private non-executable permissions and generic temporary name.
+export a local regular file and confirm only `kind` and `artifact` output headers,
+with no trailing blank line. Import the returned `<tau-artifact:FULL_KEY>`
+reference, confirm the `kind`, `path`, `size`, and recorded `mime_type` headers,
+compare bytes, and confirm a named mode-0600 file inside a fresh mode-0700
+private parent.
+Verify explicit MIME overrides inference and survives import. Changing a name or
+MIME changes identity; repeating the same tuple does not. Legacy missing metadata
+uses a generic private filename and omits MIME. Unsafe names never escape staging.
 Require exactly 24 lowercase hex digits without an algorithm label in exported
 references. Verify import and read_image reject old algorithm-labelled full-digest
 references and arbitrary shorter prefixes. Import accepts only the key argument.

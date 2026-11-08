@@ -125,12 +125,10 @@ impl ArtifactDownload {
                 }
                 self.bytes.extend_from_slice(&bytes);
                 if eof {
-                    if !self
-                        .key
-                        .matches_digest(blake3::hash(&self.bytes).to_hex().as_str())
-                    {
-                        return Err(ArtifactError::Integrity);
-                    }
+                    self.descriptor
+                        .as_ref()
+                        .ok_or(ArtifactError::Integrity)?
+                        .verify(&self.bytes)?;
                     self.verified = true;
                 }
             }

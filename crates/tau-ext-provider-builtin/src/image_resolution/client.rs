@@ -127,11 +127,11 @@ impl Client {
                 .lock()
                 .map_err(|_| ArtifactError::Unavailable)?;
             if let Some(bytes) = cache.get(key) {
-                return if bytes.len() as u64 == reference.blob.size.get() {
-                    Ok(bytes)
-                } else {
-                    Err(ArtifactError::Integrity)
-                };
+                drop(cache);
+                // The same public key is not permission to substitute identity
+                // metadata on a later occurrence, even when bytes are cached.
+                reference.blob.verify(&bytes)?;
+                return Ok(bytes);
             }
             if cache.fetching.len() < MAX_TRANSFERS && cache.fetching.insert(key.clone()) {
                 break;

@@ -208,13 +208,7 @@ fn run(
                     attempt = Some(Attempt {
                         id,
                         session,
-                        upload: tau_client::ArtifactUpload::new(
-                            text.artifact(0)
-                                .expect("one validated original")
-                                .bytes
-                                .to_vec(),
-                        )
-                        .expect("source validated before worker admission"),
+                        upload: Attempt::upload(&text, 0),
                         text,
                         handle: handle.clone(),
                         available: false,

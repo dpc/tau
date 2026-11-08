@@ -129,9 +129,14 @@ impl DurableSnapshot {
             .into());
         };
         match result.provider_content.as_slice() {
-            [ToolResultContentPart::Image(image)] => Ok(tau_proto::ArtifactKey::from_digest(
-                blake3::hash(&image.data).to_hex().as_str(),
-            )?),
+            [ToolResultContentPart::Image(image)] => Ok(tau_proto::ArtifactDescriptor::from_bytes(
+                &image.data,
+                tau_proto::ArtifactIdentity::metadata(
+                    None,
+                    Some(image.media_type.mime_type().into()),
+                )?,
+            )?
+            .key),
             [ToolResultContentPart::ImageReference(image)] => Ok(image.blob.key.clone()),
             _ => {
                 Err(format!("expected one typed image on canonical tool result `{call_id}`").into())

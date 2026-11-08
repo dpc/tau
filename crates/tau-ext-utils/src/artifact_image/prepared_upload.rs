@@ -39,7 +39,11 @@ impl PreparedImageUpload {
             return Err(ArtifactError::Invalid);
         }
         Ok(Self {
-            upload: ArtifactUpload::new(image.data.to_vec())?,
+            upload: ArtifactUpload::with_metadata(
+                image.data.to_vec(),
+                None,
+                Some(image.media_type.mime_type().into()),
+            )?,
             result,
             media_type: image.media_type,
             width: image.width,

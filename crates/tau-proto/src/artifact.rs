@@ -7,6 +7,7 @@ mod descriptor;
 mod error;
 mod frame;
 mod identifier;
+mod identity;
 mod key;
 mod limits;
 mod listing;
@@ -20,6 +21,7 @@ mod upload_id;
 pub use descriptor::ArtifactDescriptor;
 pub use error::ArtifactError;
 pub use frame::artifact_frame_fits;
+pub use identity::{ARTIFACT_METADATA_BYTES, ArtifactIdentity, bounded_artifact_metadata};
 pub use key::ArtifactKey;
 pub use limits::ArtifactLimits;
 pub use listing::{
@@ -64,7 +66,9 @@ impl ArtifactRequest {
                 artifact_prefix_valid(prefix) && *limit > 0 && *limit <= ARTIFACT_LIST_LIMIT
             }
             ArtifactOp::Available => true,
-            ArtifactOp::Begin { .. } => true,
+            ArtifactOp::Begin { identity, .. } => {
+                identity.is_bounded() && matches!(identity, ArtifactIdentity::MetadataV1 { .. })
+            }
             ArtifactOp::Write {
                 upload,
                 offset,
@@ -112,6 +116,8 @@ pub enum ArtifactOp {
     Begin {
         /// Exact expected original size.
         size: ArtifactSize,
+        /// Immutable metadata and hash scheme requested by the producer.
+        identity: ArtifactIdentity,
     },
     /// Append the next chunk or retransmit identical already accepted bytes.
     Write {

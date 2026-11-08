@@ -21,6 +21,7 @@ fn artifact_cleanup_runs_with_ephemeral_session_and_agent_persistence() {
             "tool/session",
             "connection",
             tau_proto::ArtifactOp::Begin {
+                identity: tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
                 size: tau_proto::ArtifactSize::new(0).expect("size"),
             },
             1,

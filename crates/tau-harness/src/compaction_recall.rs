@@ -222,6 +222,10 @@ fn put(
             connection,
             connection,
             ArtifactOp::Begin {
+                identity: tau_proto::ArtifactIdentity::metadata(
+                    None,
+                    Some(tau_artifact::DIRECTORY_MIME.to_owned()),
+                )?,
                 size: tau_proto::ArtifactSize::new(bytes.len() as u64)
                     .map_err(|_| ArtifactError::Invalid)?,
             },

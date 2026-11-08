@@ -60,7 +60,7 @@ enum ActiveCall {
         /// Parsed preparation request.
         request: ReadImageRequest,
         /// Verified-download state machine.
-        download: ArtifactDownload,
+        download: Box<ArtifactDownload>,
     },
     /// Verified bytes are queued or executing in the decoder worker.
     Decoding {
@@ -178,7 +178,7 @@ impl ArtifactImageManager {
             }
         };
         let call_id = invoke.call_id.clone();
-        let download = ArtifactDownload::new(request.key.clone());
+        let download = Box::new(ArtifactDownload::new(request.key.clone()));
         self.calls.insert(
             call_id.clone(),
             ActiveCall::Downloading {
@@ -268,7 +268,7 @@ impl ArtifactImageManager {
                         .descriptor()
                         .map(|descriptor| descriptor.size.get())
                         .unwrap_or_default();
-                    match download.into_bytes() {
+                    match (*download).into_bytes() {
                         Ok(bytes) => self.queue_decode(invoke, request, bytes, original_size),
                         Err(error) => self.report_error(&invoke, artifact_error_message(error)),
                     }

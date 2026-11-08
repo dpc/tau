@@ -67,7 +67,14 @@ fn finish_original(
     upload: &str,
 ) -> tau_proto::ArtifactKey {
     let begin = read_request(reader);
-    assert!(matches!(begin.op, ArtifactOp::Begin { ref size } if size.get() == bytes.len() as u64));
+    assert!(
+        matches!(begin.op, ArtifactOp::Begin { ref size, .. } if size.get() == bytes.len() as u64)
+    );
+    let ArtifactOp::Begin { ref identity, .. } = begin.op else {
+        panic!("begin")
+    };
+    let identity = identity.clone();
+    assert!(identity.mime_type().is_some());
     reply(
         control,
         begin,
@@ -88,7 +95,7 @@ fn finish_original(
     );
     let finalize = read_request(reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let key: tau_proto::ArtifactKey = blake3::hash(bytes).to_hex()[..24]
+    let key: tau_proto::ArtifactKey = identity.digest(bytes).to_hex()[..24]
         .to_owned()
         .parse()
         .expect("original key");
@@ -96,6 +103,7 @@ fn finish_original(
         control,
         finalize,
         Ok(ArtifactValue::Descriptor(tau_proto::ArtifactDescriptor {
+            identity,
             key: key.clone(),
             size: tau_proto::ArtifactSize::new(bytes.len() as u64).expect("original size"),
         })),
@@ -145,7 +153,11 @@ fn copied_files_upload_sequentially_and_retry_without_partial_prompt_insertion()
     let first_key = finish_original(&control, &mut reader, b"\0\xffMP3", "first-file");
     assert_eq!(handle.get_buffer(), "draft: ");
     let begin = read_request(&mut reader);
-    assert!(matches!(begin.op, ArtifactOp::Begin { ref size } if size.get() == 6));
+    assert!(matches!(begin.op, ArtifactOp::Begin { ref size, .. } if size.get() == 6));
+    let ArtifactOp::Begin { ref identity, .. } = begin.op else {
+        panic!("begin")
+    };
+    let identity = identity.clone();
     reply(
         &control,
         begin,
@@ -193,7 +205,7 @@ fn copied_files_upload_sequentially_and_retry_without_partial_prompt_insertion()
     );
     let finalize = read_request(&mut reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let second_key = blake3::hash(b"second").to_hex()[..24]
+    let second_key = identity.digest(b"second").to_hex()[..24]
         .to_owned()
         .parse()
         .expect("key");
@@ -202,6 +214,7 @@ fn copied_files_upload_sequentially_and_retry_without_partial_prompt_insertion()
         finalize,
         Ok(ArtifactValue::Descriptor(tau_proto::ArtifactDescriptor {
             key: second_key,
+            identity: identity.clone(),
             size: tau_proto::ArtifactSize::new(6).expect("size"),
         })),
     );
@@ -215,7 +228,7 @@ fn copied_files_upload_sequentially_and_retry_without_partial_prompt_insertion()
             "draft: {}\n{}",
             paste_reference_at(&first_key, &content, 0),
             paste_reference_at(
-                &blake3::hash(b"second").to_hex()[..24]
+                &identity.digest(b"second").to_hex()[..24]
                     .to_owned()
                     .parse()
                     .expect("key"),
@@ -361,7 +374,7 @@ fn png_paste_uses_existing_original_byte_artifact_flow() {
     reply(&control, available, Ok(ArtifactValue::Done));
     let begin = read_request(&mut reader);
     assert!(
-        matches!(begin.op, ArtifactOp::Begin { size: ref actual } if actual.get() == size as u64)
+        matches!(begin.op, ArtifactOp::Begin { size: ref actual, .. } if actual.get() == size as u64)
     );
     let upload = "png-upload".parse().expect("upload identity");
     reply(&control, begin, Ok(ArtifactValue::Upload { upload }));
@@ -378,7 +391,8 @@ fn png_paste_uses_existing_original_byte_artifact_flow() {
     );
     let finalize = read_request(&mut reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let key = blake3::hash(&source).to_hex()[..24]
+    let identity = tau_proto::ArtifactIdentity::metadata(None, Some("image/png".into())).unwrap();
+    let key = identity.digest(&source).to_hex()[..24]
         .to_owned()
         .parse()
         .expect("original digest key");
@@ -388,6 +402,7 @@ fn png_paste_uses_existing_original_byte_artifact_flow() {
         Ok(ArtifactValue::Descriptor(tau_proto::ArtifactDescriptor {
             key,
             size: tau_proto::ArtifactSize::new(size as u64).expect("bounded original size"),
+            identity,
         })),
     );
     control.stop();
@@ -534,7 +549,10 @@ fn paste_upload_retry_preserves_identity_and_inserts_only_verified_reference() {
     );
     let finalize = read_request(&mut reader);
     assert!(matches!(finalize.op, ArtifactOp::Finalize { .. }));
-    let key = blake3::hash(text.as_bytes()).to_hex()[..24]
+    let identity =
+        tau_proto::ArtifactIdentity::metadata(None, Some("text/plain;charset=utf-8".into()))
+            .unwrap();
+    let key = identity.digest(text.as_bytes()).to_hex()[..24]
         .to_owned()
         .parse()
         .expect("digest key");
@@ -545,6 +563,7 @@ fn paste_upload_retry_preserves_identity_and_inserts_only_verified_reference() {
         Ok(ArtifactValue::Descriptor(tau_proto::ArtifactDescriptor {
             key,
             size: tau_proto::ArtifactSize::new(text.len() as u64).expect("object size"),
+            identity,
         })),
     );
     assert!(matches!(

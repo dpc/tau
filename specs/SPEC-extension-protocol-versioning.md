@@ -8,6 +8,13 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 22.0 binds artifact filename and MIME metadata into immutable identity.
+Begin requires the new scheme; descriptors carry it through storage and clients.
+UI listing returns stored metadata without header classification. Old peers hash
+different preimages, so configured peers must rebuild together. Legacy
+payload-only short-key objects and receipts remain readable; no history migration,
+SDK publication or runtime activation is implied.
+
 Protocol 21.0 adds ordered tool-output reports and canonical source facts,
 declaration-frozen streaming policy, bounded typed final captures, and native
 stream-completion receipts. All background waits now return successful typed

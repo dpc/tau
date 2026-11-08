@@ -29,6 +29,19 @@ pub(super) struct Attempt {
 }
 
 impl Attempt {
+    /// Binds existing paste metadata once, without interpreting the payload.
+    pub(super) fn upload(
+        text: &tau_cli_term::PasteContent,
+        index: usize,
+    ) -> tau_client::ArtifactUpload {
+        let original = text.artifact(index).expect("validated original");
+        tau_client::ArtifactUpload::with_metadata(
+            original.bytes.to_vec(),
+            original.filename.map(tau_proto::bounded_artifact_metadata),
+            original.mime_type.map(tau_proto::bounded_artifact_metadata),
+        )
+        .expect("source and metadata bounded before upload")
+    }
     /// Retains finalized references privately and advances to the next
     /// original.
     ///
@@ -48,14 +61,7 @@ impl Attempt {
         if self.artifact_index == self.text.artifact_count() {
             return Some(std::mem::take(&mut self.references));
         }
-        self.upload = tau_client::ArtifactUpload::new(
-            self.text
-                .artifact(self.artifact_index)
-                .expect("validated next original")
-                .bytes
-                .to_vec(),
-        )
-        .expect("aggregate admission bounds each original");
+        self.upload = Self::upload(&self.text, self.artifact_index);
         self.request = None;
         None
     }

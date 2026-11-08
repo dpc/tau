@@ -262,15 +262,14 @@ fn valid_page(prefix: &str, entries: &[ArtifactListEntry]) -> bool {
 fn row(entry: ArtifactListEntry) -> CompletionItem {
     let key = entry.descriptor.key.as_str();
     let label = format!("{}…{}", &key[..15], &key[key.len() - 6..]);
-    let format = entry.signature.map_or_else(
-        || "format unknown".to_owned(),
-        |signature| format!("{} (header)", signature.mime()),
-    );
-    CompletionItem::new(
-        key,
-        format!("{format} · {} bytes", entry.descriptor.size.get()),
-    )
-    .with_label(label)
+    let description = entry
+        .descriptor
+        .identity
+        .mime_type()
+        .filter(|mime| !mime.trim().is_empty())
+        .map(|mime| format!("{mime} · {} bytes", entry.descriptor.size.get()))
+        .unwrap_or_else(|| format!("{} bytes", entry.descriptor.size.get()));
+    CompletionItem::new(key, description).with_label(label)
 }
 
 /// UI controls are withheld from older harnesses rather than silently timing

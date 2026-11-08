@@ -26,10 +26,41 @@ fn legacy_cleanup(store: &ArtifactStore, now: u64) {
 
 /// Publishes a protected fixture without any new canonical reference event.
 fn rooted_fixture() -> (tempfile::TempDir, ArtifactStore, ArtifactDescriptor) {
+    rooted_fixture_with_identity(tau_proto::ArtifactIdentity::anonymous())
+}
+
+/// Reconstructs a historical object without routing a legacy identity through
+/// new-upload admission, which only permits metadata-bound writes.
+fn rooted_fixture_with_identity(
+    identity: tau_proto::ArtifactIdentity,
+) -> (tempfile::TempDir, ArtifactStore, ArtifactDescriptor) {
     let temp = tempfile::tempdir().expect("state");
     let mut store = ArtifactStore::new(temp.path());
     fs::create_dir_all(temp.path().join("agents/history")).expect("agent");
-    let (_, descriptor) = put(&mut store, "tool", "connection", b"prepared pixels", 1);
+    let descriptor = if identity == tau_proto::ArtifactIdentity::LegacyPayload {
+        let bytes = b"prepared pixels";
+        let descriptor = ArtifactDescriptor::from_bytes(bytes, identity.clone()).unwrap();
+        let _lock = store.lock(true).unwrap();
+        let path = store
+            .root
+            .join("blake3")
+            .join(identity.digest(bytes).to_hex().as_str());
+        private_dir(&path).unwrap();
+        write_synced(&path.join("data"), bytes).unwrap();
+        write_json(
+            &path.join("meta.json"),
+            &Metadata {
+                version: 1,
+                size: bytes.len() as u64,
+                last_put_at: 1,
+                identity,
+            },
+        )
+        .unwrap();
+        descriptor
+    } else {
+        put(&mut store, "tool", "connection", b"prepared pixels", 1).1
+    };
     store
         .retain_transcript_artifact(
             &tau_proto::AgentId::parse("history").expect("agent id"),
@@ -42,7 +73,8 @@ fn rooted_fixture() -> (tempfile::TempDir, ArtifactStore, ArtifactDescriptor) {
 /// Canonical unlink by an old cleaner preserves the inode and exact-key reads.
 #[test]
 fn legacy_cleanup_preserves_hardlink_and_private_read_fallback() {
-    let (_temp, mut store, descriptor) = rooted_fixture();
+    let (_temp, mut store, descriptor) =
+        rooted_fixture_with_identity(tau_proto::ArtifactIdentity::LegacyPayload);
     let digest = store
         .storage_digest(&descriptor.key)
         .expect("storage digest");
@@ -121,7 +153,12 @@ fn duplicate_put_and_receipt_retry_never_mutate_backing() {
         &read_bounded(&protected.join("data")).expect("bytes"),
     )
     .expect("immutable");
-    legacy_cleanup(&store, 100);
+    {
+        let _lock = store.lock(true).unwrap();
+        store
+            .detach(&store.root.join("blake3").join(&digest))
+            .unwrap();
+    }
     let (_, restored) = put(&mut store, "tool", "connection", b"prepared pixels", 110);
     assert_eq!(restored, descriptor);
     assert_eq!(
@@ -140,7 +177,8 @@ fn duplicate_put_and_receipt_retry_never_mutate_backing() {
 /// roots.
 #[test]
 fn legacy_reupload_and_metadata_renewal_preserve_protected_bytes() {
-    let (_temp, store, descriptor) = rooted_fixture();
+    let (_temp, store, descriptor) =
+        rooted_fixture_with_identity(tau_proto::ArtifactIdentity::LegacyPayload);
     let digest = store
         .storage_digest(&descriptor.key)
         .expect("storage digest");
@@ -159,6 +197,7 @@ fn legacy_reupload_and_metadata_renewal_preserve_protected_bytes() {
         replace_json(
             &canonical.join("meta.json"),
             &Metadata {
+                identity: tau_proto::ArtifactIdentity::LegacyPayload,
                 version: 1,
                 size: descriptor.size.get(),
                 last_put_at: 20,
@@ -182,6 +221,7 @@ fn legacy_reupload_and_metadata_renewal_preserve_protected_bytes() {
         write_json(
             &staging.path().join("meta.json"),
             &Metadata {
+                identity: tau_proto::ArtifactIdentity::LegacyPayload,
                 version: 1,
                 size: descriptor.size.get(),
                 last_put_at: 110,
@@ -218,7 +258,7 @@ fn corrupt_protected_alias_cannot_be_certified_by_ordinary_bytes() {
     let protected = store
         .root
         .join("transcript-objects")
-        .join(digest)
+        .join(&digest)
         .join("data");
     // Replace rather than mutate the shared inode, leaving canonical bytes
     // valid.
@@ -276,6 +316,7 @@ fn backing_rejects_symlink_and_wrong_size_metadata() {
     replace_json(
         &protected.join("meta.json"),
         &Metadata {
+            identity: tau_proto::ArtifactIdentity::LegacyPayload,
             version: 1,
             size: 1,
             last_put_at: 1,
@@ -299,7 +340,7 @@ fn incomplete_receipt_recovery_preserves_protected_inode() {
     let protected = store
         .root
         .join("transcript-objects")
-        .join(digest)
+        .join(&digest)
         .join("data");
     let inode = fs::metadata(&protected).expect("data").ino();
     let (upload, _) = put(&mut store, "tool", "connection", b"prepared pixels", 20);
@@ -308,7 +349,12 @@ fn incomplete_receipt_recovery_preserves_protected_inode() {
     receipt.complete = false;
     replace_json(&operation.join("receipt.json"), &receipt).expect("interrupted intent");
     fs::write(operation.join("data"), b"prepared pixels").expect("recoverable bytes");
-    legacy_cleanup(&store, 100);
+    {
+        let _lock = store.lock(true).unwrap();
+        store
+            .detach(&store.root.join("blake3").join(&digest))
+            .unwrap();
+    }
     store
         .execute("tool", "connection", ArtifactOp::Finalize { upload }, 200)
         .expect("recover");

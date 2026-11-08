@@ -444,8 +444,11 @@ fn referenced_tool_image_validates_actual_media_before_rooting() {
 #[test]
 fn corrupt_prepared_object_notice_omits_digest_and_path() {
     let mut fixture = ImageFixture::new();
-    let (_, _descriptor) = fixture.image("private-object");
-    let hash = blake3::hash(&dedup::encoded_test_png()).to_hex();
+    let (_, descriptor) = fixture.image("private-object");
+    let hash = descriptor
+        .identity
+        .digest(&dedup::encoded_test_png())
+        .to_hex();
     let digest = hash.as_str();
     let path = fixture
         .h
@@ -696,7 +699,13 @@ fn image_admission_missing_corrupt_and_wrong_size_fail_nonfatally() {
             .session_runtime
             .state_dir
             .join("artifacts/blake3")
-            .join(blake3::hash(&dedup::encoded_test_png()).to_hex().as_str())
+            .join(
+                descriptor
+                    .identity
+                    .digest(&dedup::encoded_test_png())
+                    .to_hex()
+                    .as_str(),
+            )
             .join("data");
         match damage {
             "missing" => std::fs::remove_file(&data).expect("missing fixture"),

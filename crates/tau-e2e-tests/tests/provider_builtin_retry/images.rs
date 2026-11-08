@@ -13,7 +13,7 @@ const UTILS: &str = env!("CARGO_BIN_EXE_tau-e2e-utils");
 const CALL: &str = "prepared-image-call";
 
 /// Persistent invocations store references to re-encoded prepared bytes and
-/// cold providers fetch them after old-GC-style catalog unlink. Ephemeral
+/// cold providers fetch them after simulated catalog loss. Ephemeral
 /// agents retain the same image inline without creating prepared artifacts or
 /// roots.
 #[test]
@@ -84,7 +84,10 @@ fn provider_builtin_prepared_images_replay_and_ephemeral_fallback()
             image::load_from_memory(&bytes)?.to_rgba8(),
             image::load_from_memory(tau_ext_test_dummy::TYPED_IMAGE_PNG)?.to_rgba8(),
         );
-        let prepared_digest = blake3::hash(&bytes).to_hex();
+        let prepared_digest =
+            tau_proto::ArtifactIdentity::metadata(None, Some("image/png".into()))?
+                .digest(&bytes)
+                .to_hex();
         let prepared_key =
             tau_proto::ArtifactKey::from_digest(prepared_digest.as_str())?.to_string();
         let finished = wait_text(&mut peer, &mut observed, "image accepted")?;
@@ -112,7 +115,7 @@ fn provider_builtin_prepared_images_replay_and_ephemeral_fallback()
                 !fixture
                     .harness_state_dir()
                     .join("artifacts/blake3")
-                    .join(blake3::hash(&bytes).to_hex().as_str())
+                    .join(prepared_digest.as_str())
                     .exists()
             );
             None
@@ -159,11 +162,12 @@ fn provider_builtin_prepared_images_replay_and_ephemeral_fallback()
             let metadata: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(canonical.join("meta.json"))?)?;
             assert_eq!(
-                metadata["version"], 1,
-                "ordinary metadata remains readable to old writers"
+                metadata["version"], 2,
+                "metadata-bound identity uses its explicit storage schema"
             );
-            // Reduced old-GC fixture, NOT execution of an old binary. Its known
-            // canonical subtree is unlinked only after clean daemon shutdown.
+            // Simulate ordinary catalog loss after clean daemon shutdown.
+            // Legacy cleaners preserve the new metadata version; the alias
+            // still supports recovery independently of the ordinary catalog.
             std::fs::remove_dir_all(canonical)?;
             let resumed = DaemonGuard::resume(&fixture, &socket)?;
             peer = connect_images(&socket)?;
@@ -332,7 +336,7 @@ fn upload_original(
     }
     assert_eq!(
         upload.descriptor().ok_or("descriptor")?.key.as_str(),
-        "1c22ad7f40a18bbcb1c50dc8"
+        "c8bc6ccc266fb3d80c7fe1bb"
     );
     Ok(())
 }

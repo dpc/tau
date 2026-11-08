@@ -275,6 +275,7 @@ fn artifact_rpc_enforces_accepted_startup_limit() {
             &sink,
             ArtifactOp::Begin {
                 size: tau_proto::ArtifactSize::new(2).expect("over-limit size"),
+                identity: tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
             }
         ),
         Err(ArtifactError::Invalid),
@@ -285,6 +286,7 @@ fn artifact_rpc_enforces_accepted_startup_limit() {
             &sink,
             ArtifactOp::Begin {
                 size: tau_proto::ArtifactSize::new(1).expect("exact-limit size"),
+                identity: tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
             }
         ),
         Ok(ArtifactValue::Upload { .. }),
@@ -316,7 +318,8 @@ fn artifact_memory_only_admission_never_touches_persistent_store() {
             &mut h,
             &sink,
             ArtifactOp::Begin {
-                size: tau_proto::ArtifactSize::new(1).expect("size")
+                size: tau_proto::ArtifactSize::new(1).expect("size"),
+                identity: tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
             }
         ),
         Err(ArtifactError::Permission)
@@ -340,6 +343,7 @@ fn artifact_admission_preserves_peer_session_and_frame_boundaries() {
         &h,
         ArtifactOp::Begin {
             size: tau_proto::ArtifactSize::new(1).expect("size"),
+            identity: tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         },
     ));
     h.handle_client_message(&crate::test_connection_id("unconfigured"), message)
@@ -403,6 +407,7 @@ fn artifact_stale_admission_generation_cannot_reenter_same_session() {
         &h,
         ArtifactOp::Begin {
             size: tau_proto::ArtifactSize::new(1).expect("size"),
+            identity: tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
         },
     );
     h.session_runtime.current_session_generation = h

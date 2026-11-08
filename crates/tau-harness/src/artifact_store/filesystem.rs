@@ -97,12 +97,5 @@ pub(super) fn read_bounded(path: &Path) -> Result<Vec<u8>, ArtifactError> {
 }
 
 pub(super) fn verify(descriptor: &ArtifactDescriptor, bytes: &[u8]) -> Result<(), ArtifactError> {
-    if descriptor.size.get() != bytes.len() as u64
-        || !descriptor
-            .key
-            .matches_digest(blake3::hash(bytes).to_hex().as_str())
-    {
-        return Err(ArtifactError::Integrity);
-    }
-    Ok(())
+    descriptor.verify(bytes)
 }

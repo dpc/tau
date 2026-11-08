@@ -1,5 +1,53 @@
 use super::*;
 
+/// A server must return the requested metadata, not a valid but substituted
+/// metadata/payload tuple; rejection must leave Finalize retryable.
+#[test]
+fn upload_rejects_valid_server_selected_metadata() {
+    let mut upload = ArtifactUpload::with_metadata(
+        b"bytes".to_vec(),
+        Some("example.txt".into()),
+        Some("text/plain".into()),
+    )
+    .unwrap();
+    upload
+        .accept(ArtifactValue::Upload {
+            upload: "id".parse().unwrap(),
+        })
+        .unwrap();
+    upload
+        .accept(ArtifactValue::Written { next_offset: 5 })
+        .unwrap();
+    let requested = upload.identity.clone();
+    for identity in [
+        tau_proto::ArtifactIdentity::LegacyPayload,
+        tau_proto::ArtifactIdentity::anonymous(),
+        tau_proto::ArtifactIdentity::metadata(Some("other.txt".into()), Some("text/plain".into()))
+            .unwrap(),
+        tau_proto::ArtifactIdentity::metadata(
+            Some("example.txt".into()),
+            Some("application/x-test".into()),
+        )
+        .unwrap(),
+    ] {
+        let descriptor = ArtifactDescriptor::from_bytes(b"bytes", identity).unwrap();
+        assert_eq!(
+            upload.accept(ArtifactValue::Descriptor(descriptor)),
+            Err(ArtifactError::Integrity)
+        );
+        assert!(matches!(
+            upload.next_op(),
+            Some(ArtifactOp::Finalize { .. })
+        ));
+    }
+    upload
+        .accept(ArtifactValue::Descriptor(
+            ArtifactDescriptor::from_bytes(b"bytes", requested).unwrap(),
+        ))
+        .unwrap();
+    assert!(upload.next_op().is_none());
+}
+
 /// Rejections at every upload stage preserve the next retryable operation.
 #[test]
 fn rejected_responses_do_not_advance_upload() {
@@ -50,10 +98,9 @@ fn rejected_responses_do_not_advance_upload() {
         Err(ArtifactError::Invalid)
     );
     assert_eq!(upload.next_op(), before);
-    let descriptor = ArtifactDescriptor::new(
-        tau_proto::ArtifactKey::from_digest(blake3::hash(b"original").to_hex().as_str())
-            .expect("valid key"),
-        8,
+    let descriptor = ArtifactDescriptor::from_bytes(
+        b"original",
+        tau_proto::ArtifactIdentity::metadata(None, None).expect("metadata"),
     )
     .expect("bounded descriptor");
     upload

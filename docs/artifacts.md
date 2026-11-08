@@ -6,7 +6,8 @@ Use `:export-to-clipboard KEY` in the interactive UI. Completion suggests up to
 ten originals from the whole shared store, newest explicit upload first. Typing
 a key prefix searches before limiting, so older originals remain discoverable.
 Rows abbreviate the displayed key but insert the full key, with original byte
-size and a header-derived format hint or “format unknown.” Canonical
+size and recorded MIME when present; missing MIME is omitted rather than guessed.
+Canonical
 `<tau-artifact:FULL_KEY>` references also work when entered directly.
 
 Tau downloads and verifies the complete size and BLAKE3 digest, then closes the
@@ -27,8 +28,9 @@ No options or filename are needed:
 These bounded header guesses are not media validation. MP4 recognition checks
 only a complete `ftyp` box of at most 512 bytes for `mp41`/`mp42` brands; other
 containers (including WebM, HEIF and AVIF) fall back conservatively. No parsing of
-archive contents or recovery of original filenames occurs. Completion hints keep
-their smaller existing vocabulary; export decides from the verified original.
+archive contents or recovery of original filenames occurs. Completion shows
+stored MIME only; clipboard export independently selects its operation from the
+verified original and explicit arguments.
 
 Use `--raw` to force a raw MIME write even for binary data, retaining inferred
 MIME or `application/octet-stream` for unknown binary. Override both mode and type
@@ -97,7 +99,7 @@ syscall is not forcibly interrupted by that budget.
 Listing uses a coalesced asynchronous three-second cache and an off-loop scan
 with bounded result memory and a two-second decision budget checked between
 filesystem operations. Failed/incomplete scans are reported unavailable, not as
-partially recent pages. No durable index, MIME catalog or timestamp migration is
+partially recent pages. No separate durable index or timestamp migration is
 needed. The UI requires harness protocol 13.1 or newer for this feature.
 
 ## Shared original-byte storage
@@ -126,21 +128,26 @@ The shell extension registers `export(path, mime_type?)` and
 `import(key)` under ordinary tool-role policy. Export reads one local regular file
 or directory under the shell instance's remembered workdir authority, applies the
 configured stored-byte limit
-(32 MiB by default), and returns `artifact` and `size` output headers plus bounded
-`filename` and available `mime_type` hints. Explicit MIME wins; otherwise common
+(32 MiB by default), and returns only `kind` and `artifact` headers. It records a
+bounded basename and available MIME with the immutable artifact. Explicit MIME
+wins; otherwise common
 filename extensions supply a best-effort declaration, without content sniffing.
 Import validates the reference, downloads and verifies the complete original,
-and returns `path` and `size` output headers after writing it to a private
-unpredictable mode-0600 temporary file on the shell execution host; that local
+and returns `kind`, `path`, `size`, and recorded `mime_type` when present after
+writing it to a private mode-0600 file on the shell execution host; that local
 path can be passed to filesystem tools. The provider-independent
 `read_image(key)` tool instead consumes a verified original directly from
 Artifact storage without granting shell or workdir authority. None of these
 tools exposes store paths, inline original bytes, or execution.
 Tau directory bundles are automatically extracted as described below.
 
-Import creates a generic private temporary name. Rename the returned local file
-if a useful name or extension is needed. Export hints are per-use claims, not
-stored digest metadata or proof of media validity.
+Import restores a safe recorded basename inside a fresh mode-0700 private
+directory, for example `/tmp/tau-artifact-LMrKmo/example.txt`. Missing, unsafe or
+unusable names fall back to a generic private file. Metadata is hash-bound and
+immutable, not proof of media validity. Same bytes with different names or MIME
+have different identities; there is no first/last-writer policy. Historical
+payload-only artifacts remain readable but cannot recover missing metadata.
+Protocol 22.0 requires a coordinated rebuild of configured peers.
 
 ### Directory artifacts
 
@@ -294,11 +301,12 @@ publication. If tool cancellation wins while Finalize succeeds, its original
 may remain without a recorded tool result. Never retry a paid producer effect
 as artifact-write recovery.
 
-`ArtifactDescriptor` contains only the internal canonical `key` and `size`.
+`ArtifactDescriptor` contains canonical `key`, payload `size`, and `identity`
+including bounded optional filename and MIME.
 Format that key as `<tau-artifact:FULL_KEY>` whenever it enters model-facing
-text. Attach bounded
-filename/media hints to the consumer's own per-use arguments/results, not the
-shared object. Validate media independently. A digest detects corruption but
+text. Use `ArtifactUpload::with_metadata` to record producer metadata; the default
+constructor selects the new scheme with no metadata. Validate media independently.
+A digest detects corruption but
 does not authenticate a producer or make content safe to execute.
 
 ## Bounds and storage
