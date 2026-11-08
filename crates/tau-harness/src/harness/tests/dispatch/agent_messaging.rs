@@ -1266,6 +1266,10 @@ fn external_message_major_skew_warning_headers_success() {
                 let CborValue::Map(entries) = result.result else {
                     panic!("expected structured message result");
                 };
+                assert!(entries.contains(&(
+                    CborValue::Text("warning".to_owned()),
+                    CborValue::Text(warning.to_owned())
+                )));
                 entries.into_iter().find_map(|(key, value)| {
                     (key == CborValue::Text("status".to_owned())).then_some(value)
                 })
@@ -1273,12 +1277,7 @@ fn external_message_major_skew_warning_headers_success() {
             _ => None,
         })
         .expect("caller-visible status");
-    assert_eq!(
-        status,
-        CborValue::Text(format!(
-            "{warning}\n\nMessage committed: skew-success-message; recipient was live; response not guaranteed"
-        ))
-    );
+    assert_eq!(status, CborValue::Text("committed".to_owned()));
     let sent = session_agent_message_sent_events(&h);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].sender_notice.as_deref(), Some("sender guidance"));
@@ -1287,6 +1286,7 @@ fn external_message_major_skew_warning_headers_success() {
 
 /// Cross-session message successes hide bare-recipient reuse and auto-start
 /// mechanics while retaining the unambiguous delivery status and recipient.
+/// Reviewed input must distinguish the actual main from its undelivered worker.
 #[test]
 fn external_message_success_results_hide_bare_recipient_start_state() {
     let td = TempDir::new().expect("tempdir");
@@ -1299,16 +1299,25 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
             "delivered-reused-message",
             "reused_recipient",
             false,
+            None,
         ),
         (
             "external-message-auto-started-call",
             "delivered-auto-started-message",
             "auto_started_recipient",
             true,
+            None,
+        ),
+        (
+            "external-message-reviewed-call",
+            "reviewed-message",
+            "main_recipient",
+            false,
+            Some("intended_worker"),
         ),
     ];
 
-    for (call_id, message_id, recipient_id, _started) in completions {
+    for (call_id, message_id, recipient_id, _started, review_recipient) in completions {
         let call_id: tau_proto::ToolCallId = call_id.into();
         h.tool_routing
             .tool_runtime
@@ -1325,7 +1334,7 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                     tool_type: tau_proto::ToolType::Function,
                     result: Ok(crate::event::ExternalMessageAcceptance {
                         recipient_id: crate::parse_agent_id(recipient_id),
-                        review_recipient: None,
+                        review_recipient: review_recipient.map(crate::parse_agent_id),
                     }),
                     protocol_warning: None,
                     details: CborValue::Null,
@@ -1343,14 +1352,23 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
         .expect("handle completion");
     }
 
+    let mut reviewed_receipts = 0;
     let results = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
+            Event::ToolResult(result) if result.call_id.as_str() == "external-message-reviewed-call" => {
+                reviewed_receipts += 1;
+                let response = tau_proto::ToolResponse::from_cbor(&result.result);
+                assert!(response.body.is_empty());
+                assert_eq!(response.render(), "status: accepted_for_review\nmsg_id: reviewed-message\nrecipient_status: live\nrecipient: other-session/main_recipient\nintended_recipient: intended_worker\nintended_recipient_status: pending_review\n");
+                None
+            }
             Event::ToolResult(result) => Some((result.call_id, result.result)),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(session_agent_message_sent_events(&h).len(), 2);
+    assert_eq!(reviewed_receipts, 1);
+    assert_eq!(session_agent_message_sent_events(&h).len(), 3);
     assert_eq!(
         results,
         vec![
@@ -1359,14 +1377,15 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 CborValue::Map(vec![
                     (
                         CborValue::Text("status".to_owned()),
-                        CborValue::Text(
-                            "Message committed: delivered-reused-message; recipient was live; response not guaranteed"
-                                .to_owned(),
-                        ),
+                        CborValue::Text("committed".to_owned()),
                     ),
                     (
-                        CborValue::Text("message_id".to_owned()),
+                        CborValue::Text("msg_id".to_owned()),
                         CborValue::Text("delivered-reused-message".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("recipient_status".to_owned()),
+                        CborValue::Text("live".to_owned())
                     ),
                     (
                         CborValue::Text("recipient".to_owned()),
@@ -1379,14 +1398,15 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 CborValue::Map(vec![
                     (
                         CborValue::Text("status".to_owned()),
-                        CborValue::Text(
-                            "Message committed: delivered-auto-started-message; recipient was live; response not guaranteed"
-                                .to_owned(),
-                        ),
+                        CborValue::Text("committed".to_owned()),
                     ),
                     (
-                        CborValue::Text("message_id".to_owned()),
+                        CborValue::Text("msg_id".to_owned()),
                         CborValue::Text("delivered-auto-started-message".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("recipient_status".to_owned()),
+                        CborValue::Text("live".to_owned())
                     ),
                     (
                         CborValue::Text("recipient".to_owned()),
@@ -2339,9 +2359,9 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
                 &record.event,
                 Event::ProviderToolResult(result)
                     if result.call_id.as_str() == MESSAGE_CALL_ID
-                        && result.result == CborValue::Text(format!(
-                            "Message committed: {sent_message_id}; recipient was live; response not guaranteed"
-                        ))
+                        && result.result == crate::message_committed_receipt(
+                            &tau_proto::AgentMessageId::parse(&sent_message_id).expect("valid id")
+                        )
             ))
             .count(),
         1

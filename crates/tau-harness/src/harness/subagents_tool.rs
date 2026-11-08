@@ -3062,14 +3062,12 @@ impl Harness {
             self.publish_agent_message_from_agent(agent_id, parsed.recipient_id, parsed.message)
         });
         match result {
-            Ok(message_id) => self.finish_harness_owned_tool_with_result(
+            Ok(message_id) => self.finish_harness_owned_tool_with_cbor_result(
                 agent_id,
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                format!(
-                    "Message committed: {message_id}; recipient was live; response not guaranteed"
-                ),
+                crate::message_committed_receipt(&message_id),
                 None,
             ),
             Err(message) => self.finish_harness_owned_tool_with_error(

@@ -2890,16 +2890,18 @@ impl FakeState {
                 let committed_message_id = results.first().and_then(|result| {
                     result
                         .output
-                        .body
-                        .strip_prefix("Message committed: ")
-                        .and_then(|body| {
-                            body.strip_suffix("; recipient was live; response not guaranteed")
-                        })
+                        .headers
+                        .iter()
+                        .find(|header| header.key == "msg_id")
+                        .map(|header| header.value.as_str())
                 });
                 if results.len() != 1
                     || results[0].call_id != *call_id
                     || results[0].tool_type != ToolType::Function
                     || results[0].status != tau_proto::ToolResultStatus::Success
+                    || !results[0].output.body.is_empty()
+                    || !results[0].output.headers.iter().any(|header| header.key == "status" && header.value == "committed")
+                    || !results[0].output.headers.iter().any(|header| header.key == "recipient_status" && header.value == "live")
                     || committed_message_id.is_none_or(|message_id| {
                         tau_proto::AgentMessageId::parse(message_id).is_err()
                     })

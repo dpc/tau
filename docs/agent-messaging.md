@@ -35,12 +35,21 @@ These external message facts are separate from the harness-owned inter-session
 and agent-to-agent message events documented below.
 
 The harness-owned `message` tool lets an agent send an asynchronous short text
-note to another agent or session. Success returns
-`Message committed: <message-id>; recipient was live; response not guaranteed`.
+note to another agent or session. Direct-delivery success returns payload-free
+headers: `status: committed`, `msg_id: <actual-message-id>`, and
+`recipient_status: live`.
 This reports harness acceptance and correlation, not inference, reply, or
 completion. Every successful send is recorded as an
 `agent.message_sent` sender projection; agent recipients also get a separate
 `agent.message_received` recipient projection with the same `message_id`.
+Reviewed remote input instead reports `status: accepted_for_review`, the actual
+live main recipient, and the intended worker's `pending_review` state.
+These typed tool receipts use optional headers and an optional payload. Injected
+message context uses a registered XML-like envelope. See
+[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses)
+for the shared text format and
+[SPEC-agent-message-delivery](../specs/SPEC-agent-message-delivery.md)
+for commit and retained-release semantics.
 Agent-to-agent UI display depends on `:set show-messages`. When shown fully in
 the no-selection overview, a message renders as:
 

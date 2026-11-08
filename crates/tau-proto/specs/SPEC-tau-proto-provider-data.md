@@ -29,11 +29,13 @@ verified admission and provider resolution are integrated.
 
 `ToolResponse::render()` must keep headers as safe single lines, preserve ASCII LF body separators for line-oriented records, escape other model-visible control and separator characters, and keep binary/fallback rendering bounded. This is not terminal/UI escaping; terminal renderers still need their own sanitization for display state and layout.
 
-Tool text uses zero or more headers and an optional payload, separated by one
-empty line when both are present. This text format is independent of the
+Tool text uses optional headers and an optional payload, separated by one
+empty line only when headers and a nonempty payload are both present. Header-only,
+payload-only, and fully empty results are valid; whitespace-only payloads are
+preserved. This text format is independent of the
 context carrier. Native typed tool results need no generic-user envelope.
 When the harness injects source into generic user-role context, it wraps the
-tool text in the registered provenance envelope. Producers do not add the
+tool text in the registered XML-like provenance envelope. Producers do not add the
 envelope. See
 [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md)
 for source delivery and custody and

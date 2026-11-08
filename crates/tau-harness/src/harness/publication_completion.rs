@@ -2369,10 +2369,7 @@ impl Harness {
                     call_id,
                     tool_name,
                     tool_type,
-                    tau_proto::CborValue::Text(format!(
-                        "Original peer message committed to worker `{}`; response not guaranteed",
-                        pending.recipient_id,
-                    )),
+                    crate::message_committed_receipt(message_id),
                     display,
                 );
             }
@@ -2434,13 +2431,15 @@ impl Harness {
                     tau_proto::CborValue::Map(vec![
                         (
                             tau_proto::CborValue::Text("status".to_owned()),
-                            tau_proto::CborValue::Text(format!(
-                                "Message committed: {message_id}; recipient was live; response not guaranteed"
-                            )),
+                            tau_proto::CborValue::Text("committed".to_owned()),
                         ),
                         (
-                            tau_proto::CborValue::Text("message_id".to_owned()),
+                            tau_proto::CborValue::Text("msg_id".to_owned()),
                             tau_proto::CborValue::Text(message_id.to_string()),
+                        ),
+                        (
+                            tau_proto::CborValue::Text("recipient_status".to_owned()),
+                            tau_proto::CborValue::Text("live".to_owned()),
                         ),
                         (
                             tau_proto::CborValue::Text("recipient".to_owned()),

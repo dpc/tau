@@ -30,6 +30,15 @@ projection.
 
 ## Reviewed peer input and immutable release
 
+Message and release success receipts use typed tool text with optional headers
+and an optional payload, as specified in
+[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+Injected user context uses a registered XML-like envelope. Direct acceptance
+reports `status: committed`, the actual `msg_id`, and `recipient_status: live`;
+it does not assert inference or reply completion. Review acceptance instead
+reports `status: accepted_for_review` and distinguishes the live main recipient
+from the intended worker's `pending_review` state.
+
 An authenticated exact-worker message may commit as a pending review in the
 session main's journal. `peer_review` identifies the intended worker; the actual
 recipient remains main. The sender projection and RPC result identify both and
@@ -58,6 +67,11 @@ second payload queue, automatic restart release, or model rerun for review.
 If the original worker's history is not loaded after restart, release fails
 until you load that worker; it does not open a foreign leased journal, revive a
 worker, claim non-delivery, or consume the source.
+
+First release completion uses the committed receipt only after worker receive
+acceptance, including when that completion arrives late. A retry backed by a
+retained worker receipt reports `status: already_delivered`, `receipt: retained`,
+and `new_message: false`; it does not assert current worker liveness.
 
 Review and release inherit ordinary receive admission, interception validation,
 post-commit completion, and writeback durability. An append lost before durable

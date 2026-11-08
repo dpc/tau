@@ -2,6 +2,19 @@ use std::path as path_std_path;
 
 use super::*;
 
+/// Retried release must expose retained receipt authority and no new append,
+/// without a payload or a false claim that the original worker is still live.
+#[test]
+fn retained_release_receipt_is_payload_free() {
+    let response =
+        tau_proto::ToolResponse::from_cbor(&message_release::already_delivered_receipt());
+    assert!(response.body.is_empty());
+    assert_eq!(
+        response.render(),
+        "status: already_delivered\nreceipt: retained\nnew_message: false\n"
+    );
+}
+
 /// The handler-bound parser retains the human diagnostic while redacting the
 /// rejected status arguments from durable error details.
 #[test]
@@ -1117,10 +1130,8 @@ fn finish_message_success_passes_recipient_display_without_message_payload() {
     assert_eq!(call.tool_name.as_str(), MESSAGE_TOOL_NAME);
     assert_eq!(call.tool_type, ToolType::Function);
     assert_eq!(
-        call.result,
-        CborValue::Text(
-            "Message committed: message-1; recipient was live; response not guaranteed".to_owned()
-        )
+        tau_proto::ToolResponse::from_cbor(&call.result).render(),
+        "status: committed\nmsg_id: message-1\nrecipient_status: live\n"
     );
     assert_eq!(display.args, "agent-a");
     assert_eq!(display.status, ToolUseStatus::Success);

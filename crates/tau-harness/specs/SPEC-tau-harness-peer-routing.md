@@ -81,6 +81,11 @@ traffic do not take this path. Disabling review restores exact-worker delivery.
 Mainless sessions remain valid, but worker input with review enabled fails closed there.
 Reviewed delivery requires a sender protocol capable of representing the review
 disposition (major 16 or later); older peers fail before main creation/publication.
+Typed message and release receipts use optional headers and an optional payload,
+following the shared text contract in
+[SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses);
+their acceptance and retained-receipt meaning is defined by
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 The committed main receive and ACK report accepted-for-review, never worker
 delivery, and do not await model execution. The sender projection retains both
 the actual main and intended worker.

@@ -660,39 +660,48 @@ impl Harness {
                                 }),
                             );
                         }
-                        let status_header = command
-                            .protocol_warning
-                            .as_deref()
-                            .map(|warning| format!("{warning}\n\n"))
-                            .unwrap_or_default();
-                        let disposition = accepted.review_recipient.as_ref().map_or_else(
-                            || format!("Message committed: {}; recipient was live; response not guaranteed", command.auth_message_id),
-                            |worker| format!("Accepted for main review: {}; worker `{worker}` has not received the message; release or response not guaranteed", command.auth_message_id),
-                        );
+                        let reviewed = accepted.review_recipient.is_some();
+                        let mut receipt = vec![
+                            (
+                                "status",
+                                if reviewed {
+                                    "accepted_for_review"
+                                } else {
+                                    "committed"
+                                }
+                                .to_owned(),
+                            ),
+                            ("msg_id", command.auth_message_id.to_string()),
+                            ("recipient_status", "live".to_owned()),
+                            (
+                                "recipient",
+                                format!("{}/{}", command.recipient_session_id, recipient_id),
+                            ),
+                        ];
+                        if let Some(worker) = &accepted.review_recipient {
+                            receipt.push(("intended_recipient", worker.to_string()));
+                            receipt
+                                .push(("intended_recipient_status", "pending_review".to_owned()));
+                        }
+                        if let Some(warning) = command.protocol_warning {
+                            receipt.push(("warning", warning));
+                        }
                         self.finish_harness_owned_tool_with_cbor_result(
                             &command.conversation_id,
                             command.call_id,
                             command.tool_name,
                             command.tool_type,
-                            tau_proto::CborValue::Map(vec![
-                                (
-                                    tau_proto::CborValue::Text("status".to_owned()),
-                                    tau_proto::CborValue::Text(format!(
-                                        "{status_header}{disposition}"
-                                    )),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("message_id".to_owned()),
-                                    tau_proto::CborValue::Text(command.auth_message_id.to_string()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("recipient".to_owned()),
-                                    tau_proto::CborValue::Text(format!(
-                                        "{}/{}",
-                                        command.recipient_session_id, recipient_id
-                                    )),
-                                ),
-                            ]),
+                            tau_proto::CborValue::Map(
+                                receipt
+                                    .into_iter()
+                                    .map(|(key, value)| {
+                                        (
+                                            tau_proto::CborValue::Text(key.to_owned()),
+                                            tau_proto::CborValue::Text(value),
+                                        )
+                                    })
+                                    .collect(),
+                            ),
                             Some(display),
                         );
                     }

@@ -1502,9 +1502,7 @@ fn finish_message_success(
         call_id,
         tool_name,
         tool_type,
-        CborValue::Text(format!(
-            "Message committed: {message_id}; recipient was live; response not guaranteed"
-        )),
+        tau_harness::message_committed_receipt(&message_id),
         Some(message_success_display(arguments)),
     );
 }

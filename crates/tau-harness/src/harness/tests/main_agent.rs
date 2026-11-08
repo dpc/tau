@@ -235,7 +235,16 @@ fn peer_review_parked_release_revalidates_authority_and_preserves_retry() {
             let display = event_log_events(&h)
                 .into_iter()
                 .find_map(|event| match event {
-                    Event::ToolResult(result) if result.call_id == call => result.display,
+                    Event::ToolResult(result) if result.call_id == call => {
+                        assert_eq!(
+                            tau_proto::ToolResponse::from_cbor(&result.result).render(),
+                            format!(
+                                "status: committed\nmsg_id: {}\nrecipient_status: live\n",
+                                expected.message_id
+                            )
+                        );
+                        result.display
+                    }
                     _ => None,
                 })
                 .expect("release success display");

@@ -85,10 +85,7 @@ pub(super) fn handle_tool_call(
                 call.id.clone(),
                 visible_tool_name,
                 call.tool_type,
-                CborValue::Text(
-                    "Already delivered: retained worker receipt exists; no new message appended"
-                        .to_owned(),
-                ),
+                already_delivered_receipt(),
                 Some(display),
             )
         }
@@ -107,4 +104,22 @@ pub(super) fn handle_tool_call(
         }
     }
     Ok(())
+}
+
+/// Reports retained delivery without claiming current recipient liveness.
+pub(super) fn already_delivered_receipt() -> CborValue {
+    CborValue::Map(vec![
+        (
+            CborValue::Text("status".to_owned()),
+            CborValue::Text("already_delivered".to_owned()),
+        ),
+        (
+            CborValue::Text("receipt".to_owned()),
+            CborValue::Text("retained".to_owned()),
+        ),
+        (
+            CborValue::Text("new_message".to_owned()),
+            CborValue::Bool(false),
+        ),
+    ])
 }
