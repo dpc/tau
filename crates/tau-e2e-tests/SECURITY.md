@@ -83,7 +83,7 @@ fixture needing literal canonical wrapper syntax requires a typed scenario
 distinction.
 
 The closed task-text matcher also skips whole registered `tau_discovery` and
-`tau_tool_output`
+`tool_output`
 envelopes when selecting task text. It does not infer runtime receipt authority or
 remove those envelopes from the provider request. Canonical delivery and
 context-order tests cover that content.

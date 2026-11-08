@@ -3785,7 +3785,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
-                && matches!(&result.result, CborValue::Text(text) if text.contains("wait_outcome: interrupted"))
+                && matches!(&result.result, CborValue::Text(text) if text.contains("outcome: interrupted"))
     )));
 
     h.publish_event(
@@ -3813,7 +3813,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
-                && matches!(&result.result, CborValue::Text(text) if text.contains("wait_outcome: interrupted"))
+                && matches!(&result.result, CborValue::Text(text) if text.contains("outcome: interrupted"))
     )));
     h.shutdown().expect("shutdown");
 }

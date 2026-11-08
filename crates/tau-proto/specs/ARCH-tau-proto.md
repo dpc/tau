@@ -2,7 +2,7 @@
 
 Protocol 21.0 separates ordered tool source from native completion receipts.
 The protocol owns bounded output/update/final-capture DTOs, exact declaration
-references, and the shared `tau_tool_output` envelope. The harness owns canonical
+references, and the shared `tool_output` envelope. The harness owns canonical
 declaration policy and final capture; producers cannot author them. Rebuild
 configured peers together; publication and activation remain separate.
 See [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
@@ -433,7 +433,7 @@ prompt for a completed background tool so human UIs can suppress it without
 classifying prompt prose. Current completion prompts carry payload-free control
 notices rather than `tau_background_result` previews. That registered envelope
 remains recognizable in historical context. Ordered source text instead uses
-`tau_tool_output`; typed waits carry successful completion receipts with no
+`tool_output`; typed waits carry successful completion receipts with no
 source body. Their `target_outcome` distinguishes `completed`, `error`, and
 `cancelled`. See
 [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).

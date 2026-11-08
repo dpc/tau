@@ -601,7 +601,7 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   committed report do not acknowledge canonical acceptance.
 - **`tool.output_updated`** *(harness)* — Protected durable accepted text tied to
   an exact tool declaration occurrence and sequence. The harness places each
-  accepted frame in model context once through `tau_tool_output` and preserves it
+  accepted frame in model context once through `tool_output` and preserves it
   through ordinary replay and compaction recovery. Generic live UI payloads can replace earlier previews
   without replacing or dropping canonical source frames. An incremental frame
   can wake an idle agent but cannot interrupt live inference; owner-wide

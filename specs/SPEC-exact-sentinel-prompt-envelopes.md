@@ -38,7 +38,7 @@ model-facing payload families:
 | `quoted_message` | Generic user-role text attached to a canonical delivered/edited message | Optional descriptive reference, author, and excerpt metadata; `content_trust="external"` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Historical canonical background-preview attributes |
-| `tau_tool_output` | Generic user-role text | `call_id`, `tool`, `sequence`, `terminal`, `omitted_bytes`; ordered canonical tool source |
+| `tool_output` | Generic user-role text | `call_id`, `terminal`, then nonzero `omitted_bytes`; ordered canonical tool source |
 
 Each change that adds or reframes a generic-user family must register it and use
 the registry's shared metadata and exact-close helper. Family renderers own
@@ -143,7 +143,7 @@ the authoritative node's exact bytes and uses this registry family's close escap
 to prevent every other generic text item from forming a complete
 `tau_background_result` envelope.
 
-New output uses `tau_tool_output`, rendered only from accepted canonical updates
+New output uses `tool_output`, rendered only from accepted canonical updates
 or the final canonical terminal. The exact declaration reference governs source
 ownership; text spelling cannot confer it. The harness retains final source before
 native closure, and completion notices and waits carry control receipts rather than

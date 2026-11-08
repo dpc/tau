@@ -1314,7 +1314,7 @@ fn is_payload_envelope_provenance_projection(text: &str) -> bool {
     tau_proto::registered_payload_envelopes()
         .iter()
         .filter(|family| {
-            family.name != tau_proto::TAU_INTERNAL_HEADER_NAME
+            family.name != tau_proto::TAU_INTERNAL_PAYLOAD_ENVELOPE.name
                 && family.name != tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.name
         })
         .any(|family| family.matches_whole(text))

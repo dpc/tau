@@ -54,7 +54,7 @@ fn activity_and_absolute_deadlines_bound_batches_without_early_size_flush() {
     capture.poll(start + Duration::from_secs(30));
     let report = receive(&rx);
     assert_eq!(report.sequence, 0);
-    assert!(report.text.starts_with("\nout (fragment) "));
+    assert!(report.text.starts_with("\nout(no_nl) "));
     assert!(report.text.len() <= tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
     assert!(report.omitted_bytes > 0);
     capture.poll(start + Duration::from_secs(300));
@@ -67,7 +67,7 @@ fn activity_and_absolute_deadlines_bound_batches_without_early_size_flush() {
     capture.poll(start + Duration::from_secs(315));
     let report = receive(&rx);
     assert_eq!(report.sequence, 1);
-    assert_eq!(report.text, "\nerr (fragment) last");
+    assert_eq!(report.text, "\nerr(no_nl) last");
     assert_eq!(report.omitted_bytes, 0);
 }
 
@@ -92,13 +92,13 @@ fn split_codepoints_and_terminal_tail_preserve_stream_identity() {
     );
     capture.poll(start + Duration::from_secs(32));
     let report = receive(&rx);
-    assert_eq!(report.text, "\nerr (fragment) warning\nout (fragment) €");
+    assert_eq!(report.text, "\nerr(no_nl) warning\nout(no_nl) €");
     capture.push(
         OutputStream::Stderr,
         &[0xff, 0xe2],
         start + Duration::from_secs(33),
     );
-    assert_eq!(capture.finish(), "\nerr (fragment) ��");
+    assert_eq!(capture.finish(), "\nerr(no_nl) ��");
     assert!(rx.try_recv().is_err());
 }
 
@@ -132,8 +132,95 @@ fn lifetime_budget_preserves_recent_terminal_diagnostics() {
     assert!(rx.try_recv().is_err());
     let terminal = capture.finish();
     assert!(terminal.contains("rendered bytes omitted before retained terminal tail"));
-    assert!(terminal.ends_with("\nerr (fragment) fatal: recent diagnostic"));
-    assert!(!terminal.contains("err (fragment) x"));
+    assert!(terminal.ends_with("\nerr(no_nl) fatal: recent diagnostic"));
+    assert!(!terminal.contains("err(no_nl) x"));
 }
 #[cfg(target_os = "linux")]
 mod pressure;
+
+/// Segments preserve source endings rather than marking entire multiline runs
+/// as incomplete. A no-newline segment can continue after a batch or pipe
+/// switch.
+#[test]
+fn line_segments_reuse_endings_across_batches_and_pipes() {
+    let (mut capture, rx) = capture();
+    let start = Instant::now();
+    capture.push(
+        OutputStream::Stdout,
+        b"first\nsecond\r\nthird\rfourth",
+        start,
+    );
+    capture.poll(start + Duration::from_secs(15));
+    assert_eq!(
+        receive(&rx).text,
+        "\nout first\nout(crlf) second\nout(cr) third\nout(no_nl) fourth"
+    );
+    capture.push(
+        OutputStream::Stderr,
+        b"warning\n",
+        start + Duration::from_secs(16),
+    );
+    capture.push(
+        OutputStream::Stdout,
+        b" continued\nlast",
+        start + Duration::from_secs(17),
+    );
+    capture.poll(start + Duration::from_secs(32));
+    assert_eq!(
+        receive(&rx).text,
+        "\nerr warning\nout  continued\nout(no_nl) last"
+    );
+    assert_eq!(capture.finish(), "");
+}
+
+/// A CR split from its LF needs only per-pipe boundary state, not a buffered
+/// unbounded line. Even a CR published after a partial segment stays explicit.
+#[test]
+fn split_crlf_and_final_cr_preserve_pipe_endings() {
+    let (mut capture, rx) = capture();
+    let start = Instant::now();
+    capture.push(OutputStream::Stdout, b"first\r", start);
+    capture.push(OutputStream::Stderr, b"warning\r", start);
+    capture.poll(start + Duration::from_secs(15));
+    assert_eq!(receive(&rx).text, "\nout(no_nl) first\nerr(no_nl) warning");
+    capture.push(
+        OutputStream::Stdout,
+        b"\nsecond\r",
+        start + Duration::from_secs(16),
+    );
+    capture.push(OutputStream::Stderr, b"\n", start + Duration::from_secs(17));
+    capture.push(
+        OutputStream::Stdout,
+        b"third\r",
+        start + Duration::from_secs(18),
+    );
+    capture.poll(start + Duration::from_secs(33));
+    assert_eq!(
+        receive(&rx).text,
+        "\nout(crlf) \nout(no_nl) second\nerr(crlf) \nout(cr) \nout(no_nl) third"
+    );
+    assert_eq!(capture.finish(), "\nout(cr) ");
+}
+
+/// A long unterminated line stays bounded and does not suppress later complete
+/// lines; omission counts cover exactly the normalized rendered bytes dropped.
+#[test]
+fn long_line_and_multiline_omissions_retain_labeled_recent_tail() {
+    let mut pending = PendingOutput::default();
+    let long = "x".repeat(2 * tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
+    pending.push(false, &long);
+    let (text, omitted) = pending.take(tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
+    assert_eq!(text.len(), tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
+    assert_eq!(
+        text.len() as u64 + omitted,
+        (long.len() + "\nout(no_nl) ".len()) as u64
+    );
+    pending.push(false, &"line\n".repeat(4000));
+    let (text, omitted) = pending.take(tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
+    assert!(text.starts_with("\nout "));
+    assert!(!text.contains("no_nl"));
+    assert_eq!(
+        text.len() as u64 + omitted,
+        ("\nout line".len() * 4000) as u64
+    );
+}

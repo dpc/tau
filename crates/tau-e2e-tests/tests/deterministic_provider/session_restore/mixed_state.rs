@@ -39,7 +39,7 @@ const TOOL_CALL_ID: &str = "s7-interrupted-tool";
 const BOOT_A_CURSORS: [usize; 4] = [5, 1, 1, 1];
 const RECOVERED_CURSORS: [usize; 4] = [5, 1, 2, 2];
 const RECOVERY_MARKER: &str = "mixed-state interrupted inference recovered";
-const SCENARIO_BYTES: usize = 2_500;
+const SCENARIO_BYTES: usize = 2_496;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// Decoded fake-provider checkpoint used to prove all four immutable lane

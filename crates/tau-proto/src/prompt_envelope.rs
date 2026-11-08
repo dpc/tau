@@ -133,11 +133,11 @@ impl fmt::Display for PayloadEnvelopeRenderError {
 /// Registered output from an exact tool invocation, including nonterminal
 /// batches.
 pub const TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
-    name: "tau_tool_output",
-    opening: PayloadEnvelopeOpening::Attributed("<tau_tool_output "),
-    ordered_attributes: &["call_id", "tool", "sequence", "terminal", "omitted_bytes"],
-    exact_close: "</tau_tool_output>",
-    visible_close: "&lt;/tau_tool_output&gt;",
+    name: "tool_output",
+    opening: PayloadEnvelopeOpening::Attributed("<tool_output "),
+    ordered_attributes: &["call_id", "terminal", "omitted_bytes"],
+    exact_close: "</tool_output>",
+    visible_close: "&lt;/tool_output&gt;",
     carrier: PayloadEnvelopeCarrier::GenericUserText,
 };
 

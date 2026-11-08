@@ -138,9 +138,9 @@ path, query, command, or similar argument when the tool has transformed it into
 new information, such as a canonicalized path that differs from the input.
 
 Harness-owned background-wait interruption is a successful control result, not
-an ordinary completion. It uses closed `tau_internal: true`,
-`wait_outcome: interrupted`, `wait_reason: activating_input`, and
-`wait_mode: exact` or `any_background` headers. It does not echo a target ID or
+an ordinary completion. It uses closed `internal: true`,
+`outcome: interrupted`, `reason: activating_input`, and
+`mode: exact`, `exact_all`, or `any_background` headers. It does not echo a target ID or
 consume the target result.
 
 ### Layered escaping policy
@@ -178,9 +178,10 @@ Newlines are assumed to be `\n`, but other styles are supported
 and displayed as `crlf` (`\r\n`), `cr` (`\r`) or `no_nl` (missing trailing newline).
 This applies to both `read` line-number prefixes and `shell` stdout/stderr prefixes.
 
-Incremental shell source uses `out (fragment)` and `err (fragment)` for stream
-fragments, not complete lines. Apply the line-ending rules above to line-rendered
-output, not to fragment boundaries.
+Incremental shell source uses the same `out`/`err` line-ending conventions for
+bounded source-line segments. `(no_nl)` means the segment has no source newline
+at its boundary; later output from the same pipe can continue it, even across
+updates or intervening output from the other pipe. It does not mean process EOF.
 Use `tau-tool-verification-file-shell` for streaming UTF-8 and retention probes,
 and `tau-tool-verification-background-cancel` for source ordering and receipts.
 

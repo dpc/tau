@@ -86,6 +86,11 @@ Model shell output is an ordered source stream, separate from completion
 receipts. Pending output flushes after 15 seconds of inactivity or 30 seconds
 from its first pending bytes, whichever comes first; silence sends no update and size
 limits never cause an early flush. Actual completion flushes the final tail.
+Streamed `out`/`err` source-line segments reuse the ordinary `crlf`, `cr`, and
+`no_nl` markers. `no_nl` marks the absence of a source newline at the segment boundary, not
+process EOF. Later output from the same pipe can continue the segment across
+updates or intervening output from the other pipe. A CR held across a batch
+boundary may complete a previous segment with an empty `crlf` or `cr` segment.
 The agent can react while the process is alive, but output never interrupts
 active inference. `wait(complete_only: true)` masks nonterminal tool wakeups for
 that agent while preserving capture and unrelated activating input.

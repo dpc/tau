@@ -191,12 +191,14 @@ fn payload_envelope_provenance_detection_covers_every_envelope_family() {
         "<prompt>\nx\n</prompt>",
         "<response>\nx\n</response>",
         "<tau_web_content adapter=\"exa\">x</tau_web_content>",
+        "<tool_output call_id=\"C\" terminal=\"false\">x</tool_output>",
     ] {
         assert!(is_payload_envelope_provenance_projection(text), "{text}");
     }
     for text in [
         "prefix <user>x</user>",
         "<tau_internal>x</tau_internal>",
+        "internal: true",
         "<USER>x</USER>",
         "<message>x</message >",
         "<prompt>x</response>",

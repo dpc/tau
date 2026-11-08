@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use tau_proto::{Event, HarnessInputMessage, ToolOutputReport};
 
-use super::OutputStream;
+use super::{LineEndingKind, OutputStream, format_output_line, line_ending_marker};
 use crate::Output;
 use crate::tools::world::RecordedShellUpdate;
 
@@ -61,22 +61,23 @@ impl Wake for CapacityPipe {
     }
 }
 
-/// One run of bytes from a single pipe. Labels remain attached when older
-/// fragments are dropped, so a retained tail never loses its stream identity.
+/// One bounded source-line segment. Labels survive rolling-tail truncation.
 struct Fragment {
     /// Whether these bytes originated on stderr rather than stdout.
     stderr: bool,
     /// Normalized UTF-8 bytes retained for this pipe fragment.
     text: String,
+    /// Source ending, or no newline at the current segment boundary.
+    ending: Option<LineEndingKind>,
 }
 
 impl Fragment {
-    fn label(&self) -> &'static str {
-        if self.stderr {
-            "\nerr (fragment) "
-        } else {
-            "\nout (fragment) "
-        }
+    fn label(&self) -> String {
+        let prefix = if self.stderr { "err" } else { "out" };
+        format!(
+            "\n{}",
+            format_output_line(prefix, line_ending_marker(self.ending), "")
+        )
     }
 
     fn rendered_bytes(&self) -> usize {
@@ -94,29 +95,77 @@ struct PendingOutput {
     bytes: usize,
     /// Rendered bytes discarded to preserve the bounded recent tail.
     omitted: u64,
+    /// At most one unresolved CR per pipe, never a buffered source line.
+    pending_cr: [bool; 2],
 }
 
 impl PendingOutput {
     fn push(&mut self, stderr: bool, text: &str) {
-        if text.is_empty() {
+        let pipe = usize::from(stderr);
+        let mut text = text;
+        if !text.is_empty() && std::mem::take(&mut self.pending_cr[pipe]) {
+            let ending = if let Some(rest) = text.strip_prefix('\n') {
+                text = rest;
+                LineEndingKind::Crlf
+            } else {
+                LineEndingKind::Cr
+            };
+            self.push_segment(stderr, "", Some(ending));
+        }
+        while let Some(index) = text.find(['\r', '\n']) {
+            let (content, rest) = text.split_at(index);
+            if rest == "\r" {
+                self.push_segment(stderr, content, None);
+                self.pending_cr[pipe] = true;
+                return;
+            }
+            let (ending, consumed) = if rest.starts_with("\r\n") {
+                (LineEndingKind::Crlf, 2)
+            } else if rest.starts_with('\r') {
+                (LineEndingKind::Cr, 1)
+            } else {
+                (LineEndingKind::Lf, 1)
+            };
+            self.push_segment(stderr, content, Some(ending));
+            text = &rest[consumed..];
+        }
+        self.push_segment(stderr, text, None);
+    }
+
+    /// Append only bounded segments, reusing ordinary shell line-ending labels.
+    fn push_segment(&mut self, stderr: bool, text: &str, ending: Option<LineEndingKind>) {
+        if text.is_empty() && ending.is_none() {
             return;
         }
         if let Some(last) = self
             .fragments
             .back_mut()
-            .filter(|last| last.stderr == stderr)
+            .filter(|last| last.stderr == stderr && last.ending.is_none())
         {
+            self.bytes -= last.rendered_bytes();
             last.text.push_str(text);
-            self.bytes += text.len();
+            last.ending = ending;
+            self.bytes += last.rendered_bytes();
         } else {
             let fragment = Fragment {
                 stderr,
                 text: text.to_owned(),
+                ending,
             };
             self.bytes += fragment.rendered_bytes();
             self.fragments.push_back(fragment);
         }
         self.trim(tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
+    }
+
+    /// Resolve a final bare CR only at process completion, not a batch
+    /// boundary.
+    fn finish_lines(&mut self) {
+        for stderr in [false, true] {
+            if std::mem::take(&mut self.pending_cr[usize::from(stderr)]) {
+                self.push_segment(stderr, "", Some(LineEndingKind::Cr));
+            }
+        }
     }
 
     fn trim(&mut self, limit: usize) {
@@ -153,7 +202,7 @@ impl PendingOutput {
         self.trim(limit);
         let mut text = String::with_capacity(self.bytes);
         for fragment in self.fragments.drain(..) {
-            text.push_str(fragment.label());
+            text.push_str(&fragment.label());
             text.push_str(&fragment.text);
         }
         self.bytes = 0;
@@ -459,6 +508,7 @@ impl OutputStreamCapture {
                 self.pending.push(stderr, "\u{fffd}");
             }
         }
+        self.pending.finish_lines();
         let (mut text, omitted) = self.pending.take(tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
         if omitted != 0 {
             text.insert_str(

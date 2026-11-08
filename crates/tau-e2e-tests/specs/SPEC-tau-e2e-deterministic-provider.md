@@ -72,7 +72,7 @@ of its visible response. Direct harness admission tests verify the causal
 annotation; V1's initial-input oracle still requires an unannotated envelope.
 
 The closed task-text matcher skips whole registered `tau_discovery` and
-`tau_tool_output` user envelopes so harness guidance and tool output do not
+`tool_output` user envelopes so harness guidance and tool output do not
 replace the scenario's task text.
 This rule applies only to fixture matching, not runtime provenance recognition.
 Exact context-order oracles still inspect the original provider context,
@@ -357,7 +357,7 @@ The fixture never sends the authenticated release, so the existing release
 arbitration keeps the invocation live until process teardown rather than racing
 the crash cut against an elapsed terminal deadline. After SIGKILL, the fixture
 removes the dead generation's private release socket before starting Boot B.
-Its compact 1,267-byte scenario JSON contains two main actions and two worker
+Its compact 1,263-byte scenario JSON contains two main actions and two worker
 actions.
 Boot A requires exactly one correlated worker `tool.request` followed by canonical
 `tool.started` in the typed execution-restore stream and one live readiness fact
@@ -369,7 +369,7 @@ complete tool-result context is exactly that balanced error. Boot C receives no
 input and must add no repair; its current/history membership, execution restore,
 current-agent journals, and separately loaded worker journal equal Boot B.
 
-S7 uses four lanes and 2,500-byte compact scenario JSON: five main actions, one
+S7 uses four lanes and 2,496-byte compact scenario JSON: five main actions, one
 quiescent-worker action, a held inference plus its recovery, and the two-action
 dummy repair pair. Boot A consumes eight of ten actions with cursors
 `[5, 1, 1, 1]`. Boot B recovers the interrupted inference and runs fresh inference
@@ -460,7 +460,7 @@ worker action and two watch notifications. Boot C consumes none. Exact old and
 new prompt identities, canonical terminals, retained outer-turn identity, and
 fake cursor bindings prove recovery without replaying the old request.
 
-S6 uses two lanes and compact 1,267-byte scenario JSON: two main actions and two
+S6 uses two lanes and compact 1,263-byte scenario JSON: two main actions and two
 worker actions. Boot A consumes two main turns and one worker turn before three
 matched actions; Boot B consumes one worker turn; Boot C consumes none. Extra
 repair events, terminals, starts, provider prompts, or actions fail closed.

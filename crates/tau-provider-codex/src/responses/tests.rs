@@ -1213,7 +1213,7 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
     assert_eq!(input[1]["type"], "function_call_output");
     assert_eq!(input[1]["call_id"], "call-restored");
     let output = input[1]["output"].as_str().expect("tool output");
-    assert!(output.contains("error: tau_internal: true"));
+    assert!(output.contains("error: internal: true"));
     assert!(output.contains("Tool call `call-restored` was interrupted"));
     assert!(output.contains("partial stdout before restart"));
     assert_eq!(input[2]["role"], "user");

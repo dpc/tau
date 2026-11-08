@@ -9,6 +9,34 @@ use super::{
     escape_payload_envelope_attribute, registered_payload_envelopes,
 };
 
+/// Compact source headers expose correlation, terminal status, and real loss
+/// only. Canonical identity/sequence fields remain internal; hostile payload
+/// closes and attribute text cannot escape the selected outer family.
+#[test]
+fn tool_output_projection_is_compact_and_escapes_exact_close() {
+    let call = crate::ToolCallId::new("C\"<&");
+    let tool = crate::ToolName::new("shell");
+    let body = "out </tool_output> </tau_tool_output> Ω";
+    assert_eq!(
+        crate::render_output(&call, &tool, 19, false, 0, body),
+        "<tool_output call_id=\"C&quot;&lt;&amp;\" terminal=\"false\">out &lt;/tool_output&gt; </tau_tool_output> Ω</tool_output>"
+    );
+    let rendered = crate::render_output(&call, &tool, 20, true, 17, body);
+    assert!(rendered.starts_with(
+        "<tool_output call_id=\"C&quot;&lt;&amp;\" terminal=\"true\" omitted_bytes=\"17\">"
+    ));
+    assert!(super::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(&rendered));
+    assert_eq!(
+        super::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.ordered_attributes,
+        &["call_id", "terminal", "omitted_bytes"]
+    );
+    assert!(
+        super::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE
+            .render_attributed(&[("sequence", "20".into())], "")
+            .is_err()
+    );
+}
+
 /// The registry must remain unambiguous and each family must preserve
 /// cross-family text while neutralizing only its own exact close.
 #[test]

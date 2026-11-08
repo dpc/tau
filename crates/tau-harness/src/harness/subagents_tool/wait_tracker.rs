@@ -3413,7 +3413,7 @@ fn interrupted_wait_result(wait_mode: InterruptedWaitMode) -> CborValue {
     let header_value = wait_mode.as_header_value();
     let guidance = wait_mode.guidance();
     CborValue::Text(format!(
-        "{}: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: {header_value}\n\n{guidance}",
+        "{}: true\noutcome: interrupted\nreason: activating_input\nmode: {header_value}\n\n{guidance}",
         tau_proto::TAU_INTERNAL_HEADER_NAME
     ))
 }

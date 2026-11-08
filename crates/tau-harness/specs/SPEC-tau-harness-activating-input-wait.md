@@ -68,9 +68,9 @@ wait-tool delay, so completion before that cut coalesces the prompt and expiry
 interrupts the wait once with the typed activating-input result.
 
 An interrupted background wait remains a successful scheduling result with the
-exact provider-visible headers `tau_internal: true`, `wait_outcome: interrupted`,
-`wait_reason: activating_input`, and `wait_mode: exact` or
-`wait_mode: exact_all` or `wait_mode: any_background`, followed by exactly one
+exact provider-visible headers `internal: true`, `outcome: interrupted`,
+`reason: activating_input`, and `mode: exact` or
+`mode: exact_all` or `mode: any_background`, followed by exactly one
 blank line and optional concise harness-authored prose. Header names and values
 are LF-separated closed ASCII tokens. The result contains no activating payload
 or redundant target ID. Singular interruption consumes no target completion.

@@ -17,7 +17,7 @@ use super::{
 /// Exact provider-authored foreground tool identity.
 const TOOL_CALL_ID: &str = "s6-interrupted-tool";
 /// Exact compact JSON size of the reviewed S6 scenario grammar.
-const SCENARIO_BYTES: usize = 1_267;
+const SCENARIO_BYTES: usize = 1_263;
 
 /// Proves a worker's acknowledged but unterminated foreground tool is repaired
 /// once on resume and remains balanced across a second cold resume.

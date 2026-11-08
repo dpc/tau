@@ -304,7 +304,7 @@ Please continue.
 
 If the watching agent repeats the same notification text in a commentary/final response, that is the agent echoing the notification, not a second watch delivery. When checking for duplicate delivery, count actual message events/results, not streamed echoes of text the model chose to repeat.
 
-A watch notification that arrives while the watcher is blocked in `wait` may interrupt the wait with a `tau_internal: true` result saying new input is queued. Treat that as expected: it is the same active-wait interruption behavior used for ordinary agent messages.
+A watch notification that arrives while the watcher is blocked in `wait` may interrupt the wait with an `internal: true` result saying new input is queued. Treat that as expected: it is the same active-wait interruption behavior used for ordinary agent messages.
 
 Calls with exact recipient `user` must fail as unsupported and create no message projection. Use the parent agent ID or a watched response/final answer when proving that the parent observed a notification.
 

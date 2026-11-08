@@ -992,7 +992,10 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              separated by a literal `...` line. Output lines are prefixed with `out ` \
              for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
              `out(no_nl)`; CRLF and CR line endings are marked as `out(crlf)` \
-             or `out(cr)`. Invalid UTF-8 is shown with Unicode replacement characters and \
+             or `out(cr)`. Streamed source uses these labels for bounded line segments; \
+             `(no_nl)` means no source newline at this segment boundary, not process EOF. \
+             Later same-pipe output can continue it across updates or intervening stderr/stdout. \
+             Invalid UTF-8 is shown with Unicode replacement characters and \
              an `invalid-utf8` line flag. Lines that would exceed the 15 KiB output budget \
              are marker-only, e.g. `err(truncated)`. Truncated results include complete totals, a warning, and normally an exact temporary path to up to 16 MiB of rendered output; output beyond that saved cap is explicitly marked incomplete, while platforms or filesystems that cannot enforce private storage report `saved_output_unavailable: true`. Byte totals and artifacts count the complete rendered UTF-8 records, including stream prefixes, flags, and separators, rather than raw process bytes. \
              Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors. \
@@ -1049,7 +1052,10 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "Run a shell command. The native `output` body is capped. \
              If truncated, results are saved to a temporary file when possible. \
              Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
-             trailing newlines are marked with `(no_nl)`. Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors."
+             trailing newlines are marked with `(no_nl)`. Streamed source labels bounded \
+             line segments: `(no_nl)` means no source newline at that boundary, not process EOF; \
+             later same-pipe output can continue it across updates or intervening stderr/stdout. \
+             CRLF and CR endings use `(crlf)` and `(cr)`. Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,

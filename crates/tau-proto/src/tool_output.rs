@@ -194,25 +194,25 @@ impl std::fmt::Write for BoundedToolOutput {
 }
 
 /// Render one ordered tool-origin occurrence, without interpreting its payload.
+/// Tool identity and sequence remain canonical metadata; the model sees only
+/// call correlation, terminal status, and nonzero omission counts.
 pub fn render_output(
     call_id: &ToolCallId,
-    tool_name: &ToolName,
-    sequence: u64,
+    _tool_name: &ToolName,
+    _sequence: u64,
     terminal: bool,
     omitted_bytes: u64,
     text: &str,
 ) -> String {
+    let mut attributes = vec![
+        ("call_id", call_id.to_string()),
+        ("terminal", terminal.to_string()),
+    ];
+    if omitted_bytes != 0 {
+        attributes.push(("omitted_bytes", omitted_bytes.to_string()));
+    }
     crate::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE
-        .render_attributed(
-            &[
-                ("call_id", call_id.to_string()),
-                ("tool", tool_name.to_string()),
-                ("sequence", sequence.to_string()),
-                ("terminal", terminal.to_string()),
-                ("omitted_bytes", omitted_bytes.to_string()),
-            ],
-            text,
-        )
+        .render_attributed(&attributes, text)
         .expect("tool-output attributes follow the shared registry")
 }
 

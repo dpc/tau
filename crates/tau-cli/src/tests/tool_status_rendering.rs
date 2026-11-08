@@ -4892,7 +4892,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text(
-                "tau_internal: true\n\nTool call `call-1` is running in the background.".into(),
+                "internal: true\n\nTool call `call-1` is running in the background.".into(),
             ),
             provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::BackgroundPlaceholder,

@@ -2183,7 +2183,7 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
         .expect("resume");
     let errors = provider_tool_errors(&h, "interrupted-call");
     assert_eq!(errors.len(), 1);
-    assert!(errors[0].message.contains("tau_internal: true"));
+    assert!(errors[0].message.contains("internal: true"));
     assert!(errors[0].message.contains("Side effects may have occurred"));
     let cid = test_user_agent(&h);
     h.resolve_materialized_message_wakes(&cid);

@@ -33,9 +33,10 @@ terminal behind them. The terminal owns the last source occurrence; it is not
 another update event.
 
 The harness projects every source occurrence exactly once through the registered
-`tau_tool_output` generic user-role envelope. Its ordered attributes identify
-call, tool, sequence, terminal status, and omitted bytes. Its body is untrusted
-tool data. Final source precedes the native closure or background completion
+`tool_output` generic user-role envelope. Its ordered attributes identify
+call and terminal status, followed by `omitted_bytes` only when nonzero.
+Tool identity and sequence remain in canonical metadata and validation, not the
+model-facing header. The envelope body contains untrusted tool data. Final source precedes the native closure or background completion
 settlement. Opted-in foreground text calls close with a successful typed receipt;
 the receipt's `target_outcome` distinguishes completed, error, and cancelled.
 Non-opted foreground tools retain native output, including images.

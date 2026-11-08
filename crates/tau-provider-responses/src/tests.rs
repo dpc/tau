@@ -108,7 +108,7 @@ fn responses_tool_result_marks_omitted_images_without_byte_egress() {
 /// framing in the provider's function-call output.
 #[test]
 fn responses_tool_result_preserves_typed_wait_interruption_fixture() {
-    let interruption = "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact\n\nNew input is queued; retry the wait to consume its target result.";
+    let interruption = "internal: true\noutcome: interrupted\nreason: activating_input\nmode: exact\n\nNew input is queued; retry the wait to consume its target result.";
     let result = tau_proto::ToolResultItem {
         presentation: Default::default(),
         call_id: tau_proto::ToolCallId::new("wait-call"),
@@ -140,7 +140,7 @@ fn responses_tool_result_preserves_typed_wait_interruption_fixture() {
 /// byte in its function-call output.
 #[test]
 fn responses_tool_result_preserves_exact_all_wait_interruption_fixture() {
-    let interruption = "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact_all\n\nNew input is queued; retry the wait to consume its target result.";
+    let interruption = "internal: true\noutcome: interrupted\nreason: activating_input\nmode: exact_all\n\nNew input is queued; retry the wait to consume its target result.";
     let result = tau_proto::ToolResultItem {
         presentation: Default::default(),
         call_id: tau_proto::ToolCallId::new("wait-all-call"),

@@ -106,9 +106,9 @@ Completion notices leave results queued:
   1 / 1,440). It is mutually exclusive with `tool_call_id`.
 
 Activating input can interrupt background waits with successful
-`wait_outcome: interrupted`, `wait_reason: activating_input`, and
-`wait_mode: exact` or `any_background`. The result remains queued; handle input,
-then retry the exact wait. A pending wait can suppress/remove a completion
+`internal: true`, `outcome: interrupted`, `reason: activating_input`, and
+`mode: exact`, `exact_all`, or `any_background`. The result remains queued;
+handle input, then retry the exact wait. A pending wait can suppress/remove a completion
 notice but cannot retract a notice already delivered to the model.
 
 ## Manual compaction tools
