@@ -345,6 +345,14 @@ late UI subscribers without rebasing observation clocks. It never enters
 semantic session or agent history. See
 [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
+Accepted nonempty merged quota also feeds a separate bounded, lossy filesystem
+worker for startup alias hints. Private per-provider sidecars contain only
+configured provider names and percentage/validity observations, not provider
+authority or credentials. The worker replaces them atomically. They are advisory
+inputs to config selection, never live quota, UI hydration, or journal replay. Empty bootstrap state and ordinary
+teardown do not erase them. Memory-only harnesses omit this worker; write failure
+or pressure cannot delay or reject canonical publication.
+
 This component implements the harness-owned parts of [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md), [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md), and [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
 The harness owns runtime-only semantic work status for each loaded agent and
 projects each current canonical phase/title through the complete transient

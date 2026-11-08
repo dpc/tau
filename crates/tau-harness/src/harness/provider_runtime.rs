@@ -807,6 +807,9 @@ impl Harness {
                 snapshot: changed.clone(),
             },
         );
+        if let Some(writer) = &self.provider_runtime.usage_writer {
+            writer.offer(&changed);
+        }
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::HarnessProviderQuotaChanged(changed),
@@ -895,6 +898,9 @@ impl Harness {
                 snapshot: changed.clone(),
             },
         );
+        if let Some(writer) = &self.provider_runtime.usage_writer {
+            writer.offer(&changed);
+        }
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::HarnessProviderQuotaChanged(changed),

@@ -251,6 +251,148 @@ agents:
     );
 }
 
+/// Lists select once across inherited and explicit roles, while later layers
+/// replace the entire target value and model suffix aliases stay independent.
+#[test]
+fn provider_alias_lists_share_one_choice_and_replace_across_layers() {
+    let td = TempDir::new().expect("temp dir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+aliases:
+  providers:
+    current: [first, second]
+  models:
+    fast: vendor/fast
+agents:
+  model: current/fast
+  role_groups:
+    test:
+      model: current/fast
+      roles:
+        inherited: {}
+        explicit:
+          model: current/fast
+"#,
+    )
+    .expect("write list alias settings");
+    let dirs = dirs_with_config(td.path());
+    for _ in 0..4 {
+        let settings = load_harness_settings_in(&dirs).expect("load list alias settings");
+        let selected = settings.roles["inherited"]
+            .model
+            .as_ref()
+            .expect("inherited model");
+        assert!(["first", "second"].contains(&selected.provider.as_str()));
+        assert_eq!(selected.model.as_str(), "vendor/fast");
+        assert_eq!(settings.roles["explicit"].model.as_ref(), Some(selected));
+    }
+    for replacement in [r#""scalar""#, r#"["singleton"]"#] {
+        let overrides = model_reference_alias_config_overrides(ModelReferenceAliasSources {
+            provider_environment: Some(format!(r#"{{"current":{replacement}}}"#).into()),
+            ..Default::default()
+        })
+        .expect("parse environment override");
+        let settings =
+            load_harness_settings_with_profile_and_cli_overrides_in(&dirs, None, &[], &overrides)
+                .expect("load replacement alias");
+        let provider = settings.roles["inherited"]
+            .model
+            .as_ref()
+            .expect("resolved role model")
+            .provider
+            .as_str();
+        assert_eq!(
+            provider,
+            if replacement.starts_with('[') {
+                "singleton"
+            } else {
+                "scalar"
+            }
+        );
+    }
+    assert!(
+        model_reference_alias_config_overrides(ModelReferenceAliasSources {
+            model_environment: Some(r#"{"fast":["a","b"]}"#.into()),
+            ..Default::default()
+        })
+        .is_err(),
+        "model aliases remain scalar"
+    );
+}
+
+/// A later startup uses local hints without requiring a published model or
+/// network; expired observations stop influencing selection rather than
+/// becoming free quota.
+#[test]
+fn provider_alias_startup_uses_only_usable_local_hints() {
+    use std::time::SystemTime;
+
+    use crate::provider_usage_hint::ProviderUsageHint;
+
+    let config = TempDir::new().expect("config dir");
+    let state = TempDir::new().expect("state dir");
+    std::fs::write(
+        config.path().join("harness.yaml"),
+        r#"
+aliases:
+  providers:
+    current: [busy, free]
+agents:
+  model: current/model
+"#,
+    )
+    .expect("write startup config");
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis() as u64;
+    let write_hint = |name: &str, used: u16, observed: u64| {
+        let window = serde_json::from_value(serde_json::json!({
+            "key": {"limit_id": "codex", "window_id": "primary"},
+            "used_basis_points": used,
+            "usage_observed_at_unix_ms": observed,
+            "window_seconds": 18000
+        }))
+        .expect("quota window fixture");
+        ProviderUsageHint::from_windows(ProviderName::new(name), &[window])
+            .expect("nonempty windows")
+            .write(state.path())
+            .expect("save account hint");
+    };
+    let dirs = TauDirs {
+        config_dir: Some(config.path().into()),
+        state_dir: Some(state.path().into()),
+    };
+    write_hint("busy", 9000, now);
+    write_hint("free", 1000, now);
+    let first = load_harness_settings_in(&dirs).expect("first startup");
+    assert!(
+        first
+            .roles
+            .values()
+            .filter_map(|role| role.model.as_ref())
+            .all(|model| model.provider.as_str() == "free")
+    );
+    write_hint("free", 0, now - 18_000_000);
+    let second = load_harness_settings_in(&dirs).expect("second startup");
+    assert!(
+        second
+            .roles
+            .values()
+            .filter_map(|role| role.model.as_ref())
+            .all(|model| model.provider.as_str() == "busy")
+    );
+    assert!(
+        first
+            .roles
+            .values()
+            .filter_map(|role| role.model.as_ref())
+            .all(|model| model.provider.as_str() == "free"),
+        "existing launch stays pinned"
+    );
+}
+
 /// Selected profiles can retarget lower-layer model references, while a final
 /// dedicated-style config layer remains the highest-precedence alias value.
 #[test]

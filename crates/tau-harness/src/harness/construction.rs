@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use super::provider_usage_writer::ProviderUsageWriter;
 use super::*;
 
 /// Immutable construction inputs shared across configured harness startup
@@ -108,6 +109,11 @@ impl Harness {
     }
     fn from_base_parts(parts: HarnessBaseParts) -> Self {
         let initial_session_id = parts.session_runtime.current_session_id.clone();
+        let mut provider_runtime = ProviderRuntimeState::new(parts.provider_cache_refresh);
+        if !parts.session_runtime.storage_mode.is_memory_only() {
+            provider_runtime.usage_writer =
+                ProviderUsageWriter::start(parts.session_runtime.state_dir.clone());
+        }
         let harness = Self {
             runtime_io: parts.runtime_io,
             session_runtime: parts.session_runtime,
@@ -165,7 +171,7 @@ impl Harness {
             ui_runtime: UiRuntimeState::default(),
             peer_messaging: PeerMessagingState::default(),
             extensions: ExtensionRuntimeState::default(),
-            provider_runtime: ProviderRuntimeState::new(parts.provider_cache_refresh),
+            provider_runtime,
         };
         if let Some(owner) = harness.session_runtime.persistence_owner.as_ref() {
             let tx = harness.runtime_io.tx.clone();

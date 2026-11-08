@@ -14,8 +14,10 @@
 pub mod atomic;
 pub mod chatgpt_responses_settings;
 pub mod inter_session_policy;
+mod provider_aliases;
 pub mod provider_debug_capture;
 pub mod provider_settings;
+pub mod provider_usage_hint;
 pub mod secret_sources;
 pub mod settings;
 mod web_tools;

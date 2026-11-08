@@ -1571,7 +1571,7 @@ struct HarnessRoleOverrides {
 #[serde(default, deny_unknown_fields)]
 struct ModelReferenceAliases {
     /// Exact provider-name aliases.
-    providers: BTreeMap<ProviderName, ProviderName>,
+    providers: BTreeMap<ProviderName, crate::provider_aliases::ProviderAliasTargets>,
     /// Exact model-name suffix aliases.
     models: BTreeMap<ModelName, ModelName>,
 }
@@ -2851,14 +2851,20 @@ fn parse_alias_assignment(value: &str) -> Result<(&str, &str), String> {
 pub fn model_reference_alias_config_overrides(
     sources: ModelReferenceAliasSources<'_>,
 ) -> Result<Vec<HarnessConfigCliOverride>, SettingsError> {
-    let mut providers = parse_alias_environment::<ProviderName>(
+    use crate::provider_aliases::ProviderAliasTargets;
+    let mut providers = parse_alias_environment::<ProviderName, ProviderAliasTargets>(
         TAU_PROVIDER_ALIASES_ENV,
         sources.provider_environment,
     )?;
-    let mut models =
-        parse_alias_environment::<ModelName>(TAU_MODEL_ALIASES_ENV, sources.model_environment)?;
+    let mut models = parse_alias_environment::<ModelName, ModelName>(
+        TAU_MODEL_ALIASES_ENV,
+        sources.model_environment,
+    )?;
     for override_ in sources.provider_cli {
-        providers.insert(override_.from.clone(), override_.to.clone());
+        providers.insert(
+            override_.from.clone(),
+            ProviderAliasTargets::Single(override_.to.clone()),
+        );
     }
     for override_ in sources.model_cli {
         models.insert(override_.from.clone(), override_.to.clone());
@@ -2881,12 +2887,13 @@ pub fn model_reference_alias_config_overrides(
 }
 
 /// Parses one public alias environment variable as a strict JSON object.
-fn parse_alias_environment<T>(
+fn parse_alias_environment<T, V>(
     variable: &'static str,
     value: Option<OsString>,
-) -> Result<BTreeMap<T, T>, SettingsError>
+) -> Result<BTreeMap<T, V>, SettingsError>
 where
     T: Ord + for<'de> Deserialize<'de>,
+    V: for<'de> Deserialize<'de>,
 {
     let Some(value) = value else {
         return Ok(BTreeMap::new());
@@ -4499,7 +4506,7 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
     settings.validate_main_role()?;
-    resolve_model_references(&mut settings, &aliases.aliases)?;
+    resolve_model_references(&mut settings, &aliases.aliases, dirs.state_dir.as_deref())?;
     Ok(settings)
 }
 
@@ -4508,9 +4515,29 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
 fn resolve_model_references(
     settings: &mut HarnessSettings,
     aliases: &ModelReferenceAliases,
+    state_dir: Option<&Path>,
 ) -> Result<(), SettingsError> {
-    validate_alias_graph(&aliases.providers)
-        .map_err(|path| SettingsError::ProviderAliasCycle { path })?;
+    use std::time::SystemTime;
+
+    use rand::Rng;
+
+    use crate::provider_usage_hint::ProviderUsageHint;
+
+    let now_ms = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            elapsed.as_millis().try_into().unwrap_or(u64::MAX)
+        });
+    let mut scores = BTreeMap::new();
+    let providers = crate::provider_aliases::select(
+        &aliases.providers,
+        |provider| {
+            *scores
+                .entry(provider.clone())
+                .or_insert_with(|| ProviderUsageHint::read(state_dir?, provider)?.remaining(now_ms))
+        },
+        |count| rand::thread_rng().gen_range(0..count),
+    )?;
     validate_alias_graph(&aliases.models)
         .map_err(|path| SettingsError::ModelAliasCycle { path })?;
     for role in settings.roles.values_mut() {
@@ -4518,7 +4545,10 @@ fn resolve_model_references(
             continue;
         };
         role.model = Some(ModelId::new(
-            resolve_alias(&aliases.providers, &model.provider),
+            providers
+                .get(&model.provider)
+                .cloned()
+                .unwrap_or(model.provider),
             resolve_alias(&aliases.models, &model.model),
         ));
     }

@@ -61,6 +61,16 @@ Tau resolves chains after effective role merging, accepts identity mappings as
 literal-name resets, rejects other cycles, and passes only canonical model IDs
 into the running harness.
 
+Provider targets may also be nonempty lists, for example
+`aliases.providers.codex: [chatgpt, chatgpt-fedi]`. Tau chooses once per alias
+per launch across all roles; live reconnect keeps the choice, while cold resume
+may choose again. Local best-effort usage hints prefer the known account with
+the greatest bottleneck remaining percentage. Tau chooses randomly for ties and
+all-unknown lists. Expired constraints make an account unknown, never newly unused.
+Selection adds no network request or refresh wait. Nested aliases choose first;
+duplicate resolved targets do not add weight. Model aliases remain scalar.
+The separate private hints never restore live/UI quota or journal state.
+
 `TAU_PROVIDER_ALIASES` and `TAU_MODEL_ALIASES` contain JSON objects and override
 config for one process. Repeatable `--provider-alias FROM=TO` and
 `--model-alias FROM=TO` flags apply after those environment maps; the last flag

@@ -166,6 +166,7 @@ use crate::harness::peer_messaging::PeerMessagingState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::prompt_runtime_state::PromptRuntimeState;
 use crate::harness::provider_runtime_state::ProviderRuntimeState;
+mod provider_usage_writer;
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::provider_terminal_plan::{
     AutomaticCompactionOrPendingMessageWakeClassification,

@@ -1262,6 +1262,52 @@ load, or redirect provider profile files, credentials, extension instances, or
 `tau provider` command arguments. The canonical target profile must still exist,
 authenticate, and publish the selected model.
 
+Provider aliases also accept nonempty candidate lists:
+
+```yaml
+aliases:
+  providers:
+    codex: [chatgpt, chatgpt-fedi]
+```
+
+Tau chooses once per alias per harness launch and shares each choice across all
+effective roles. Reconnecting to the live harness keeps it; a cold resume may choose again.
+Concrete runtime model overrides remain unchanged. Model aliases stay scalar.
+Later config layers replace a provider alias's entire scalar or list value;
+`TAU_PROVIDER_ALIASES` accepts JSON arrays too. Dedicated `--provider-alias`
+flags continue to set scalar targets.
+
+Selection uses local, best-effort account usage hints without a startup network
+request or refresh wait. Among known candidates, Tau chooses the greatest
+remaining percentage, using the most-used account window as the bottleneck. A
+known zero beats an unknown value. Tau chooses randomly for ties and all-unknown
+lists. Nested aliases
+choose their targets first and keep those choices throughout the launch;
+duplicate resolved targets within a list do not add weight. Every branch is
+validated, including unused branches, and empty lists and nonidentity cycles
+fail startup.
+
+Hints remain usable past the UI's freshness cutoff but expire at the earliest
+reported reset or one observed window duration after the usage observation.
+Any expired or invalid constraint makes that account unknown; Tau never assumes
+usage resets to zero. Relative timing and calibrated absolute timing bound
+expiry; an absolute reset without calibration is treated as a best-effort local
+timestamp.
+
+Accepted, merged, nonempty quota observations feed private per-provider files
+under the instance state directory's `provider-usage/` directory. These hints
+contain only configured names, percentages, and local validity times—not
+credentials, account IDs, route bindings, or provider epochs. A bounded lossy
+worker replaces files atomically; missing, corrupt, unreadable, or unwritable
+files do not fail startup or live work. Empty bootstrap observations and ordinary
+teardown retain previous hints. Memory-only harnesses do not write them.
+These files do not populate live quota, the UI, or semantic journals.
+
+This is account-level balancing, not model-specific applicability, exploration,
+reservation, failover, or strict round-robin. Concurrent launches may choose the
+same account, and changing credentials behind a configured name can leave stale
+hints until the next observation or expiry.
+
 `tau provider login <profile>` hydrates or refreshes an existing profile without
 changing its config- or state-owned settings. It publishes only the host-local
 typed Secret record, revalidates the exact profile source and bytes before the

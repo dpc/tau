@@ -44,6 +44,13 @@ subscribers receive only harness-sourced canonical current state, including an
 empty capability snapshot after clear or route loss. This flow implements
 [SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 
+Accepted, merged, nonempty observations may supply separate best-effort local
+startup alias hints. These hints carry no route applicability, epoch, sequence,
+or live authority. They never hydrate the ephemeral quota cache, reach UI pacing,
+or enter semantic journals. The advisory selection policy is documented in
+[provider configuration](../docs/providers.md); it does not relax the evidence
+requirements below.
+
 ## Applicability
 
 A colored claim requires a fresh explicit `ModelId` to quota-pool binding from

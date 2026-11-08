@@ -1,5 +1,8 @@
+use tau_config::provider_usage_hint::ProviderUsageHint;
+
 use super::*;
 use crate::event_log as path_crate_event_log;
+use crate::harness::provider_usage_writer::ProviderUsageWriter;
 
 fn quota_model() -> tau_proto::ProviderModelInfo {
     tau_proto::ProviderModelInfo {
@@ -73,6 +76,33 @@ fn quota_replace_report(epoch: &str, used_basis_points: u16) -> Event {
         windows: vec![quota_window(used_basis_points)],
         route_bindings: vec![quota_binding()],
     })
+}
+
+/// Saved startup hints never hydrate live quota, and memory-only harnesses
+/// never start a sidecar writer or create a state directory from accepted
+/// reports.
+#[test]
+fn provider_usage_hints_stay_outside_live_and_memory_only_state() {
+    let temp = TempDir::new().expect("temp dir");
+    let provider = tau_proto::ProviderName::new("chatgpt");
+    ProviderUsageHint::from_windows(provider.clone(), &[quota_window(1000)])
+        .expect("nonempty quota")
+        .write(temp.path())
+        .expect("save startup hint");
+    let harness = quiet_provider_harness(temp.path()).expect("persistent harness");
+    assert!(harness.current_provider_quota(&provider).is_none());
+    drop(harness);
+
+    let state = temp.path().join("memory-only");
+    let mut harness = echo_harness_memory_only(&state).expect("memory-only harness");
+    assert!(harness.provider_runtime.usage_writer.is_none());
+    harness.set_provider_models(&crate::test_connection_id("owner"), vec![quota_model()]);
+    let Event::ProviderQuotaReplaceReported(replace) = quota_replace_report("memory", 1000) else {
+        unreachable!();
+    };
+    harness.handle_provider_quota_replace(&crate::test_connection_id("owner"), replace);
+    assert!(harness.current_provider_quota(&provider).is_some());
+    assert!(!state.exists());
 }
 
 fn committed_quota_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
@@ -675,6 +705,8 @@ fn parked_stale_provider_quota_report_cannot_mutate_state() {
 fn provider_quota_replace_patch_and_spoofing_are_validated() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let (writer, hints) = ProviderUsageWriter::test_channel();
+    harness.provider_runtime.usage_writer = Some(writer);
     harness.set_provider_models(&crate::test_connection_id("owner"), vec![quota_model()]);
     let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch");
     harness.handle_provider_quota_replace(
@@ -689,6 +721,10 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
         },
     );
     assert!(harness.provider_runtime.quota.is_empty());
+    assert!(
+        hints.try_recv().is_err(),
+        "unowned reports cannot persist hints"
+    );
     harness.handle_provider_quota_replace(
         &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
@@ -706,6 +742,13 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
             .sequence,
         tau_proto::ProviderQuotaSequence::new(1)
     );
+    assert_eq!(
+        hints
+            .try_recv()
+            .expect("accepted replacement hint")
+            .remaining(123_000),
+        Some(9000)
+    );
     harness.handle_provider_quota_patch(
         &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaPatch {
@@ -721,6 +764,31 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
         &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
     assert_eq!(snapshot.sequence, tau_proto::ProviderQuotaSequence::new(2));
     assert_eq!(snapshot.windows[0].used_basis_points, 2_000);
+    assert_eq!(
+        hints
+            .try_recv()
+            .expect("accepted patch hint")
+            .remaining(123_000),
+        Some(8000)
+    );
+    let stale = tau_proto::ProviderQuotaPatch {
+        provider: tau_proto::ProviderName::new("chatgpt"),
+        profile_epoch: snapshot.profile_epoch.clone(),
+        sequence: tau_proto::ProviderQuotaSequence::new(2),
+        windows: vec![quota_window(0)],
+        removed_window_keys: Vec::new(),
+        route_bindings: Vec::new(),
+    };
+    harness.handle_provider_quota_patch(&crate::test_connection_id("owner"), stale);
+    assert!(
+        hints.try_recv().is_err(),
+        "stale sequence cannot persist hints"
+    );
+    harness.remove_provider_quota(&tau_proto::ProviderName::new("chatgpt"));
+    assert!(
+        hints.try_recv().is_err(),
+        "teardown must retain saved hints"
+    );
 }
 
 /// A full two-pool account snapshot followed by the exact-model default-pool
@@ -730,6 +798,8 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
 fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let (writer, hints) = ProviderUsageWriter::test_channel();
+    harness.provider_runtime.usage_writer = Some(writer);
     harness.set_provider_models(&crate::test_connection_id("owner"), vec![quota_model()]);
     let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch");
     harness.handle_provider_quota_replace(
@@ -756,6 +826,21 @@ fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
             removed_window_keys: Vec::new(),
             route_bindings: vec![quota_binding()],
         },
+    );
+    assert_eq!(
+        hints
+            .try_recv()
+            .expect("replacement hint")
+            .remaining(123_000),
+        Some(5600)
+    );
+    assert_eq!(
+        hints
+            .try_recv()
+            .expect("merged patch hint")
+            .remaining(123_000),
+        Some(5600),
+        "binding-only patch must save the merged account constraints"
     );
 
     let snapshot =

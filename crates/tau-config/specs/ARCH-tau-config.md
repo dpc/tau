@@ -257,6 +257,13 @@ array replacement:
   identity edges terminate, while any other cycle (including an unused cycle)
   fails startup. The resulting `HarnessSettings` contains only canonical model
   IDs and does not retain alias maps.
+  Provider aliases accept scalar targets or nonempty candidate lists; model
+  aliases remain scalar. Child aliases resolve first and each alias keeps one
+  choice across all effective roles for that settings load. Duplicate resolved
+  targets do not add weight. Local advisory usage hints rank known candidates
+  by bottleneck remaining percentage; ties and all-unknown lists choose randomly.
+  This selection neither fetches network data nor waits for provider refresh.
+  A later cold load may choose again; runtime concrete overrides are unchanged.
 - Role-only `main_priority` merging, selection, diagnostics, session identity, and lazy demand follow
   [SPEC-session-main-agent](../../../specs/SPEC-session-main-agent.md).
 - `inter_session.review_direct_messages` is a startup session policy, defaulting

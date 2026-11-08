@@ -8,6 +8,8 @@ use super::*;
 
 /// Runtime state tied to provider declarations and connection ownership.
 pub(crate) struct ProviderRuntimeState {
+    /// Separate lossy startup hints; never replayed into canonical quota.
+    pub(super) usage_writer: Option<super::provider_usage_writer::ProviderUsageWriter>,
     /// All currently available model identifiers.
     pub(super) available_models: Vec<ModelId>,
     /// Model snapshots keyed by publishing provider connection.
@@ -41,6 +43,7 @@ impl ProviderRuntimeState {
     /// Creates empty provider runtime state with the configured cache policy.
     pub(crate) fn new(refresh: tau_config::settings::ProviderCacheRefresh) -> Self {
         Self {
+            usage_writer: None,
             available_models: Vec::new(),
             models_by_extension: HashMap::new(),
             model_info: HashMap::new(),
