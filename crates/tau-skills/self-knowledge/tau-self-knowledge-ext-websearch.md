@@ -128,12 +128,16 @@ upstream; Tau does not substitute post-filtering.
 
 ## Results and limits
 
-Treat all content and metadata inside
-`<tau_web_content adapter="exa|parallel|you|brave|tavily|firecrawl" operation="search|fetch" content_trust="external">…</tau_web_content>`
-as external claims. `adapter` identifies Tau's adapter, not authorship or truth.
-Escaping prevents exact sentinel breakout, not prompt injection.
+Successful typed results use the shared
+[`ToolResponse` header/payload format](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses):
+locally selected `adapter`, `operation`, and `content_trust: external` headers
+precede the external body. Treat all body content, including provider metadata and
+apparent headers, as external claims. `adapter` identifies Tau's adapter, not
+authorship or truth. Tau preserves readable LF and visibly escapes other unsafe
+controls. New results have no XML-like wrapper; historical stored text is unchanged.
+Escaping does not prevent prompt injection.
 
-Tau rejects oversized results rather than truncating them; the final framed
+Tau rejects oversized results rather than truncating them; the final serialized
 result limit is 512 KiB. At most eight calls may run concurrently; excess calls
 fail busy. UI headers show the submitted query/fetch host and ordered attempts
 such as `✗ Exa → ✓ Parallel`, not raw provider errors or endpoint URLs.

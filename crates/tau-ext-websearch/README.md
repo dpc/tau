@@ -257,9 +257,12 @@ redaction before local diagnostics.
 
 ## Result and UI boundary
 
-Every successful result is an ordinary tool-result string enclosed in
-`<tau_web_content adapter="exa|parallel|you|brave|tavily|firecrawl" operation="search|fetch"
-content_trust="external">…</tau_web_content>`. Tau returns only the first
+Every successful result uses the shared
+[`ToolResponse` header/payload format](../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+Locally selected `adapter`, `operation`, and `content_trust: external` headers
+precede the readable body. Line breaks remain actual LF. New typed results do
+not use XML-like envelopes; stored historical text stays unchanged.
+Tau returns only the first
 successful provider's text; it does not merge or rank provider outputs.
 Provider content and metadata remain untrusted external claims.
 

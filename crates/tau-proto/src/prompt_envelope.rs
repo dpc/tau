@@ -438,7 +438,8 @@ pub const QUOTED_MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = Registere
     carrier: PayloadEnvelopeCarrier::GenericUserText,
 };
 
-/// Registered attributed envelope for typed web-search tool results.
+/// Historical typed web-result envelope retained for recognition and scanning.
+/// New web results use `ToolResponse`, not this envelope.
 pub const TAU_WEB_CONTENT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
     name: "tau_web_content",
     opening: PayloadEnvelopeOpening::Attributed("<tau_web_content "),

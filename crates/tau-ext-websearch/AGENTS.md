@@ -2,6 +2,12 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-ext-websearch
 
+- Typed web results use `WebContent` and the shared `ToolResponse` serializer:
+  [SPEC-tau-proto-provider-data](../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+  Injected user-role context follows the separate
+  [envelope contract](../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+  Do not wrap new typed web results in historical `tau_web_content` envelopes.
+
 Before changing provider behavior, endpoint configuration, response-size limits,
 concurrency handling, or tests, read `README.md` for this crate's runtime and
 security assumptions, the applicable Linked Specs under `specs/`, and

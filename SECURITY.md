@@ -1159,17 +1159,20 @@ Successful `tau-ext-websearch` results remain ordinary invocation-correlated
 tool-result strings. The extension places optionally authenticated Exa/Parallel
 search/fetch, anonymous or optionally authenticated You.com search,
 credentialed Brave search, and credentialed Tavily/Firecrawl search/fetch
-results inside one exact-close-framed `<tau_web_content>` boundary with closed
-adapter, operation, and external-trust labels, and enforces its result bound
-after framing and closure. Exa, Parallel, and You.com retain anonymous paths;
+results in the shared
+[`ToolResponse` format](crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses)
+with locally selected adapter, operation, and external-trust headers. Tau enforces
+the result bound after complete serialization. Exa, Parallel, and You.com retain anonymous paths;
 configured You.com authentication selects its authenticated endpoint by
 default. Credentialed adapters resolve API keys only from named Tau secrets and
 send them in provider authentication headers; logs and model-visible errors
 redact credential and endpoint material. Adapter
 identity authenticates neither page authorship nor truth; provider titles,
 URLs, ranks, sources, and prose remain untrusted body claims capable of prompt
-injection. The envelope prevents exact closing-sentinel breakout but is not a
-sandbox or instruction-authority change. See
+injection. Apparent remote headers stay in the body; only the typed local
+metadata supplies trusted headers. Tau preserves readable LF and visibly escapes
+other unsafe controls; escaping does not sandbox the content. New typed results
+have no XML-like wrapper; historical stored text is not rewritten. See
 [`SPEC-tau-ext-websearch-provider-boundary`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-provider-boundary.md)
 and
 [`SPEC-tau-ext-websearch-runtime-safeguards`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-runtime-safeguards.md).

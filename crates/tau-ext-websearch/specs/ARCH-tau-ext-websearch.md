@@ -23,8 +23,10 @@ each admitted composite call, and is not persisted. Argument validation, busy
 rejection, and replay do not advance it. The serial protocol loop reserves
 starts before workers launch, so concurrent completion cannot change order.
 
-Every successful provider path projects text at the extension boundary as
-one escaped `<tau_web_content>` string, then submit that string in an
+Every successful provider path serializes typed external web content with the
+shared `ToolResponse` header/payload contract in
+[SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses),
+then submits the resulting text in an
 invocation-correlated `tool.result_reported`. The harness publishes the canonical
 terminal/provider projections, so existing transcript, replay, compaction,
 Chat Completions, and Codex/Responses paths therefore retain their normal

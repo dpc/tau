@@ -22,10 +22,10 @@ HTTP error bodies other than HTTP 429 are capped at 64 KiB. An HTTP 429 returns
 the bounded generic advice `web service rate-limited the request; try again
 later.` without reading or projecting the provider body. Successful hosted response
 bodies are capped at 1 MiB before decode. Decoded provider text retains its
-512 KiB pre-projection cap, and the complete framed, closed
-`<tau_web_content>` result is independently capped at 512 KiB. Expansion from
-exact-close replacement or visible-Unicode escaping counts toward that final
-bound; oversize results fail clearly as a `ToolError` and are not truncated into
+512 KiB pre-projection cap, and the complete serialized `ToolResponse`
+result, including headers and separator, is independently capped at 512 KiB.
+Expansion from visible-Unicode escaping counts toward that final
+bound. Oversize results fail as a `ToolError`; Tau does not truncate them into
 a different success contract. A JSON-RPC error above 512 KiB is replaced by a
 compact deterministic diagnostic, and every final sanitized model-visible error
 is capped to 512 KiB with a UTF-8-safe suffix. Endpoint redaction occurs before

@@ -298,13 +298,14 @@ fn deepseek_cache_usage_normalizes_contradictory_counters() {
     assert_eq!(cache.hit_ratio_millionths(), Some(900_000));
 }
 
-/// Ensures historical XML-escaped and current exact-close web results remain
+/// Ensures historical wrapped and current canonical web results remain
 /// byte-for-byte intact on the Chat Completions native tool-result path.
 #[test]
-fn web_content_envelope_is_preserved_in_chat_tool_result() {
+fn web_content_is_preserved_in_chat_tool_result() {
     for envelope in [
         "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: &lt;claim&gt;</tau_web_content>",
         "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: <claim> & &lt;/tau_web_content&gt;</tau_web_content>",
+        "adapter: exa\noperation: search\ncontent_trust: external\n\nTitle: <claim> & </tau_web_content>\nURL: https://example.com\n\\u{000A}",
     ] {
         let output =
             tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(envelope.to_owned()));

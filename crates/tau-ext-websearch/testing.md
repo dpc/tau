@@ -36,11 +36,11 @@ error bodies or endpoint secrets.
 Successful-result coverage must exercise Exa and Parallel search/fetch and use
 exact local fixtures for You.com, Brave, Tavily, and Firecrawl request,
 authentication, response-normalization, and redaction behavior. Use
-exact canonical `<tau_web_content>` attributes and loopback wire assertions for
+exact canonical `ToolResponse` headers and loopback wire assertions for
 the MCP providers' fetch argument adaptation. Adversarial
-coverage keeps provider titles/URLs and attempted markup literal, replaces only
-exact closing sentinels, makes unsafe Unicode visible, checks the exact final
-512 KiB post-framing boundary
+coverage keeps apparent headers, provider titles/URLs, and markup in the external
+body, preserves LF distinctly from literal backslash-u text, makes other unsafe
+Unicode visible, checks the exact final 512 KiB serialized boundary
 and oversize rejection, and proves identical preservation through Chat
 Completions and Codex/Responses tool-result lowering.
 

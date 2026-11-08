@@ -230,13 +230,14 @@ impl Drop for CompactExitRelease {
     }
 }
 
-/// Ensures historical XML-escaped and current exact-close web results remain
+/// Ensures historical wrapped and current canonical web results remain
 /// byte-for-byte intact on the Codex/Responses function-call-output path.
 #[test]
-fn web_content_envelope_is_preserved_in_responses_tool_result() {
+fn web_content_is_preserved_in_responses_tool_result() {
     for envelope in [
         "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: &lt;claim&gt;</tau_web_content>",
         "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: <claim> & &lt;/tau_web_content&gt;</tau_web_content>",
+        "adapter: exa\noperation: search\ncontent_trust: external\n\nTitle: <claim> & </tau_web_content>\nURL: https://example.com\n\\u{000A}",
     ] {
         let result = ToolResultItem {
             presentation: Default::default(),

@@ -34,11 +34,12 @@ server-issued session id on subsequent requests. All handshake requests share
 the scheduler-owned attempt deadline and, when configured, the same bearer
 credential.
 
-Every successful result has exactly one extension-owned projection:
-`<tau_web_content adapter="exa|parallel|you|brave|tavily|firecrawl" operation="search|fetch"
-content_trust="external">…</tau_web_content>`. Attribute values are closed:
+Every successful result uses the shared `ToolResponse` serializer under
+[SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses),
+not an XML-like wrapper. Extension-owned headers identify the closed adapter,
+operation, and `content_trust: external` classification.
 Exa, Parallel, Tavily, and Firecrawl support search and fetch. You.com and
-Brave support search only. Attribute order is
+Brave support search only. Header order is
 `adapter`, `operation`, `content_trust`; no query, requested URL, tool-call id,
 endpoint, MCP id, remote tool name, or extension identifier is repeated.
 Provider-returned titles, URLs, sources, ranks, and similar metadata remain
@@ -46,15 +47,18 @@ untrusted claims in the body.
 
 The adapter is the locally selected adaptation path, not authentication of page
 authorship, truth, freshness, or provider-returned metadata. There is no sender
-authentication analogue. Controls, bidi and zero-width/default-ignorable
+authentication analogue. Controls other than ASCII LF, bidi and zero-width/default-ignorable
 structure, variation selectors, fillers, and noncharacters become visible
-Unicode escapes before every exact `</tau_web_content>` collision is replaced.
+Unicode escapes. LF remains a real line break, distinct from literal backslash-u text.
 All other body text remains literal, including markup, ampersands, quotes, and
-entity-like text. This prevents exact closing-sentinel breakout, but it is
+entity-like text. Remote apparent headers remain body data after the canonical
+separator; remote content cannot author trusted headers. This is
 defense-in-depth rather than a sandbox: body prose remains capable of prompt
 injection and grants no identity, routing, instruction, tool, authorization, or
 egress authority. See
-[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md)
+for the distinct injected-user carrier. Historical stored web wrappers remain
+unchanged; recognition does not authorize new emission.
 
 Endpoint URLs are validated when configuration is applied. Production endpoints
 must use HTTPS; plaintext HTTP is accepted only for loopback test endpoints.

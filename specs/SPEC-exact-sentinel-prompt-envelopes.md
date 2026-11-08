@@ -40,15 +40,17 @@ model-facing payload families:
 | `summary_request`, `summary_continuation` | Generic user-role text | Fieldless; provisional local-summary dialogue |
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher`, optional `sender_trust`, and optional descriptive JSON `mentions` before `content_trust` |
 | `quoted_message` | Generic user-role text attached to a canonical delivered/edited message | Optional descriptive reference, author, and excerpt metadata; `content_trust="external"` |
-| `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
+| `tau_web_content` | Historical typed tool result only | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Historical canonical background-preview attributes |
 | `tool_output` | Generic user-role text | `call_id`, `terminal`, optional terminal `status`, then nonzero `omitted_bytes`; ordered canonical tool source |
 
 New injected-user projections use unprefixed, meaning-specific names.
 `tau_internal`, `tau_extension_output`, `tau_discovery`, and
 `tau_background_result` remain registered for historical recognition.
-The typed web adapter uses `tau_web_content` until its separate conversion to
-canonical tool-result headers and payload. It is not an injected-user producer.
+`tau_web_content` remains registered only for historical recognition and scanning.
+New typed web results use canonical headers and payload through
+[`ToolResponse`](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses),
+not an injected-user envelope. Stored opaque or historical text is not rewritten.
 The shared `ToolResponse` serializer renders semantic headers before outer framing;
 header metadata also retains source-specific visible escaping.
 
