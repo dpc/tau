@@ -637,7 +637,7 @@ fn request_display(
                 &mut text,
                 "\n{}. {}",
                 index + 1,
-                tau_proto::artifact_reference(key)
+                tau_proto::artifact_uri(key)
             );
         }
     }

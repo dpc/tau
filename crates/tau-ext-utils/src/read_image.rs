@@ -9,7 +9,7 @@ use image::{
 };
 use tau_proto::{
     ArtifactKey, CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart,
-    ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus, artifact_reference,
+    ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus, artifact_reference, artifact_uri,
     parse_artifact_reference,
 };
 
@@ -45,14 +45,6 @@ impl ImageMode {
             None | Some("high") => Ok(Self::High),
             Some("overview") => Ok(Self::Overview),
             Some(_) => Err("argument `mode` must be `high` or `overview`".to_owned()),
-        }
-    }
-
-    /// Stable metadata spelling for the selected profile.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::High => "high",
-            Self::Overview => "overview",
         }
     }
 
@@ -186,10 +178,6 @@ impl ImageRegion {
 struct PreparedImage {
     /// Typed canonical content directed only to image-capable providers.
     content: ImageContent,
-    /// Decoder-reported width before EXIF orientation.
-    source_width: u32,
-    /// Decoder-reported height before EXIF orientation.
-    source_height: u32,
     /// Full raster width after EXIF orientation.
     oriented_width: u32,
     /// Full raster height after EXIF orientation.
@@ -263,9 +251,7 @@ impl ReadImageRequest {
         let prepared = prepare_image(bytes, mode, requested_region)
             .map_err(|message| format!("{display_reference}: {message}"))?;
         let image = prepared.content;
-        let format = image.media_type.mime_type();
         let byte_count = image.data.len();
-        let patches = patch_count(image.width, image.height);
         let mut metadata = vec![(
             CborValue::Text("size".to_owned()),
             CborValue::Text(format!("{}x{}", image.width, image.height)),
@@ -282,25 +268,25 @@ impl ReadImageRequest {
             ));
         }
         let result = CborValue::Map(metadata);
-        let details = format!(
-            "{display_reference}\nformat: {format}\nmode: {}\nsource: {}x{}\noriented: {}x{}\n\
-         region: {},{} {}x{}\noutput: {}x{}\npatches: {patches}",
-            mode.as_str(),
-            prepared.source_width,
-            prepared.source_height,
-            prepared.oriented_width,
-            prepared.oriented_height,
-            prepared.region.x,
-            prepared.region.y,
-            prepared.region.width,
-            prepared.region.height,
-            image.width,
-            image.height
-        );
+        let mut details = Vec::new();
+        if (image.width, image.height) != (prepared.oriented_width, prepared.oriented_height) {
+            details.push(format!(
+                "Source: {}x{}",
+                prepared.oriented_width, prepared.oriented_height
+            ));
+        }
+        if prepared.region != ImageRegion::full(prepared.oriented_width, prepared.oriented_height) {
+            details.push(format!(
+                "Crop: {},{} {}x{}",
+                prepared.region.x, prepared.region.y, prepared.region.width, prepared.region.height
+            ));
+        }
         let mut display = ToolUseState {
-            args: display_reference,
+            args: artifact_uri(&self.key),
             info_chips: vec![format!("{}x{}", image.width, image.height)],
-            payload: Some(ToolUsePayload::Text { text: details }),
+            payload: (!details.is_empty()).then(|| ToolUsePayload::Text {
+                text: details.join("\n"),
+            }),
             status: ToolUseStatus::Success,
             status_text: "ok".to_owned(),
             ..Default::default()
@@ -409,8 +395,6 @@ fn prepare_image(
             // Overview is a local transform, not provider `low` detail.
             detail: ImageDetail::High,
         },
-        source_width,
-        source_height,
         oriented_width,
         oriented_height,
         region,

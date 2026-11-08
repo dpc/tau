@@ -277,8 +277,8 @@ Provider stream content remains private, and detachable per-agent correlation
 makes live, late-attach, and cold-replay rendering identical.
 
 When a materialized inference reports an available compaction transcript archive,
-the CLI adds its canonical `<tau-artifact:...>` locator to the existing
-transaction-owned compact row. For historical prompt starts, the CLI projects only
+the CLI adds its `tau-artifact:...` locator, without Markdown brackets, to the
+existing transaction-owned compact row. For historical prompt starts, the CLI projects only
 archive metadata and does not recreate activity. Missing or unavailable archives
 leave the row unchanged; showing a locator does not pin the archive.
 

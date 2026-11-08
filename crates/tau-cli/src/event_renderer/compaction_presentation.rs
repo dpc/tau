@@ -95,7 +95,7 @@ impl EventRenderer {
         else {
             return;
         };
-        entry.display.args = tau_proto::artifact_reference(&artifact.key);
+        entry.display.args = tau_proto::artifact_uri(&artifact.key);
         let display = entry.display.clone();
         let block = if standalone {
             self.render_compact_tool_block(&display)

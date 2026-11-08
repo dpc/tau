@@ -7229,7 +7229,7 @@ impl EventRenderer {
                 .compaction_recall_artifacts
                 .get(transaction)
         }) {
-            display.args = tau_proto::artifact_reference(key);
+            display.args = tau_proto::artifact_uri(key);
         }
         if let Some(duration) = Self::live_tool_duration(state) {
             Self::upsert_tool_duration_suffix(&mut display, duration, state.effective_tool_timeout);
@@ -8552,7 +8552,7 @@ impl EventRenderer {
                     .compaction_recall_artifacts
                     .get(transaction)
             }) {
-                display.args = tau_proto::artifact_reference(key);
+                display.args = tau_proto::artifact_uri(key);
             }
             if let (Some(transaction), Some(block)) = (&tool.transaction_id, prior.history_block_id)
             {
@@ -9542,7 +9542,7 @@ impl EventRenderer {
                             .compaction_recall_artifacts
                             .get(&compacted.transaction_id)
                         {
-                            display.args = tau_proto::artifact_reference(key);
+                            display.args = tau_proto::artifact_uri(key);
                         }
                         let block_id = self.resources.handle.print_output(
                             "standalone-compaction-terminal",

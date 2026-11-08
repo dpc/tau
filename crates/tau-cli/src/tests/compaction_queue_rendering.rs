@@ -63,7 +63,8 @@ fn compaction_archive_locator_survives_cold_attach_without_prompt_activity() {
                     );
                 } else if index == 2 {
                     assert!(
-                        screen.contains("<tau-artifact:0123456789abcdef01234567>"),
+                        screen.contains("tau-artifact:0123456789abcdef01234567")
+                            && !screen.contains("<tau-artifact:"),
                         "{screen}"
                     );
                 }
@@ -90,7 +91,8 @@ fn compaction_archive_locator_survives_cold_attach_without_prompt_activity() {
         sync(&handle);
         let screen = vt.screen_text(100).join("\n");
         assert!(
-            screen.contains("<tau-artifact:0123456789abcdef01234567>"),
+            screen.contains("tau-artifact:0123456789abcdef01234567")
+                && !screen.contains("<tau-artifact:"),
             "{screen}"
         );
         assert_eq!(screen.matches("compact ").count(), 1, "{screen}");

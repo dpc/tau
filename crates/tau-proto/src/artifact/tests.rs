@@ -89,13 +89,16 @@ fn keys_and_operation_bounds_are_canonical() {
     assert!(ArtifactRequestId::parse("x".repeat(129)).is_err());
 }
 
-/// Model-visible references round-trip through one shared formatter/parser,
-/// while consumers may continue accepting a bare internal content key.
+/// Markdown references and plain UI locators resolve to the same identity as
+/// bare keys, while malformed markup and unrelated URI schemes stay invalid.
 #[test]
 fn artifact_references_round_trip_and_accept_bare_keys() {
     let key = ArtifactKey::parse("a".repeat(24)).expect("canonical artifact key");
     let reference = artifact_reference(&key);
     assert_eq!(reference, format!("<tau-artifact:{key}>"));
+    let uri = artifact_uri(&key);
+    assert_eq!(uri, format!("tau-artifact:{key}"));
+    assert_eq!(parse_artifact_reference(&uri).expect("plain UI URI"), key);
     assert_eq!(
         parse_artifact_reference(&reference).expect("canonical reference"),
         key
@@ -105,7 +108,11 @@ fn artifact_references_round_trip_and_accept_bare_keys() {
         key
     );
     for invalid in [
-        format!("tau-artifact:{key}"),
+        format!("tau-artifact:{key}>"),
+        format!("tau-artifact:<{key}>"),
+        format!("<{key}>"),
+        format!(" tau-artifact:{key}"),
+        format!("tau-artifact:{key}/path"),
         format!("<tau-data:{key}>"),
         format!("<tau-artifact:{key}"),
         format!("<tau-artifact:{key}>>"),

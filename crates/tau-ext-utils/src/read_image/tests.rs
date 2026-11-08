@@ -4,8 +4,8 @@ use std::path::Path;
 
 use super::*;
 
-/// Ensures compact model text retains typed pixels and detailed UI diagnostics
-/// without echoing the artifact argument or preparation internals.
+/// Ensures an unchanged image keeps typed pixels and compact model metadata,
+/// with one plain UI locator and no redundant detail block.
 #[test]
 fn artifact_request_prepares_typed_content_without_path_authority() {
     let source = DynamicImage::new_rgb8(4, 3);
@@ -34,15 +34,11 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
     assert_eq!(image.media_type, ImageMediaType::Png);
     assert_eq!(image.detail, ImageDetail::High);
     assert!(!image.data.is_empty());
-    assert_eq!(output.display.args, reference);
+    assert_eq!(output.display.args, tau_proto::artifact_uri(&key));
     assert_eq!(output.display.info_chips, ["4x3"]);
-    assert!(!output.display.args.contains("patches"));
-    let Some(ToolUsePayload::Text { text }) = &output.display.payload else {
-        panic!("image facts")
-    };
-    assert!(text.contains(&reference));
-    assert!(text.contains("mode: high"));
-    assert!(text.contains("source: 4x3"));
+    assert_eq!(output.display.status_text, "ok");
+    assert_eq!(output.display.stats.bytes, Some(image.data.len() as u64));
+    assert!(output.display.payload.is_none());
     if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
         std::fs::write(
             Path::new(&directory).join("read-image.json"),
@@ -299,7 +295,6 @@ fn exif_orientation_precedes_region_crop() {
 
     let prepared =
         prepare_image(&jpeg, ImageMode::High, Some(region)).expect("prepare oriented crop");
-    assert_eq!((prepared.source_width, prepared.source_height), (4, 2));
     assert_eq!((prepared.oriented_width, prepared.oriented_height), (2, 4));
     assert_eq!(prepared.region, region);
     assert_eq!(
@@ -439,6 +434,18 @@ fn compact_metadata_tracks_delivered_and_full_source_sizes() {
         .prepare(bytes.get_ref())
         .expect("prepare");
         assert_eq!(render_image_result(&output), format!("{expected}\n"));
+        let Some(ToolUsePayload::Text { text }) = &output.display.payload else {
+            panic!("transformed image details")
+        };
+        let expected_details = if let Some(region) = region {
+            format!(
+                "Source: 2560x1440\nCrop: {},{} {}x{}",
+                region.x, region.y, region.width, region.height
+            )
+        } else {
+            "Source: 2560x1440".to_owned()
+        };
+        assert_eq!(text, &expected_details);
         let [ToolResultContentPart::Image(image)] = output.provider_content.as_slice() else {
             panic!("typed image")
         };
@@ -483,5 +490,13 @@ fn compact_metadata_uses_oriented_source_coordinates() {
         .prepare(&bytes)
         .expect("prepare");
         assert_eq!(render_image_result(&output), format!("{expected}\n"));
+        if region.is_some_and(|region| region != ImageRegion::full(2, 4)) {
+            assert!(matches!(
+                &output.display.payload,
+                Some(ToolUsePayload::Text { text }) if text == "Source: 2x4\nCrop: 0,2 2x2"
+            ));
+        } else {
+            assert!(output.display.payload.is_none());
+        }
     }
 }

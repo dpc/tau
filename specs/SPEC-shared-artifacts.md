@@ -18,7 +18,9 @@ retain known-key read authority without enumeration.
 Model-facing text names an artifact with the canonical Markdown autolink
 `<tau-artifact:0123456789abcdef01234567>`: exactly 24 lowercase hexadecimal
 digits, the first 96 bits of BLAKE3, with no algorithm label. Consumers may
-also accept the bare key. This is a fixed identity, not a variable abbreviation.
+also accept the bare key or the plain `tau-artifact:0123456789abcdef01234567` URI.
+Owned plain-text UI locators use the URI without brackets; prompt and model-facing
+Markdown references use the bracketed autolink. This identity is fixed, not a variable abbreviation.
 Only the fixed-width key is accepted; former algorithm-labelled full-digest
 references and typed keys are rejected.
 

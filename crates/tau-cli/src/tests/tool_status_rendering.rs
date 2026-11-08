@@ -3168,7 +3168,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     sync(&handle);
     let archived = vt.screen_text(100).join("\n");
     assert!(
-        archived.contains("<tau-artifact:0123456789abcdef01234567>"),
+        archived.contains("tau-artifact:0123456789abcdef01234567"),
         "{archived}"
     );
     assert_eq!(archived.matches("~#47k/~#150k").count(), 1, "{archived}");
@@ -3177,7 +3177,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     sync(&handle);
     let restored = vt.screen_text(100).join("\n");
     assert!(
-        restored.contains("<tau-artifact:0123456789abcdef01234567>"),
+        restored.contains("tau-artifact:0123456789abcdef01234567"),
         "{restored}"
     );
 

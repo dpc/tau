@@ -196,16 +196,27 @@ pub fn artifact_digest(key: &str) -> Option<&str> {
 /// used in prompts, tool results, and documentation.
 #[must_use]
 pub fn artifact_reference(key: &ArtifactKey) -> String {
-    format!("<{ARTIFACT_REFERENCE_SCHEME}:{}>", key.canonical())
+    format!("<{}>", artifact_uri(key))
 }
 
-/// Parses either a canonical model-visible artifact reference or a bare
-/// internal key retained for simple callers and existing integrations.
+/// Formats an artifact locator for plain-text UI surfaces without Markdown
+/// markup.
+#[must_use]
+pub fn artifact_uri(key: &ArtifactKey) -> String {
+    format!("{ARTIFACT_REFERENCE_SCHEME}:{}", key.canonical())
+}
+
+/// Parses a Markdown artifact reference, a plain UI URI, or a bare internal
+/// key.
 pub fn parse_artifact_reference(text: &str) -> Result<ArtifactKey, ArtifactError> {
-    let key = text
-        .strip_prefix(&format!("<{ARTIFACT_REFERENCE_SCHEME}:"))
+    let locator = text
+        .strip_prefix('<')
         .and_then(|text| text.strip_suffix('>'))
+        .filter(|text| text.starts_with(&format!("{ARTIFACT_REFERENCE_SCHEME}:")))
         .unwrap_or(text);
+    let key = locator
+        .strip_prefix(&format!("{ARTIFACT_REFERENCE_SCHEME}:"))
+        .unwrap_or(locator);
     ArtifactKey::parse(key)
 }
 

@@ -161,11 +161,13 @@ fn images() -> ImageTools {
 }
 
 /// Real progress and terminal reports retain the full prompt and ordered input
-/// occurrences, including duplicates, without exposing private image contents.
+/// occurrences as plain UI locators, including duplicates, without exposing
+/// private image contents or rewriting Markdown-like literal prompt text.
 #[test]
 fn image_request_display_survives_pending_and_terminal_reports() {
-    let prompt = "  描いて 🌿\nKeep every line and trailing space.  ";
+    let prompt = "  描いて 🌿\nKeep <tau-artifact:bbbbbbbbbbbbbbbbbbbbbbbb> and trailing space.  ";
     let reference = format!("<tau-artifact:{}>", "a".repeat(24));
+    let uri = format!("tau-artifact:{}", "a".repeat(24));
     for count in 0..=2 {
         for fail in [false, true] {
             let frames = with_handle(|handle| {
@@ -232,7 +234,8 @@ fn image_request_display_survives_pending_and_terminal_reports() {
                     panic!("full request payload");
                 };
                 assert!(text.starts_with(&format!("Prompt:\n{prompt}")));
-                assert_eq!(text.matches(&reference).count(), count);
+                assert_eq!(text.matches(&uri).count(), count);
+                assert!(!text.contains(&reference));
             }
         }
     }
