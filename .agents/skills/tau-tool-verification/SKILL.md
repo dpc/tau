@@ -104,6 +104,18 @@ headers and a body are both present, one empty line separates them. A compact
 body-only scalar response is valid and must not gain a leading empty line or
 redundant status header.
 
+Verify that header-bearing results with an empty body, including an empty
+`output`, end at the final header LF without a separator. Preserve
+whitespace-only bodies. Check success, error with empty details, and cancellation.
+For streamed shell terminals, check for exactly one blank line between metadata
+and the first `out`/`err` record. Remove one formatter LF, not source blank
+lines; leave live batch framing unchanged.
+
+The original streamed call's receipt contains only `outcome`, without a
+redundant `cause` naming itself. Explicit single and plural waits retain the
+target `cause` and outcome. Confirm completed, failed, and cancelled tools
+deliver final source once, separately from their synchronization receipts.
+
 `multi-line-payload` can be arbitrary, but line-oriented output typically uses
 `<prefix>(optional-per-line-flags) <line-content>` structure. If that's the case
 the tool description should mention it.

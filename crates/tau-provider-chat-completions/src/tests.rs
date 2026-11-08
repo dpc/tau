@@ -3892,7 +3892,7 @@ fn tool_result_text_uses_structured_status_headers() {
             },
             &output,
         ),
-        "cancelled: stopped\n\n",
+        "cancelled: stopped\n",
     );
 }
 

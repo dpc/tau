@@ -7056,10 +7056,7 @@ fn tool_response_escapes_header_controls() {
         CborValue::Text("value\r\u{1b}\0\t\u{85}".to_owned()),
     )]));
 
-    assert_eq!(
-        response.render(),
-        "bad\\nkey: value\\r\\x1b\\0\\t\\u{85}\n\n"
-    );
+    assert_eq!(response.render(), "bad\\nkey: value\\r\\x1b\\0\\t\\u{85}\n");
 }
 
 /// Directly constructed ToolResponse headers still pass through render-time
@@ -7075,7 +7072,7 @@ fn tool_response_escapes_direct_header_value_controls() {
         body: String::new(),
     };
 
-    assert_eq!(response.render(), "status: ok\\nforged: yes\\u{7f}\n\n");
+    assert_eq!(response.render(), "status: ok\\nforged: yes\\u{7f}\n");
 }
 
 /// Body sanitization is last-resort provider safety: it preserves legitimate
@@ -7103,7 +7100,7 @@ fn tool_response_escapes_unicode_line_separators() {
 
     assert_eq!(
         header_response.render(),
-        "key\\u{2028}next: value\\u{2029}next\n\n"
+        "key\\u{2028}next: value\\u{2029}next\n"
     );
     assert_eq!(
         body_response.render(),

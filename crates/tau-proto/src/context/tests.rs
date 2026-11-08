@@ -122,6 +122,7 @@ fn streaming_provider_tool_result_text_matches_materialized_renderer() {
 
 /// Shared rendered-key classification keeps materialized and streaming paths
 /// identical for scalar, suppressed-data, nested, tagged, and non-text keys.
+/// All canonical renderers must agree on nested CBOR projections and sizes.
 #[test]
 fn provider_tool_result_normalization_matches_across_cbor_shapes() {
     let values = [
@@ -188,6 +189,104 @@ fn provider_tool_result_normalization_matches_across_cbor_shapes() {
                 .rendered_bytes,
             expected.len()
         );
+    }
+}
+
+/// Empty payloads must not allocate a blank body region, while real whitespace
+/// and inter-entry separators remain byte-exact in rendering and measurement.
+#[test]
+fn provider_tool_result_separators_depend_on_rendered_body() {
+    let map = |entries: &[(&str, &str)]| {
+        CborValue::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        CborValue::Text((*key).into()),
+                        CborValue::Text((*value).into()),
+                    )
+                })
+                .collect(),
+        )
+    };
+    let cases = [
+        (map(&[("status", "0")]), "status: 0\n"),
+        (map(&[("status", "0"), ("output", "")]), "status: 0\n"),
+        (
+            map(&[("status", "0"), ("output", "xyz")]),
+            "status: 0\n\nxyz",
+        ),
+        (map(&[("output", "xyz")]), "xyz"),
+        (map(&[("status", "0"), ("output", "\n")]), "status: 0\n\n\n"),
+        (map(&[("status", "0"), ("output", " ")]), "status: 0\n\n "),
+        (
+            map(&[
+                ("status", "0"),
+                ("output", ""),
+                ("line-numbered content", ""),
+            ]),
+            "status: 0\n\n\n",
+        ),
+        (
+            CborValue::Map(vec![(
+                CborValue::Text("nested".into()),
+                map(&[("status", "0")]),
+            )]),
+            "nested:\nstatus: 0\n",
+        ),
+        (CborValue::Text(String::new()), ""),
+    ];
+    for (value, expected) in cases {
+        assert_eq!(ToolResponse::from_cbor(&value).render(), expected);
+        for (status, prefix) in [
+            (ProviderToolResultStatus::Success, ""),
+            (
+                ProviderToolResultStatus::Error { message: "failed" },
+                "error: failed\n",
+            ),
+            (
+                ProviderToolResultStatus::Cancelled { reason: "stopped" },
+                "cancelled: stopped\n",
+            ),
+        ] {
+            let expected = match status {
+                ProviderToolResultStatus::Success => expected.to_owned(),
+                ProviderToolResultStatus::Cancelled { .. } => prefix.to_owned(),
+                ProviderToolResultStatus::Error { .. } => {
+                    let response = ToolResponse::from_cbor(&value);
+                    if response.headers.is_empty() && !response.body.is_empty() {
+                        format!("{prefix}\n{expected}")
+                    } else {
+                        format!("{prefix}{expected}")
+                    }
+                }
+            };
+            let mut rendered = String::new();
+            write_provider_tool_result_text(&value, status, &mut rendered)
+                .expect("String sink cannot fail");
+            assert_eq!(rendered, expected);
+            assert_eq!(
+                measure_provider_tool_result_text(&value, status).rendered_bytes,
+                expected.len(),
+            );
+            let item = ToolResultItem {
+                call_id: "call".into(),
+                tool_type: ToolType::Function,
+                status: match status {
+                    ProviderToolResultStatus::Success => ToolResultStatus::Success,
+                    ProviderToolResultStatus::Error { message } => ToolResultStatus::Error {
+                        message: message.into(),
+                    },
+                    ProviderToolResultStatus::Cancelled { reason } => ToolResultStatus::Cancelled {
+                        reason: reason.into(),
+                    },
+                },
+                output: ToolResponse::from_cbor(&value),
+                presentation: Default::default(),
+                provider_content: Vec::new(),
+            };
+            assert_eq!(item.render_provider_text(), expected);
+        }
     }
 }
 

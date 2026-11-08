@@ -405,9 +405,80 @@ fn ordered_tool_output_and_recovery_match_live_and_cold_deferred_round() {
             &"stream".into(),
         )
         .expect("native receipt");
-    assert!(result.output.render().contains("outcome"));
+    assert_eq!(result.output.render(), "outcome: completed\n");
     assert!(!result.output.render().contains("last-unique"));
     assert!(tree.validate_event(&update(call, 2, "late")).is_err());
+}
+
+/// Failed and cancelled streamed calls deliver their source once, then close
+/// successfully with only an outcome; cold replay must preserve that split.
+#[test]
+fn failed_stream_terminals_omit_self_cause_without_losing_final_source() {
+    for cancelled in [false, true] {
+        let main = agent_id();
+        let mut tree = AgentTree::from_events(main.clone(), &[]);
+        let mut records = Vec::new();
+        let mut response = streaming_response(&main);
+        response.output_items.truncate(1);
+        append(
+            &mut tree,
+            &mut records,
+            Event::ProviderResponseFinished(response),
+        );
+        let call = tree
+            .tool_output_call(&"stream".into(), tree.head())
+            .expect("call");
+        let capture = Some(tau_proto::ToolFinalOutput {
+            text: "terminal-source-unique".into(),
+            omitted_bytes: 0,
+        });
+        let terminal = if cancelled {
+            Event::ToolCancelled(tau_proto::ToolCancelled {
+                output: Some(String::new()),
+                captured_output: capture,
+                call_id: "stream".into(),
+                tool_name: ToolName::new("tool"),
+                tool_type: ToolType::Function,
+                presentation: tau_proto::ToolResultPresentation::ToolStreamReceipt,
+                display: None,
+            })
+        } else {
+            Event::ProviderToolError(tau_proto::ToolError {
+                captured_output: capture,
+                call_id: "stream".into(),
+                tool_name: ToolName::new("tool"),
+                tool_type: ToolType::Function,
+                message: "failed".into(),
+                details: Some(tau_proto::CborValue::Text(String::new())),
+                presentation: tau_proto::ToolResultPresentation::ToolStreamReceipt,
+                display: None,
+                originator: PromptOriginator::User,
+            })
+        };
+        append(&mut tree, &mut records, terminal);
+        let cold = AgentTree::try_from_events(main, &records).expect("cold terminal");
+        for tree in [&tree, &cold] {
+            let node = *tree
+                .terminal_tool_result_nodes
+                .get("stream")
+                .expect("terminal");
+            let receipt = tree
+                .terminal_tool_result_at(node, &"stream".into())
+                .expect("receipt");
+            assert_eq!(receipt.status, ToolResultStatus::Success);
+            assert_eq!(
+                receipt.output.render(),
+                if cancelled {
+                    "outcome: cancelled\n"
+                } else {
+                    "outcome: error\n"
+                },
+            );
+            let page = tree.tool_output_page(call, tree.head(), 0).expect("source");
+            assert!(page.terminal);
+            assert_eq!(page.text.matches("terminal-source-unique").count(), 1);
+        }
+    }
 }
 
 /// Display-ID reuse, a sibling declaration, gaps, and empty heartbeats cannot

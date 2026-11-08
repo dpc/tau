@@ -25,6 +25,40 @@ fn receive(rx: &mpsc::Receiver<HarnessInputMessage>) -> ToolOutputReport {
     }
 }
 
+/// Only the terminal label's framing LF is removed; source blank lines and live
+/// batch framing remain intact, and canonical headers supply one separator.
+#[test]
+fn terminal_tail_has_no_extra_separator_and_preserves_source_blank_lines() {
+    let (mut capture, rx) = capture();
+    let start = Instant::now();
+    capture.push(OutputStream::Stdout, b"live\n", start);
+    capture.poll(start + Duration::from_secs(15));
+    assert_eq!(receive(&rx).text, "\nout live");
+    capture.push(
+        OutputStream::Stdout,
+        b"\nxyz\n\n",
+        start + Duration::from_secs(16),
+    );
+    let tail = capture.finish();
+    assert_eq!(tail, "out \nout xyz\nout ");
+    let response = tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Map(vec![
+        (
+            tau_proto::CborValue::Text("duration_seconds".into()),
+            tau_proto::CborValue::Text("1".into()),
+        ),
+        (
+            tau_proto::CborValue::Text("output".into()),
+            tau_proto::CborValue::Text(tail),
+        ),
+    ]));
+    assert_eq!(
+        response.render(),
+        "duration_seconds: 1\n\nout \nout xyz\nout "
+    );
+    assert_eq!(capture.finish(), "");
+    assert!(rx.try_recv().is_err());
+}
+
 /// Activity resets the idle deadline but cannot extend a batch past 30s.
 /// Polling a silent stream never emits an empty heartbeat.
 #[test]
@@ -98,7 +132,7 @@ fn split_codepoints_and_terminal_tail_preserve_stream_identity() {
         &[0xff, 0xe2],
         start + Duration::from_secs(33),
     );
-    assert_eq!(capture.finish(), "\nerr(no_nl) ��");
+    assert_eq!(capture.finish(), "err(no_nl) ��");
     assert!(rx.try_recv().is_err());
 }
 
@@ -199,7 +233,7 @@ fn split_crlf_and_final_cr_preserve_pipe_endings() {
         receive(&rx).text,
         "\nout(crlf) \nout(no_nl) second\nerr(crlf) \nout(cr) \nout(no_nl) third"
     );
-    assert_eq!(capture.finish(), "\nout(cr) ");
+    assert_eq!(capture.finish(), "out(cr) ");
 }
 
 /// A long unterminated line stays bounded and does not suppress later complete

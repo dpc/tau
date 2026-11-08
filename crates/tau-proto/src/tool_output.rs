@@ -253,3 +253,12 @@ pub fn tool_completion_receipt(call_id: &ToolCallId, outcome: ToolCompletionOutc
         ),
     ])
 }
+
+/// Close the original streamed call without redundantly naming itself as its
+/// cause.
+pub fn tool_call_completion_receipt(outcome: ToolCompletionOutcome) -> CborValue {
+    CborValue::Map(vec![(
+        CborValue::Text("outcome".to_owned()),
+        CborValue::Text(outcome.as_str().to_owned()),
+    )])
+}

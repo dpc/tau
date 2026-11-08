@@ -575,7 +575,7 @@ impl ToolResponse {
             write_sanitized_provider_text(&header.value, ProviderTextMode::Header, out)?;
             out.write_char('\n')?;
         }
-        if !self.headers.is_empty() {
+        if !self.headers.is_empty() && !self.body.is_empty() {
             out.write_char('\n')?;
         }
         write_sanitized_provider_text(&self.body, ProviderTextMode::Body, out)
@@ -973,7 +973,7 @@ fn provider_tool_result_text_shape(
                 ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n\n"));
+            shape.append(ProviderTextShape::literal("\n"));
             shape
         }
     }
@@ -994,7 +994,7 @@ fn provider_tool_result_text_cached_shape(
                 ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n\n"));
+            shape.append(ProviderTextShape::literal("\n"));
             shape
         }
     }
@@ -1007,13 +1007,17 @@ fn cbor_tool_response_shape(
 ) -> ProviderTextShape {
     let CborValue::Map(entries) = value else {
         let mut shape = ProviderTextShape::default();
+        let body = cbor_tool_response_text_shape(value, cache).sanitized(ProviderTextMode::Body);
         if let Some((key, value)) = prefix_header {
             shape.append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n\n"));
+            shape.append(ProviderTextShape::literal("\n"));
+            if body.body_bytes != 0 {
+                shape.append(ProviderTextShape::literal("\n"));
+            }
         }
-        shape.append(cbor_tool_response_text_shape(value, cache).sanitized(ProviderTextMode::Body));
+        shape.append(body);
         return shape;
     };
     cbor_tool_response_map_shape(entries, prefix_header, cache)
@@ -1026,15 +1030,18 @@ fn cbor_tool_response_cached_shape(
 ) -> ProviderTextShape {
     let CborValue::Map(entries) = value else {
         let mut shape = ProviderTextShape::default();
+        let body =
+            cbor_tool_response_text_cached_shape(value, cache).sanitized(ProviderTextMode::Body);
         if let Some((key, value)) = prefix_header {
             shape.append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n\n"));
+            shape.append(ProviderTextShape::literal("\n"));
+            if body.body_bytes != 0 {
+                shape.append(ProviderTextShape::literal("\n"));
+            }
         }
-        shape.append(
-            cbor_tool_response_text_cached_shape(value, cache).sanitized(ProviderTextMode::Body),
-        );
+        shape.append(body);
         return shape;
     };
     cbor_tool_response_map_cached_shape(entries, prefix_header, cache)
@@ -1153,7 +1160,7 @@ impl MapShapeAccumulator {
     }
 
     fn finish(mut self) -> ProviderTextShape {
-        if self.wrote_header {
+        if self.wrote_header && self.body.body_bytes != 0 {
             self.headers.append(ProviderTextShape::literal("\n"));
         }
         self.headers.append(self.body);
@@ -1301,6 +1308,8 @@ trait CborMapProjectionOps {
     fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind;
     /// Report whether one canonically rendered value contains a newline.
     fn value_has_newline(&mut self, value: &CborValue) -> bool;
+    /// Report whether the rendered value contributes no body bytes.
+    fn value_is_empty(&mut self, value: &CborValue) -> bool;
     /// Emit the optional status prefix as the first header.
     fn prefix_header(&mut self, key: &str, value: &str) -> fmt::Result;
     /// Emit one ordinary header entry.
@@ -1347,9 +1356,6 @@ fn visit_cbor_tool_response_map(
             wrote_header = true;
         }
     }
-    if wrote_header {
-        ops.header_body_separator()?;
-    }
     let mut wrote_body = false;
     for (key, value) in entries {
         let key_kind = ops.key_kind(key);
@@ -1359,6 +1365,10 @@ fn visit_cbor_tool_response_map(
         if let MapEntryProjection::Body { label } =
             classify_map_entry(has_output, key_kind, ops.value_has_newline(value))
         {
+            if wrote_header && (wrote_body || label || !ops.value_is_empty(value)) {
+                ops.header_body_separator()?;
+                wrote_header = false;
+            }
             ops.body(key, value, label, wrote_body)?;
             wrote_body = true;
         }
@@ -1418,6 +1428,10 @@ impl MaterializedMapProjection {
 }
 
 impl CborMapProjectionOps for MaterializedMapProjection {
+    fn value_is_empty(&mut self, value: &CborValue) -> bool {
+        self.rendered(value).is_empty()
+    }
+
     fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind {
         cbor_map_key_kind_from_text(&cbor_tool_response_text(key))
     }
@@ -1475,6 +1489,10 @@ struct ShapeMapProjection<'a> {
 }
 
 impl CborMapProjectionOps for ShapeMapProjection<'_> {
+    fn value_is_empty(&mut self, value: &CborValue) -> bool {
+        cbor_tool_response_text_cached_shape(value, self.cache).body_bytes == 0
+    }
+
     fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind {
         let mut no_cache = None;
         cbor_tool_response_text_shape(key, &mut no_cache)
@@ -1565,7 +1583,7 @@ fn write_provider_tool_result_text_with_cache(
             write_sanitized_provider_text("cancelled", ProviderTextMode::Header, output)?;
             output.write_str(": ")?;
             write_sanitized_provider_text(reason, ProviderTextMode::Header, output)?;
-            output.write_str("\n\n")
+            output.write_str("\n")
         }
     }
 }
@@ -1577,11 +1595,15 @@ fn write_cbor_tool_response(
     output: &mut dyn fmt::Write,
 ) -> fmt::Result {
     let CborValue::Map(entries) = value else {
+        let has_body = cached_provider_text_shape(value, cache).body_bytes != 0;
         if let Some((key, value)) = prefix_header {
             write_sanitized_provider_text(key, ProviderTextMode::Header, output)?;
             output.write_str(": ")?;
             write_sanitized_provider_text(value, ProviderTextMode::Header, output)?;
-            output.write_str("\n\n")?;
+            output.write_str("\n")?;
+            if has_body {
+                output.write_str("\n")?;
+            }
         }
         return write_sanitized_cbor_tool_response_text(
             value,
@@ -1612,6 +1634,10 @@ struct StreamingMapProjection<'a> {
 }
 
 impl CborMapProjectionOps for StreamingMapProjection<'_> {
+    fn value_is_empty(&mut self, value: &CborValue) -> bool {
+        cached_provider_text_shape(value, self.cache).body_bytes == 0
+    }
+
     fn key_kind(&mut self, key: &CborValue) -> CborMapKeyKind {
         let mut no_cache = None;
         cbor_tool_response_text_shape(key, &mut no_cache)

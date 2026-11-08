@@ -510,6 +510,11 @@ impl OutputStreamCapture {
         }
         self.pending.finish_lines();
         let (mut text, omitted) = self.pending.take(tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES);
+        // Fragment labels own this LF; the terminal map renderer supplies the
+        // header/body separator. Live batches keep their existing framing.
+        if text.starts_with('\n') {
+            text.remove(0);
+        }
         if omitted != 0 {
             text.insert_str(
                 0,

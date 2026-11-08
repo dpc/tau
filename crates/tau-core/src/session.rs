@@ -4032,8 +4032,7 @@ impl AgentTree {
                     let mut receipt = result.clone();
                     receipt.captured_output = None;
                     receipt.provider_content.clear();
-                    receipt.result = tau_proto::tool_completion_receipt(
-                        &result.call_id,
+                    receipt.result = tau_proto::tool_call_completion_receipt(
                         tau_proto::ToolCompletionOutcome::Completed,
                     );
                     receipt.presentation = Default::default();
@@ -4068,8 +4067,7 @@ impl AgentTree {
                         tool_type: error.tool_type,
                         status: ToolResultStatus::Success,
                         output: tau_proto::ToolResponse::from_cbor(
-                            &tau_proto::tool_completion_receipt(
-                                &error.call_id,
+                            &tau_proto::tool_call_completion_receipt(
                                 tau_proto::ToolCompletionOutcome::Error,
                             ),
                         ),
@@ -4109,8 +4107,7 @@ impl AgentTree {
                         tool_type: cancelled.tool_type,
                         status: ToolResultStatus::Success,
                         output: tau_proto::ToolResponse::from_cbor(
-                            &tau_proto::tool_completion_receipt(
-                                &cancelled.call_id,
+                            &tau_proto::tool_call_completion_receipt(
                                 tau_proto::ToolCompletionOutcome::Cancelled,
                             ),
                         ),
