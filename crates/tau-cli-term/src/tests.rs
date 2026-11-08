@@ -15,7 +15,7 @@ fn argument_completion_display_label_preserves_full_insertion() {
     let key = "a".repeat(24);
     data.set_arg_completions(
         CommandName::new(":export-to-clipboard"),
-        vec![CompletionItem::new(&key, "format unknown · 12 bytes").with_label("aaaa…aaaa")],
+        vec![CompletionItem::new(&key, "format unknown 12 bytes").with_label("aaaa…aaaa")],
     );
     let candidates = completion::build_candidates(&[], &data, ":export-to-clipboard ", 21);
     assert_eq!(candidates[0].label, "aaaa…aaaa");

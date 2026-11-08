@@ -267,7 +267,7 @@ fn row(entry: ArtifactListEntry) -> CompletionItem {
         .identity
         .mime_type()
         .filter(|mime| !mime.trim().is_empty())
-        .map(|mime| format!("{mime} · {} bytes", entry.descriptor.size.get()))
+        .map(|mime| format!("{mime} {} bytes", entry.descriptor.size.get()))
         .unwrap_or_else(|| format!("{} bytes", entry.descriptor.size.get()));
     CompletionItem::new(key, description).with_label(label)
 }

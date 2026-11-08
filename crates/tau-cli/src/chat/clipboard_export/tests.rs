@@ -7,7 +7,8 @@ use tau_proto::{ArtifactDescriptor, ArtifactRequest, HarnessInputMessage};
 use super::*;
 
 /// Completion uses immutable metadata verbatim, never payload classification
-/// or a guessed label for legacy missing MIME.
+/// or a guessed label for legacy missing MIME. MIME and size use only one
+/// separating space to preserve completion-menu width.
 #[test]
 fn completion_displays_recorded_mime_only() {
     let descriptor = ArtifactDescriptor::from_bytes(
@@ -20,7 +21,7 @@ fn completion_displays_recorded_mime_only() {
         descriptor,
         last_put_at: 1,
     });
-    assert_eq!(item.description, "application/vnd.tau.directory · 14 bytes");
+    assert_eq!(item.description, "application/vnd.tau.directory 14 bytes");
     let descriptor = ArtifactDescriptor::from_bytes(
         b"\x89PNG\r\n\x1a\n",
         tau_proto::ArtifactIdentity::LegacyPayload,
