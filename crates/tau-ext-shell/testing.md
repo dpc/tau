@@ -37,6 +37,10 @@ compact results, no-op diff suppression, and the ordinary durable structured
 diff for changed UTF-8 files. Harness lifecycle coverage preserves visible
 `edit` requests and terminals while ext-shell receives and reports `replace`.
 
+`apply_patch` success results use a canonical map with `format: status path...`
+and an `output` body of escaped `A`/`M`/`D` path records, grouped in that order.
+Lifecycle tests assert the exact canonical rendering for single-file, multi-file,
+and escaped-path patches, without the old prose preamble.
 `apply_patch` tests retain path-labelled UI-only diffs for every changed file,
 including single-file updates, add/modify/delete multi-file patches, moves,
 escaped paths, and partial failures. CLI rendering tests require exactly one

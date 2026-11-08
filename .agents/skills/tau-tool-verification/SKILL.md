@@ -239,6 +239,12 @@ notices, report exact native totals, and save exactly the selected 100-record
 native rendering (not the sentinel or notices). Also verify the neighboring
 no-sentinel, already-over-budget, and multibyte-path cases.
 
+For `apply_patch` success, verify the canonical map has `format: status path...`
+and an `output` body of escaped `A`/`M`/`D` path records, grouped in that order.
+The rendering has a blank line after the format header and no prose preamble or
+redundant success header. Errors and partial-mutation recovery retain their
+existing structured details and UI-only diffs.
+
 For complete terminal-frame budgeting, verify an oversized `read_image` result
 fails as typed content without base64/text fallback. For an oversized
 `edit`/`apply_patch` structured diff, verify only the optional UI diff becomes

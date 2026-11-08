@@ -800,11 +800,8 @@ fn extension_apply_patch_updates_file() {
         "after\n"
     );
     assert_eq!(
-        result.result,
-        CborValue::Text(format!(
-            "Success. Updated the following files:\nM {}",
-            file_path.display()
-        ))
+        tau_proto::ToolResponse::from_cbor(&result.result).render(),
+        format!("format: status path...\n\nM {}", file_path.display())
     );
     let display = result.display.expect("apply_patch display");
     assert_eq!(display.args, file_path.display().to_string());
@@ -909,9 +906,14 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
     let Event::ToolResult(result) = result else {
         panic!("expected tool result");
     };
-    let CborValue::Text(output) = result.result else {
-        panic!("expected text result");
-    };
+    let output = tau_proto::ToolResponse::from_cbor(&result.result).render();
+    assert_eq!(
+        output,
+        format!(
+            "format: status path...\n\nM {}",
+            crate::tools::find::escape_path_text(&file_path.to_string_lossy())
+        )
+    );
     assert!(
         output.contains("line\\tbreak.txt"),
         "escaped path missing: {output}"
@@ -1194,13 +1196,13 @@ fn extension_apply_patch_applies_multiple_operations() {
     );
     assert!(!delete_path.exists(), "deleted path should be removed");
     assert_eq!(
-        result.result,
-        CborValue::Text(format!(
-            "Success. Updated the following files:\nA {}\nM {}\nD {}",
+        tau_proto::ToolResponse::from_cbor(&result.result).render(),
+        format!(
+            "format: status path...\n\nA {}\nM {}\nD {}",
             add_path.display(),
             modify_path.display(),
             delete_path.display(),
-        ))
+        )
     );
     let display = result.display.expect("apply_patch display");
     assert_eq!(display.args, format!("{},…", add_path.display()));

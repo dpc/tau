@@ -11,7 +11,6 @@ use crate::display::{ToolFailure, ToolOutput};
 use crate::tools::find::escape_path_text;
 use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
 
-const SUMMARY_HEADER: &str = "Success. Updated the following files:";
 const MAX_CONTEXT_MISMATCH_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_CONTEXT_MISMATCH_PATH_BYTES: usize = 1024;
 
@@ -41,7 +40,16 @@ pub(crate) fn apply_patch(
 
     let summary = format_summary(&changes);
     let payload = display_payload_for_changes(&changes, &summary);
-    let result = CborValue::Text(summary.clone());
+    let result = CborValue::Map(vec![
+        (
+            CborValue::Text("format".to_owned()),
+            CborValue::Text("status path...".to_owned()),
+        ),
+        (
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(summary.clone()),
+        ),
+    ]);
 
     let mut display = crate::display::ok_display("");
     populate_change_display(&mut display, &changes);
@@ -533,7 +541,7 @@ fn format_partial_summary(changes: &[AppliedChange]) -> String {
 }
 
 fn format_summary(changes: &[AppliedChange]) -> String {
-    let mut lines = vec![SUMMARY_HEADER.to_owned()];
+    let mut lines = Vec::new();
     for status in [
         ChangeStatus::Add,
         ChangeStatus::Modify,

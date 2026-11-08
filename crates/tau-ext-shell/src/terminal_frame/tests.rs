@@ -247,9 +247,18 @@ fn oversized_singular_edit_diff_retains_minimal_result_and_display_facts() {
 /// changed-file evidence while only its optional UI diff is truncated.
 #[test]
 fn oversized_success_diff_retains_result_and_changed_path_evidence() {
-    let summary = "Success. Updated the following files:\nM src/large.rs";
+    let summary = CborValue::Map(vec![
+        (
+            CborValue::Text("format".to_owned()),
+            CborValue::Text("status path...".to_owned()),
+        ),
+        (
+            CborValue::Text("output".to_owned()),
+            CborValue::Text("M src/large.rs".to_owned()),
+        ),
+    ]);
     let event = result_event(
-        CborValue::Text(summary.to_owned()),
+        summary.clone(),
         Vec::new(),
         ToolUseState {
             args: "src/large.rs".to_owned(),
@@ -266,7 +275,7 @@ fn oversized_success_diff_retains_result_and_changed_path_evidence() {
         panic!("expected reported tool result");
     };
     let display = result.display.as_ref().expect("retained display");
-    assert_eq!(result.result, CborValue::Text(summary.to_owned()));
+    assert_eq!(result.result, summary);
     assert_eq!(display.args, "src/large.rs");
     assert_eq!(display.info_chips, ["1F"]);
     assert_eq!(display.status, ToolUseStatus::Success);
