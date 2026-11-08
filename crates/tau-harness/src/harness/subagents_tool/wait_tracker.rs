@@ -3353,7 +3353,8 @@ enum InterruptedWaitMode {
 }
 
 /// Keep activation interruption distinct from consuming a tool completion,
-/// including its mode and conditional next-action guidance in full display.
+/// including its mode in the compact display and guidance only in model
+/// context.
 fn interrupted_wait_reply(
     call_id: ToolCallId,
     tool_name: ToolName,
@@ -3374,13 +3375,7 @@ fn interrupted_wait_reply(
     {
         display.mode = mode.as_header_value().to_owned();
         display.status_text = "interrupted".to_owned();
-        display.payload = Some(tau_proto::ToolUsePayload::Text {
-            text: format!(
-                "mode: {}\noutcome: interrupted\n{}",
-                mode.as_header_value(),
-                mode.guidance()
-            ),
-        });
+        display.payload = None;
     }
     reply
 }

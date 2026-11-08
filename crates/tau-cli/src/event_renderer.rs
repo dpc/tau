@@ -8179,6 +8179,9 @@ impl EventRenderer {
             );
         }
         display.payload = Some(tau_proto::ToolUsePayload::Text { text });
+        // Updates are nonterminal, contiguous zero-based source items. The
+        // canonical terminal owns one final item rather than another update.
+        display.stream_items = Some(update.output.sequence.saturating_add(1));
         Self::normalize_live_tool_duration(
             freeze_multiline_payloads,
             display,
@@ -8221,6 +8224,9 @@ impl EventRenderer {
                 } else {
                     render_tool_use_state(display_name, progress_display)
                 };
+                display.stream_items = state
+                    .output_sequence
+                    .map(|(_, sequence)| sequence.saturating_add(1));
                 let wait_timeout =
                     normalize_wait_display_timeout(state.is_activating_input_wait, &mut display);
                 if wait_timeout.is_some() {
@@ -8536,6 +8542,9 @@ impl EventRenderer {
             Self::tool_result_display(display_name, descriptor, diff.as_ref())
         };
         self.apply_self_compaction_name_style(call_id, &mut display);
+        display.stream_items = prior
+            .output_sequence
+            .map(|(_, sequence)| sequence.saturating_add(2));
         if let Some(tool) = self.transcript.runtime.self_compaction_tools.get(call_id) {
             if let Some(key) = tool.transaction_id.as_ref().and_then(|transaction| {
                 self.transcript
@@ -8725,6 +8734,9 @@ impl EventRenderer {
             )
         };
         self.apply_self_compaction_name_style(error.call_id, &mut display);
+        display.stream_items = prior
+            .output_sequence
+            .map(|(_, sequence)| sequence.saturating_add(2));
         let wait_timeout =
             normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
@@ -8812,6 +8824,9 @@ impl EventRenderer {
             normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::Cancelled);
         let mut display = render_tool_use_state(display_name, &descriptor);
         self.apply_self_compaction_name_style(&cancelled.call_id, &mut display);
+        display.stream_items = prior
+            .output_sequence
+            .map(|(_, sequence)| sequence.saturating_add(2));
         let is_blocker = prior.is_blocker || is_blocker_tool_name(cancelled.tool_name.as_str());
         let wait_timeout =
             normalize_wait_display_timeout(prior.is_activating_input_wait, &mut display);

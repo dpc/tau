@@ -28,6 +28,8 @@ fn generic_tool_output_updates_live_payload_and_terminal_closes_it() {
         "stable argument",
         "",
     ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "@"));
     let update = |sequence, text: &str| {
         Event::ToolOutputUpdated(tau_proto::ToolOutputUpdate {
             call: tau_proto::ToolCallRef {
@@ -47,12 +49,25 @@ fn generic_tool_output_updates_live_payload_and_terminal_closes_it() {
     sync(&handle);
     assert!(vt.screen_contains(100, "first live fragment"));
     assert!(vt.screen_contains(100, "stable argument"));
+    assert!(vt.screen_contains(100, "@1"));
     renderer.handle(&update(1, "second live fragment"));
     renderer.handle(&update(0, "stale fragment must stay hidden"));
     sync(&handle);
     assert!(vt.screen_contains(100, "second live fragment"));
     assert!(!vt.screen_contains(100, "first live fragment"));
     assert!(!vt.screen_contains(100, "stale fragment"));
+    assert!(vt.screen_contains(100, "@2"));
+    renderer.handle(&initial_tool_progress(
+        "stream",
+        "custom_stream",
+        "stable argument",
+        "",
+    ));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(100, "@2"),
+        "progress must retain the count"
+    );
     renderer.handle(&update(2, "multiline fragment\nsecond line"));
     sync(&handle);
     assert!(vt.screen_contains(100, "multiline fragment"));
@@ -85,6 +100,43 @@ fn generic_tool_output_updates_live_payload_and_terminal_closes_it() {
     assert!(!vt.screen_contains(100, "second live fragment"));
     assert!(!vt.screen_contains(100, "late fragment"));
     assert!(vt.screen_contains(100, "stable argument"));
+    assert!(
+        vt.screen_contains(100, "@5"),
+        "the terminal owns the final item"
+    );
+}
+
+/// A terminal source with no incremental chunks is an ordinary completed tool,
+/// not a stream, and must not add a counter to its header.
+#[test]
+fn terminal_only_tool_has_no_stream_count() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&tool_started("plain", "custom_stream", CborValue::Null));
+    renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
+        captured_output: Some(tau_proto::ToolFinalOutput {
+            text: "only final source".to_owned(),
+            omitted_bytes: 0,
+        }),
+        call_id: "plain".into(),
+        tool_name: tau_proto::ToolName::new("custom_stream"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Null,
+        display: Some(tau_proto::ToolUseState {
+            args: "stable argument".to_owned(),
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "stable argument"));
+    assert!(!vt.screen_contains(100, "@"));
 }
 
 /// Live and attach-reconstructed blocks must use the same mode projection when

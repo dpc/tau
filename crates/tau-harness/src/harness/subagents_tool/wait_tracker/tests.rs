@@ -1342,8 +1342,8 @@ fn activating_input_interruption_results_use_typed_headers() {
     );
 }
 
-/// Interrupted waits must expose their own mode/outcome and safe guidance,
-/// never an arbitrary source tool's command or payload.
+/// Interrupted waits must expose their own compact mode/outcome without
+/// guidance, never an arbitrary source tool's command or payload.
 #[test]
 fn interrupted_wait_ui_distinguishes_all_modes_without_source_payload() {
     let mut fixtures = Vec::new();
@@ -1363,10 +1363,10 @@ fn interrupted_wait_ui_distinguishes_all_modes_without_source_payload() {
         assert_eq!(display.mode, mode.as_header_value());
         assert_eq!(display.args, "shell");
         assert_eq!(display.status_text, "interrupted");
-        let Some(tau_proto::ToolUsePayload::Text { text }) = &display.payload else {
-            panic!("guidance")
-        };
-        assert!(text.contains(mode.guidance()));
+        assert!(
+            display.payload.is_none(),
+            "guidance belongs only in model context"
+        );
         fixtures.push(
             serde_json::json!({"case":format!("wait-interrupted-{}",mode.as_header_value()),
             "tool_name":"wait", "display":display}),

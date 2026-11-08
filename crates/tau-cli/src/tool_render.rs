@@ -544,6 +544,8 @@ pub(crate) struct ToolCallDisplay {
     pub(crate) mode: String,
     pub(crate) args: String,
     pub(crate) range: Option<String>,
+    /// Accepted source-item count, present only after nonterminal streaming.
+    pub(crate) stream_items: Option<u64>,
     pub(crate) suffixes: Vec<ToolLineSegment>,
     pub(crate) payload: Option<ToolUsePayload>,
 }
@@ -629,6 +631,7 @@ pub(crate) fn pending_tool_call_display(tool_name: &str) -> ToolCallDisplay {
         mode: String::new(),
         args: String::new(),
         range: None,
+        stream_items: None,
         suffixes: vec![tool_suffix("pending".to_owned(), ToolStatus::Pending)],
         payload: None,
     }
@@ -868,6 +871,7 @@ fn render_tool_use_state_inner(
         mode: display.mode.clone(),
         args: display.args.clone(),
         range: display.range.as_ref().and_then(format_tool_use_range),
+        stream_items: None,
         suffixes,
         payload: match payload_projection {
             ToolPayloadProjection::RetainDescriptor => display.payload.clone(),
@@ -1050,6 +1054,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
         mode: String::new(),
         args: format!("{}/{}", summary.completed, summary.total),
         range: None,
+        stream_items: None,
         suffixes,
         payload: None,
     }
@@ -1364,6 +1369,13 @@ fn render_tool_block_with_payload(
             left,
             tool_line_text(theme, names::TOOL_ARGS, range.clone()),
             RANGE_BOUNDS,
+        );
+    }
+    if let Some(count) = display.stream_items {
+        line.push(
+            ToolLineElement::Counter.priority(),
+            left,
+            tool_line_text(theme, names::TOOL_STATUS_INFO, format!("@{count}")),
         );
     }
     for suffix in &display.suffixes {
