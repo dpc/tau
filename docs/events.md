@@ -645,8 +645,8 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   finishes. Opted-in streams retain bounded captured final text and process
   metadata instead of an unbounded raw body. Other tools retain their
   ordinary terminal payload, from which the harness derives a bounded final
-  source occurrence. Waits return successful receipts whose `target_outcome` is
-  `completed`, `error`, or `cancelled`, with no source body. Completion notices
+  source occurrence. Successful wait receipts contain an `outcome` of `completed`,
+  `error`, or `cancelled`, without a source body. Completion notices
   carry control receipts without payload copies. Callers can explicitly recover
   accepted source through bounded `tool_output` pages. UI clients receive the
   separate display projection below. The earlier synthetic provider placeholder also produces

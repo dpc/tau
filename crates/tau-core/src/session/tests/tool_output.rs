@@ -405,7 +405,7 @@ fn ordered_tool_output_and_recovery_match_live_and_cold_deferred_round() {
             &"stream".into(),
         )
         .expect("native receipt");
-    assert!(result.output.render().contains("target_outcome"));
+    assert!(result.output.render().contains("outcome"));
     assert!(!result.output.render().contains("last-unique"));
     assert!(tree.validate_event(&update(call, 2, "late")).is_err());
 }

@@ -434,7 +434,7 @@ classifying prompt prose. Current completion prompts carry payload-free control
 notices rather than `tau_background_result` previews. That registered envelope
 remains recognizable in historical context. Ordered source text instead uses
 `tool_output`; typed waits carry successful completion receipts with no
-source body. Their `target_outcome` distinguishes `completed`, `error`, and
+source body. The receipt `outcome` distinguishes `completed`, `error`, and
 `cancelled`. See
 [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 The contracts are

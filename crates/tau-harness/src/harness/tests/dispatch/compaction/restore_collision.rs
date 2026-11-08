@@ -274,8 +274,8 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
             event,
             Event::ToolResult(result)
                 if result.call_id == wait.id
-                    && cbor_map_text(&result.result, "original_tool_call_id") == Some(cross_call.id.as_str())
-                    && cbor_map_text(&result.result, "target_outcome") == Some("error")
+                    && cbor_map_text(&result.result, "cause") == Some(cross_call.id.as_str())
+                    && cbor_map_text(&result.result, "outcome") == Some("error")
         )));
     } else {
         let wait_events = event_log_events(&resumed)
@@ -294,8 +294,8 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
             wait_events.iter().any(|event| matches!(
                 event,
                 Event::ToolResult(result)
-                    if cbor_map_text(&result.result, "original_tool_call_id") == Some(cross_call.id.as_str())
-                        && cbor_map_text(&result.result, "target_outcome") == Some("completed")
+                    if cbor_map_text(&result.result, "cause") == Some(cross_call.id.as_str())
+                        && cbor_map_text(&result.result, "outcome") == Some("completed")
             )),
             "{wait_events:#?}"
         );

@@ -3900,7 +3900,7 @@ fn tool_result_text_uses_structured_status_headers() {
 /// interruption framing in the provider's tool message.
 #[test]
 fn tool_result_text_preserves_typed_wait_interruption_fixture() {
-    let interruption = "internal: true\noutcome: interrupted\nreason: activating_input\nmode: any_background\n\nNew input is queued; retry the wait to consume its target result.";
+    let interruption = "outcome: interrupted\nreason: partial_tool_output\ncause: call-source";
     let output =
         tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(interruption.to_owned()));
 
@@ -3914,7 +3914,7 @@ fn tool_result_text_preserves_typed_wait_interruption_fixture() {
 /// without parsing or rewriting the trusted control headers.
 #[test]
 fn tool_result_text_preserves_exact_all_wait_interruption_fixture() {
-    let interruption = "internal: true\noutcome: interrupted\nreason: activating_input\nmode: exact_all\n\nNew input is queued; retry the wait to consume its target result.";
+    let interruption = "outcome: interrupted\nreason: partial_tool_output\ncause: call-source";
     let output =
         tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(interruption.to_owned()));
 

@@ -2447,6 +2447,13 @@ fn human_ui_prompt_interrupts_exact_wait_at_five_second_deadline() {
         PendingPrompt::human_ui("urgent visible input".to_owned()),
     )
     .expect("queue HumanUI prompt");
+    let activation = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .pending_prompts
+        .back()
+        .expect("queued HumanUI prompt")
+        .activation_observation
+        .expect("accepted activation identity");
     let deadline = h.agent_runtime.agent_registry.agents[&cid]
         .dispatch
         .pending_prompts
@@ -2465,7 +2472,8 @@ fn human_ui_prompt_interrupts_exact_wait_at_five_second_deadline() {
         event,
         Event::ToolResult(result)
             if result.call_id == wait_call.id
-                && matches!(&result.result, CborValue::Text(text) if text.contains("mode: exact"))
+                && result.result == CborValue::Text(format!(
+                    "outcome: interrupted\nreason: user\ncause: {activation}"))
     )));
 }
 
@@ -2649,7 +2657,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
         event,
         Event::ToolResult(result)
             if result.call_id == bare.id
-                && cbor_map_text(&result.result, "original_tool_call_id")
+                && cbor_map_text(&result.result, "cause")
                     == Some(call_b.as_str())
     )));
     h.shutdown().expect("shutdown");

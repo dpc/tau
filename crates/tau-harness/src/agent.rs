@@ -258,6 +258,8 @@ impl InferenceCheckpointOwner {
 pub(crate) enum PendingMessageWakeSource {
     /// Accepted output already owns context; this is only a wake cause.
     ToolOutput {
+        /// Display identity from the accepted canonical output occurrence.
+        call_id: tau_proto::ToolCallId,
         /// Exact canonical occurrence in the owning agent journal.
         durable_event_seq: tau_core::PersistedAgentEventSeq,
         /// Only nonterminal updates are suppressible by completion-only waits.

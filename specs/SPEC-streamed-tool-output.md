@@ -36,15 +36,16 @@ The harness projects every source occurrence exactly once through the registered
 `tool_output` generic user-role envelope. Its ordered attributes identify
 call and terminal status, followed by `omitted_bytes` only when nonzero.
 Tool identity and sequence remain in canonical metadata and validation, not the
-model-facing header. The envelope body contains untrusted tool data. Final source precedes the native closure or background completion
-settlement. Opted-in foreground text calls close with a successful typed receipt;
-the receipt's `target_outcome` distinguishes completed, error, and cancelled.
+model-facing header. The envelope body contains untrusted tool data. Final source
+precedes the native closure or background completion settlement. Opted-in
+foreground text calls close with a successful typed receipt;
+the receipt's `outcome` distinguishes completed, error, and cancelled.
 Non-opted foreground tools retain native output, including images.
 
 All background tools place their final bounded source at the canonical terminal,
 independently of a later wait or notification. Completion notices carry only
-control and correlation. Successful waits carry only
-`original_tool_call_id` and `target_outcome`, never source payload. A target error
+control and correlation. Successful waits carry `cause` (the source call ID) and
+`outcome`, without source payload. A target error
 or cancellation does not make synchronization itself fail. Plural waits keep
 request order and existing atomic consumption, ownership, generation, and
 rollback rules. Invalid waits still fail normally.

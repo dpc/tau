@@ -581,8 +581,7 @@ fn run_core_shell_four_sibling_commands(
                 entries
                     .iter()
                     .find_map(|(key, value)| {
-                        (key == &CborValue::Text("original_tool_call_id".to_owned()))
-                            .then_some(value)
+                        (key == &CborValue::Text("cause".to_owned())).then_some(value)
                     })
                     .and_then(|value| match value {
                         CborValue::Text(value) => Some(value.clone()),

@@ -55,13 +55,12 @@ pub(crate) fn handle_tool_call(
             .map(|_| (phase, title))
     }) {
         Ok((phase, title)) => {
-            let result = format!("Status accepted: {} — {title}", phase_name(phase));
             host.finish_tool_with_cbor_result(
                 conversation_id,
                 call.id.clone(),
                 visible_tool_name,
                 call.tool_type,
-                CborValue::Text(result),
+                CborValue::Text(String::new()),
                 Some(display(phase, &title, ToolUseStatus::Success, "ok")),
             );
         }

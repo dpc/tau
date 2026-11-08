@@ -243,15 +243,15 @@ fn resumed_no_arg_wait_uses_restored_completion_event_order() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "wait-restored-first"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some("restored-b")
-                && cbor_map_text(&result.result, "target_outcome") == Some("completed")
+                && cbor_map_text(&result.result, "cause") == Some("restored-b")
+                && cbor_map_text(&result.result, "outcome") == Some("completed")
     )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "wait-restored-second"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some("restored-a")
-                && cbor_map_text(&result.result, "target_outcome") == Some("completed")
+                && cbor_map_text(&result.result, "cause") == Some("restored-a")
+                && cbor_map_text(&result.result, "outcome") == Some("completed")
     )));
 
     h.shutdown().expect("shutdown");

@@ -2228,7 +2228,7 @@ fn wait_tool_spec() -> ToolSpec {
              timeout_minutes. Selectors are mutually exclusive. Plural waits accept 1–64 distinct \
              nonempty IDs and settle only after every member terminates, returning receipts in \
              request order. All completion receipts are successful synchronization results with \
-             target_outcome completed, error, or cancelled; they never repeat target output. \
+             outcome completed, error, or cancelled; they never repeat target output. \
              Output arrives separately in ordered tool-origin context. Use tool_output for \
              deliberate bounded recovery. Bare wait remains pending while an owned background \
              call runs; with no available or running call it fails. Input timeouts are positive \

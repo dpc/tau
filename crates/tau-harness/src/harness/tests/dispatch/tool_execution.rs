@@ -2503,7 +2503,7 @@ fn wait_resolves_on_synthetic_tool_error() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "wait-call"
-                && cbor_map_text(&result.result, "target_outcome") == Some("error")
+                && cbor_map_text(&result.result, "outcome") == Some("error")
     )));
 
     h.shutdown().expect("shutdown");

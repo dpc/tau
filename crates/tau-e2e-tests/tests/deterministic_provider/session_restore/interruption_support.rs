@@ -547,7 +547,6 @@ pub(super) fn assert_no_duplicate_repair(
 /// Reproduces the harness's exact synthetic interrupted-tool diagnostic.
 pub(super) fn interrupted_tool_diagnostic(call_id: &ToolCallId) -> String {
     format!(
-        "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
+        "Tool call `{call_id}` was interrupted due to session restart. Side effects may have occurred."
     )
 }

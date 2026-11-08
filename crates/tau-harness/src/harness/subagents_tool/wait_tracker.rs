@@ -18,12 +18,13 @@ use tau_proto::{
 };
 
 use super::WAIT_TOOL_NAME;
+use super::wait_activation::WaitActivation;
 use crate::background_completion_outcome::BackgroundErrorOutcome;
 
 /// Bound retained terminal tombstones while preserving recent duplicate-wait
 /// diagnostics and call-ID reuse behavior.
 const MAX_WAIT_TERMINAL_TOMBSTONES: usize = 1024;
-const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
+const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "cause";
 const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
 
 /// Generation of one completion queue entry for a potentially reused call ID.
@@ -250,7 +251,7 @@ struct ExactAllWait {
 #[derive(Clone, Debug, PartialEq)]
 enum ClaimedWaitWake {
     /// Activating input won ordinary arbitration while the claim was held.
-    Activation(tau_proto::ObservationId),
+    Activation(WaitActivation),
     /// A matching background completion won ordinary arbitration.
     Completion(
         /// Source call whose completion won.
@@ -2696,7 +2697,7 @@ impl WaitTracker {
     fn interrupt_active_waits_for(
         &mut self,
         owner: &AgentId,
-        activation: tau_proto::ObservationId,
+        activation: &WaitActivation,
     ) -> Vec<WaitReply> {
         let targets: Vec<ToolCallId> = self
             .waiters
@@ -2728,9 +2729,12 @@ impl WaitTracker {
                     wait.request.call_id.clone(),
                     wait.request.tool_name.clone(),
                 )
+                .with_activation(activation)
                 .with_settlement(
                     &wait.request,
-                    tau_proto::ToolWaitOutcome::InterruptedByActivation { activation },
+                    tau_proto::ToolWaitOutcome::InterruptedByActivation {
+                        activation: activation.observation,
+                    },
                 );
                 let (restore, release) = self.exact_all_notice_release_actions(&wait);
                 reply.unsuppress_notices = restore;
@@ -2740,9 +2744,12 @@ impl WaitTracker {
         }
         if let Some(wait) = self.any_waiters.remove(owner) {
             let reply = wait_interrupted_any_reply(wait.call_id.clone(), wait.tool_name.clone())
+                .with_activation(activation)
                 .with_settlement(
                     &wait,
-                    tau_proto::ToolWaitOutcome::InterruptedByActivation { activation },
+                    tau_proto::ToolWaitOutcome::InterruptedByActivation {
+                        activation: activation.observation,
+                    },
                 );
             replies.push(reply);
         }
@@ -2753,8 +2760,9 @@ impl WaitTracker {
     pub(super) fn activate_waits_for(
         &mut self,
         owner: &AgentId,
-        activation: tau_proto::ObservationId,
+        activation: impl Into<WaitActivation>,
     ) -> Vec<WaitReply> {
+        let activation = activation.into();
         if let Some(claimed) = self.claimed_waits.get_mut(owner) {
             match claimed {
                 ClaimedWait::Exact {
@@ -2772,7 +2780,7 @@ impl WaitTracker {
             }
             return Vec::new();
         }
-        let mut replies = self.interrupt_active_waits_for(owner, activation);
+        let mut replies = self.interrupt_active_waits_for(owner, &activation);
         if let Some(wait) = self.input_waiters.remove(owner) {
             let reply = wait_input_available_reply(
                 wait.request.call_id.clone(),
@@ -2781,7 +2789,9 @@ impl WaitTracker {
             )
             .with_settlement(
                 &wait.request,
-                tau_proto::ToolWaitOutcome::InputAvailable { activation },
+                tau_proto::ToolWaitOutcome::InputAvailable {
+                    activation: activation.observation,
+                },
             );
             replies.push(reply);
         }
@@ -2797,7 +2807,7 @@ impl WaitTracker {
         &self,
         target: ToolCallId,
         wait: WaitRequest,
-        activation: tau_proto::ObservationId,
+        activation: &WaitActivation,
     ) -> WaitReply {
         let source_tool_name = self.call_tool_names.get(&target).cloned();
         let mut reply = wait_interrupted_reply(
@@ -2805,9 +2815,12 @@ impl WaitTracker {
             wait.tool_name.clone(),
             source_tool_name,
         )
+        .with_activation(activation)
         .with_settlement(
             &wait,
-            tau_proto::ToolWaitOutcome::InterruptedByActivation { activation },
+            tau_proto::ToolWaitOutcome::InterruptedByActivation {
+                activation: activation.observation,
+            },
         );
         if self.is_backgrounded(&target) {
             reply = reply.with_unsuppress(target);
@@ -3100,6 +3113,13 @@ impl WaitTracker {
 }
 
 impl WaitReply {
+    /// Freeze the actual accepted cause before any queue or claim can retire.
+    pub(super) fn with_activation(mut self, activation: &WaitActivation) -> Self {
+        if let WaitReplyKind::Result { result, .. } = &mut self.kind {
+            *result = activation.receipt();
+        }
+        self
+    }
     /// Add model-visible advice to a successful timeout result.
     pub(super) fn add_timeout_advice(&mut self, advice: &str) {
         let WaitReplyKind::Result {
@@ -3353,8 +3373,7 @@ enum InterruptedWaitMode {
 }
 
 /// Keep activation interruption distinct from consuming a tool completion,
-/// including its mode in the compact display and guidance only in model
-/// context.
+/// retaining its mode only in the compact UI display.
 fn interrupted_wait_reply(
     call_id: ToolCallId,
     tool_name: ToolName,
@@ -3365,7 +3384,7 @@ fn interrupted_wait_reply(
         call_id,
         tool_name,
         source,
-        interrupted_wait_result(mode),
+        CborValue::Text("outcome: interrupted\nreason: other\ncause: unavailable".to_owned()),
         None,
     );
     if let WaitReplyKind::Result {
@@ -3389,33 +3408,6 @@ impl InterruptedWaitMode {
             Self::AnyBackground => "any_background",
         }
     }
-
-    /// Return concise next-action guidance that matches this wait mode.
-    fn guidance(&self) -> &'static str {
-        match self {
-            Self::Exact => {
-                "New input interrupted this wait. Review the new input before deciding whether to \
-                 cancel the tool or wait again for its result."
-            }
-            Self::ExactAll => {
-                "New input interrupted this wait. Review the new input before deciding whether to \
-                 cancel the tools or wait again for their results."
-            }
-            Self::AnyBackground => {
-                "New input interrupted this wait. Review the new input before deciding whether to \
-                 cancel a background tool or wait again for a result."
-            }
-        }
-    }
-}
-
-fn interrupted_wait_result(wait_mode: InterruptedWaitMode) -> CborValue {
-    let header_value = wait_mode.as_header_value();
-    let guidance = wait_mode.guidance();
-    CborValue::Text(format!(
-        "{}: true\noutcome: interrupted\nreason: activating_input\nmode: {header_value}\n\n{guidance}",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
-    ))
 }
 
 fn result_with_original_tool_call_id(

@@ -72,22 +72,19 @@ pub(super) fn format_elapsed_count(count: u64, unit: &str) -> String {
 
 pub(super) fn restored_tool_call_error_message(call_id: &ToolCallId) -> String {
     format!(
-        "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
+        "Tool call `{call_id}` was interrupted due to session restart. Side effects may have occurred."
     )
 }
 
 pub(super) fn restored_background_tool_call_error_message(call_id: &ToolCallId) -> String {
     format!(
-        "{}: true\n\nBackground tool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
+        "Background tool call `{call_id}` was interrupted due to session restart. Side effects may have occurred."
     )
 }
 
 pub(super) fn extension_disconnected_tool_call_error_message(call_id: &ToolCallId) -> String {
     format!(
-        "{}: true\n\nTool call `{call_id}` was interrupted because extension disconnected. Side effects may have occurred.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
+        "Tool call `{call_id}` was interrupted because extension disconnected. Side effects may have occurred."
     )
 }
 
@@ -95,8 +92,7 @@ pub(super) fn extension_disconnected_background_tool_call_error_message(
     call_id: &ToolCallId,
 ) -> String {
     format!(
-        "{}: true\n\nBackground tool call `{call_id}` was interrupted because extension disconnected. Side effects may have occurred.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
+        "Background tool call `{call_id}` was interrupted because extension disconnected. Side effects may have occurred."
     )
 }
 
@@ -2233,10 +2229,13 @@ impl Harness {
             .iter()
             .filter_map(|record| {
                 let source = match &record.event {
-                    Event::ToolOutputUpdated(_) => Some(PendingMessageWakeSource::ToolOutput {
-                        durable_event_seq: record.seq,
-                        terminal: false,
-                    }),
+                    Event::ToolOutputUpdated(update) => {
+                        Some(PendingMessageWakeSource::ToolOutput {
+                            call_id: update.output.call_id.clone(),
+                            durable_event_seq: record.seq,
+                            terminal: false,
+                        })
+                    }
                     // Final output is context, not a new activation authority.
                     // Existing native continuation, correlated completion
                     // notices and dedicated compaction delivery retain their

@@ -666,8 +666,7 @@ fn restore_notice_event_count(h: &Harness) -> usize {
 
 fn restored_background_notice(call_id: &str) -> String {
     format!(
-        "{}: true\n\nBackground tool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
+        "Background tool call `{call_id}` was interrupted due to session restart. Side effects may have occurred."
     )
 }
 
@@ -784,8 +783,7 @@ fn seed_background_placeholder_for_agent(
                 tool_name: ToolName::new(tool_name),
                 tool_type: tau_proto::ToolType::Function,
                 result: CborValue::Text(format!(
-                    "{}: true\n\nTool call `{call_id}` is running in the background.",
-                    tau_proto::TAU_INTERNAL_HEADER_NAME
+                    "internal: true\n\nTool call `{call_id}` is running in the background."
                 )),
                 provider_content: Vec::new(),
                 kind: tau_proto::ToolResultKind::BackgroundPlaceholder,

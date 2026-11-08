@@ -244,11 +244,11 @@ impl ToolCompletionOutcome {
 pub fn tool_completion_receipt(call_id: &ToolCallId, outcome: ToolCompletionOutcome) -> CborValue {
     CborValue::Map(vec![
         (
-            CborValue::Text("original_tool_call_id".to_owned()),
+            CborValue::Text("cause".to_owned()),
             CborValue::Text(call_id.to_string()),
         ),
         (
-            CborValue::Text("target_outcome".to_owned()),
+            CborValue::Text("outcome".to_owned()),
             CborValue::Text(outcome.as_str().to_owned()),
         ),
     ])

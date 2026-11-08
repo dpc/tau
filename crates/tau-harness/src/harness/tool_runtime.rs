@@ -465,13 +465,11 @@ impl Harness {
         };
         let agent_id_headers = agent_ids
             .map(|(self_agent_id, sub_agent_id)| {
-                format!("self_agent_id: {self_agent_id}\nsub_agent_id: {sub_agent_id}\n")
+                format!("self_agent_id: {self_agent_id}\nsub_agent_id: {sub_agent_id}\n\n")
             })
             .unwrap_or_default();
-        let content = format!(
-            "{}: true\n{agent_id_headers}\nTool call `{call_id}` is running in the background.",
-            tau_proto::TAU_INTERNAL_HEADER_NAME
-        );
+        let content =
+            format!("{agent_id_headers}Tool call `{call_id}` is running in the background.");
         let result = ToolResult {
             captured_output: None,
             presentation: Default::default(),

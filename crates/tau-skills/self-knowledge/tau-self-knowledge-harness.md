@@ -105,11 +105,14 @@ Completion notices leave results queued:
   to `wait_timeout_minimum_minutes` / `wait_timeout_maximum_minutes` (defaults:
   1 / 1,440). It is mutually exclusive with `tool_call_id`.
 
-Activating input can interrupt background waits with successful
-`internal: true`, `outcome: interrupted`, `reason: activating_input`, and
-`mode: exact`, `exact_all`, or `any_background`. The result remains queued;
-handle input, then retry the exact wait. A pending wait can suppress/remove a completion
-notice but cannot retract a notice already delivered to the model.
+Activating input can interrupt a background wait with a successful result:
+`outcome: interrupted`, a typed `reason` such as `partial_tool_output`, and
+`cause`. For tool input, `cause` is the actual activating call ID; for non-tool
+input, it is the activation observation ID. Missing historical correlation uses
+`unavailable`. The result contains no echoed mode or prose payload. The result
+remains queued; handle input, then retry the exact wait. A pending wait can
+suppress or remove a completion notice but cannot retract one already delivered
+to the model.
 
 ## Manual compaction tools
 

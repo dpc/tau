@@ -3876,8 +3876,7 @@ fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
         tool_type: tau_proto::ToolType::Function,
         status: ToolResultStatus::Error {
             message: format!(
-                "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
-                tau_proto::TAU_INTERNAL_HEADER_NAME
+                "internal: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred."
             ),
         },
         output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(body.to_owned())),

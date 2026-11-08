@@ -67,13 +67,17 @@ wait-any delay. An authenticated visible user prompt uses a five-second
 wait-tool delay, so completion before that cut coalesces the prompt and expiry
 interrupts the wait once with the typed activating-input result.
 
-An interrupted background wait remains a successful scheduling result with the
-exact provider-visible headers `internal: true`, `outcome: interrupted`,
-`reason: activating_input`, and `mode: exact` or
-`mode: exact_all` or `mode: any_background`, followed by exactly one
-blank line and optional concise harness-authored prose. Header names and values
-are LF-separated closed ASCII tokens. The result contains no activating payload
-or redundant target ID. Singular interruption consumes no target completion.
+An interrupted background wait remains a successful scheduling result with
+LF-separated `outcome: interrupted`, `reason`, and `cause` headers and no payload.
+The reason names the typed activating input: `partial_tool_output`, `user`,
+`agent_message`, `external_message`, `internal_prompt`, `timer`,
+`watch_notification`, `loop_guard`, `background_completion`, or `other`.
+For tool input, `cause` is the actual activating call ID, not the wait target.
+For non-tool input, `cause` is the existing activation observation ID. When
+historical correlation is missing, `cause` is `unavailable`, not an invented identity.
+Queued, installed, and exclusively claimed waits retain the same source identity;
+payload text cannot select either reason or cause. Mode remains UI metadata only.
+Singular interruption consumes no target completion.
 Plural interruption atomically releases every target reservation, consumes no
 member, preserves completed-member FIFO order, and restores only undelivered
 completion notices that the reservation suppressed. Each notice remains bound to
@@ -108,15 +112,15 @@ CBOR envelope in request order:
 
 ```text
 results:
-  - original_tool_call_id: <member ID>
-    target_outcome: completed
-  - original_tool_call_id: <member ID>
-    target_outcome: error
+  - cause: <member ID>
+    outcome: completed
+  - cause: <member ID>
+    outcome: error
 ```
 
-Each member contains a synchronization receipt with no source body.
-Cancellation uses `target_outcome: cancelled` in the same successful receipt
-shape. Accepted text remains in the canonical ordered source stream; callers can
+Each member contains a synchronization receipt without a source body.
+Cancellation uses `outcome: cancelled` in the same successful receipt shape.
+Accepted text remains in the canonical ordered source stream; callers can
 explicitly recover it through bounded `tool_output` pages. See
 [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 Invalid invocation, ownership, reservation, and wait-operation failures remain

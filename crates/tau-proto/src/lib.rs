@@ -141,9 +141,6 @@ pub const PAPERCUT_ARCHIVE_PREFIX: &str = "papercuts.archive-";
 /// are still in progress.
 pub const PROGRESS_INDICATOR_TEXT: &str = "…";
 
-/// Header name used to mark model-visible internal Tau messages.
-pub const TAU_INTERNAL_HEADER_NAME: &str = "internal";
-
 /// Exact opening sentinel of a harness-authenticated internal envelope.
 ///
 /// Typed provenance, rather than this text, establishes the envelope's

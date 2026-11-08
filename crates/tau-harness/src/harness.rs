@@ -644,10 +644,7 @@ fn bounded_loop_text(text: &str, max_chars: usize) -> String {
 /// Model-visible internal tool error for calls whose provider is no longer
 /// live.
 pub(crate) fn unavailable_tool_error_message(tool_name: &ToolName) -> String {
-    format!(
-        "{}: true\n\nTool `{tool_name}` is not available.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
-    )
+    format!("Tool `{tool_name}` is not available.")
 }
 
 fn unavailable_tool_error_message_with_suggestion(
@@ -662,17 +659,11 @@ fn unavailable_tool_error_message_with_suggestion(
 }
 
 pub(crate) fn disabled_tool_error_message(tool_name: &ToolName) -> String {
-    format!(
-        "{}: true\n\nTool `{tool_name}` exists, but is disabled for the current role/model.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
-    )
+    format!("Tool `{tool_name}` exists, but is disabled for the current role/model.")
 }
 
 pub(crate) fn prompt_snapshot_tool_error_message(tool_name: &ToolName) -> String {
-    format!(
-        "{}: true\n\nTool `{tool_name}` was not in the tool set advertised for this prompt.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
-    )
+    format!("Tool `{tool_name}` was not in the tool set advertised for this prompt.")
 }
 
 /// Hidden prompt text used to tell the model a tool left the live registry.

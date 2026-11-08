@@ -14,6 +14,7 @@ use crate::background_completion_outcome::BackgroundErrorOutcome;
 use crate::harness::SessionGeneration;
 use crate::{harness as path_crate_harness, runtime_dir as path_crate_runtime_dir};
 
+mod wait_activation;
 mod wait_tracker;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +29,7 @@ use tau_proto::{
     ToolBackgroundResult, ToolCallId, ToolCallRef, ToolError, ToolName, ToolResult, ToolResultKind,
     ToolType,
 };
+use wait_activation::{WaitActivation, WaitActivationSource};
 use wait_tracker::{
     CompletionNotice, WaitReply, WaitReplyKind, WaitRequest, WaitTarget, WaitTracker,
     normalized_wait_timeout_minutes_inner, parse_wait_args_with_bounds, wait_error_reply,
@@ -894,6 +896,7 @@ impl Harness {
         owner: &AgentId,
         activation: tau_proto::ObservationId,
     ) {
+        let activation = self.wait_activation(owner, activation);
         let replies = self
             .agent_runtime
             .subagents
@@ -901,6 +904,66 @@ impl Harness {
             .activate_waits_for(owner, activation);
         self.synchronize_work_waits();
         self.publish_wait_replies(replies);
+    }
+
+    /// Resolve receipt provenance from typed accepted queue items, never text.
+    fn wait_activation(
+        &self,
+        owner: &AgentId,
+        observation: tau_proto::ObservationId,
+    ) -> WaitActivation {
+        use crate::agent::{AgentMessageActivationClass, PendingMessageWakeSource};
+        let unknown = WaitActivation {
+            observation,
+            source: WaitActivationSource::Other,
+        };
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(owner) else {
+            return unknown;
+        };
+        let source = if let Some(wake) = agent
+            .dispatch
+            .pending_message_wakes
+            .iter()
+            .find(|wake| wake.activation_observation == Some(observation))
+        {
+            match &wake.source {
+                PendingMessageWakeSource::ToolOutput {
+                    call_id, terminal, ..
+                } => {
+                    if *terminal {
+                        WaitActivationSource::BackgroundCompletion(Some(call_id.clone()))
+                    } else {
+                        WaitActivationSource::PartialToolOutput(call_id.clone())
+                    }
+                }
+                PendingMessageWakeSource::AgentMessageReceived {
+                    activation_class, ..
+                } => match activation_class {
+                    AgentMessageActivationClass::OrdinaryAgentInput => {
+                        WaitActivationSource::AgentMessage
+                    }
+                    AgentMessageActivationClass::IsolatedWatchNotification => {
+                        WaitActivationSource::WatchNotification
+                    }
+                },
+                PendingMessageWakeSource::MessageFact { .. } => {
+                    WaitActivationSource::ExternalMessage
+                }
+            }
+        } else if let Some(prompt) = agent
+            .dispatch
+            .pending_prompts
+            .iter()
+            .find(|prompt| prompt.activation_observation == Some(observation))
+        {
+            WaitActivationSource::from_prompt(prompt)
+        } else {
+            WaitActivationSource::Other
+        };
+        WaitActivation {
+            observation,
+            source,
+        }
     }
 
     /// Owner-wide policy of an installed wait; context capture is unaffected.
@@ -3230,6 +3293,14 @@ impl Harness {
                 ),
                 Err(message) => wait_error_reply(call_id, visible_tool_name, message, None),
             };
+            if let Some(observation) = activation
+                && matches!(
+                    &settlement_outcome,
+                    Some(tau_proto::ToolWaitOutcome::InterruptedByActivation { .. })
+                )
+            {
+                reply = reply.with_activation(&self.wait_activation(agent_id, observation));
+            }
             if let Some(outcome) = settlement_outcome {
                 reply = reply.with_settlement(&wait, outcome);
             }

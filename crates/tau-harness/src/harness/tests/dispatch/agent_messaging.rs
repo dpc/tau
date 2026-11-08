@@ -5163,13 +5163,21 @@ fn agent_message_interrupts_recipient_active_wait() {
         event,
         Event::ToolResult(result) if result.call_id.as_str() == wait_call_id.as_str()
     )));
+    let activation = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .pending_message_wakes
+        .back()
+        .expect("queued message")
+        .activation_observation
+        .expect("activation");
     h.process_notification_delivery_deadlines_at(Instant::now() + Duration::from_millis(20_000));
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
-                && matches!(&result.result, CborValue::Text(text) if text.contains("outcome: interrupted"))
+                && result.result == CborValue::Text(format!(
+                    "outcome: interrupted\nreason: agent_message\ncause: {activation}"))
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -5271,6 +5279,13 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
             message: "queued manager message".to_owned(),
         }),
     );
+    let activation = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .pending_message_wakes
+        .back()
+        .expect("queued message")
+        .activation_observation
+        .expect("activation");
     std::thread::sleep(Duration::from_millis(2));
     h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
         .expect("wait interrupted by queued agent message");
@@ -5284,7 +5299,8 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
-                && matches!(&result.result, CborValue::Text(text) if text.contains("outcome: interrupted"))
+                && result.result == CborValue::Text(format!(
+                    "outcome: interrupted\nreason: agent_message\ncause: {activation}"))
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,

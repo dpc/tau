@@ -9,8 +9,8 @@ use crate::background_completion_outcome::BackgroundErrorOutcome;
 
 fn completion_receipt_matches(value: &CborValue, call: &str, outcome: &str) -> bool {
     matches!(value, CborValue::Map(fields) if fields.len() == 2)
-        && cbor_map_text(value, "original_tool_call_id") == Some(call)
-        && cbor_map_text(value, "target_outcome") == Some(outcome)
+        && cbor_map_text(value, "cause") == Some(call)
+        && cbor_map_text(value, "outcome") == Some(outcome)
 }
 
 /// An accepted producer cancellation needs no observed harness request. Its
@@ -2534,9 +2534,9 @@ fn wait_after_notice_publication_transfer_remains_receipt_only() {
         event,
         Event::ToolResult(result)
             if result.call_id == wait_call.id
-                && cbor_map_text(&result.result, "original_tool_call_id")
+                && cbor_map_text(&result.result, "cause")
                     == Some(call_id.as_str())
-                && cbor_map_text(&result.result, "target_outcome") == Some("completed")
+                && cbor_map_text(&result.result, "outcome") == Some("completed")
                 && cbor_map_text(&result.result, "output").is_none()
     )));
     assert!(
@@ -2864,9 +2864,9 @@ fn plural_wait_final_background_member_does_not_recreate_completion_notice() {
                 && matches!(&result.result, CborValue::Map(root)
                     if matches!(&root[0].1, CborValue::Array(members)
                         if members.len() == 2
-                            && cbor_map_text(&members[0], "original_tool_call_id")
+                            && cbor_map_text(&members[0], "cause")
                                 == Some(sources[0].as_str())
-                            && cbor_map_text(&members[1], "original_tool_call_id")
+                            && cbor_map_text(&members[1], "cause")
                                 == Some(sources[1].as_str())))
     )));
     for call_id in &sources {
@@ -5032,7 +5032,7 @@ fn background_cancel_clears_actual_running_call() {
         event,
         Event::ToolResult(result)
             if result.call_id == wait_call.id
-                && cbor_map_text(&result.result, "target_outcome") == Some("cancelled")
+                && cbor_map_text(&result.result, "outcome") == Some("cancelled")
     )));
     reopened.shutdown().expect("shutdown reopened harness");
 }
@@ -6553,7 +6553,7 @@ fn background_completion_wakes_input_wait_without_consuming_result() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "wait-consume-after-input"
-                && cbor_map_text(&result.result, "original_tool_call_id")
+                && cbor_map_text(&result.result, "cause")
                     == Some(background_id.as_str())
     )));
     h.shutdown().expect("shutdown");

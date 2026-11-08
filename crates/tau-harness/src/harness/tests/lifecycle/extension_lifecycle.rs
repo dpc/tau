@@ -8955,7 +8955,7 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
                 if items.iter().any(|item| {
                     item.call_id.as_str() == "c1"
                         && item.status == ToolResultStatus::Success
-                        && item.output.render().contains("target_outcome")
+                        && item.output.render().contains("outcome")
                         && item.output.render().contains("error")
                 })
         )

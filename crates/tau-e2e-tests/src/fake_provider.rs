@@ -1196,12 +1196,8 @@ impl FakeState {
             .map_err(|message| self.mismatch(index, message))?;
         match initial_status {
             InitialStatusOutcome::AcceptedWorking => {
-                require_tool_result(
-                    prompt,
-                    "status-policy-working",
-                    "Status accepted: working — Exercise current status policy",
-                )
-                .map_err(|message| self.mismatch(index, message))?;
+                require_tool_result(prompt, "status-policy-working", "")
+                    .map_err(|message| self.mismatch(index, message))?;
                 if prompt_contains_text(prompt, STATUS_REMINDER) {
                     return Err(self.mismatch(index, "Working received a start reminder"));
                 }
@@ -1246,11 +1242,9 @@ impl FakeState {
             InitialStatusOutcome::AcceptedWorking => {
                 require_tool_result(prompt, "status-policy-followup-work", "restart succeeded")
             }
-            InitialStatusOutcome::Rejected => require_tool_result(
-                prompt,
-                "status-policy-recovery-working",
-                "Status accepted: working — Exercise current status policy",
-            ),
+            InitialStatusOutcome::Rejected => {
+                require_tool_result(prompt, "status-policy-recovery-working", "")
+            }
         }
         .map_err(|message| self.mismatch(index, message))?;
         let expected_reminders = match initial_status {
@@ -1294,14 +1288,10 @@ impl FakeState {
         &mut self,
         index: usize,
         prompt: &tau_proto::AgentPromptCreated,
-        terminal_phase: StatusTerminalPhase,
+        _terminal_phase: StatusTerminalPhase,
         response: String,
     ) -> ClientResult<Event> {
-        let expected = format!(
-            "Status accepted: {} — Exercise current status policy",
-            terminal_phase.as_str()
-        );
-        require_tool_result(prompt, "status-policy-terminal", &expected)
+        require_tool_result(prompt, "status-policy-terminal", "")
             .map_err(|message| self.mismatch(index, message))?;
         Ok(Event::ProviderResponseFinishedReported(finished(
             prompt,

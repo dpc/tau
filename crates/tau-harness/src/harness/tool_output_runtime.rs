@@ -182,6 +182,7 @@ impl Harness {
             .pending_message_wakes
             .push_back(crate::agent::PendingMessageWake {
                 source: PendingMessageWakeSource::ToolOutput {
+                    call_id: update.output.call_id.clone(),
                     durable_event_seq: outcome.seq,
                     terminal: false,
                 },

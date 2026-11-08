@@ -98,8 +98,8 @@ that agent while preserving capture and unrelated activating input.
 Accepted updates are limited to 8 KiB each and 64 KiB/64 updates per call, with a
 separate bounded final diagnostic capture. Tau drains excess output, retains
 recent text, and reports omissions; overflow does not cancel the command.
-`wait` returns a successful receipt with `original_tool_call_id` and
-`target_outcome` (`completed`, `error`, or `cancelled`), not another output copy.
+`wait` returns a successful receipt with `cause` (the source call ID) and
+`outcome` (`completed`, `error`, or `cancelled`), without a copy of the output.
 Use `tool_output` for deliberate bounded recovery of accepted source, including
 after compaction or restart. It does not recover omitted raw bytes or expired
 temporary files.

@@ -699,6 +699,17 @@ fn complete_only_filters_queued_and_live_updates_in_each_wait_mode() {
                     "{mode}, queued={queued_first}, complete_only={complete_only}"
                 );
                 assert_eq!(h.suppresses_tool_update_wakes(&cid), complete_only);
+                if !complete_only && mode != "input" {
+                    assert!(
+                        event_log_contains_any_source(&h, |event| matches!(
+                            event,
+                            Event::ToolResult(result) if result.call_id.as_str() == "waiting-stream"
+                                && result.result == CborValue::Text(
+                                    "outcome: interrupted\nreason: partial_tool_output\ncause: background-stream".into())
+                        )),
+                        "{mode}, queued_first={queued_first}: exact source receipt"
+                    );
+                }
                 let agent = durable_agent_id_for_conversation(&h, &cid);
                 let tree = h
                     .session_runtime

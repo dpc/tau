@@ -408,7 +408,7 @@ fn deterministic_dummy_disconnect_respawns_before_later_turn()
     const SECOND_PROMPT: &str = "use the replacement dummy";
     const FIRST_CALL: &str = "disconnect-call";
     const SECOND_CALL: &str = "replacement-call";
-    const DISCONNECT_DIAGNOSTIC: &str = "internal: true\n\nTool call `disconnect-call` was interrupted because extension disconnected. Side effects may have occurred.";
+    const DISCONNECT_DIAGNOSTIC: &str = "Tool call `disconnect-call` was interrupted because extension disconnected. Side effects may have occurred.";
 
     let fixture = DeterministicFixture::new_exit_once_then_success_v2(
         "deterministic_dummy_disconnect_respawns_before_later_turn",
@@ -876,11 +876,7 @@ fn deterministic_current_status_policy_round() -> Result<(), Box<dyn std::error:
                 assert_eq!(
                     outcome.tool_results.iter().any(|result| {
                         result.call_id.as_str() == "status-policy-working"
-                            && result.result
-                                == CborValue::Text(
-                                    "Status accepted: working — Exercise current status policy"
-                                        .to_owned(),
-                                )
+                            && result.result == CborValue::Text(String::new())
                     }),
                     initial_status == InitialStatusOutcome::AcceptedWorking
                 );
