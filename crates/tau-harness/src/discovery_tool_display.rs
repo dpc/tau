@@ -33,7 +33,13 @@ pub fn discovery_tool_display(result: &CborValue, kind: DiscoveryKind) -> ToolUs
         let parts = fields
             .into_iter()
             .filter_map(|key| {
-                tau_proto::cbor_text_field(row, key).map(|value| format!("{key}: {value}"))
+                tau_proto::cbor_text_field(row, key).map(|value| {
+                    if matches!(kind, DiscoveryKind::Sessions) && key == "session_id" {
+                        value.to_owned()
+                    } else {
+                        format!("{key}: {value}")
+                    }
+                })
             })
             .collect::<Vec<_>>();
         if !parts.is_empty() {

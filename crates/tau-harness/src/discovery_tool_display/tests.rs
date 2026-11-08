@@ -2,6 +2,39 @@ use std::path::Path;
 
 use super::*;
 
+/// Session rows omit redundant identity labels without losing metadata, scan
+/// warnings, or the structured result consumed by the model.
+#[test]
+fn session_ui_uses_bare_ids_and_preserves_metadata() {
+    let result = serde_json::from_value::<CborValue>(serde_json::json!({
+        "sessions": [
+            {"session_id": "isolate-zvpks2"},
+            {"session_id": "tau-ri282t", "state": "running", "prompt": "PRIVATE"}
+        ],
+        "truncated": true,
+        "scan_truncated": true
+    }))
+    .expect("discovery result");
+    let original = result.clone();
+    let display = discovery_tool_display(&result, DiscoveryKind::Sessions);
+    assert_eq!(
+        display.payload,
+        Some(ToolUsePayload::Text {
+            text:
+                "isolate-zvpks2\ntau-ri282t  state: running\ntruncated: true\nscan_truncated: true"
+                    .into()
+        })
+    );
+    assert_eq!(display.stats.matches, Some(2));
+    assert_eq!(display.status_text, "ok");
+    assert_eq!(display.info_chips, ["truncated", "scan truncated"]);
+    assert_eq!(result, original);
+
+    let empty = discovery_tool_display(&CborValue::Map(vec![]), DiscoveryKind::Sessions);
+    assert_eq!(empty.stats.matches, Some(0));
+    assert_eq!(empty.payload, None);
+}
+
 /// Returned identities and incomplete-scan facts remain visible, but arbitrary
 /// result fields and private prompt text never become UI payloads.
 #[test]
@@ -37,6 +70,7 @@ fn discovery_ui_projects_only_identity_and_scan_facts() {
         panic!("identity rows")
     };
     assert!(text.contains("reviewer-demo"));
+    assert!(text.contains("agent_id: reviewer-demo"));
     assert!(!text.contains("PRIVATE"));
     let sessions = CborValue::Map(vec![
         (
