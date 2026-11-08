@@ -264,7 +264,9 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
         &mut world,
     ) {
         Ok(path_crate_tools_shell::CommandOutcome::Finished(output)) => *output,
-        Ok(path_crate_tools_shell::CommandOutcome::Cancelled) => panic!("unexpected cancellation"),
+        Ok(path_crate_tools_shell::CommandOutcome::Cancelled { .. }) => {
+            panic!("unexpected cancellation")
+        }
         Err(error) if error.message.contains("Operation not permitted") => return,
         Err(error) => panic!("unexpected shell start error: {error:?}"),
     };

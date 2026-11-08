@@ -5,6 +5,7 @@ use super::*;
 #[test]
 fn inspection_alias_projects_canonical_terminal() {
     let event = Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: "call".into(),
         tool_name: tau_proto::ToolName::new("shell"),
         tool_type: tau_proto::ToolType::Function,

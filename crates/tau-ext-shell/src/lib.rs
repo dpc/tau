@@ -180,6 +180,38 @@ impl Output {
         result
     }
 
+    /// Reserve capacity-wake custody before starting command effects.
+    fn reserve_output_capacity(
+        &self,
+    ) -> tau_client::ClientResult<Option<tau_client::DetachedCapacityToken>> {
+        match &self.inner {
+            OutputInner::Client(handle) => handle.reserve_detached_capacity().map(Some),
+            #[cfg(test)]
+            OutputInner::Channel(_) => Ok(None),
+        }
+    }
+
+    /// Admit a source frame or atomically request a future capacity wake.
+    fn send_or_arm(
+        &self,
+        mut message: HarnessInputMessage,
+        token: Option<&tau_client::DetachedCapacityToken>,
+    ) -> tau_client::ClientResult<()> {
+        self.scope_message(&mut message);
+        match (&self.inner, token) {
+            (OutputInner::Client(handle), Some(token)) => {
+                handle.send_detached_or_arm(message, token)
+            }
+            #[cfg(test)]
+            (OutputInner::Channel(tx), None) => tx
+                .send(message)
+                .map_err(|_| tau_client::ClientError::WriterClosed),
+            _ => Err(tau_client::ClientError::handler(
+                "stream publisher has no capacity token",
+            )),
+        }
+    }
+
     /// Sends mandatory lifecycle traffic in order and waits for writer flush.
     fn send_checked(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
         if let Some(scope) = &self.user_shell
@@ -195,7 +227,7 @@ impl Output {
     /// Flush an already scoped protocol message without re-entering adaptation.
     fn send_wire_checked(&self, message: HarnessInputMessage) -> tau_client::ClientResult<()> {
         let result = match &self.inner {
-            OutputInner::Client(handle) => handle.send(message),
+            OutputInner::Client(handle) => handle.send_after_detached(message),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
                 .send(message)
@@ -215,6 +247,7 @@ impl Output {
         if let HarnessInputMessage::Emit(emit) = message {
             let tool_name = match emit.event.as_mut() {
                 Event::ToolProgressReported(event) => Some(&mut event.tool_name),
+                Event::ToolOutputReported(event) => Some(&mut event.tool_name),
                 Event::ToolResultReported(event) => Some(&mut event.tool_name),
                 Event::ToolResult(event) => Some(&mut event.tool_name),
                 Event::ToolErrorReported(event) => Some(&mut event.tool_name),
@@ -992,6 +1025,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         tags: tool_tags(&[
             "shell:exec",
             "shell:exec:generic",
+            tau_proto::TOOL_OUTPUT_STREAM_TAG,
             tau_proto::TURN_MANIPULATOR_TOOL_TAG,
         ]),
         enabled_by_default: true,
@@ -1042,6 +1076,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         tags: tool_tags(&[
             "shell:exec",
             "shell:exec:shell_command",
+            tau_proto::TOOL_OUTPUT_STREAM_TAG,
             tau_proto::TURN_MANIPULATOR_TOOL_TAG,
         ]),
         enabled_by_default: false,
@@ -2127,6 +2162,7 @@ fn send_identity_failure(
         display,
     } = failure;
     tx.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: identity.call_id,
         tool_name: identity.wire_tool_name,
@@ -2237,6 +2273,7 @@ fn dispatch_tool_invoke(
                 WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
             });
             let _ = tx.report_tool_terminal(Event::ToolResult(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -2297,6 +2334,7 @@ fn dispatch_tool_invoke(
             display,
         }) => {
             let event = Event::ToolError(tau_proto::ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
@@ -2438,6 +2476,8 @@ fn dispatch_cancellable_non_shell_tool(
         }
         path_crate_tools::CancellableToolOutcome::Cancelled => {
             let event = Event::ToolCancelled(ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id,
                 tool_name,
@@ -2515,20 +2555,31 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
             shell_command_mode,
         )),
     });
-    let result = path_crate_tools::shell::run_command_cancellable_for_tool(
-        path_crate_tools::shell::ShellInvocation {
-            surface: path_crate_tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
-                .expect("shell dispatch accepts only known shell tools"),
-            call_id: invoke.call_id.as_str(),
-            arguments: &invoke.arguments,
-            authorized_cwd: authorized_cwd.as_deref(),
-        },
-        &shell_config,
-        shell_command_mode,
-        enforce_ro_bind,
-        Some(cancel_rx),
-        &mut world,
-    );
+    let result = path_crate_tools_shell::OutputStreamCapture::new(
+        tx.clone(),
+        invoke.call_id.clone(),
+        invoke.tool_name.clone(),
+    )
+    .map_err(|error| {
+        path_crate_display::ToolFailure::from(format!("cannot initialize output stream: {error}"))
+    })
+    .and_then(|stream| {
+        path_crate_tools::shell::run_command_cancellable_for_tool(
+            path_crate_tools::shell::ShellInvocation {
+                output_stream: Some(stream),
+                surface: path_crate_tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
+                    .expect("shell dispatch accepts only known shell tools"),
+                call_id: invoke.call_id.as_str(),
+                arguments: &invoke.arguments,
+                authorized_cwd: authorized_cwd.as_deref(),
+            },
+            &shell_config,
+            shell_command_mode,
+            enforce_ro_bind,
+            Some(cancel_rx),
+            &mut world,
+        )
+    });
     let outcome = match (result, world.finish()) {
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Ok(_), Err(failure)) | (Err(failure), Ok(())) | (Err(failure), Err(_)) => Err(failure),
@@ -2537,6 +2588,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         Ok(path_crate_tools_shell::CommandOutcome::Finished(output)) => {
             debug!(call_id = %invoke.call_id, tool_name = %invoke.tool_name, "cancellable shell call finished");
             Event::ToolResult(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
@@ -2548,9 +2600,11 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
                 originator: invoke.originator.clone(),
             })
         }
-        Ok(path_crate_tools_shell::CommandOutcome::Cancelled) => {
+        Ok(path_crate_tools_shell::CommandOutcome::Cancelled { output }) => {
             debug!(call_id = %invoke.call_id, tool_name = %invoke.tool_name, "cancellable shell call cancelled");
             Event::ToolCancelled(ToolCancelled {
+                output,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
@@ -2570,6 +2624,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
                 "cancellable shell call failed"
             );
             Event::ToolError(tau_proto::ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),

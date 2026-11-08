@@ -1378,6 +1378,7 @@ impl Harness {
 
     /// Republish one retained completion envelope only on its owning branch.
     pub(super) fn retry_pending_agent_publish_completion(&mut self, cid: &AgentId) {
+        self.retry_tool_outputs(cid);
         self.retry_retained_tool_terminals(cid);
         let Some(mut completion) = self
             .prompt_coordination
@@ -1763,6 +1764,7 @@ impl Harness {
                         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                         context_limit_telemetry: None,
                         interrupted_retry: false,
+                        streamed_tool_items: Vec::new(),
                         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         output_length_disposition:
@@ -2981,6 +2983,7 @@ impl Harness {
         result: &ToolResult,
     ) {
         let generic = Event::ToolResult(ToolResult {
+            captured_output: result.captured_output.clone(),
             call_id: result.call_id.clone(),
             tool_name: result.tool_name.clone(),
             tool_type: result.tool_type,
@@ -3032,6 +3035,12 @@ impl Harness {
             agent.identity.source_connection = None;
         }
         self.react_to_committed_tool_terminal(source, event, append_outcome);
+        if let Event::ToolOutputUpdated(update) = event {
+            if let Some(outcome) = append_outcome {
+                self.activate_tool_output(update, outcome);
+            }
+            self.finish_tool_output_update(update);
+        }
         if let Event::ProviderStandaloneExecutionAccounted(accounted) = event {
             self.fold_committed_standalone_accounting(accounted, source, true);
         }
@@ -3490,6 +3499,7 @@ impl Harness {
                     });
                 self.finish_prebuilt_internal_tool_error_with_mode(
                     ToolError {
+                        captured_output: None,
                         presentation: Default::default(),
                         call_id: call_id.clone(),
                         tool_name: pending.visible_tool_name,
@@ -3566,6 +3576,7 @@ impl Harness {
                     let call_id = pending.call_id.clone();
                     self.finish_prebuilt_internal_tool_error_with_mode(
                         ToolError {
+                            captured_output: None,
                             presentation: Default::default(),
                             call_id: pending.call_id,
                             tool_name: pending.tool_name,
@@ -3773,6 +3784,7 @@ impl Harness {
             });
             self.finish_prebuilt_internal_tool_result_with_mode(
                 ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: pending.call_id,
                     tool_name: pending.tool_name,
@@ -4409,6 +4421,10 @@ impl Harness {
                 .publication
                 .capacity_rejected_activations
                 .remove(&cid);
+            self.tool_routing
+                .tool_runtime
+                .output_residencies
+                .retain(|_, owner| owner != &cid);
             self.agent_runtime.agent_registry.agents.remove(&cid);
             self.cancel_agent_synchronized_publications(&cid);
         }
@@ -4755,6 +4771,7 @@ impl Harness {
             self.handle_background_tool_error_inner(
                 Some(crate::harness::harness_connection_id()),
                 ToolError {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id,
                     tool_name,
@@ -4769,6 +4786,7 @@ impl Harness {
             );
         } else {
             self.finish_prebuilt_internal_tool_error(ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id,
                 tool_name,
@@ -5201,6 +5219,7 @@ impl Harness {
         if !matches!(
             event,
             Event::ProviderToolResult(_)
+                | Event::ToolOutputUpdated(_)
                 | Event::ProviderToolError(_)
                 | Event::ToolResult(_)
                 | Event::ToolResultDisplay(_)
@@ -5353,6 +5372,12 @@ impl Harness {
 
     pub(super) fn tool_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
         match event {
+            Event::ToolOutputReported(output) => {
+                self.tool_call_targets_ephemeral_agent(&output.call_id)
+            }
+            Event::ToolOutputUpdated(update) => {
+                self.tool_call_targets_ephemeral_agent(&update.output.call_id)
+            }
             Event::ToolRejected(rejected) => {
                 self.tool_call_targets_ephemeral_agent(&rejected.call_id)
             }
@@ -5476,6 +5501,13 @@ impl Harness {
                 .tool_runtime
                 .tool_agents
                 .get(&result.call_id)
+                .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
+                .and_then(|conv| conv.identity.agent_id.clone()),
+            Event::ToolOutputUpdated(update) => self
+                .tool_routing
+                .tool_runtime
+                .tool_agents
+                .get(&update.output.call_id)
                 .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
                 .and_then(|conv| conv.identity.agent_id.clone()),
             Event::ProviderToolError(error) | Event::ToolError(error) => self

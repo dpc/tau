@@ -5,11 +5,195 @@ use std::collections::HashSet;
 use super::super::super::CancelTarget;
 use super::*;
 use crate::agent::PendingPromptSource;
-use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
+use crate::background_completion_outcome::BackgroundErrorOutcome;
 
-/// Full/summary previews and errors do not keep finished durable work alive.
-/// Idle shutdown must preserve its original output for exact and bare waits on
-/// cold resume, without weakening unload or consuming the eager preview.
+fn completion_receipt_matches(value: &CborValue, call: &str, outcome: &str) -> bool {
+    matches!(value, CborValue::Map(fields) if fields.len() == 2)
+        && cbor_map_text(value, "original_tool_call_id") == Some(call)
+        && cbor_map_text(value, "target_outcome") == Some(outcome)
+}
+
+/// An accepted producer cancellation needs no observed harness request. Its
+/// typed outcome and available diagnostics survive live and cold exact/plural
+/// waits without deriving cancellation from prose or inventing causal evidence.
+#[test]
+fn unsolicited_cancellation_preserves_live_and_restored_wait_outcome() {
+    for cold in [false, true] {
+        for plural in [false, true] {
+            let td = TempDir::new().expect("tempdir");
+            let state = td.path().join("state");
+            let mut h = echo_harness(&state).expect("start");
+            h.config.selected_model = Some("test/model".into());
+            connect_ready_configured_extension(
+                &mut h,
+                "cancel-worker",
+                "cancel-worker",
+                tau_proto::ClientKind::Tool,
+            );
+            let connection = crate::test_connection_id("cancel-worker");
+            h.tool_routing.registry.register(
+                &connection,
+                instant_background_test_tool_spec("cancel_work"),
+            );
+            let cid = ensure_test_user_agent(&mut h);
+            let agent = durable_agent_id_for_conversation(&h, &cid);
+            start_background_tool_and_finish_placeholder_turn(
+                &mut h,
+                &cid,
+                "cancel-source",
+                "cancel_work",
+            );
+            assert!(
+                !h.tool_routing
+                    .tool_runtime
+                    .pending_cancellation_observations
+                    .contains_key("cancel-source")
+            );
+            h.handle_extension_event_inner(
+                &connection,
+                Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                    output: Some(
+                        if plural {
+                            "available cancellation diagnostic"
+                        } else {
+                            ""
+                        }
+                        .into(),
+                    ),
+                    captured_output: Some(tau_proto::ToolFinalOutput {
+                        text: "forged capture".into(),
+                        omitted_bytes: 0,
+                    }),
+                    call_id: "cancel-source".into(),
+                    tool_name: ToolName::new("cancel_work"),
+                    tool_type: tau_proto::ToolType::Function,
+                    presentation: Default::default(),
+                    display: None,
+                }),
+            )
+            .expect("unsolicited cancellation");
+            let records = h
+                .session_runtime
+                .agent_store
+                .snapshot_agent_events_for_test(agent.as_str())
+                .expect("records");
+            let error = records
+                .iter()
+                .find_map(|record| match &record.event {
+                    Event::ToolBackgroundError(error)
+                        if error.call_id.as_str() == "cancel-source" =>
+                    {
+                        Some(error)
+                    }
+                    _ => None,
+                })
+                .expect("canonical cancellation");
+            assert_eq!(
+                error.outcome,
+                tau_proto::ToolBackgroundErrorOutcome::Cancelled
+            );
+            let capture = error.captured_output.as_ref().expect("available capture");
+            assert!(capture.text.contains("cancelled: tool cancelled"));
+            if plural {
+                assert!(capture.text.contains("available cancellation diagnostic"));
+            }
+            assert!(!capture.text.contains("forged capture"));
+            assert!(
+                records.iter().any(|record| matches!(
+                    &record.event,
+                    Event::AgentToolTerminalClassified(classified)
+                        if classified.cause == tau_proto::ToolTerminalCause::Unknown
+                )),
+                "explicit cancellation must not invent a request cause"
+            );
+            let prompt = active_prompt_for(&h, &cid);
+            let live_context = event_log_events(&h)
+                .into_iter()
+                .find_map(|event| match event {
+                    Event::AgentPromptCreated(created) if created.agent_prompt_id == prompt => {
+                        Some(serde_json::to_string(&created.context).expect("live context"))
+                    }
+                    _ => None,
+                })
+                .expect("completion followup context");
+            assert!(
+                live_context.contains("cancelled: tool cancelled"),
+                "status must reach the model without wait"
+            );
+            let replayed = tau_core::AgentTree::try_from_events(agent.clone(), &records)
+                .expect("replay final source");
+            let reference = replayed
+                .tool_output_call(&"cancel-source".into(), replayed.head())
+                .expect("source declaration");
+            let page = replayed
+                .tool_output_page(reference, replayed.head(), 0)
+                .expect("replayed source");
+            assert!(page.text.contains("cancelled: tool cancelled"));
+            h.handle_provider_response_finished(provider_text_response(
+                &prompt,
+                agent.clone(),
+                "done",
+            ))
+            .expect("finish followup");
+            if cold {
+                h.shutdown().expect("shutdown");
+                drop(h);
+                wait_for_session_unlock(&state, "s1");
+                h = quiet_provider_harness_with_start_reason(
+                    &state,
+                    tau_proto::SessionStartReason::Resume,
+                )
+                .expect("cold restore");
+            }
+            let cid = ensure_test_user_agent(&mut h);
+            let mut wait = wait_no_args_call("cancel-receipt");
+            wait.arguments = if plural {
+                CborValue::Map(vec![(
+                    CborValue::Text("tool_call_ids".into()),
+                    CborValue::Array(vec![CborValue::Text("cancel-source".into())]),
+                )])
+            } else {
+                CborValue::Map(vec![(
+                    CborValue::Text("tool_call_id".into()),
+                    CborValue::Text("cancel-source".into()),
+                )])
+            };
+            h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+                .expect("wait");
+            assert!(
+                event_log_contains_any_source(&h, |event| {
+                    let Event::ToolResult(result) = event else {
+                        return false;
+                    };
+                    if result.call_id != wait.id {
+                        return false;
+                    }
+                    let receipt = if plural {
+                        let Some(CborValue::Array(results)) =
+                            tau_proto::cbor_field(&result.result, "results")
+                        else {
+                            return false;
+                        };
+                        if results.len() != 1 {
+                            return false;
+                        }
+                        &results[0]
+                    } else {
+                        &result.result
+                    };
+                    completion_receipt_matches(receipt, "cancel-source", "cancelled")
+                }),
+                "cold={cold} plural={plural}"
+            );
+            h.shutdown().expect("final shutdown");
+        }
+    }
+}
+
+/// Retained canonical source and errors do not keep finished durable work
+/// alive. Idle shutdown preserves source recovery and exact/bare completion
+/// receipts on cold resume without weakening unload or repeating source text in
+/// waits.
 #[test]
 fn unread_background_completion_allows_idle_shutdown_and_cold_wait() {
     for (failed, summary) in [(false, false), (false, true), (true, false)] {
@@ -64,7 +248,8 @@ fn unread_background_completion_allows_idle_shutdown_and_cold_wait() {
                 event,
                 Event::AgentPromptSubmitted(prompt)
                     if prompt.internal_kind == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
-                        && prompt.text.contains(if summary { "delivery=\"summary\"" } else { "delivery=\"full\"" })
+                        && prompt.text.contains("completion receipt")
+                        && !prompt.text.contains(&output)
             )));
             assert!(
                 h.agent_has_accepted_work(&cid, &agent_id),
@@ -156,18 +341,12 @@ fn unread_background_completion_allows_idle_shutdown_and_cold_wait() {
             assert!(
                 event_log_contains_any_source(&h, |event| match event {
                     Event::ToolResult(result) =>
-                        !failed
-                            && result.call_id == wait.id
-                            && if exact {
-                                result.result == CborValue::Text(output.clone())
-                            } else {
-                                cbor_map_text(&result.result, "original_tool_call_id")
-                                    == Some("idle-source")
-                                    && cbor_map_text(&result.result, "output")
-                                        == Some(output.as_str())
-                            },
-                    Event::ToolError(error) =>
-                        failed && error.call_id == wait.id && error.message.contains(&output),
+                        result.call_id == wait.id
+                            && completion_receipt_matches(
+                                &result.result,
+                                "idle-source",
+                                if failed { "error" } else { "completed" }
+                            ),
                     _ => false,
                 }),
                 "failed={failed} summary={summary} exact={exact}"
@@ -258,8 +437,13 @@ fn consumed_background_wait_allows_idle_shutdown() {
             assert!(
                 mode == "direct"
                     || event_log_contains_any_source(&h, |event| match event {
-                        Event::ToolResult(result) => !failed && result.call_id == wait.id,
-                        Event::ToolError(error) => failed && error.call_id == wait.id,
+                        Event::ToolResult(result) =>
+                            result.call_id == wait.id
+                                && completion_receipt_matches(
+                                    &result.result,
+                                    "idle-source",
+                                    if failed { "error" } else { "completed" }
+                                ),
                         _ => false,
                     })
             );
@@ -307,6 +491,7 @@ fn provider_owner_validation_rejects_external_background_result() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-wrong"),
         Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: "owner-background-call".into(),
             tool_name: ToolName::new("owned_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -339,6 +524,8 @@ fn provider_owner_validation_rejects_external_background_error() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-wrong"),
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: "owner-background-error-call".into(),
             tool_name: ToolName::new("owned_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -431,6 +618,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -567,6 +755,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -655,6 +844,8 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-wrong"),
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "owner-cancelled-call".into(),
             tool_name: ToolName::new("owned_tool"),
@@ -757,6 +948,7 @@ fn cancel_publishes_tool_cancel_request() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -964,15 +1156,11 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
         event_log_contains_any_source(&h, |event| matches!(
             event,
                 Event::AgentPromptSubmitted(submitted)
-                if submitted.text.starts_with(&format!(
-                        "<tau_background_result call_id=\"{}\"",
-                        call_id.as_str()
-                    ))
-                    && submitted.text.contains("tool_outcome=\"error\"")
+                if submitted.text == completion_prompt
                     && submitted.message_class == tau_proto::PromptMessageClass::Internal
                     && submitted.internal_kind
                         == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
-                    && submitted.trusted_internal_spans.is_empty()
+                    && !submitted.trusted_internal_spans.is_empty()
         )),
         "events: {:?}",
         event_log_events(&h)
@@ -1081,6 +1269,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1238,6 +1427,7 @@ fn backgrounded_tool_progress_is_not_published() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1345,6 +1535,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1360,8 +1551,9 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::ToolError(error)
-            if error.call_id.as_str() == "wait-lost-bg" && error.message == notice
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "wait-lost-bg"
+                && completion_receipt_matches(&result.result, "lost-bg", "error")
     )));
 
     h.shutdown().expect("shutdown");
@@ -1429,6 +1621,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1496,13 +1689,10 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptSubmitted(submitted)
-            if submitted.text.starts_with(
-                    "<tau_background_result call_id=\"a-bg-idle\""
-                )
-                && submitted.text.contains("tool_outcome=\"error\"")
+            if submitted.text == background_completion_prompt(&ToolCallId::from("a-bg-idle"))
                 && submitted.internal_kind
                     == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
-                && submitted.trusted_internal_spans.is_empty()
+                && !submitted.trusted_internal_spans.is_empty()
     )));
 
     h.shutdown().expect("shutdown");
@@ -1567,6 +1757,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1772,6 +1963,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         provider_attempt: Default::default(),
@@ -1879,6 +2071,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1896,6 +2089,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-fail"),
         Event::ToolErrorReported(tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "fail-call".into(),
             tool_name: ToolName::new("fail"),
@@ -2189,8 +2383,7 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "wait-any-before"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some(call_id.as_str())
-                && cbor_map_text(&result.result, "output") == Some("background done")
+                && completion_receipt_matches(&result.result, call_id.as_str(), "completed")
     )));
     let completion_prompt = background_completion_prompt(&call_id);
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -2231,6 +2424,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     );
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: call_id.clone(),
             tool_name: ToolName::new("slow_any_after"),
             tool_type: tau_proto::ToolType::Function,
@@ -2246,8 +2440,8 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     let completion_prompt = background_completion_prompt(&call_id);
     assert_eq!(
         completion_prompt,
-        "Tool call `bg-any-after` completed. Its result is queued. Call `wait` to consume it when \
-         useful; otherwise, you can leave it queued."
+        "Tool call `bg-any-after` completed. Its output is recorded separately. Call `wait` for a \
+         completion receipt, or `tool_output` to deliberately recover retained output."
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
@@ -2265,8 +2459,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "wait-any-after"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some(call_id.as_str())
-                && cbor_map_text(&result.result, "output") == Some("already done")
+                && completion_receipt_matches(&result.result, call_id.as_str(), "completed")
     )));
     assert!(
         h.tool_routing
@@ -2285,10 +2478,10 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     h.shutdown().expect("shutdown");
 }
 
-/// Once preview publication takes ownership, a racing wait still receives the
-/// canonical completion and cannot retract the transferred preview.
+/// A transferred control notice and a racing wait do not duplicate source
+/// output.
 #[test]
-fn wait_after_preview_publication_transfer_can_duplicate_completion() {
+fn wait_after_notice_publication_transfer_remains_receipt_only() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
@@ -2306,6 +2499,7 @@ fn wait_after_preview_publication_transfer_can_duplicate_completion() {
     );
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: call_id.clone(),
             tool_name: ToolName::new("slow_after_transfer"),
             tool_type: tau_proto::ToolType::Function,
@@ -2327,14 +2521,10 @@ fn wait_after_preview_publication_transfer_can_duplicate_completion() {
         .pending_prompts
         .drain(..)
         .collect::<Vec<_>>();
-    h.materialize_background_completion_preview_group(&mut transferred);
+    h.materialize_background_completion_notices(&mut transferred);
     assert_eq!(transferred.len(), 1);
-    assert!(
-        transferred[0]
-            .text
-            .starts_with("<tau_background_result call_id=\"bg-after-preview-transfer\"",)
-    );
-    assert!(transferred[0].text.contains("canonical output"));
+    assert!(transferred[0].text.contains("bg-after-preview-transfer"));
+    assert!(!transferred[0].text.contains("canonical output"));
 
     let wait_call = wait_no_args_call("wait-after-preview-transfer");
     h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
@@ -2346,7 +2536,8 @@ fn wait_after_preview_publication_transfer_can_duplicate_completion() {
             if result.call_id == wait_call.id
                 && cbor_map_text(&result.result, "original_tool_call_id")
                     == Some(call_id.as_str())
-                && cbor_map_text(&result.result, "output") == Some("canonical output")
+                && cbor_map_text(&result.result, "target_outcome") == Some("completed")
+                && cbor_map_text(&result.result, "output").is_none()
     )));
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
@@ -2358,10 +2549,9 @@ fn wait_after_preview_publication_transfer_can_duplicate_completion() {
     h.shutdown().expect("shutdown");
 }
 
-/// Passive previews merged into one user dispatch share one cumulative body
-/// budget and retain those exact committed bytes in provider context.
+/// Passive completion notices retain control identity, never source payload.
 #[test]
-fn passive_preview_group_budget_survives_publication_and_provider_assembly() {
+fn passive_completion_notices_do_not_copy_payload_into_provider_context() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
@@ -2379,6 +2569,7 @@ fn passive_preview_group_budget_survives_publication_and_provider_assembly() {
         h.record_wait_tool_call_ref(call_id.clone(), call_ref);
         h.record_wait_background_result(
             tau_proto::ToolBackgroundResult {
+                captured_output: None,
                 call_id: call_id.clone(),
                 tool_name: ToolName::new("large_passive"),
                 tool_type: tau_proto::ToolType::Function,
@@ -2412,24 +2603,15 @@ fn passive_preview_group_budget_survives_publication_and_provider_assembly() {
         })
         .collect::<Vec<_>>();
     assert_eq!(committed.len(), 2);
-    assert!(committed[0].contains("delivery=\"full\""));
-    assert!(committed[0].contains(&"a".repeat(5 * 1024)));
-    assert!(committed[1].contains("delivery=\"summary\""));
-    assert!(!committed[1].contains(&"b".repeat(5 * 1024)));
-    let delivered_body_bytes = committed
-        .iter()
-        .map(|text| {
-            text.split_once('>')
-                .and_then(|(_, body_and_close)| {
-                    body_and_close.strip_suffix("</tau_background_result>")
-                })
-                .expect("registered preview envelope")
-                .len()
-        })
-        .sum::<usize>();
     assert!(
-        delivered_body_bytes
-            <= crate::background_completion_preview::BACKGROUND_PREVIEW_GROUP_BODY_BYTES
+        committed
+            .iter()
+            .all(|text| text.contains("completion receipt"))
+    );
+    assert!(
+        !committed.iter().any(
+            |text| text.contains(&"a".repeat(5 * 1024)) || text.contains(&"b".repeat(5 * 1024))
+        )
     );
 
     let request = read_nth_prompt_created(&h, 0);
@@ -2442,7 +2624,10 @@ fn passive_preview_group_budget_survives_publication_and_provider_assembly() {
                 let ContentPart::Text { text } = part else {
                     return None;
                 };
-                text.starts_with("<tau_background_result").then_some(text)
+                committed
+                    .iter()
+                    .find(|notice| text.contains(notice.as_str()))
+                    .cloned()
             }),
             _ => None,
         })
@@ -2528,6 +2713,7 @@ fn plural_wait_publishes_ordered_aggregate_and_durable_correlation() {
     let terminal_b = tau_proto::ObservationId::from_bytes([32; 16]);
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: source_a.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -2542,6 +2728,8 @@ fn plural_wait_publishes_ordered_aggregate_and_durable_correlation() {
     );
     h.record_wait_background_error(
         tau_proto::ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: source_b.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -2581,12 +2769,8 @@ fn plural_wait_publishes_ordered_aggregate_and_durable_correlation() {
             if result.call_id == wait.id
                 && matches!(&result.result, CborValue::Map(root)
                     if matches!(&root[0].1, CborValue::Array(members)
-                        if cbor_map_text(&members[0], "original_tool_call_id")
-                            == Some(source_b.as_str())
-                            && cbor_map_text(&members[0], "outcome") == Some("error")
-                            && cbor_map_text(&members[1], "original_tool_call_id")
-                                == Some(source_a.as_str())
-                            && cbor_map_text(&members[1], "outcome") == Some("result")))
+                        if completion_receipt_matches(&members[0], source_b.as_str(), "error")
+                            && completion_receipt_matches(&members[1], source_a.as_str(), "completed")))
     )));
     h.shutdown().expect("shutdown");
 }
@@ -2660,6 +2844,7 @@ fn plural_wait_final_background_member_does_not_recreate_completion_notice() {
         h.handle_background_tool_result(
             &crate::test_connection_id("conn-slow"),
             ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: ToolName::new("slow"),
@@ -2747,6 +2932,7 @@ fn plural_wait_terminal_append_retries_before_atomic_consumption() {
     h.record_wait_tool_request(&source);
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: source.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -2884,6 +3070,7 @@ fn plural_wait_call_cancellation_restores_notice_without_consuming_source() {
     }
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: completed.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3000,6 +3187,7 @@ fn plural_wait_old_generation_delivery_preserves_reused_notice() {
     }
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: reused.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3045,6 +3233,7 @@ fn plural_wait_old_generation_delivery_preserves_reused_notice() {
     h.record_wait_tool_request(&reused);
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: reused.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3152,6 +3341,7 @@ fn plural_wait_old_generation_delivery_removes_stale_notice_until_reuse_complete
     }
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: reused.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3243,6 +3433,7 @@ fn plural_wait_old_generation_delivery_removes_stale_notice_until_reuse_complete
 
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: reused.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3313,6 +3504,7 @@ fn plural_wait_multi_generation_delivery_preserves_notice_until_last_release() {
     let notice = background_completion_prompt(&reused);
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: reused.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3368,6 +3560,7 @@ fn plural_wait_multi_generation_delivery_preserves_notice_until_last_release() {
     );
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: reused.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3461,6 +3654,7 @@ fn plural_wait_multi_generation_delivery_preserves_notice_until_last_release() {
 
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: reused.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -3529,6 +3723,7 @@ fn current_generation_exact_waits_restore_released_generation_notice() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3555,6 +3750,7 @@ fn current_generation_exact_waits_restore_released_generation_notice() {
             &cid,
             old_terminal,
             Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+                captured_output: None,
                 call_id: reused.clone(),
                 tool_name: ToolName::new("slow"),
                 tool_type: tau_proto::ToolType::Function,
@@ -3595,6 +3791,7 @@ fn current_generation_exact_waits_restore_released_generation_notice() {
         }
         h.record_wait_background_result(
             tau_proto::ToolBackgroundResult {
+                captured_output: None,
                 call_id: reused.clone(),
                 tool_name: ToolName::new("slow"),
                 tool_type: tau_proto::ToolType::Function,
@@ -3660,6 +3857,7 @@ fn current_generation_exact_waits_restore_released_generation_notice() {
 
         h.record_wait_background_result(
             tau_proto::ToolBackgroundResult {
+                captured_output: None,
                 call_id: reused.clone(),
                 tool_name: ToolName::new("slow"),
                 tool_type: tau_proto::ToolType::Function,
@@ -3707,31 +3905,35 @@ fn current_generation_exact_waits_restore_released_generation_notice() {
                 },
                 tau_proto::ObservationId::from_bytes([117; 16]),
             )]);
-            assert!(h.has_pending_wait_preempting_prompt(
+            assert!(h.has_pending_wait_preempting_prompt_filtered(
                 &cid,
                 &current_identity,
                 DeliveryDeadlineKind::WaitTool,
+                false,
             ));
             assert_eq!(
-                h.pending_wait_preempting_activation(
+                h.pending_wait_preempting_activation_filtered(
                     &cid,
                     &current_identity,
                     DeliveryDeadlineKind::WaitTool,
+                    false,
                 ),
                 Some(old_activation),
                 "exact-current wait is preempted by the older generation's notice"
             );
             let old_identity = HashSet::from([(old_call_ref, old_terminal)]);
-            assert!(h.has_pending_wait_preempting_prompt(
+            assert!(h.has_pending_wait_preempting_prompt_filtered(
                 &cid,
                 &old_identity,
                 DeliveryDeadlineKind::WaitAny,
+                false,
             ));
             assert_eq!(
-                h.pending_wait_preempting_activation(
+                h.pending_wait_preempting_activation_filtered(
                     &cid,
                     &old_identity,
                     DeliveryDeadlineKind::WaitAny,
+                    false,
                 ),
                 Some(current_activation),
                 "bare-oldest wait is preempted by the newer generation's notice"
@@ -3752,6 +3954,7 @@ fn current_generation_exact_waits_restore_released_generation_notice() {
         if plural {
             h.record_wait_background_result(
                 tau_proto::ToolBackgroundResult {
+                    captured_output: None,
                     call_id: other.clone(),
                     tool_name: ToolName::new("slow"),
                     tool_type: tau_proto::ToolType::Function,
@@ -3978,6 +4181,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -4031,6 +4235,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -4122,6 +4327,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -4181,6 +4387,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "slow-call".into(),
             tool_name: ToolName::new("slow"),
@@ -4341,6 +4548,7 @@ fn completed_internal_delegate_with_background_tool_accepts_followup_input() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "preview".into(),
             tool_name: ToolName::new("slow"),
@@ -4491,6 +4699,7 @@ fn background_error_clears_actual_running_call() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -4629,6 +4838,7 @@ fn background_cancel_clears_actual_running_call() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -4671,6 +4881,8 @@ fn background_cancel_clears_actual_running_call() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-bg-cancel-drain"),
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "bg-exclusive-cancel-running".into(),
             tool_name: ToolName::new("bg_exclusive_cancel"),
@@ -4742,14 +4954,12 @@ fn background_cancel_clears_actual_running_call() {
         })
         .cloned()
         .collect::<Vec<_>>();
-    h.materialize_background_completion_preview_group(&mut pending);
+    h.materialize_background_completion_notices(&mut pending);
     assert!(
         pending.iter().any(|prompt| {
-            prompt
-                .text
-                .starts_with("<tau_background_result call_id=\"bg-exclusive-cancel-running\"")
-                && prompt.text.contains("tool_outcome=\"cancelled\"")
-                && prompt.trusted_internal_spans.is_empty()
+            prompt.text.contains("bg-exclusive-cancel-running")
+                && prompt.text.contains("completion receipt")
+                && !prompt.trusted_internal_spans.is_empty()
         }),
         "pending: {pending:?}"
     );
@@ -4804,16 +5014,6 @@ fn background_cancel_clears_actual_running_call() {
     let reopened_cid = reopened
         .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
         .expect("reopened agent");
-    let preview = reopened
-        .background_completion_preview_for(
-            &"bg-exclusive-cancel-running".into(),
-            terminal,
-            &mut BackgroundPreviewBudget::default(),
-        )
-        .expect("restored preview");
-    assert!(preview.contains("tool_outcome=\"cancelled\""));
-    assert!(!preview.contains("message_bytes="));
-
     let wait_call = AgentToolCall {
         call_ref: None,
         id: "wait-restored-cancel".into(),
@@ -4830,8 +5030,9 @@ fn background_cancel_clears_actual_running_call() {
         .expect("consume restored cancellation");
     assert!(event_log_contains_any_source(&reopened, |event| matches!(
         event,
-        Event::ToolError(error)
-            if error.call_id == wait_call.id && error.message == "Tool cancelled"
+        Event::ToolResult(result)
+            if result.call_id == wait_call.id
+                && cbor_map_text(&result.result, "target_outcome") == Some("cancelled")
     )));
     reopened.shutdown().expect("shutdown reopened harness");
 }
@@ -5014,6 +5215,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         provider_attempt: Default::default(),
@@ -5252,6 +5454,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -5371,6 +5574,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -5817,6 +6021,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -5880,6 +6085,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -5964,6 +6170,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "slow-call-cancel".into(),
             tool_name: ToolName::new("slow"),
@@ -6066,9 +6273,9 @@ fn wait_returns_internal_background_error_after_extension_disconnect() {
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::ToolError(error)
-            if error.call_id.as_str() == "wait-bg-disconnect"
-                && error.message == expected
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "wait-bg-disconnect"
+                && completion_receipt_matches(&result.result, call_id.as_str(), "error")
     )));
 
     h.shutdown().expect("shutdown");
@@ -6099,6 +6306,7 @@ fn background_wait_rejections_do_not_count_as_input_timeouts() {
     h.record_wait_tool_request(&background_id);
     h.record_wait_tool_result(
         &ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: background_id.clone(),
             tool_name: ToolName::new("slow"),
@@ -6113,6 +6321,7 @@ fn background_wait_rejections_do_not_count_as_input_timeouts() {
     );
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: background_id,
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -6324,6 +6533,7 @@ fn background_completion_wakes_input_wait_without_consuming_result() {
         .insert(background_id.clone(), cid.clone());
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: background_id.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -6497,6 +6707,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: ToolName::new("slow"),
@@ -6719,6 +6930,7 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -6736,8 +6948,7 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "wait-restored-any"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some("restored-any")
-                && cbor_map_text(&result.result, "output") == Some("restored output")
+                && completion_receipt_matches(&result.result, "restored-any", "completed")
     )));
 
     h.shutdown().expect("shutdown");
@@ -6798,6 +7009,7 @@ fn resumed_completed_background_result_preserves_exact_wait_correlation() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -6936,10 +7148,11 @@ fn scheduler_wait_for_completed_background_call_retains_durable_correlation() {
         })
         .collect::<Vec<_>>();
     assert_eq!(wait_results.len(), 1);
-    assert_eq!(
-        wait_results[0].result,
-        CborValue::Text("source-owned output".to_owned())
-    );
+    assert!(completion_receipt_matches(
+        &wait_results[0].result,
+        "completed-wait-source",
+        "completed",
+    ));
 
     let records = h
         .session_runtime
@@ -7091,6 +7304,7 @@ fn scheduler_plural_wait_retains_ordered_durable_correlation() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

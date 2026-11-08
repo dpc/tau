@@ -1446,9 +1446,12 @@ impl AgentStore {
                 .ok_or(AgentStoreError::Persistence(
                     PersistenceAdmissionError::NotPrepared,
                 ))?;
-        let count = lease
-            .try_reserve_frame()
-            .map_err(AgentStoreError::Persistence)?;
+        let count = if matches!(event, Event::ToolOutputUpdated(_)) {
+            lease.try_reserve_tool_output_frame()
+        } else {
+            lease.try_reserve_frame()
+        }
+        .map_err(AgentStoreError::Persistence)?;
         let projection =
             self.managed_projections
                 .get(&agent_id)

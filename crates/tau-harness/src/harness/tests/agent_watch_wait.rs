@@ -76,6 +76,7 @@ fn install_exact_wait_at(
 /// Build one ordinary final tool result for a tracked wait source.
 fn wait_source_result(call_id: &str) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("slow"),

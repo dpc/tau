@@ -1078,6 +1078,8 @@ impl Harness {
             .filter_map(|wake| {
                 wake.activation_observation.map(|observation| {
                     let kind = match wake.source {
+                        path_crate_agent::PendingMessageWakeSource::ToolOutput { .. } =>
+                            tau_proto::ActivationKind::BackgroundCompletion,
                         path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                             activation_class:
                                 path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput,
@@ -1792,6 +1794,7 @@ impl Harness {
                 continue;
             };
             self.finish_prebuilt_internal_tool_error(ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id,
                 tool_name: tool.name,
@@ -1948,6 +1951,10 @@ impl Harness {
                 .publication
                 .capacity_rejected_activations
                 .remove(cid);
+            self.tool_routing
+                .tool_runtime
+                .output_residencies
+                .retain(|_, owner| owner != cid);
             self.agent_runtime.agent_registry.agents.remove(cid);
             if retiring_main {
                 self.agent_runtime

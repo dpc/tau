@@ -342,6 +342,8 @@ fn prepared_upload_rejects_wrong_final_descriptor_without_fallback() {
 /// Builds the harness-owned cancellation corresponding to one captured call.
 fn cancellation(invoke: &ToolStarted) -> ToolCancelled {
     ToolCancelled {
+        output: None,
+        captured_output: None,
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,

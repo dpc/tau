@@ -51,6 +51,70 @@ impl AgentTree {
             }
         }
         charge = charge.saturating_add(self.control_allocation_charge(event));
+        // Stream projection owns an independently rendered context occurrence.
+        // Charge escaping expansion and deferred placement before admitting it.
+        let output_text_bytes = match event {
+            Event::ToolOutputUpdated(update) => Some(owned_value(update)),
+            Event::ToolBackgroundResult(result) => Some(
+                tool_response_allocation_charge(&result.result)
+                    .saturating_add(owned_value(&result.captured_output)),
+            ),
+            Event::ToolBackgroundError(error) => Some(owned_value(error)),
+            Event::ProviderToolResult(result)
+                if result.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt =>
+            {
+                Some(
+                    tool_response_allocation_charge(&result.result)
+                        .saturating_add(owned_value(&result.captured_output)),
+                )
+            }
+            Event::ProviderToolError(error)
+                if error.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt =>
+            {
+                Some(owned_value(error))
+            }
+            Event::ToolCancelled(cancelled)
+                if cancelled.presentation
+                    == tau_proto::ToolResultPresentation::ToolStreamReceipt =>
+            {
+                Some(owned_value(cancelled))
+            }
+            _ => None,
+        };
+        if let Some(bytes) = output_text_bytes {
+            charge = charge
+                .saturating_add(bytes.saturating_mul(8).saturating_add(2048))
+                .saturating_add(map_growth(&self.indexes.tool_outputs, 1))
+                // One bounded cursor's occurrence vector can grow at most once
+                // per accepted update and once for its terminal.
+                .saturating_add(
+                    (tau_proto::MAX_TOOL_OUTPUT_UPDATES as usize + 1)
+                        .saturating_mul(size_of::<PersistedAgentEventSeq>() * 2),
+                )
+                .saturating_add(self.context_allocation_charge(parent, false, &mut additions));
+            if matches!(
+                event,
+                Event::ProviderToolResult(result)
+                    if result.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt
+            ) || matches!(
+                event,
+                Event::ProviderToolError(error)
+                    if error.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt
+            ) || matches!(
+                event,
+                Event::ToolCancelled(cancelled)
+                    if cancelled.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt
+            ) {
+                // The final is queued before the native receipt closes the
+                // round. Ordinary terminal accounting sees only the old queue,
+                // so also charge this newly projected node and sorting slot.
+                additions.nodes = additions.nodes.saturating_add(1);
+                additions.context = additions.context.saturating_add(1);
+                charge = charge.saturating_add(sort_scratch::<PendingToolContextInput>(
+                    self.pending_context_inputs.len().saturating_add(1),
+                ));
+            }
+        }
         match event {
             Event::AgentStarted(started) => {
                 charge = charge.saturating_add(owned_value(started));
@@ -199,7 +263,14 @@ impl AgentTree {
                     }
                     charge = charge
                         .saturating_add(new_vec::<ToolCallId>(calls))
-                        .saturating_add(hash_growth::<ToolCallId>(0, 0, calls));
+                        .saturating_add(hash_growth::<ToolCallId>(0, 0, calls))
+                        .saturating_add(map_growth(&self.indexes.tool_outputs, calls))
+                        .saturating_add(map_growth(&self.indexes.tool_output_calls, calls));
+                    for item in &response.output_items {
+                        if let ContextItem::ToolCall(call) = item {
+                            charge = charge.saturating_add(owned_value(&call.call_id));
+                        }
+                    }
                     let owned = self
                         .pending_inference_inputs
                         .iter()

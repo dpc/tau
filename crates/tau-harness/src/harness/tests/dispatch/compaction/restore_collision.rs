@@ -272,9 +272,10 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
     if pre_start_failure {
         assert!(event_log_contains_any_source(&resumed, |event| matches!(
             event,
-            Event::ToolError(error)
-                if error.call_id == wait.id
-                    && Some(&error.message) == expected_cross_error.as_ref()
+            Event::ToolResult(result)
+                if result.call_id == wait.id
+                    && cbor_map_text(&result.result, "original_tool_call_id") == Some(cross_call.id.as_str())
+                    && cbor_map_text(&result.result, "target_outcome") == Some("error")
         )));
     } else {
         let wait_events = event_log_events(&resumed)
@@ -293,14 +294,29 @@ fn assert_restored_cross_compaction_request_id_collision(pre_start_failure: bool
             wait_events.iter().any(|event| matches!(
                 event,
                 Event::ToolResult(result)
-                    if cbor_map_text(&result.result, "request_id")
-                        == Some(cross_request_id.as_str())
-                        && cbor_map_text(&result.result, "target_agent_id")
-                            == Some(target_id.as_str())
-                        && cbor_map_text(&result.result, "status") == Some("compacted")
+                    if cbor_map_text(&result.result, "original_tool_call_id") == Some(cross_call.id.as_str())
+                        && cbor_map_text(&result.result, "target_outcome") == Some("completed")
             )),
             "{wait_events:#?}"
         );
+    }
+    let tree = resumed
+        .session_runtime
+        .agent_store
+        .agent(caller_id.as_str())
+        .expect("caller");
+    let source = tree
+        .tool_output_call(&cross_call.id, tree.head())
+        .expect("source declaration");
+    let page = tree
+        .tool_output_page(source, tree.head(), 0)
+        .expect("retained source output");
+    if let Some(message) = expected_cross_error {
+        assert!(page.text.contains(&message));
+    } else {
+        assert!(page.text.contains(cross_request_id.as_str()));
+        assert!(page.text.contains(target_id.as_str()));
+        assert!(page.text.contains("compacted"));
     }
     assert!(!resumed.wait_completion_is_retained_for_test(&resumed_caller, &cross_call.id));
 }

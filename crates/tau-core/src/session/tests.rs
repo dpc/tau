@@ -7,6 +7,7 @@ mod cross_model_recovery;
 mod discovery_context;
 mod fold_allocation;
 mod partial_provider_error;
+mod tool_output;
 
 /// Retained review lookup is independent of provider placement: it resolves
 /// while a tool round defers input and after a compaction replaces that
@@ -73,6 +74,7 @@ fn peer_review_source_survives_deferred_tool_input_and_compaction() {
     append(
         &mut live,
         Event::ProviderToolResult(tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call,
             tool_name: ToolName::new("tool"),
@@ -336,6 +338,7 @@ fn hosted_search_citations_and_opaque_call_survive_live_cold_restart() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1050,6 +1053,7 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
 #[test]
 fn provider_image_content_rejects_mismatched_media_bytes() {
     let result = tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
@@ -1119,6 +1123,7 @@ fn provider_image_content_rejects_per_agent_aggregate_overflow() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     tree.retained_provider_image_bytes = MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT;
     let result = tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
@@ -1201,6 +1206,7 @@ fn provider_image_reference_shape_rejects_invalid_size_dimensions_and_tool_kind(
 #[test]
 fn provider_image_reference_quota_counts_occurrences_not_unique_keys() {
     let result = tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "image".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
@@ -1265,6 +1271,7 @@ fn provider_response_rejects_input_side_tool_result_items() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2397,6 +2404,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2423,6 +2431,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
         );
         for (index, tool_type) in tool_types.iter().enumerate() {
             tree.apply_event(&Event::ProviderToolResult(tau_proto::ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: format!("call-{index}").into(),
                 tool_name: ToolName::new(format!("tool_{index}")),
@@ -2513,6 +2522,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2979,6 +2989,7 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3030,6 +3041,7 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3107,6 +3119,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4368,6 +4381,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -4455,6 +4469,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         tree.apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ProviderToolResult(tau_proto::ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: second_call_id.clone(),
                 tool_name: ToolName::new("second_tool"),
@@ -4473,6 +4488,8 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         tree.apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ToolCancelled(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: third_call_id.clone(),
                 tool_name: ToolName::new("third_tool"),
@@ -4488,6 +4505,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         .apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ProviderToolError(tau_proto::ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: first_call_id.clone(),
                 tool_name: ToolName::new("first_tool"),
@@ -4681,6 +4699,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     let drained = tree.apply_event_at(
         AgentEventParent::InheritHead,
         &Event::ProviderToolResult(tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id,
             tool_name: ToolName::new("tool"),
@@ -5083,6 +5102,7 @@ fn tool_round_deferred_background_preview_keeps_exact_node_provenance() {
             seq: PersistedAgentEventSeq::new(3),
             source: None,
             event: Event::ProviderToolResult(tau_proto::ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id,
                 tool_name: ToolName::new("tool"),
@@ -5179,6 +5199,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                 &mut tree,
                 AgentEventParent::InheritHead,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: prefix_call,
                     tool_name: ToolName::new("prefix"),
@@ -5255,6 +5276,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                 &mut tree,
                 AgentEventParent::InheritHead,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id,
                     tool_name: ToolName::new("test"),
@@ -5908,6 +5930,7 @@ fn background_terminal_cause_restore_requires_exact_call_and_terminal() {
         vec![call_id.clone()],
     ));
     let placeholder = Event::ProviderToolResult(tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.clone(),
         tool_name: ToolName::new("tool"),
@@ -5920,6 +5943,8 @@ fn background_terminal_cause_restore_requires_exact_call_and_terminal() {
     });
     let terminal = tau_proto::ObservationId::from_bytes([204; 16]);
     let error = Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+        outcome: Default::default(),
+        captured_output: None,
         call_id: call_id.clone(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -6023,6 +6048,7 @@ fn background_terminal_cause_restore_requires_exact_call_and_terminal() {
         vec![call_id.clone()],
     ));
     let first_result = Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: call_id.clone(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -6158,6 +6184,7 @@ fn tool_calling_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -6965,6 +6992,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationPlanned {
@@ -7035,6 +7063,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -7363,6 +7392,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -7476,6 +7506,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -7949,6 +7980,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -8102,6 +8134,7 @@ fn output_length_terminal_incomplete_does_not_cross_newer_selected_dispatch() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -8814,6 +8847,7 @@ fn automatic_policy_tool_trace(rounds: usize) -> AutomaticPolicyToolTrace {
         events.push((
             "tool_result",
             Event::ProviderToolResult(tau_proto::ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id,
                 tool_name: tau_proto::ToolName::new("tool"),
@@ -9500,6 +9534,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
             failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,

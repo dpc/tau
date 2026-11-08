@@ -716,6 +716,7 @@ fn sink_has_tool_invoke(sink: &Arc<Mutex<Vec<RoutedFrame>>>, call_id: &str) -> b
 
 fn test_tool_result(call_id: &str, tool_name: &str) -> Event {
     Event::ToolResultReported(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
@@ -837,6 +838,7 @@ pub(super) fn reasoning_only_length_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

@@ -321,6 +321,12 @@ struct ProviderWindowIndex {
 /// Complete non-persisted query indexes rebuilt by agent-journal replay.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct AgentTreeIndexes {
+    /// Output cursors and recovery references, independent of provider
+    /// compaction.
+    tool_outputs: HashMap<tau_proto::ToolCallRef, ToolOutputState>,
+    /// Latest declared generation for routing terminals that carry a display
+    /// ID.
+    tool_output_calls: HashMap<ToolCallId, tau_proto::ToolCallRef>,
     /// Typed discovery receipts keyed by their canonical injected occurrence.
     /// Replacement text cannot create these receipts.
     discovery_by_event_seq: HashMap<PersistedAgentEventSeq, tau_proto::DiscoveryContextDelivery>,
@@ -345,6 +351,22 @@ struct AgentTreeIndexes {
     provider_window: ProviderWindowIndex,
     /// Replay-derived compaction-chain observability facts.
     compaction_chains: crate::compaction_chain_view::CompactionChainIndex,
+}
+
+/// Bounded per-invocation output metadata; payload remains in ordinary context
+/// nodes.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ToolOutputState {
+    /// Declaration-time opt-in, including invocations that never emit a frame.
+    streamed: bool,
+    /// Next contiguous producer sequence.
+    sequence: u64,
+    /// Incremental payload allowance already consumed.
+    bytes: usize,
+    /// A canonical terminal prevents subsequent updates.
+    terminal: bool,
+    /// Canonical context occurrences in acceptance order, including the final.
+    occurrences: Vec<PersistedAgentEventSeq>,
 }
 
 /// Niche-optimized optional materialized node id for replay-only indexes.
@@ -3175,12 +3197,35 @@ impl AgentTree {
                 record.fold_semantics,
             )
         };
-        if matches!(record.event, Event::ProviderResponseFinished(_))
+        if let Event::ProviderResponseFinished(response) = &record.event
             && let Some(node) = self.assistant_response_node_for_durable_event_seq(record.seq)
         {
             self.indexes
                 .assistant_response_nodes_by_observation
                 .insert(record.observation_id, node);
+            for (item_index, item) in response.output_items.iter().enumerate() {
+                if let ContextItem::ToolCall(call) = item
+                    && let Ok(item_index) = u32::try_from(item_index)
+                {
+                    let reference = tau_proto::ToolCallRef {
+                        declaration: record.observation_id,
+                        item_index,
+                    };
+                    self.indexes
+                        .tool_output_calls
+                        .insert(call.call_id.clone(), reference);
+                    self.indexes.tool_outputs.insert(
+                        reference,
+                        ToolOutputState {
+                            streamed: response
+                                .streamed_tool_items
+                                .binary_search(&item_index)
+                                .is_ok(),
+                            ..ToolOutputState::default()
+                        },
+                    );
+                }
+            }
         }
         self.indexes
             .compaction_chains
@@ -3777,10 +3822,12 @@ impl AgentTree {
             Event::ToolBackgroundResult(result) => {
                 self.background_completed_tool_calls
                     .insert(result.call_id.clone());
+                return false;
             }
             Event::ToolBackgroundError(error) => {
                 self.background_completed_tool_calls
                     .insert(error.call_id.clone());
+                return false;
             }
             _ => return false,
         }
@@ -3923,9 +3970,157 @@ impl AgentTree {
             Event::AgentPromptTerminated(terminated) => {
                 self.close_terminated_inference(&terminated.agent_prompt_id)
             }
-            Event::ProviderToolResult(result) => self.record_provider_tool_result(result),
-            Event::ProviderToolError(error) => self.record_provider_tool_error(error),
-            Event::ToolCancelled(cancelled) => self.record_cancelled_tool_result(cancelled),
+            Event::ToolOutputUpdated(update) => {
+                let state = self
+                    .indexes
+                    .tool_outputs
+                    .get_mut(&update.call)
+                    .expect("validated output declaration");
+                state.sequence = update.output.sequence + 1;
+                state.bytes += update.output.text.len();
+                state.occurrences.push(durable_event_seq);
+                self.record_context_entry(
+                    parent,
+                    Self::user_text_input_entry(update.render(), &[], None, false, true),
+                    durable_event_seq,
+                    false,
+                )
+            }
+            Event::ToolBackgroundResult(result) => self.record_tool_output_final(
+                parent,
+                durable_event_seq,
+                &result.call_id,
+                &result.tool_name,
+                result.captured_output.clone().unwrap_or_else(|| {
+                    tau_proto::ToolFinalOutput::capture(
+                        &result.result,
+                        tau_proto::ProviderToolResultStatus::Success,
+                    )
+                }),
+            ),
+            Event::ToolBackgroundError(error) => self.record_tool_output_final(
+                parent,
+                durable_event_seq,
+                &error.call_id,
+                &error.tool_name,
+                error.captured_output.clone().unwrap_or_else(|| {
+                    tau_proto::ToolFinalOutput::capture(
+                        error
+                            .details
+                            .as_ref()
+                            .unwrap_or(&tau_proto::CborValue::Null),
+                        tau_proto::ProviderToolResultStatus::Error {
+                            message: &error.message,
+                        },
+                    )
+                }),
+            ),
+            Event::ProviderToolResult(result) => {
+                if result.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt {
+                    self.record_tool_output_final(
+                        parent,
+                        durable_event_seq,
+                        &result.call_id,
+                        &result.tool_name,
+                        result.captured_output.clone().unwrap_or_else(|| {
+                            tau_proto::ToolFinalOutput::capture(
+                                &result.result,
+                                tau_proto::ProviderToolResultStatus::Success,
+                            )
+                        }),
+                    );
+                    let mut receipt = result.clone();
+                    receipt.captured_output = None;
+                    receipt.provider_content.clear();
+                    receipt.result = tau_proto::tool_completion_receipt(
+                        &result.call_id,
+                        tau_proto::ToolCompletionOutcome::Completed,
+                    );
+                    receipt.presentation = Default::default();
+                    return self.record_provider_tool_result(&receipt);
+                }
+                if result.kind == ToolResultKind::Final {
+                    self.close_tool_output(&result.call_id);
+                }
+                self.record_provider_tool_result(result)
+            }
+            Event::ProviderToolError(error) => {
+                if error.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt {
+                    self.record_tool_output_final(
+                        parent,
+                        durable_event_seq,
+                        &error.call_id,
+                        &error.tool_name,
+                        error.captured_output.clone().unwrap_or_else(|| {
+                            tau_proto::ToolFinalOutput::capture(
+                                error
+                                    .details
+                                    .as_ref()
+                                    .unwrap_or(&tau_proto::CborValue::Null),
+                                tau_proto::ProviderToolResultStatus::Error {
+                                    message: &error.message,
+                                },
+                            )
+                        }),
+                    );
+                    return self.record_terminal_tool_result(ToolResultItem {
+                        call_id: error.call_id.clone(),
+                        tool_type: error.tool_type,
+                        status: ToolResultStatus::Success,
+                        output: tau_proto::ToolResponse::from_cbor(
+                            &tau_proto::tool_completion_receipt(
+                                &error.call_id,
+                                tau_proto::ToolCompletionOutcome::Error,
+                            ),
+                        ),
+                        presentation: Default::default(),
+                        provider_content: Vec::new(),
+                    });
+                }
+                self.close_tool_output(&error.call_id);
+                self.record_provider_tool_error(error)
+            }
+            Event::ToolCancelled(cancelled) => {
+                if cancelled.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt {
+                    self.record_tool_output_final(
+                        parent,
+                        durable_event_seq,
+                        &cancelled.call_id,
+                        &cancelled.tool_name,
+                        cancelled.captured_output.clone().unwrap_or_else(|| {
+                            match cancelled.output.as_ref() {
+                                Some(text) => tau_proto::ToolFinalOutput::capture(
+                                    &tau_proto::CborValue::Text(text.clone()),
+                                    tau_proto::ProviderToolResultStatus::Cancelled {
+                                        reason: "tool cancelled",
+                                    },
+                                ),
+                                None => tau_proto::ToolFinalOutput::capture(
+                                    &tau_proto::CborValue::Null,
+                                    tau_proto::ProviderToolResultStatus::Cancelled {
+                                        reason: "final capture unavailable",
+                                    },
+                                ),
+                            }
+                        }),
+                    );
+                    return self.record_terminal_tool_result(ToolResultItem {
+                        call_id: cancelled.call_id.clone(),
+                        tool_type: cancelled.tool_type,
+                        status: ToolResultStatus::Success,
+                        output: tau_proto::ToolResponse::from_cbor(
+                            &tau_proto::tool_completion_receipt(
+                                &cancelled.call_id,
+                                tau_proto::ToolCompletionOutcome::Cancelled,
+                            ),
+                        ),
+                        presentation: Default::default(),
+                        provider_content: Vec::new(),
+                    });
+                }
+                self.close_tool_output(&cancelled.call_id);
+                self.record_cancelled_tool_result(cancelled)
+            }
             _ => None,
         }
     }
@@ -3948,6 +4143,46 @@ impl AgentTree {
             delayed,
             inference_activation,
         }
+    }
+
+    /// Append the final occurrence before closing its native round. The
+    /// terminal event, not a second output event, owns this occurrence on
+    /// live fold and replay.
+    fn record_tool_output_final(
+        &mut self,
+        parent: Option<NodeId>,
+        durable_event_seq: PersistedAgentEventSeq,
+        call_id: &ToolCallId,
+        tool_name: &ToolName,
+        output: tau_proto::ToolFinalOutput,
+    ) -> Option<NodeId> {
+        let call = self.indexes.tool_output_calls.get(call_id)?;
+        let state = self.indexes.tool_outputs.get_mut(call)?;
+        let sequence = state.sequence;
+        state.terminal = true;
+        state.occurrences.push(durable_event_seq);
+        self.record_context_entry(
+            parent,
+            Self::user_text_input_entry(
+                tau_proto::render_output(
+                    call_id,
+                    tool_name,
+                    sequence,
+                    true,
+                    output.omitted_bytes,
+                    &output.text,
+                ),
+                // Native continuation or the existing background completion
+                // disposition owns terminal activation. Payload placement must
+                // not create a second wake, especially after cold replay.
+                &[],
+                None,
+                false,
+                false,
+            ),
+            durable_event_seq,
+            false,
+        )
     }
 
     /// Split trusted harness spans from ordinary prompt bytes without allowing
@@ -6676,7 +6911,53 @@ impl AgentTree {
         head: Option<NodeId>,
         event: &Event,
     ) -> Option<Result<(), AgentEventValidationError>> {
+        let captured = match event {
+            Event::ProviderToolResult(result) => result.captured_output.as_ref(),
+            Event::ProviderToolError(error) => error.captured_output.as_ref(),
+            Event::ToolBackgroundResult(result) => result.captured_output.as_ref(),
+            Event::ToolBackgroundError(error) => error.captured_output.as_ref(),
+            Event::ToolCancelled(cancelled) => cancelled.captured_output.as_ref(),
+            _ => None,
+        };
+        if captured.is_some_and(|output| output.text.len() > tau_proto::MAX_TOOL_OUTPUT_FINAL_BYTES)
+        {
+            return Some(Err(AgentEventValidationError::new(
+                "final tool capture exceeds its allowance",
+            )));
+        }
         match event {
+            Event::ToolOutputUpdated(update) => Some((|| {
+                let output = &update.output;
+                let state = self.indexes.tool_outputs.get(&update.call);
+                let declaration = self
+                    .indexes
+                    .assistant_response_nodes_by_observation
+                    .get(&update.call.declaration)
+                    .and_then(|node| self.node(*node));
+                let identity_matches = declaration.is_some_and(|node| {
+                    matches!(&node.entry, AgentEntry::AssistantResponse { output_items, .. }
+                        if matches!(output_items.get(update.call.item_index as usize),
+                            Some(ContextItem::ToolCall(call)) if call.call_id == output.call_id))
+                });
+                if !self.tool_call_is_on_branch(update.call, head)
+                    || !identity_matches
+                    || self.indexes.tool_output_calls.get(&output.call_id) != Some(&update.call)
+                    || state.is_none_or(|state| state.terminal || !state.streamed)
+                    || output.sequence != state.map_or(0, |state| state.sequence)
+                    || output.sequence >= tau_proto::MAX_TOOL_OUTPUT_UPDATES
+                    || output.text.len() > tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES
+                    || state
+                        .map_or(0, |state| state.bytes)
+                        .saturating_add(output.text.len())
+                        > tau_proto::MAX_TOOL_OUTPUT_LIVE_BYTES
+                    || (output.text.is_empty() && output.omitted_bytes == 0)
+                {
+                    return Err(AgentEventValidationError::new(
+                        "invalid tool output identity, sequence or size",
+                    ));
+                }
+                self.validate_background_tool_completion(head, &output.call_id)
+            })()),
             Event::ProviderToolResult(result) => Some(
                 self.validate_terminal_tool_result(&result.call_id)
                     .and_then(|()| validate_tool_result_provider_content(result)),
@@ -6746,6 +7027,21 @@ impl AgentTree {
         &self,
         response: &tau_proto::ProviderResponseFinished,
     ) -> Result<(), AgentEventValidationError> {
+        if response
+            .streamed_tool_items
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+            || response.streamed_tool_items.iter().any(|index| {
+                !matches!(
+                    response.output_items.get(*index as usize),
+                    Some(ContextItem::ToolCall(_))
+                )
+            })
+        {
+            return Err(AgentEventValidationError::new(
+                "streamed tool policy requires ordered unique tool-call item indices",
+            ));
+        }
         if response.interrupted_retry {
             let ordinary_owner = self.inference_dispatches.get(&response.agent_prompt_id);
             if !ordinary_owner.is_some_and(|dispatch| {
@@ -7679,3 +7975,4 @@ mod fold_allocation;
 mod response_continuation;
 #[cfg(test)]
 mod tests;
+mod tool_output;

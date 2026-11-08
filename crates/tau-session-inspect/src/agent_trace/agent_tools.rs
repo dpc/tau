@@ -2114,18 +2114,28 @@ fn wait_relationships(
         .collect()
 }
 fn add_owned_output(value: &mut CallProjection, event: &Event, mode: super::AgentTraceMode) {
-    let rendered = match event {
-        Event::ProviderToolResult(e) => {
-            Some(tau_proto::ToolResponse::from_cbor(&e.result).render())
-        }
-        Event::ToolBackgroundResult(e) => {
-            Some(tau_proto::ToolResponse::from_cbor(&e.result).render())
-        }
-        Event::ProviderToolError(e) => Some(render_error(&e.message, e.details.as_ref())),
-        Event::ToolBackgroundError(e) => Some(render_error(&e.message, e.details.as_ref())),
-        Event::ToolCancelled(_) => Some(render_cancelled()),
+    let captured = match event {
+        Event::ProviderToolResult(e) => e.captured_output.as_ref(),
+        Event::ToolBackgroundResult(e) => e.captured_output.as_ref(),
+        Event::ProviderToolError(e) => e.captured_output.as_ref(),
+        Event::ToolBackgroundError(e) => e.captured_output.as_ref(),
         _ => None,
     };
+    let rendered = captured
+        .map(|output| output.text.clone())
+        .or_else(|| match event {
+            Event::ProviderToolResult(e) => {
+                Some(tau_proto::ToolResponse::from_cbor(&e.result).render())
+            }
+            Event::ToolBackgroundResult(e) => {
+                Some(tau_proto::ToolResponse::from_cbor(&e.result).render())
+            }
+            Event::ProviderToolError(e) => Some(render_error(&e.message, e.details.as_ref())),
+            Event::ToolBackgroundError(e) => Some(render_error(&e.message, e.details.as_ref())),
+            Event::ToolCancelled(_) => Some(render_cancelled()),
+            _ => None,
+        });
+    let source_complete = captured.is_none_or(|output| output.omitted_bytes == 0);
     if let Some(rendered) = rendered {
         match mode {
             super::AgentTraceMode::Lite => {
@@ -2133,11 +2143,11 @@ fn add_owned_output(value: &mut CallProjection, event: &Event, mode: super::Agen
                 value.output_lines = Some(rendered.lines().count());
                 let (s, complete) = lite_output(&rendered);
                 value.output = Some(s.to_owned());
-                value.output_complete = Some(complete)
+                value.output_complete = Some(complete && source_complete)
             }
             super::AgentTraceMode::Full => {
                 value.output = Some(rendered);
-                value.output_complete = Some(true)
+                value.output_complete = Some(source_complete)
             }
         }
     }

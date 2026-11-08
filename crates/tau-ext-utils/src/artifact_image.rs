@@ -300,6 +300,8 @@ impl ArtifactImageManager {
         self.release(&call);
         let invoke = call.invoke();
         if let Err(error) = self.handle.report_tool_cancelled(ToolCancelled {
+            output: None,
+            captured_output: None,
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
@@ -318,6 +320,8 @@ impl ArtifactImageManager {
         };
         let invoke = call.invoke();
         let cancelled = ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -395,6 +399,7 @@ impl ArtifactImageManager {
     /// Chooses transport only from the captured harness invocation policy.
     fn finish_prepared(&mut self, invoke: ToolStarted, output: ReadImageOutput) {
         let result = ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -561,6 +566,7 @@ impl ArtifactImageManager {
 
     fn report_error(&mut self, invoke: &ToolStarted, message: String) {
         if let Err(error) = self.handle.report_tool_error(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -617,6 +623,7 @@ fn budget_prepared_result(
         display.status_text = IMAGE_TOO_LARGE_MESSAGE.to_owned();
     }
     Ok(Err(ToolError {
+        captured_output: None,
         presentation: result.presentation,
         call_id: result.call_id,
         tool_name: result.tool_name,

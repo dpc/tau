@@ -26,6 +26,9 @@ impl Harness {
         semantic_parent: tau_core::AgentEventParent,
         source: Option<&tau_proto::ConnectionId>,
     ) -> bool {
+        if self.retain_rejected_tool_output(event, semantic_parent) {
+            return true;
+        }
         let Some(sync) = sync else {
             return false;
         };
@@ -118,6 +121,7 @@ impl Harness {
             .retained_terminals
             .values()
             .map(|retained| retained.cid.clone())
+            .chain(self.retained_tool_output_agents())
             .collect()
     }
 }

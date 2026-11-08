@@ -488,6 +488,7 @@ fn persist_false_non_tool_event_is_not_persisted() {
 #[test]
 fn raw_tool_terminal_events_are_not_persisted() {
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
@@ -499,6 +500,7 @@ fn raw_tool_terminal_events_are_not_persisted() {
         originator: PromptOriginator::User,
     };
     let error = ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
@@ -509,6 +511,8 @@ fn raw_tool_terminal_events_are_not_persisted() {
         originator: PromptOriginator::User,
     };
     let cancelled = ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
@@ -552,6 +556,7 @@ fn raw_start_agent_requests_are_not_persisted() {
 #[test]
 fn persist_false_preserves_every_persistence_exception() {
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
@@ -563,6 +568,7 @@ fn persist_false_preserves_every_persistence_exception() {
         originator: PromptOriginator::User,
     };
     let error = ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
@@ -593,6 +599,8 @@ fn persist_false_preserves_every_persistence_exception() {
         Event::ProviderToolResult(result),
         Event::ProviderToolError(error),
         Event::ToolCancelled(ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("tool"),
@@ -600,6 +608,7 @@ fn persist_false_preserves_every_persistence_exception() {
             display: None,
         }),
         Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: "call-1".into(),
             tool_name: ToolName::new("tool"),
             tool_type: ToolType::Function,
@@ -608,6 +617,8 @@ fn persist_false_preserves_every_persistence_exception() {
             originator: PromptOriginator::User,
         }),
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: "call-1".into(),
             tool_name: ToolName::new("tool"),
             tool_type: ToolType::Function,
@@ -645,6 +656,7 @@ fn persist_false_preserves_every_persistence_exception() {
 #[test]
 fn inverted_wire_metadata_preserves_persistence_exceptions() {
     let exception = Event::ProviderToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),

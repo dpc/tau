@@ -274,6 +274,8 @@ impl ReleaseWorker {
                     if claim(&terminal, TerminalOwner::Cancellation) {
                         terminals.send(
                             tau_proto::ToolCancelled {
+                                output: None,
+                                captured_output: None,
                                 presentation: Default::default(),
                                 call_id: invoke.call_id.clone(),
                                 tool_name: invoke.tool_name.clone(),
@@ -322,6 +324,7 @@ impl ReleaseWorker {
             if armed && authenticated && claim(&terminal, TerminalOwner::Release) {
                 terminals.send(
                     ToolResult {
+                        captured_output: None,
                         presentation: Default::default(),
                         call_id: invoke.call_id.clone(),
                         tool_name: invoke.tool_name.clone(),
@@ -406,6 +409,7 @@ fn claim(terminal: &Mutex<TerminalOwner>, owner: TerminalOwner) -> bool {
 /// Builds one worker-owned terminal error.
 fn worker_error(invoke: &tau_proto::ToolStarted, message: String) -> ToolError {
     ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),

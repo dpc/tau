@@ -82,9 +82,27 @@ Commands may queue; exhausted queue budgets return backpressure errors.
 
 ## Output limits
 
+Model shell output is an ordered source stream, separate from completion
+receipts. Pending output flushes after 15 seconds of inactivity or 30 seconds
+from its first pending bytes, whichever comes first; silence sends no update and size
+limits never cause an early flush. Actual completion flushes the final tail.
+The agent can react while the process is alive, but output never interrupts
+active inference. `wait(complete_only: true)` masks nonterminal tool wakeups for
+that agent while preserving capture and unrelated activating input.
+
+Accepted updates are limited to 8 KiB each and 64 KiB/64 updates per call, with a
+separate bounded final diagnostic capture. Tau drains excess output, retains
+recent text, and reports omissions; overflow does not cancel the command.
+`wait` returns a successful receipt with `original_tool_call_id` and
+`target_outcome` (`completed`, `error`, or `cancelled`), not another output copy.
+Use `tool_output` for deliberate bounded recovery of accepted source, including
+after compaction or restart. It does not recover omitted raw bytes or expired
+temporary files.
+
 Inspection/edit-recovery/user-command surfaces cap visible output at 10 KiB;
-model `shell`/`shell_command` cap native `output` at 15 KiB and, where applicable,
-2,000 lines. Metadata and fully rendered provider text are outside that budget.
+model `shell`/`shell_command` additionally cap their producer-side aggregate at
+15 KiB and, where applicable, 2,000 lines. The harness's bounded final source
+capture is separate from that aggregate.
 
 Truncated results include totals and a saved rendering up to 16 MiB:
 `full_output_path` means complete; `saved_output_path` with

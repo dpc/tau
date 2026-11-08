@@ -761,6 +761,7 @@ fn finished_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

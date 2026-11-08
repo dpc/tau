@@ -256,6 +256,13 @@ impl InferenceCheckpointOwner {
 /// Typed source of one committed message activation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PendingMessageWakeSource {
+    /// Accepted output already owns context; this is only a wake cause.
+    ToolOutput {
+        /// Exact canonical occurrence in the owning agent journal.
+        durable_event_seq: tau_core::PersistedAgentEventSeq,
+        /// Only nonterminal updates are suppressible by completion-only waits.
+        terminal: bool,
+    },
     /// Harness-owned inbound agent-message occurrence.
     AgentMessageReceived {
         /// Sequence of the canonical received fact in the owning agent log.
@@ -279,7 +286,10 @@ impl PendingMessageWakeSource {
             Self::AgentMessageReceived {
                 durable_event_seq, ..
             }
-            | Self::MessageFact { durable_event_seq } => *durable_event_seq,
+            | Self::MessageFact { durable_event_seq }
+            | Self::ToolOutput {
+                durable_event_seq, ..
+            } => *durable_event_seq,
         }
     }
 
@@ -289,7 +299,9 @@ impl PendingMessageWakeSource {
             Self::AgentMessageReceived {
                 activation_class, ..
             } => *activation_class,
-            Self::MessageFact { .. } => AgentMessageActivationClass::OrdinaryAgentInput,
+            Self::MessageFact { .. } | Self::ToolOutput { .. } => {
+                AgentMessageActivationClass::OrdinaryAgentInput
+            }
         }
     }
 
@@ -300,7 +312,7 @@ impl PendingMessageWakeSource {
                 peer_admission_bytes,
                 ..
             } => *peer_admission_bytes,
-            Self::MessageFact { .. } => None,
+            Self::MessageFact { .. } | Self::ToolOutput { .. } => None,
         }
     }
 }
@@ -780,6 +792,7 @@ impl Agent {
                 pending_prompts: VecDeque::new(),
                 discovery_fold_pending: false,
                 pending_message_wakes: VecDeque::new(),
+                restored_tool_output_debt: false,
                 pending_replay_activation: false,
                 terminating: false,
                 activation_dispatch: ActivationDispatchState::None,

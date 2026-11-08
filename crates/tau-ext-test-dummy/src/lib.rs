@@ -841,6 +841,7 @@ where
         text,
     )))?;
     handle.report_tool_result(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
@@ -931,6 +932,7 @@ where
 {
     if cx.state.pending_hold.is_some() {
         return cx.report_error(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
@@ -986,6 +988,7 @@ where
 {
     if cx.state.pending_hold.is_some() {
         return cx.report_error(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
@@ -1016,6 +1019,8 @@ where
             Ok(HoldSignal::Cancel) => {
                 terminals.send(
                     tau_proto::ToolCancelled {
+                        output: None,
+                        captured_output: None,
                         presentation: Default::default(),
                         call_id: invoke.call_id,
                         tool_name: invoke.tool_name,
@@ -1027,7 +1032,7 @@ where
             }
             Ok(HoldSignal::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                terminals.send(ToolError {
+                terminals.send(ToolError { captured_output: None,
                     presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
@@ -1072,6 +1077,7 @@ where
 
 fn restart_success(invoke: tau_proto::ToolStarted) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
@@ -1087,6 +1093,7 @@ fn restart_success(invoke: tau_proto::ToolStarted) -> ToolResult {
 /// Returns the fixed image-bearing terminal used only by deterministic E2E.
 fn typed_image_success(invoke: tau_proto::ToolStarted) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
@@ -1107,6 +1114,7 @@ fn typed_image_success(invoke: tau_proto::ToolStarted) -> ToolResult {
 
 fn restart_error(invoke: tau_proto::ToolStarted) -> ToolError {
     ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,

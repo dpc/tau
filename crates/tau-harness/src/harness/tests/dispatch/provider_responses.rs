@@ -3527,6 +3527,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
@@ -3581,6 +3582,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
@@ -3706,6 +3708,7 @@ fn finish_materialized_turn(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

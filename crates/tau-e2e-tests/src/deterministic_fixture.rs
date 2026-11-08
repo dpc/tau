@@ -106,6 +106,7 @@ enum FixtureMode {
     Standard,
     CoreShell,
     CoreShellParallel,
+    CoreShellStream,
     /// Core-shell success/error siblings joined by one plural wait.
     WaitAllMixed,
     SessionRestore,
@@ -498,6 +499,23 @@ impl DeterministicFixture {
         )
     }
 
+    /// Creates the closed live shell-output and cancellation fixture.
+    pub fn new_core_shell_stream(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            scenario.lanes.iter().map(|lane| lane.actions.len()).sum(),
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface::default(),
+            FixtureMode::CoreShellStream,
+        )
+    }
+
     /// Creates the closed harness-owned mixed-result plural-wait fixture.
     pub fn new_wait_all_mixed(
         name: &str,
@@ -527,7 +545,10 @@ impl DeterministicFixture {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let core_shell_enabled = matches!(
             mode,
-            FixtureMode::CoreShell | FixtureMode::CoreShellParallel | FixtureMode::WaitAllMixed
+            FixtureMode::CoreShell
+                | FixtureMode::CoreShellParallel
+                | FixtureMode::CoreShellStream
+                | FixtureMode::WaitAllMixed
         );
         let FixtureToolSurface {
             dummy_tool_bin,
@@ -685,7 +706,9 @@ impl DeterministicFixture {
                     }
                 }),
             );
-            if mode == FixtureMode::CoreShellParallel {
+            if mode == FixtureMode::CoreShellStream {
+                serde_json::json!(["shell", "wait", "cancel"])
+            } else if mode == FixtureMode::CoreShellParallel {
                 serde_json::json!(["shell", "wait"])
             } else if mode == FixtureMode::WaitAllMixed {
                 serde_json::json!(["shell", "workdir", "wait"])

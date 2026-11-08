@@ -128,6 +128,7 @@ fn debug_provider_finished(output_items: Vec<tau_proto::ContextItem>) -> Provide
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -144,6 +145,7 @@ fn debug_provider_finished(output_items: Vec<tau_proto::ContextItem>) -> Provide
 
 fn debug_image_tool_result(data: Vec<u8>) -> tau_proto::ToolResult {
     tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
@@ -595,6 +597,7 @@ fn published_line_preserves_enriched_token_usage() {
             observation: tau_proto::ContextLimitObservation::RejectedBelowAdvertisedLimit,
         }),
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -1238,6 +1241,7 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
 #[test]
 fn tool_result_report_image_bytes_are_redacted_before_debug_json() {
     let event = Event::ToolResultReported(tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-image-report".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
@@ -1279,6 +1283,7 @@ fn intercept_reply_nested_event_redacts_provider_image_bytes() {
     let message = HarnessInputMessage::InterceptReply(tau_proto::InterceptReply {
         action: tau_proto::InterceptAction::Pass(Some(Box::new(Event::ProviderToolResult(
             tau_proto::ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "call-image".into(),
                 tool_name: tau_proto::ToolName::new("read_image"),

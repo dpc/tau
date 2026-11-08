@@ -8,6 +8,15 @@ requests. These cooperating areas collectively define which visible state
 follows an agent or editor and cannot be documented coherently beside any one
 renderer or input-loop implementation.
 
+Ordered tool-output updates refresh the existing owning tool block through
+generic text payloads. Replacing a display preview does not discard canonical
+model context. Updates do not create orphan blocks or
+reopen completed calls. Cold attach stages bounded replay/live updates behind
+their reconstructed running owner and discards display-only orphans and closed
+owners. Terminal descriptors retain bounded final diagnostics without tool-name
+special cases. See
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
+
 The terminal UI keeps visible transcript state in renderer fields and detached
 hidden-agent presentation models in `AgentUiState`. Response text used by the external
 prompt editor's trailer follows the same per-agent snapshot boundary: current and

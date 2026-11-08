@@ -926,6 +926,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
@@ -1692,6 +1693,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
 #[test]
 fn ui_replay_projects_provider_image_result_without_bytes() {
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: ToolName::new("read_image"),
@@ -1792,6 +1794,7 @@ fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
@@ -1807,6 +1810,7 @@ fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
 
 fn successful_tool_result(call_id: &str) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("read"),
@@ -3352,6 +3356,7 @@ fn ui_observer_replays_requested_durable_facts_but_not_transient_progress() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: Default::default(),
@@ -3520,6 +3525,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 originator: Default::default(),
@@ -3543,6 +3549,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "background-result-call".into(),
             tool_name: ToolName::new("background_ok"),
@@ -3558,6 +3565,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: "background-result-call".into(),
             tool_name: ToolName::new("background_ok"),
             tool_type: tau_proto::ToolType::Function,
@@ -3577,6 +3585,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "background-error-call".into(),
             tool_name: ToolName::new("background_err"),
@@ -3592,6 +3601,8 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: "background-error-call".into(),
             tool_name: ToolName::new("background_err"),
             tool_type: tau_proto::ToolType::Function,
@@ -3607,6 +3618,8 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "cancelled-call".into(),
             tool_name: ToolName::new("cancel_me"),
@@ -3786,6 +3799,7 @@ fn resumed_harness_replays_persisted_session_history() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
@@ -4201,6 +4215,7 @@ fn reasoning_is_persisted_and_replayed_as_typed_items_not_assistant_text() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,

@@ -2,6 +2,11 @@
 slow-timeout = { period = "10s", terminate-after = 1 }
 
 [[profile.default.overrides]]
+# This live-shell oracle exercises the real 15-second idle output deadline.
+filter = "package(dpc-tau-ext-shell) & test(/^tools::shell::tests::live_stream_can_cancel_running_shell_and_replay_preserves_batches$/)"
+slow-timeout = { period = "45s", terminate-after = 1 }
+
+[[profile.default.overrides]]
 # Two barrier-synchronized preview stacks each own a CLI, harness, and up to
 # five configured extension children.
 filter = "package(dpc-tau) & binary(dev_previews) & test(/^previews_omit_durable_session_artifacts_across_success_failure_and_concurrency$/)"

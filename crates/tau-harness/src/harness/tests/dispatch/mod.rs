@@ -207,6 +207,7 @@ fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: 
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: None,
@@ -404,6 +405,7 @@ pub(super) fn provider_text_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -437,6 +439,7 @@ fn provider_repetition_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -756,6 +759,7 @@ fn seed_background_placeholder_for_agent(
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
@@ -774,6 +778,7 @@ fn seed_background_placeholder_for_agent(
             agent_id,
             None,
             Event::ProviderToolResult(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.into(),
                 tool_name: ToolName::new(tool_name),
@@ -800,6 +805,7 @@ fn seed_background_result(state_dir: &Path, call_id: &str, tool_name: &str, outp
             "main",
             None,
             Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+                captured_output: None,
                 call_id: call_id.into(),
                 tool_name: ToolName::new(tool_name),
                 tool_type: tau_proto::ToolType::Function,
@@ -820,6 +826,8 @@ fn seed_background_error(state_dir: &Path, call_id: &str, tool_name: &str, messa
             "main",
             None,
             Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+                outcome: Default::default(),
+                captured_output: None,
                 call_id: call_id.into(),
                 tool_name: ToolName::new(tool_name),
                 tool_type: tau_proto::ToolType::Function,
@@ -1056,6 +1064,7 @@ pub(super) fn setup_routed_test_tool_calls_with_background(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1096,6 +1105,7 @@ fn tool_invoke_call_ids(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> Vec<String> {
 
 fn loop_guard_tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
@@ -1111,6 +1121,7 @@ fn loop_guard_tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_p
 /// tests.
 pub(super) fn final_tool_result(call_id: &str, tool_name: &str, text: &str) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
@@ -1193,6 +1204,7 @@ pub(super) fn provider_tool_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1209,6 +1221,7 @@ pub(super) fn provider_tool_response(
 /// Builds a terminal error fixture for dispatch and interception tests.
 pub(super) fn tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
@@ -1372,6 +1385,7 @@ impl crate::InternalToolHandler for TestAgentStartBuiltin {
                     return Ok(());
                 };
                 host.finish_prebuilt_tool_error(tau_proto::ToolError {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: call_id.into(),
                     tool_name: ToolName::new("agent_start"),
@@ -1463,6 +1477,7 @@ pub(super) fn context_overflow_response(
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: prompt.originator.clone(),
@@ -1524,6 +1539,7 @@ pub(super) fn standalone_compaction_success_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: prompt.originator.clone(),
@@ -1744,6 +1760,7 @@ fn seed_historical_open_prefix_failure(
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: None,
@@ -1765,6 +1782,7 @@ fn seed_historical_open_prefix_failure(
     h.publish_for_agent(
         cid,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-historical".into(),
             tool_name: ToolName::new("historical_tool"),
@@ -1915,6 +1933,7 @@ fn provider_compact_call(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2494,6 +2513,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2937,6 +2957,7 @@ mod runtime_scheduling;
 mod session_lifecycle;
 mod status_reporting;
 mod tool_execution;
+mod tool_output;
 mod ui_admission;
 
 /// Rewrites one test agent journal to an exact complete-record crash prefix.

@@ -348,6 +348,8 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
         "conn-wrong",
         TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ToolCancelled(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "emit-cancelled-call".into(),
                 tool_name: ToolName::new("owned_tool"),
@@ -548,6 +550,7 @@ fn tool_turn_dispatches_provider_emitted_siblings_without_global_locking() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -701,6 +704,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -854,6 +858,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1111,6 +1116,7 @@ fn watch_notification_folded_by_tool_terminal_starts_continuation() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1336,6 +1342,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1421,6 +1428,7 @@ fn tools_drift_invalidates_chain_anchor() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1562,6 +1570,7 @@ fn peer_auto_start_handover_dispatches_tool_without_human_ui_prompt() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -1813,6 +1822,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
@@ -1862,6 +1872,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2047,6 +2058,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
@@ -2107,6 +2119,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: Some(tau_proto::ProviderTokenUsage {
@@ -2312,6 +2325,7 @@ fn embedded_tool_trace_records_call_and_byte_free_result() {
     assert_eq!(calls, vec![call]);
 
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: ToolName::new("read_image"),
@@ -2427,9 +2441,10 @@ fn wait_resolves_on_synthetic_tool_error() {
     h.handle_extension_event(
         "wait-error-interceptor",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::PROVIDER_TOOL_ERROR,
-            )],
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_TOOL_ERROR),
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_TOOL_RESULT),
+            ],
             priority: InterceptionPriority::new(0),
         })),
     )
@@ -2440,6 +2455,7 @@ fn wait_resolves_on_synthetic_tool_error() {
         Some(&cid),
         None,
         tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: target_call_id,
             tool_name: ToolName::new("missing"),
@@ -2473,7 +2489,7 @@ fn wait_resolves_on_synthetic_tool_error() {
     .expect("commit canonical synthetic error");
     assert!(
         h.runtime_io.publication.pending_intercept.is_some(),
-        "the wait helper's own canonical error remains parked"
+        "the wait helper's canonical receipt remains parked"
     );
     h.handle_extension_event(
         "wait-error-interceptor",
@@ -2481,13 +2497,13 @@ fn wait_resolves_on_synthetic_tool_error() {
             action: InterceptAction::Pass(None),
         })),
     )
-    .expect("commit canonical wait-helper error");
+    .expect("commit canonical wait-helper receipt");
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::ToolError(error)
-            if error.call_id.as_str() == "wait-call"
-                && error.message == missing_message
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "wait-call"
+                && cbor_map_text(&result.result, "target_outcome") == Some("error")
     )));
 
     h.shutdown().expect("shutdown");
@@ -2540,6 +2556,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2669,6 +2686,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2798,6 +2816,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2906,6 +2925,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2944,6 +2964,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -3310,6 +3331,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -3386,6 +3408,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -3470,6 +3493,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -3509,6 +3533,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.handle_extension_event(
         "conn-delegate",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "nested-call".into(),
             tool_name: tau_proto::ToolName::new("agent_start"),
@@ -3641,6 +3666,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -3711,6 +3737,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -3853,6 +3880,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -3928,6 +3956,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -3965,6 +3994,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.handle_extension_event(
         "conn-delegate",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "outer-call".into(),
             tool_name: tau_proto::ToolName::new("agent_start"),
@@ -4058,6 +4088,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -4253,6 +4284,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -4360,6 +4392,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -4645,6 +4678,7 @@ fn detached_delegate_preserves_reentrant_foreground_terminal() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-replacement"),
         Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "replacement-foreground".into(),
             tool_name: ToolName::new("slow"),
@@ -4779,6 +4813,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -4937,6 +4972,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -5120,6 +5156,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -5260,6 +5297,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -5507,6 +5545,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -5582,6 +5621,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -6469,6 +6509,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -6612,6 +6653,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -6725,6 +6767,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -7066,6 +7109,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -7270,6 +7314,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -7381,6 +7426,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

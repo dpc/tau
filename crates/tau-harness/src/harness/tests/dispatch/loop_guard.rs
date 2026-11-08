@@ -685,6 +685,7 @@ fn loop_guard_resets_on_successful_terminal_tool_result() {
         Some(&cid),
         None,
         tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "ok-call".into(),
             tool_name: ToolName::new("read"),
@@ -722,6 +723,7 @@ fn publish_self_compaction_result(h: &mut Harness, cid: &AgentId, call_id: ToolC
         Some(cid),
         None,
         tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id,
             tool_name: ToolName::new("compact"),
@@ -1202,6 +1204,7 @@ fn loop_guard_resets_on_successful_background_tool_result() {
     h.handle_background_tool_result(
         &crate::test_connection_id("conn-bg"),
         tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "bg-call".into(),
             tool_name: ToolName::new("read"),
@@ -1267,6 +1270,7 @@ fn loop_guard_preserves_failure_history_and_pending_breaker_after_background_err
     h.handle_background_tool_error(
         Some(&crate::test_connection_id("conn-bg")),
         tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "bg-error".into(),
             tool_name: ToolName::new("read"),
@@ -1350,6 +1354,8 @@ fn loop_guard_preserves_blocked_breaker_after_background_cancellation() {
     h.handle_background_tool_cancelled(
         &crate::test_connection_id("conn-bg"),
         tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "bg-cancel".into(),
             tool_name: ToolName::new("read"),
@@ -1377,11 +1383,11 @@ fn loop_guard_preserves_blocked_breaker_after_background_cancellation() {
         .filter(|prompt| prompt.is_activating_background_completion())
         .cloned()
         .collect::<Vec<_>>();
-    h.materialize_background_completion_preview_group(&mut pending);
+    h.materialize_background_completion_notices(&mut pending);
     assert!(
         pending
             .iter()
-            .any(|prompt| prompt.text.contains("tool_outcome=\"cancelled\"")),
-        "cancellation must retain its existing wait/notification outcome"
+            .any(|prompt| prompt.text.contains("completion receipt")),
+        "cancellation must retain its existing notification disposition"
     );
 }

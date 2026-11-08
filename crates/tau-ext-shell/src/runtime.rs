@@ -501,6 +501,8 @@ impl ShellRuntime {
             let call_id = pending_workdir.identity.call_id.clone();
             let event = if pending_workdir.cancel_requested {
                 Event::ToolCancelled(tau_proto::ToolCancelled {
+                    output: None,
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: pending_workdir.identity.call_id,
                     tool_name: pending_workdir.identity.wire_tool_name,
@@ -510,6 +512,7 @@ impl ShellRuntime {
             } else if pending_workdir.matched_request {
                 let output = path_crate_tools::workdir::output(cwd);
                 Event::ToolResult(ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: pending_workdir.identity.call_id,
                     tool_name: pending_workdir.identity.wire_tool_name,
@@ -522,6 +525,7 @@ impl ShellRuntime {
                 })
             } else {
                 Event::ToolError(tau_proto::ToolError {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: pending_workdir.identity.call_id,
                     tool_name: pending_workdir.identity.wire_tool_name,
@@ -614,6 +618,8 @@ impl ShellRuntime {
         let call_id = pending.identity.call_id.clone();
         let event = if pending.cancel_requested {
             Event::ToolCancelled(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: pending.identity.call_id,
                 tool_name: pending.identity.wire_tool_name,
@@ -622,6 +628,7 @@ impl ShellRuntime {
             })
         } else {
             Event::ToolError(tau_proto::ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: pending.identity.call_id,
                 tool_name: pending.identity.wire_tool_name,

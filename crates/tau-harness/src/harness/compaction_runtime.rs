@@ -235,6 +235,8 @@ impl Harness {
         self.publish_for_agent(
             cid,
             Event::ToolCancelled(ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: wait_call_id.clone(),
                 tool_name: tool.name,
@@ -331,6 +333,8 @@ impl Harness {
         self.publish_for_agent(
             cid,
             Event::ToolCancelled(ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: wait_call_id,
                 tool_name: tool.name,
@@ -2239,6 +2243,7 @@ impl Harness {
                         self.restore_manual_tool_runtime(&caller_cid, &requested);
                         self.finish_prebuilt_internal_tool_error_with_mode(
                             ToolError {
+                                captured_output: None,
                                 presentation: Default::default(),
                                 call_id: requested
                                     .required_tool_source()
@@ -2383,6 +2388,7 @@ impl Harness {
                     }
                     self.finish_prebuilt_internal_tool_result_with_mode(
                         ToolResult {
+                            captured_output: None,
                             presentation: Default::default(),
                             call_id: request
                                 .required_tool_source()
@@ -2451,6 +2457,7 @@ impl Harness {
                         .clone();
                     self.finish_prebuilt_internal_tool_error_with_mode(
                         ToolError {
+                            captured_output: None,
                             presentation: Default::default(),
                             call_id: call_id.clone(),
                             tool_name: request.required_tool_source().visible_tool_name.clone(),

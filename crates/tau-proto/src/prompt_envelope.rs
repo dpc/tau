@@ -130,6 +130,17 @@ impl fmt::Display for PayloadEnvelopeRenderError {
     }
 }
 
+/// Registered output from an exact tool invocation, including nonterminal
+/// batches.
+pub const TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
+    name: "tau_tool_output",
+    opening: PayloadEnvelopeOpening::Attributed("<tau_tool_output "),
+    ordered_attributes: &["call_id", "tool", "sequence", "terminal", "omitted_bytes"],
+    exact_close: "</tau_tool_output>",
+    visible_close: "&lt;/tau_tool_output&gt;",
+    carrier: PayloadEnvelopeCarrier::GenericUserText,
+};
+
 /// Registered attributed envelope for direct Tau user-channel input.
 pub const USER_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
     name: "user",
@@ -265,6 +276,7 @@ pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelo
         QUOTED_MESSAGE_PAYLOAD_ENVELOPE,
         TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
         TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
+        TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE,
         TAU_DISCOVERY_PAYLOAD_ENVELOPE,
     ]
 }

@@ -148,6 +148,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: Default::default(),
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -193,6 +194,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
         record(
             4,
             Event::ProviderToolResult(tau_proto::ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "call-1".into(),
                 tool_name: ToolName::new("shell"),
@@ -234,6 +236,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     events.push(record(
         8,
         Event::ProviderToolResult(tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
@@ -301,6 +304,7 @@ fn aggregation_groups_typed_tool_names_and_preserves_lexical_json_order() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: Default::default(),
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -318,6 +322,7 @@ fn aggregation_groups_typed_tool_names_and_preserves_lexical_json_order() {
     };
     let result = |call_id: &str, tool_name: &str| {
         Event::ProviderToolResult(tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.into(),
             tool_name: ToolName::new(tool_name),
@@ -331,6 +336,7 @@ fn aggregation_groups_typed_tool_names_and_preserves_lexical_json_order() {
     };
     let error = |call_id: &str, tool_name: &str| {
         Event::ProviderToolError(tau_proto::ToolError {
+            captured_output: None,
             call_id: call_id.into(),
             tool_name: ToolName::new(tool_name),
             tool_type: ToolType::Function,
@@ -343,6 +349,8 @@ fn aggregation_groups_typed_tool_names_and_preserves_lexical_json_order() {
     };
     let cancelled = |call_id: &str, tool_name: &str| {
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             call_id: call_id.into(),
             tool_name: ToolName::new(tool_name),
             tool_type: ToolType::Function,
@@ -513,6 +521,7 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: Default::default(),
             output_length_disposition: tau_proto::OutputLengthDisposition::None,

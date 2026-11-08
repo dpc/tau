@@ -6,6 +6,22 @@ use tau_proto::{ProviderFailureKind, ToolCallId, ToolName};
 /// Fully-qualified model published by every deterministic scenario.
 pub const FAKE_MODEL_ID: &str = "fake/test";
 
+/// Closed steps for observing a real shell child before cancelling it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellStreamStep {
+    /// Start the fixed sentinel probe.
+    Start,
+    /// Wait for its first incremental output.
+    Wait,
+    /// Cancel only after observing that output.
+    Cancel,
+    /// Collect the cancelled terminal.
+    Receipt,
+    /// Verify the receipt and finish.
+    Finished,
+}
+
 /// Exact provider-owned syntax emitted by the canonical opaque-compaction
 /// acceptance case.
 pub const CANONICAL_OPAQUE_COMPACTION_JSON: &str =
@@ -488,6 +504,16 @@ pub enum ScenarioActionV2 {
         call_id: ToolCallId,
         /// Complete assistant marker.
         response: String,
+    },
+    /// Run the closed live-output/cancellation oracle with fixed call
+    /// identities.
+    CoreShellStream {
+        /// Exact task text.
+        user_text: String,
+        /// Preflight-resolved fixed probe executable.
+        probe_executable: std::path::PathBuf,
+        /// Next step of the five-action sequence.
+        step: ShellStreamStep,
     },
     /// Emit four sibling production `shell` calls in one provider
     /// terminal so the fixture can prove execution overlap.

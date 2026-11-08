@@ -12,6 +12,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("tau-e2e-shell-probe 1");
         return Ok(());
     }
+    if ident == "stream-until-cancel" {
+        std::fs::write(".tau-stream-started", b"started")?;
+        println!("tau-stream-live-sentinel");
+        std::io::stdout().flush()?;
+        std::thread::sleep(Duration::from_secs(60));
+        std::fs::write(".tau-stream-natural-exit", b"finished")?;
+        return Ok(());
+    }
 
     let ordinal = ident
         .strip_prefix("parallel-")

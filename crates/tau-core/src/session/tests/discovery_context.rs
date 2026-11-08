@@ -68,6 +68,7 @@ fn discovery_receipts_follow_live_replay_and_compaction_suffix() {
     append(
         &mut live,
         Event::ProviderToolResult(tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "discovery-tool".into(),
             tool_name: ToolName::new("workdir"),

@@ -30,7 +30,7 @@ mod agent_cost_ledger;
 mod agent_creator_topology;
 mod artifact_store;
 mod artifact_worker;
-mod background_completion_preview;
+mod background_completion_outcome;
 mod client_writer_lifecycle;
 #[cfg(test)]
 mod client_writer_lifecycle_tests;
@@ -134,6 +134,7 @@ pub use crate::harness::{
 };
 pub use crate::internal_tools::{
     AgentOwnedInternalToolCall, InternalToolHandler, InternalToolHandlers, InternalToolHost,
+    ToolOutputTarget,
 };
 pub use crate::settings::{
     EXTENSION_CLI_OVERRIDES_ENV, ExtensionConfig, HARNESS_CONFIG_CLI_OVERRIDES_ENV,

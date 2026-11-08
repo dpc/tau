@@ -18,9 +18,7 @@ use tau_proto::{
 };
 
 use super::WAIT_TOOL_NAME;
-use crate::background_completion_preview::{
-    BackgroundCompletionPreview, BackgroundErrorOutcome, BackgroundPreviewBudget,
-};
+use crate::background_completion_outcome::BackgroundErrorOutcome;
 
 /// Bound retained terminal tombstones while preserving recent duplicate-wait
 /// diagnostics and call-ID reuse behavior.
@@ -131,6 +129,8 @@ enum WaitCallState {
     BackgroundError(
         /// Retained source error.
         ToolBackgroundError,
+        /// Typed outcome retained even without durable correlation.
+        BackgroundErrorOutcome,
     ),
     /// Foreground success retained after a plural reservation was released.
     ReservedResult(
@@ -141,6 +141,8 @@ enum WaitCallState {
     ReservedError(
         /// Retained source error.
         ToolBackgroundError,
+        /// Typed outcome of this reserved generation.
+        BackgroundErrorOutcome,
     ),
     /// Terminal was delivered or deliberately retired.
     Consumed,
@@ -149,6 +151,8 @@ enum WaitCallState {
 /// Installed wait invocation and its durable correlation identities.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct WaitRequest {
+    /// Suppress only owner-wide nonterminal tool-output wake causes.
+    pub(super) complete_only: bool,
     /// Wait tool display call ID.
     pub(super) call_id: ToolCallId,
     /// Visible wait tool name.
@@ -444,8 +448,6 @@ pub(super) struct WaitTracker {
     call_refs: HashMap<ToolCallId, ToolCallRef>,
     /// Canonical terminal identity retained for immediate and active delivery.
     terminal_observations: HashMap<ToolCallId, tau_proto::ObservationId>,
-    /// Typed logical error outcome retained by exact terminal identity.
-    background_error_outcomes: HashMap<tau_proto::ObservationId, BackgroundErrorOutcome>,
     /// Oldest-first completion order scoped to each owning agent.
     ///
     /// `completed_membership` identifies the sole live generation for a call.
@@ -494,7 +496,6 @@ impl WaitTracker {
             call_tool_names: HashMap::new(),
             call_refs: HashMap::new(),
             terminal_observations: HashMap::new(),
-            background_error_outcomes: HashMap::new(),
             completion_order_by_owner: HashMap::new(),
             completed_membership: HashMap::new(),
             released_completions: HashMap::new(),
@@ -527,6 +528,23 @@ impl WaitTracker {
             .chain(self.input_waiters.keys().cloned())
             .chain(self.claimed_waits.keys().cloned())
             .collect()
+    }
+
+    /// Whether any installed or settling wait masks this owner's nonterminal
+    /// tool-output wakes.
+    pub(super) fn suppresses_tool_updates(&self, owner: &AgentId) -> bool {
+        self.waiters
+            .values()
+            .chain(self.exact_all_waits.values().map(|wait| &wait.request))
+            .chain(
+                self.pending_exact_all_commits
+                    .values()
+                    .map(|wait| &wait.request),
+            )
+            .chain(self.any_waiters.values())
+            .chain(self.input_waiters.values().map(|wait| &wait.request))
+            .chain(self.claimed_waits.values().map(ClaimedWait::request))
+            .any(|wait| &wait.owner == owner && wait.complete_only)
     }
 
     /// Return the highest-precedence installed wait mode for one owner.
@@ -704,69 +722,6 @@ impl WaitTracker {
         self.terminal_observations.get(call_id).copied()
     }
 
-    /// Render the canonical preview for one exact retained completion.
-    pub(super) fn render_background_completion_preview(
-        &self,
-        call_id: &ToolCallId,
-        source_terminal: tau_proto::ObservationId,
-        budget: &mut BackgroundPreviewBudget,
-    ) -> Option<String> {
-        if self.terminal_observations.get(call_id) == Some(&source_terminal) {
-            match self.calls.get(call_id) {
-                Some(WaitCallState::BackgroundResult(result))
-                | Some(WaitCallState::ReservedResult(result)) => {
-                    return Some(BackgroundCompletionPreview::from_result(result).render(budget));
-                }
-                Some(WaitCallState::BackgroundError(error))
-                | Some(WaitCallState::ReservedError(error)) => {
-                    return Some(
-                        BackgroundCompletionPreview::from_error(
-                            error,
-                            self.background_error_outcomes
-                                .get(&source_terminal)
-                                .copied()
-                                .unwrap_or(BackgroundErrorOutcome::Error),
-                        )
-                        .render(budget),
-                    );
-                }
-                _ => {}
-            }
-        }
-        self.released_completions.values().find_map(|released| {
-            (released.completion.terminal() == source_terminal).then(|| {
-                match &released.completion {
-                    ExactAllCompletion::Result {
-                        output,
-                        display: _,
-                        phase: _,
-                        terminal: _,
-                    } => BackgroundCompletionPreview::from_result_parts(
-                        call_id,
-                        &released.tool_name,
-                        output,
-                    )
-                    .render(budget),
-                    ExactAllCompletion::Error {
-                        message,
-                        details,
-                        display: _,
-                        phase: _,
-                        terminal: _,
-                        outcome,
-                    } => BackgroundCompletionPreview::from_error_parts(
-                        call_id,
-                        &released.tool_name,
-                        message,
-                        details.as_ref(),
-                        *outcome,
-                    )
-                    .render(budget),
-                }
-            })
-        })
-    }
-
     /// Report whether runtime state contains this call.
     #[cfg(test)]
     pub(super) fn tracks_call(&self, call_id: &ToolCallId) -> bool {
@@ -785,12 +740,21 @@ impl WaitTracker {
 
     fn attach_completion_settlement(
         &self,
-        reply: WaitReply,
+        mut reply: WaitReply,
         wait: &WaitRequest,
         source_call_id: &ToolCallId,
         source_phase: tau_proto::ToolSourcePhase,
-        envelope: tau_proto::ToolOutputEnvelope,
+        target_outcome: tau_proto::ToolCompletionOutcome,
     ) -> WaitReply {
+        reply.kind = WaitReplyKind::Result {
+            result: tau_proto::tool_completion_receipt(source_call_id, target_outcome),
+            display: Some(wait_display_from_source(
+                self.call_tool_names.get(source_call_id).cloned(),
+                None,
+                ToolUseStatus::Success,
+                target_outcome.as_str().to_owned(),
+            )),
+        };
         let Some(source_call) = self.call_refs.get(source_call_id).copied() else {
             return reply;
         };
@@ -803,7 +767,7 @@ impl WaitTracker {
                 source_call,
                 source_terminal,
                 source_phase,
-                envelope,
+                envelope: tau_proto::ToolOutputEnvelope::Identity,
             },
         )
     }
@@ -836,52 +800,26 @@ impl WaitTracker {
                 .completion
                 .as_ref()
                 .expect("all exact-all members completed");
-            let (result, terminal, phase) = match completion {
+            let (terminal, phase) = match completion {
                 ExactAllCompletion::Result {
-                    output,
-                    display: _,
-                    phase,
-                    terminal,
-                } => (
-                    CborValue::Map(vec![
-                        original_tool_call_id_entry(&member.call_id),
-                        (
-                            CborValue::Text("outcome".to_owned()),
-                            CborValue::Text("result".to_owned()),
-                        ),
-                        (CborValue::Text("output".to_owned()), output.clone()),
-                    ]),
-                    *terminal,
-                    *phase,
-                ),
-                ExactAllCompletion::Error {
-                    message,
-                    details,
-                    display: _,
-                    phase,
-                    terminal,
-                    outcome: _,
-                } => (
-                    CborValue::Map(vec![
-                        original_tool_call_id_entry(&member.call_id),
-                        (
-                            CborValue::Text("outcome".to_owned()),
-                            CborValue::Text("error".to_owned()),
-                        ),
-                        (
-                            CborValue::Text("message".to_owned()),
-                            CborValue::Text(message.clone()),
-                        ),
-                        (
-                            CborValue::Text("details".to_owned()),
-                            details.clone().unwrap_or(CborValue::Null),
-                        ),
-                    ]),
-                    *terminal,
-                    *phase,
-                ),
+                    phase, terminal, ..
+                }
+                | ExactAllCompletion::Error {
+                    phase, terminal, ..
+                } => (*terminal, *phase),
             };
-            result_members.push(result);
+            let target_outcome = match completion {
+                ExactAllCompletion::Result { .. } => tau_proto::ToolCompletionOutcome::Completed,
+                ExactAllCompletion::Error {
+                    outcome: BackgroundErrorOutcome::Cancelled,
+                    ..
+                } => tau_proto::ToolCompletionOutcome::Cancelled,
+                ExactAllCompletion::Error { .. } => tau_proto::ToolCompletionOutcome::Error,
+            };
+            result_members.push(tau_proto::tool_completion_receipt(
+                &member.call_id,
+                target_outcome,
+            ));
             sources.push(tau_proto::WaitDeliveredSource {
                 source_call: member.call_ref,
                 source_terminal: terminal,
@@ -978,6 +916,7 @@ impl WaitTracker {
                     self.calls.insert(
                         member.call_id.clone(),
                         WaitCallState::ReservedResult(ToolBackgroundResult {
+                            captured_output: None,
                             call_id: member.call_id.clone(),
                             tool_name: member.tool_name.clone(),
                             tool_type: ToolType::Function,
@@ -993,19 +932,24 @@ impl WaitTracker {
                     display,
                     phase: tau_proto::ToolSourcePhase::Foreground,
                     terminal: _,
-                    outcome: _,
+                    outcome,
                 }) => {
                     self.calls.insert(
                         member.call_id.clone(),
-                        WaitCallState::ReservedError(ToolBackgroundError {
-                            call_id: member.call_id.clone(),
-                            tool_name: member.tool_name.clone(),
-                            tool_type: ToolType::Function,
-                            message: message.clone(),
-                            details: details.clone(),
-                            display: display.clone(),
-                            originator: tau_proto::PromptOriginator::User,
-                        }),
+                        WaitCallState::ReservedError(
+                            ToolBackgroundError {
+                                outcome: Default::default(),
+                                captured_output: None,
+                                call_id: member.call_id.clone(),
+                                tool_name: member.tool_name.clone(),
+                                tool_type: ToolType::Function,
+                                message: message.clone(),
+                                details: details.clone(),
+                                display: display.clone(),
+                                originator: tau_proto::PromptOriginator::User,
+                            },
+                            *outcome,
+                        ),
                     );
                 }
                 Some(
@@ -1132,6 +1076,9 @@ impl WaitTracker {
         wait_observation: Option<tau_proto::ObservationId>,
     ) -> WaitStart {
         let mut wait = WaitRequest {
+            complete_only: matches!(arguments, CborValue::Map(entries) if entries.iter().any(
+                |(key, value)| key == &CborValue::Text("complete_only".to_owned())
+                    && value == &CborValue::Bool(true))),
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             owner: owner.clone(),
@@ -1282,12 +1229,12 @@ impl WaitTracker {
                     &wait,
                     &target,
                     tau_proto::ToolSourcePhase::Background,
-                    tau_proto::ToolOutputEnvelope::Identity,
+                    tau_proto::ToolCompletionOutcome::Completed,
                 );
                 let reply = reply.with_release_suppression(target.clone());
                 WaitStart::reply_with_suppress(reply, target)
             }
-            Some(WaitCallState::BackgroundError(error)) => {
+            Some(WaitCallState::BackgroundError(error, outcome)) => {
                 self.record_terminal_state(target.clone(), WaitCallState::Consumed);
                 self.remove_completed(&target);
                 let source_tool_name = Some(error.tool_name.clone());
@@ -1303,7 +1250,7 @@ impl WaitTracker {
                     &wait,
                     &target,
                     tau_proto::ToolSourcePhase::Background,
-                    tau_proto::ToolOutputEnvelope::Identity,
+                    outcome.into(),
                 );
                 let reply = reply.with_release_suppression(target.clone());
                 WaitStart::reply_with_suppress(reply, target)
@@ -1323,11 +1270,11 @@ impl WaitTracker {
                     &wait,
                     &target,
                     tau_proto::ToolSourcePhase::Foreground,
-                    tau_proto::ToolOutputEnvelope::Identity,
+                    tau_proto::ToolCompletionOutcome::Completed,
                 );
                 WaitStart::reply(reply)
             }
-            Some(WaitCallState::ReservedError(error)) => {
+            Some(WaitCallState::ReservedError(error, outcome)) => {
                 self.record_terminal_state(target.clone(), WaitCallState::Consumed);
                 let source_tool_name = Some(error.tool_name.clone());
                 let reply = wait_error_reply(
@@ -1342,7 +1289,7 @@ impl WaitTracker {
                     &wait,
                     &target,
                     tau_proto::ToolSourcePhase::Foreground,
-                    tau_proto::ToolOutputEnvelope::Identity,
+                    outcome.into(),
                 );
                 WaitStart::reply(reply)
             }
@@ -1507,7 +1454,7 @@ impl WaitTracker {
                         terminal,
                     })
                 }
-                WaitCallState::BackgroundError(error) => {
+                WaitCallState::BackgroundError(error, outcome) => {
                     let Some(terminal) = self.terminal_observations.get(target).copied() else {
                         return WaitStart::reply(wait_error_reply(
                             wait.call_id.clone(),
@@ -1522,11 +1469,7 @@ impl WaitTracker {
                         display: error.display.clone(),
                         phase: tau_proto::ToolSourcePhase::Background,
                         terminal,
-                        outcome: self
-                            .background_error_outcomes
-                            .get(&terminal)
-                            .copied()
-                            .unwrap_or(BackgroundErrorOutcome::Error),
+                        outcome: *outcome,
                     })
                 }
                 WaitCallState::ReservedResult(result) => {
@@ -1545,7 +1488,7 @@ impl WaitTracker {
                         terminal,
                     })
                 }
-                WaitCallState::ReservedError(error) => {
+                WaitCallState::ReservedError(error, outcome) => {
                     let Some(terminal) = self.terminal_observations.get(target).copied() else {
                         return WaitStart::reply(wait_error_reply(
                             wait.call_id.clone(),
@@ -1560,11 +1503,7 @@ impl WaitTracker {
                         display: error.display.clone(),
                         phase: tau_proto::ToolSourcePhase::Foreground,
                         terminal,
-                        outcome: self
-                            .background_error_outcomes
-                            .get(&terminal)
-                            .copied()
-                            .unwrap_or(BackgroundErrorOutcome::Error),
+                        outcome: *outcome,
                     })
                 }
             };
@@ -1657,9 +1596,9 @@ impl WaitTracker {
                 && self.calls.get(target).is_some_and(|state| match state {
                     WaitCallState::Pending | WaitCallState::Backgrounded => true,
                     WaitCallState::BackgroundResult(_)
-                    | WaitCallState::BackgroundError(_)
+                    | WaitCallState::BackgroundError(..)
                     | WaitCallState::ReservedResult(_)
-                    | WaitCallState::ReservedError(_) => {
+                    | WaitCallState::ReservedError(..) => {
                         self.terminal_observations.contains_key(target)
                     }
                     WaitCallState::NormalReturned | WaitCallState::Consumed => false,
@@ -1762,7 +1701,7 @@ impl WaitTracker {
             .is_some()
             && matches!(
                 self.calls.get(call_id),
-                Some(WaitCallState::BackgroundResult(_) | WaitCallState::BackgroundError(_))
+                Some(WaitCallState::BackgroundResult(_) | WaitCallState::BackgroundError(..))
             )
             && !self
                 .released_completions
@@ -1996,49 +1935,40 @@ impl WaitTracker {
         if let Some(released) = self.released_completions.remove(&selection.generation) {
             let source_call = released.call_ref;
             let restore_notice = released.restore_notice;
-            let (reply, terminal, phase) = match released.completion {
+            let (terminal, phase, outcome) = match released.completion {
                 ExactAllCompletion::Result {
-                    output,
-                    display,
-                    phase,
-                    terminal,
-                } => (
-                    wait_result_reply(
-                        wait.call_id.clone(),
-                        wait.tool_name.clone(),
-                        Some(released.tool_name),
-                        result_with_original_tool_call_id(&target, output),
-                        display,
-                    ),
-                    terminal,
-                    phase,
-                ),
+                    phase, terminal, ..
+                } => (terminal, phase, tau_proto::ToolCompletionOutcome::Completed),
                 ExactAllCompletion::Error {
-                    message,
-                    details,
-                    display,
                     phase,
                     terminal,
-                    outcome: _,
+                    outcome,
+                    ..
                 } => (
-                    wait_error_reply(
-                        wait.call_id.clone(),
-                        wait.tool_name.clone(),
-                        message,
-                        details_with_original_tool_call_id(&target, details),
-                    )
-                    .with_source_display(Some(released.tool_name), display),
                     terminal,
                     phase,
+                    match outcome {
+                        BackgroundErrorOutcome::Error => tau_proto::ToolCompletionOutcome::Error,
+                        BackgroundErrorOutcome::Cancelled => {
+                            tau_proto::ToolCompletionOutcome::Cancelled
+                        }
+                    },
                 ),
             };
-            let mut reply = reply.with_settlement(
+            let mut reply = wait_result_reply(
+                wait.call_id.clone(),
+                wait.tool_name.clone(),
+                Some(released.tool_name),
+                tau_proto::tool_completion_receipt(&target, outcome),
+                None,
+            )
+            .with_settlement(
                 &wait,
                 tau_proto::ToolWaitOutcome::CompletionDelivered {
                     source_call,
                     source_terminal: terminal,
                     source_phase: phase,
-                    envelope: tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader,
+                    envelope: tau_proto::ToolOutputEnvelope::Identity,
                 },
             );
             if restore_notice {
@@ -2048,7 +1978,6 @@ impl WaitTracker {
                     source_terminal: terminal,
                 });
             }
-            self.background_error_outcomes.remove(&terminal);
             return WaitStart::reply(reply);
         }
         let Some(state) = self.calls.remove(&target) else {
@@ -2083,11 +2012,11 @@ impl WaitTracker {
                     &wait,
                     &target,
                     tau_proto::ToolSourcePhase::Background,
-                    tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader,
+                    tau_proto::ToolCompletionOutcome::Completed,
                 );
                 WaitStart::reply_with_suppress(reply, target)
             }
-            WaitCallState::BackgroundError(error) => {
+            WaitCallState::BackgroundError(error, outcome) => {
                 self.record_terminal_state(target.clone(), WaitCallState::Consumed);
                 let source_tool_name = Some(error.tool_name.clone());
                 let reply = wait_error_reply(
@@ -2102,7 +2031,7 @@ impl WaitTracker {
                     &wait,
                     &target,
                     tau_proto::ToolSourcePhase::Background,
-                    tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader,
+                    outcome.into(),
                 );
                 WaitStart::reply_with_suppress(reply, target)
             }
@@ -2151,8 +2080,8 @@ impl WaitTracker {
             && self.exact_all_reservation_for_current(&call_id).is_some()
         {
             let completion = ExactAllCompletion::Result {
-                output: result.result.clone(),
-                display: result.display.clone(),
+                output: CborValue::Null,
+                display: None,
                 phase: tau_proto::ToolSourcePhase::Foreground,
                 terminal,
             };
@@ -2176,7 +2105,7 @@ impl WaitTracker {
                 &wait,
                 &call_id,
                 tau_proto::ToolSourcePhase::Foreground,
-                tau_proto::ToolOutputEnvelope::Identity,
+                tau_proto::ToolCompletionOutcome::Completed,
             )];
         }
         self.record_terminal_state(call_id, WaitCallState::NormalReturned);
@@ -2208,9 +2137,9 @@ impl WaitTracker {
             && self.exact_all_reservation_for_current(&call_id).is_some()
         {
             let completion = ExactAllCompletion::Error {
-                message: error.message.clone(),
-                details: error.details.clone(),
-                display: error.display.clone(),
+                message: String::new(),
+                details: None,
+                display: None,
                 phase: tau_proto::ToolSourcePhase::Foreground,
                 terminal,
                 outcome: BackgroundErrorOutcome::Error,
@@ -2235,7 +2164,7 @@ impl WaitTracker {
                 &wait,
                 &call_id,
                 tau_proto::ToolSourcePhase::Foreground,
-                tau_proto::ToolOutputEnvelope::Identity,
+                tau_proto::ToolCompletionOutcome::Error,
             )];
         }
         self.record_terminal_state(call_id, WaitCallState::NormalReturned);
@@ -2246,13 +2175,18 @@ impl WaitTracker {
     /// waiter.
     pub(super) fn record_background_result(
         &mut self,
-        result: ToolBackgroundResult,
+        mut result: ToolBackgroundResult,
         owner: AgentId,
         terminal: Option<tau_proto::ObservationId>,
     ) -> Vec<WaitReply> {
         if result.tool_name.as_str() == WAIT_TOOL_NAME {
             return Vec::new();
         }
+        // Completion custody owns synchronization metadata only. Recovery reads
+        // accepted source from the canonical tree, including after restart.
+        result.result = CborValue::Null;
+        result.captured_output = None;
+        result.display = None;
         let call_id = result.call_id.clone();
         if let Some(terminal) = terminal {
             self.terminal_observations.insert(call_id.clone(), terminal);
@@ -2298,7 +2232,7 @@ impl WaitTracker {
                 &wait,
                 &call_id,
                 tau_proto::ToolSourcePhase::Background,
-                tau_proto::ToolOutputEnvelope::Identity,
+                tau_proto::ToolCompletionOutcome::Completed,
             );
             let mut replies = vec![reply];
             replies.extend(self.finish_any_waiter_if_no_candidates(&owner));
@@ -2320,7 +2254,7 @@ impl WaitTracker {
                 &wait,
                 &call_id,
                 tau_proto::ToolSourcePhase::Background,
-                tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader,
+                tau_proto::ToolCompletionOutcome::Completed,
             )];
         }
         self.calls
@@ -2334,7 +2268,7 @@ impl WaitTracker {
     /// waiter.
     pub(super) fn record_background_error(
         &mut self,
-        error: ToolBackgroundError,
+        mut error: ToolBackgroundError,
         owner: AgentId,
         terminal: Option<tau_proto::ObservationId>,
         outcome: BackgroundErrorOutcome,
@@ -2342,10 +2276,13 @@ impl WaitTracker {
         if error.tool_name.as_str() == WAIT_TOOL_NAME {
             return Vec::new();
         }
+        error.message.clear();
+        error.details = None;
+        error.captured_output = None;
+        error.display = None;
         let call_id = error.call_id.clone();
         if let Some(terminal) = terminal {
             self.terminal_observations.insert(call_id.clone(), terminal);
-            self.background_error_outcomes.insert(terminal, outcome);
         }
         self.call_tool_names
             .insert(call_id.clone(), error.tool_name.clone());
@@ -2365,8 +2302,10 @@ impl WaitTracker {
                 terminal,
                 outcome,
             };
-            self.calls
-                .insert(call_id.clone(), WaitCallState::BackgroundError(error));
+            self.calls.insert(
+                call_id.clone(),
+                WaitCallState::BackgroundError(error, outcome),
+            );
             self.push_completed(call_id.clone());
             return self
                 .record_exact_all_completion(&call_id, completion)
@@ -2390,7 +2329,7 @@ impl WaitTracker {
                 &wait,
                 &call_id,
                 tau_proto::ToolSourcePhase::Background,
-                tau_proto::ToolOutputEnvelope::Identity,
+                outcome.into(),
             );
             let mut replies = vec![reply];
             replies.extend(self.finish_any_waiter_if_no_candidates(&owner));
@@ -2413,11 +2352,13 @@ impl WaitTracker {
                 &wait,
                 &call_id,
                 tau_proto::ToolSourcePhase::Background,
-                tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader,
+                outcome.into(),
             )];
         }
-        self.calls
-            .insert(call_id.clone(), WaitCallState::BackgroundError(error));
+        self.calls.insert(
+            call_id.clone(),
+            WaitCallState::BackgroundError(error, outcome),
+        );
         self.push_completed(call_id.clone());
         self.note_claimed_completion(&owner, &call_id);
         Vec::new()
@@ -2470,15 +2411,11 @@ impl WaitTracker {
                 owner.clone(),
                 self.terminal_observations.get(target).copied(),
             ),
-            Some(WaitCallState::BackgroundError(error)) => self.record_background_error(
+            Some(WaitCallState::BackgroundError(error, outcome)) => self.record_background_error(
                 error,
                 owner.clone(),
                 self.terminal_observations.get(target).copied(),
-                self.terminal_observations
-                    .get(target)
-                    .and_then(|terminal| self.background_error_outcomes.get(terminal))
-                    .copied()
-                    .unwrap_or(BackgroundErrorOutcome::Error),
+                outcome,
             ),
             _ => Vec::new(),
         }
@@ -2595,7 +2532,7 @@ impl WaitTracker {
                     } else {
                         tau_proto::ToolSourcePhase::Foreground
                     },
-                    tau_proto::ToolOutputEnvelope::Identity,
+                    tau_proto::ToolCompletionOutcome::Cancelled,
                 );
                 exact_consumed_cancelled.insert(target.clone());
                 cancelled.replies.push(reply);
@@ -2659,7 +2596,34 @@ impl WaitTracker {
                 if self.is_backgrounded(call_id) {
                     self.calls.insert(
                         call_id.clone(),
-                        WaitCallState::BackgroundError(ToolBackgroundError {
+                        WaitCallState::BackgroundError(
+                            ToolBackgroundError {
+                                outcome: Default::default(),
+                                captured_output: None,
+                                call_id: call_id.clone(),
+                                tool_name: self
+                                    .call_tool_names
+                                    .get(call_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| ToolName::new("cancelled")),
+                                tool_type: ToolType::Function,
+                                message: "Tool call canceled".to_owned(),
+                                details: None,
+                                originator: tau_proto::PromptOriginator::User,
+                                display: None,
+                            },
+                            BackgroundErrorOutcome::Cancelled,
+                        ),
+                    );
+                    self.push_completed(call_id.clone());
+                }
+            } else if self.is_backgrounded(call_id) {
+                self.calls.insert(
+                    call_id.clone(),
+                    WaitCallState::BackgroundError(
+                        ToolBackgroundError {
+                            outcome: Default::default(),
+                            captured_output: None,
                             call_id: call_id.clone(),
                             tool_name: self
                                 .call_tool_names
@@ -2670,28 +2634,11 @@ impl WaitTracker {
                             message: "Tool call canceled".to_owned(),
                             details: None,
                             originator: tau_proto::PromptOriginator::User,
-                            display: None,
-                        }),
-                    );
-                    self.push_completed(call_id.clone());
-                }
-            } else if self.is_backgrounded(call_id) {
-                self.calls.insert(
-                    call_id.clone(),
-                    WaitCallState::BackgroundError(ToolBackgroundError {
-                        call_id: call_id.clone(),
-                        tool_name: self
-                            .call_tool_names
-                            .get(call_id)
-                            .cloned()
-                            .unwrap_or_else(|| ToolName::new("cancelled")),
-                        tool_type: ToolType::Function,
-                        message: "Tool call canceled".to_owned(),
-                        details: None,
-                        originator: tau_proto::PromptOriginator::User,
 
-                        display: None,
-                    }),
+                            display: None,
+                        },
+                        BackgroundErrorOutcome::Cancelled,
+                    ),
                 );
                 self.push_completed(call_id.clone());
             } else {
@@ -3119,19 +3066,14 @@ impl WaitTracker {
         &mut self,
         call_id: &ToolCallId,
     ) -> Option<tau_proto::ObservationId> {
-        let terminal = self.terminal_observations.remove(call_id)?;
-        self.background_error_outcomes.remove(&terminal);
-        Some(terminal)
+        self.terminal_observations.remove(call_id)
     }
 
     fn remove_released_completion(
         &mut self,
         generation: CompletionGeneration,
     ) -> Option<ReleasedCompletion> {
-        let released = self.released_completions.remove(&generation)?;
-        self.background_error_outcomes
-            .remove(&released.completion.terminal());
-        Some(released)
+        self.released_completions.remove(&generation)
     }
 
     /// Return whether a call is currently waitable in the background.
@@ -3145,7 +3087,7 @@ impl WaitTracker {
         self.calls.get(call_id).is_some_and(|state| {
             matches!(
                 state,
-                WaitCallState::BackgroundResult(_) | WaitCallState::BackgroundError(_)
+                WaitCallState::BackgroundResult(_) | WaitCallState::BackgroundError(..)
             )
         })
     }
@@ -3540,6 +3482,7 @@ pub(super) fn parse_wait_args_with_bounds(
     let mut tool_call_ids_count = 0_u8;
     let mut timeout_minutes_count = 0_u8;
     let mut unsupported_argument = None;
+    let mut complete_only_seen = false;
     for (k, v) in entries {
         let CborValue::Text(name) = k else {
             unsupported_argument
@@ -3547,6 +3490,14 @@ pub(super) fn parse_wait_args_with_bounds(
             continue;
         };
         match name.as_str() {
+            "complete_only" => {
+                if complete_only_seen || !matches!(v, CborValue::Bool(_)) {
+                    unsupported_argument.get_or_insert_with(|| {
+                        "`complete_only` must be a boolean and must not be repeated".to_owned()
+                    });
+                }
+                complete_only_seen = true;
+            }
             "tool_call_id" => {
                 tool_call_id_count = tool_call_id_count.saturating_add(1);
                 tool_call_id_value.get_or_insert(v);

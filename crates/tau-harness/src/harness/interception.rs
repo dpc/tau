@@ -1033,6 +1033,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::TOOL_REGISTER,
     EventName::TOOL_UNREGISTER,
     EventName::TOOL_PROGRESS,
+    EventName::TOOL_OUTPUT_UPDATED,
     EventName::ACTION_SCHEMA_PUBLISHED,
     EventName::ACTION_RESULT,
     EventName::ACTION_ERROR,
@@ -1231,6 +1232,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::ToolBackgroundResult(_)
             | Event::ToolBackgroundResultDisplay(_)
             | Event::ToolBackgroundError(_)
+            | Event::ToolOutputUpdated(_)
     ) && original != replacement
 }
 
@@ -2050,6 +2052,39 @@ impl Harness {
         }
         self.runtime_io.publication.deferred = retained;
         removed_pending
+    }
+
+    /// Commit an already interceptor-approved retry event without restarting
+    /// the interception chain.
+    pub(super) fn commit_approved_tool_output_retry(
+        &mut self,
+        cid: &AgentId,
+        publication: OwnedPublication,
+    ) {
+        let event = *publication.approved_event;
+        let agent_id = self.agent_id_for_event(&event);
+        self.commit_event(
+            None,
+            &PeerPublicationContext::default(),
+            event,
+            true,
+            Some(ConversationHeadSync {
+                user_response_baseline: None,
+                cid: cid.clone(),
+                agent_id,
+                session_generation: self.session_runtime.current_session_generation,
+                fold_parent: Some(publication.semantic_parent),
+                suppress_activation_dispatch: true,
+                continuation: None,
+                notify_watchers: false,
+            }),
+            PublicationOutcomeOwners {
+                ui_interaction: None,
+                prompt_acceptance: None,
+                start: None,
+            },
+        );
+        self.drain_deferred_publishes();
     }
 
     /// Commit an already interceptor-approved retry event without restarting

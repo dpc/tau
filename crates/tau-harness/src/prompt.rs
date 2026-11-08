@@ -2249,7 +2249,8 @@ pub(crate) fn project_tool_result_items(
         .cloned()
         .map(|mut item| {
             item.output.body = match item.presentation {
-                tau_proto::ToolResultPresentation::ToolPayload => {
+                tau_proto::ToolResultPresentation::ToolPayload
+                | tau_proto::ToolResultPresentation::ToolStreamReceipt => {
                     crate::internal_envelope::escape_untrusted_close(&item.output.body).into_owned()
                 }
                 tau_proto::ToolResultPresentation::HarnessDedupPointer => {
@@ -2259,7 +2260,8 @@ pub(crate) fn project_tool_result_items(
             match &mut item.status {
                 tau_proto::ToolResultStatus::Error { message } => {
                     *message = match item.presentation {
-                        tau_proto::ToolResultPresentation::ToolPayload => {
+                        tau_proto::ToolResultPresentation::ToolPayload
+                        | tau_proto::ToolResultPresentation::ToolStreamReceipt => {
                             crate::internal_envelope::escape_untrusted_close(message).into_owned()
                         }
                         tau_proto::ToolResultPresentation::HarnessDedupPointer => {

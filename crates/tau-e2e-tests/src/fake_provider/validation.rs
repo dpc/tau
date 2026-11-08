@@ -142,6 +142,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
         return Err(ClientError::handler("scenario exceeds 16384 bytes"));
     }
     validate_parallel_shell_shape(scenario)?;
+    validate_shell_stream_shape(scenario)?;
     validate_wait_all_mixed_shape(scenario)?;
     let mut ids = path_std_collections::HashSet::new();
     let mut barriers: HashMap<String, (usize, std::collections::HashSet<String>)> = HashMap::new();
@@ -405,6 +406,50 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     {
         return Err(ClientError::handler(
             "barriers may share a lane only in a closed message scenario",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_shell_stream_shape(scenario: &ScenarioV2) -> ClientResult<()> {
+    if !scenario
+        .lanes
+        .iter()
+        .flat_map(|lane| &lane.actions)
+        .any(|action| matches!(action, ScenarioActionV2::CoreShellStream { .. }))
+    {
+        return Ok(());
+    }
+    let [lane] = scenario.lanes.as_slice() else {
+        return Err(ClientError::handler("shell stream requires one lane"));
+    };
+    let steps = [
+        ShellStreamStep::Start,
+        ShellStreamStep::Wait,
+        ShellStreamStep::Cancel,
+        ShellStreamStep::Receipt,
+        ShellStreamStep::Finished,
+    ];
+    let Some(ScenarioActionV2::CoreShellStream {
+        user_text,
+        probe_executable,
+        ..
+    }) = lane.actions.first()
+    else {
+        return Err(ClientError::handler(
+            "shell stream must start with its probe",
+        ));
+    };
+    if lane.actions.len() != steps.len()
+        || !probe_executable.is_absolute()
+        || lane.actions.iter().zip(steps).any(|(action, expected)| {
+            !matches!(action, ScenarioActionV2::CoreShellStream {
+                user_text: text, probe_executable: probe, step
+            } if text == user_text && probe == probe_executable && *step == expected)
+        })
+    {
+        return Err(ClientError::handler(
+            "shell stream requires the fixed five-step sequence",
         ));
     }
     Ok(())

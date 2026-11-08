@@ -122,6 +122,8 @@ impl TypedImageUpload {
         active.canceled = true;
         abort(active, handle);
         handle.report_tool_cancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: active.invoke.call_id.clone(),
             tool_name: active.invoke.tool_name.clone(),
@@ -158,6 +160,7 @@ fn abort(active: &Active, handle: &ClientHandle) {
 /// Failure text is fixed and never carries fetchable keys or private paths.
 fn report_error(invoke: &ToolStarted, handle: &ClientHandle) -> ClientResult<()> {
     handle.report_tool_error(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),

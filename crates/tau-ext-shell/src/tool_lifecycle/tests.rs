@@ -49,6 +49,7 @@ fn terminal_preparation_failure_preserves_lifecycle_ownership() {
         usize::try_from(tau_client::MAX_OUTBOUND_FRAME_BYTES).expect("frame limit fits usize"),
     );
     let result = output.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.clone(),
         tool_name: ToolName::new("read"),

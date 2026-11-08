@@ -248,6 +248,7 @@ fn terminal_event_mapping_preserves_source_and_omits_placeholders() {
     )]);
     let tool_result = |kind| {
         Event::ProviderToolResult(crate::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call".into(),
             tool_name: crate::ToolName::new("shell"),
@@ -274,6 +275,7 @@ fn terminal_event_mapping_preserves_source_and_omits_placeholders() {
     );
 
     let foreground_error = Event::ProviderToolError(crate::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call".into(),
         tool_name: crate::ToolName::new("shell"),
@@ -291,6 +293,7 @@ fn terminal_event_mapping_preserves_source_and_omits_placeholders() {
     ));
 
     let background = Event::ToolBackgroundResult(crate::ToolBackgroundResult {
+        captured_output: None,
         call_id: "call".into(),
         tool_name: crate::ToolName::new("shell"),
         tool_type: crate::ToolType::Function,
@@ -306,6 +309,8 @@ fn terminal_event_mapping_preserves_source_and_omits_placeholders() {
     ));
 
     let background_error = Event::ToolBackgroundError(crate::ToolBackgroundError {
+        outcome: Default::default(),
+        captured_output: None,
         call_id: "call".into(),
         tool_name: crate::ToolName::new("shell"),
         tool_type: crate::ToolType::Function,

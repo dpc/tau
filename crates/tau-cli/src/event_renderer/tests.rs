@@ -1256,6 +1256,7 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
@@ -1375,6 +1376,7 @@ fn blocker_result(tool_name: &str, call_id: &str) -> tau_proto::ToolResultDispla
 
 fn blocker_error(tool_name: &str, call_id: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new(tool_name),
@@ -1577,6 +1579,7 @@ fn hidden_background_diff_moves_through_borrowed_terminal_projection() {
     let large_line = "b".repeat(bytes);
     let source_pointer = large_line.as_ptr();
     let event = tau_proto::Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: "large-background-diff".into(),
         tool_name: tau_proto::ToolName::new("edit"),
         tool_type: tau_proto::ToolType::Function,
@@ -1710,6 +1713,8 @@ fn large_background_error_borrows_descriptor_and_details() {
     let details_text = "d".repeat(2 * 1024 * 1024);
     let details_pointer = details_text.as_ptr();
     let event = tau_proto::Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+        outcome: Default::default(),
+        captured_output: None,
         call_id: "large-background-error".into(),
         tool_name: tau_proto::ToolName::new("edit"),
         tool_type: tau_proto::ToolType::Function,
@@ -1915,6 +1920,7 @@ fn terminal_builders_render_canonical_status_wording() {
     );
 
     let error = tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "error-call".into(),
         tool_name: tau_proto::ToolName::new("generic"),
@@ -1946,6 +1952,7 @@ fn terminal_builders_render_canonical_status_wording() {
 #[test]
 fn delegate_error_fallback_retains_stats_and_canonical_wording() {
     let error = tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "delegate-error".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
@@ -2071,6 +2078,8 @@ fn background_terminal_handlers_normalize_status() {
     );
     renderer.handle_socket_delivery(
         &tau_proto::Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: "background-error".into(),
             tool_name: tau_proto::ToolName::new("generic"),
             tool_type: tau_proto::ToolType::Function,
@@ -2161,6 +2170,8 @@ fn transcript_tool_runtime_retains_typed_ids_across_background_and_terminal_even
     assert!(typed_backgrounds.contains(&call_id));
 
     let terminal = tau_proto::Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+        outcome: Default::default(),
+        captured_output: None,
         call_id: call_id.clone(),
         tool_name: tau_proto::ToolName::new("extension_custom"),
         tool_type: tau_proto::ToolType::Custom,
@@ -2274,6 +2285,8 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         );
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "blocker-cancel".into(),
                 tool_name: tau_proto::ToolName::new(tool_name),
@@ -3687,6 +3700,7 @@ fn deferred_large_tool_terminal_reuses_one_lightweight_projection() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3769,6 +3783,7 @@ fn deferred_tool_ownership_routes_later_progress_after_publication() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5877,6 +5892,7 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5920,6 +5936,7 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
     };
     let tool_error = |call_id: tau_proto::ToolCallId| {
         tau_proto::Event::ToolError(tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id,
             tool_name: tau_proto::ToolName::new("generic"),
@@ -5932,6 +5949,8 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
     };
     let tool_cancelled = |call_id: tau_proto::ToolCallId| {
         tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id,
             tool_name: tau_proto::ToolName::new("generic"),

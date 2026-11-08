@@ -1535,6 +1535,7 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "wait-timeout".into(),
             tool_name: tau_proto::ToolName::new("wait"),
@@ -1576,6 +1577,7 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
     );
     replay.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "replayed-wait".into(),
             tool_name: tau_proto::ToolName::new("wait"),
@@ -1648,6 +1650,7 @@ fn exact_wait_for_minute_shaped_tool_name_has_no_timeout_limit() {
     };
     let terminal = || {
         Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "exact-wait".into(),
             tool_name: tau_proto::ToolName::new("wait"),

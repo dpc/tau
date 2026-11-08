@@ -71,9 +71,9 @@ impl Harness {
             // publish the corresponding mutable declaration instead.
             return Ok(());
         }
-        if matches!(event, Event::ToolProgress(_)) {
-            // Canonical tool progress is harness-authored. Tool/Core extensions
-            // publish `tool.progress_reported` observations instead.
+        if matches!(event, Event::ToolProgress(_) | Event::ToolOutputUpdated(_)) {
+            // Canonical progress and output are harness-authored. Extensions
+            // publish reports; only committed routed reports acquire authority.
             return Ok(());
         }
         if matches!(
@@ -258,6 +258,7 @@ impl Harness {
         if matches!(
             event,
             Event::ToolProgressReported(_)
+                | Event::ToolOutputReported(_)
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)
                 | Event::ToolCancelledReported(_)
@@ -903,6 +904,10 @@ impl Harness {
         }
         if let Event::ToolProgressReported(progress) = event {
             self.process_committed_tool_progress_report(peer_context, progress);
+            return;
+        }
+        if let Event::ToolOutputReported(output) = event {
+            self.process_committed_tool_output_report(peer_context, output);
             return;
         }
         if matches!(
@@ -1963,13 +1968,19 @@ impl Harness {
         let source_id = &extension.source;
         match event {
             Event::ToolResultReported(result) => {
-                self.handle_extension_tool_result(source_id, result.clone());
+                let mut result = result.clone();
+                result.captured_output = None;
+                self.handle_extension_tool_result(source_id, result);
             }
             Event::ToolErrorReported(error) => {
-                self.handle_extension_tool_error(source_id, error.clone());
+                let mut error = error.clone();
+                error.captured_output = None;
+                self.handle_extension_tool_error(source_id, error);
             }
             Event::ToolCancelledReported(cancelled) => {
-                self.handle_extension_tool_cancelled(source_id, cancelled.clone());
+                let mut cancelled = cancelled.clone();
+                cancelled.captured_output = None;
+                self.handle_extension_tool_cancelled(source_id, cancelled);
             }
             _ => unreachable!("caller filters terminal tool reports"),
         }
@@ -2540,6 +2551,7 @@ impl Harness {
             None => self.publish_event(Some(crate::harness::harness_connection_id()), event),
         }
         let error = ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: request.call_id,
             tool_name: tool_name.clone(),
@@ -2666,6 +2678,7 @@ impl Harness {
                     Some(&cid),
                     Some(crate::harness::harness_connection_id()),
                     ToolError {
+                        captured_output: None,
                         presentation: Default::default(),
                         call_id: result.call_id,
                         tool_name: result.tool_name,
@@ -2720,6 +2733,7 @@ impl Harness {
                     None,
                     Some(crate::harness::harness_connection_id()),
                     ToolError {
+                        captured_output: None,
                         presentation: Default::default(),
                         call_id: result.call_id,
                         tool_name: result.tool_name,

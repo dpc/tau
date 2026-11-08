@@ -742,6 +742,7 @@ impl Harness {
                 continue;
             };
             let mut error = ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: tool.name,
@@ -1247,6 +1248,7 @@ impl Harness {
     /// terminal-event enrichment and transcript attribution can still read the
     /// runtime metadata.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
+        self.tool_routing.tool_runtime.output_lanes.remove(call_id);
         self.tool_routing.tool_runtime.images.remove(call_id);
         let owner = self
             .tool_routing
@@ -1260,6 +1262,9 @@ impl Harness {
                     .get(call_id)
             })
             .cloned();
+        if let Some(cid) = &owner {
+            self.release_materialized_tool_output(cid);
+        }
         if owner
             .as_ref()
             .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
@@ -1363,6 +1368,7 @@ impl Harness {
                 | Event::MessageReactionRemovedReported(_)
                 | Event::MessageSentReported(_)
                 | Event::ToolProgressReported(_)
+                | Event::ToolOutputReported(_)
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)
                 | Event::ToolCancelledReported(_)
@@ -1398,6 +1404,9 @@ impl Harness {
     }
 
     pub(super) fn is_peer_forbidden_harness_fact(event: &Event) -> bool {
+        if matches!(event, Event::ToolOutputUpdated(_)) {
+            return true;
+        }
         // Peer intake rejects the same harness-owned facts that interception
         // treats as protected. Update this with `MUST_PASS_BY_DEFAULT` and
         // `immutable_protected_fact_was_modified` when adding new

@@ -155,6 +155,7 @@ fn replay_tool_normalization_preserves_event_allocation() {
     let mut stager = ColdAttachStager::pass_through();
     let delivery = replay(
         Event::ProviderToolError(tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("fixture"),
@@ -212,6 +213,7 @@ fn agent_stats(agent_id: &str) -> Event {
 /// the later attach-selection facts arrive.
 fn historical_tool_error() -> Event {
     Event::ToolError(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "historical-call".into(),
         tool_name: tau_proto::ToolName::new("fixture"),
@@ -229,6 +231,7 @@ fn historical_tool_error() -> Event {
 fn late_duplicate_start_after_terminal_stays_settled() {
     let mut stager = ColdAttachStager::staging();
     let terminal = Event::ToolError(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "settled-call".into(),
         tool_name: tau_proto::ToolName::new("fixture"),

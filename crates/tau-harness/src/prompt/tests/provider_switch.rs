@@ -197,6 +197,7 @@ fn provider_switch_clears_sidecars_without_changing_closed_tool_history() {
         vec![message.clone(), ContextItem::ToolCall(call.clone())],
     );
     history.append(Event::ProviderToolResult(tau_proto::ToolResult {
+        captured_output: None,
         call_id: call.call_id.clone(),
         tool_name: call.name.clone(),
         tool_type: call.tool_type,

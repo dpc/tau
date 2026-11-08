@@ -323,31 +323,19 @@ fn deterministic_wait_all_returns_mixed_result_and_error_members()
     let CborValue::Array(members) = &root[0].1 else {
         panic!("plural wait results must be an array");
     };
-    assert_eq!(members.len(), 2);
-    assert!(matches!(
-        &members[0],
-        CborValue::Map(entries)
-            if entries.contains(&(
-                CborValue::Text("original_tool_call_id".to_owned()),
-                CborValue::Text(success_call_id.to_string()),
-            ))
-                && entries.contains(&(
-                    CborValue::Text("outcome".to_owned()),
-                    CborValue::Text("result".to_owned()),
-                ))
-    ));
-    assert!(matches!(
-        &members[1],
-        CborValue::Map(entries)
-            if entries.contains(&(
-                CborValue::Text("original_tool_call_id".to_owned()),
-                CborValue::Text(error_call_id.to_string()),
-            ))
-                && entries.contains(&(
-                    CborValue::Text("outcome".to_owned()),
-                    CborValue::Text("error".to_owned()),
-                ))
-    ));
+    assert_eq!(
+        members,
+        &vec![
+            tau_proto::tool_completion_receipt(
+                &success_call_id,
+                tau_proto::ToolCompletionOutcome::Completed
+            ),
+            tau_proto::tool_completion_receipt(
+                &error_call_id,
+                tau_proto::ToolCompletionOutcome::Error
+            ),
+        ]
+    );
     fixture.assert_consumed()?;
     Ok(())
 }

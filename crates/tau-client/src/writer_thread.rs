@@ -35,6 +35,23 @@ pub(crate) struct WriterSender {
 }
 
 impl WriterSender {
+    /// Reserve a bounded payload-free producer wake slot.
+    pub(crate) fn reserve_detached_capacity(&self) -> ClientResult<crate::DetachedCapacityToken> {
+        self.detached.reserve_capacity()
+    }
+
+    /// Admit or arm a producer atomically with detached capacity changes.
+    pub(crate) fn admit_detached_or_arm(
+        &self,
+        frame: QueuedFrame,
+        observation: Option<AdmissionObservation>,
+        token: &crate::DetachedCapacityToken,
+    ) -> ClientResult<()> {
+        self.detached
+            .admit_or_arm(frame, observation, Some(token))?;
+        self.wake_detached()
+    }
+
     /// Sends one synchronous writer command with transport backpressure.
     pub(crate) fn send(&self, command: WriterCommand) -> ClientResult<()> {
         self.send_observed(command, None)

@@ -1,4 +1,6 @@
 use std::time as path_std_time;
+#[cfg(unix)]
+use std::{fs::File, process::Command};
 
 use super::*;
 use crate::tools as path_crate_tools;
@@ -50,6 +52,244 @@ fn output_text(result: &CborValue) -> &str {
         .expect("output field")
 }
 
+/// Cancellation before the first flush keeps available pipe diagnostics, and
+/// cancellation after an accepted batch keeps only the new tail.
+#[cfg(unix)]
+#[test]
+fn cancellation_retains_available_tail_without_repeating_accepted_batches() {
+    use std::io::Read;
+
+    for earlier_batch in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let fifo = directory.path().join("ready");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("create readiness FIFO")
+                .success()
+        );
+        let (output_tx, output_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let mut stream = OutputStreamCapture::new(
+            crate::Output::channel(output_tx),
+            "cancel-tail".into(),
+            tau_proto::ToolName::new("shell"),
+        )
+        .expect("stream");
+        if earlier_batch {
+            let now = path_std_time::Instant::now();
+            stream.push(OutputStream::Stdout, b"EARLIER_ACCEPTED", now);
+            stream.poll(now + path_std_time::Duration::from_secs(15));
+            output_rx
+                .recv_timeout(path_std_time::Duration::from_secs(1))
+                .expect("accepted batch");
+        }
+        let arguments = shell_args(
+            &format!(
+                "printf FINAL_CANCEL_DIAGNOSTIC; printf R > '{}'; sleep 60",
+                fifo.display()
+            ),
+            90,
+        );
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = run_command_live_for_surface_with_authorized_cwd(
+                path_crate_tools::ShellSurface::Generic,
+                &arguments,
+                &ShellConfig::default(),
+                ShellCommandMode::READ_WRITE_HIDDEN,
+                false,
+                None,
+                ShellRunControl {
+                    cancel_rx: Some(cancel_rx),
+                    output_stream: Some(stream),
+                },
+            );
+            done_tx.send(result).expect("outcome");
+        });
+        let controller = std::thread::spawn(move || {
+            let mut ready = File::open(fifo).expect("readiness FIFO");
+            ready
+                .read_exact(&mut [0u8])
+                .expect("child wrote its diagnostics");
+            cancel_tx.send(()).expect("cancel");
+        });
+        let outcome = done_rx
+            .recv_timeout(path_std_time::Duration::from_secs(10))
+            .expect("prompt cancellation")
+            .expect("shell");
+        controller.join().expect("controller");
+        worker.join().expect("worker");
+        let CommandOutcome::Cancelled { output: Some(tail) } = outcome else {
+            panic!("expected cancellation with available tail");
+        };
+        assert!(tail.contains("FINAL_CANCEL_DIAGNOSTIC"));
+        assert!(!tail.contains("EARLIER_ACCEPTED"));
+        assert!(
+            output_rx.try_recv().is_err(),
+            "no empty or duplicate update"
+        );
+    }
+}
+
+/// If the optional lifecycle wake pipe is unavailable, the pre-effect capacity
+/// endpoint still wakes closed-output waits for a later child exit or cancel.
+#[cfg(unix)]
+#[test]
+fn missing_lifecycle_pipe_does_not_strand_closed_output_exit_or_cancellation() {
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    for cancel in [false, true] {
+        let (output_tx, _output_rx) = mpsc::channel();
+        let stream = OutputStreamCapture::new(
+            crate::Output::channel(output_tx),
+            "closed-output".into(),
+            tau_proto::ToolName::new("shell"),
+        )
+        .expect("pre-effect wake endpoint");
+        let mut child = Command::new("sh")
+            .args(["-c", "read ignored"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("controlled child");
+        let mut input = child.stdin.take().expect("child input");
+        let process = ShellProcess {
+            child,
+            stdout: None,
+            stderr: None,
+            #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+            output_users: None,
+        };
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let (poll_tx, poll_rx) = mpsc::sync_channel(1);
+        // Inject failure/absence of the optional child wake allocation. No
+        // stdout/stderr descriptor can accidentally deliver the terminal wake.
+        let mut state = ShellWaitState::start_with_wake_pipe(
+            process,
+            Some(cancel_rx),
+            Some(stream.lifecycle_waker()),
+            None,
+        );
+        state.closed_output_poll = Some(poll_tx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done_tx
+                .send(state.wait(path_std_time::Duration::from_secs(30), Some(stream)))
+                .expect("wait result");
+        });
+        poll_rx
+            .recv_timeout(path_std_time::Duration::from_secs(2))
+            .expect("closed-output poll boundary");
+        if cancel {
+            cancel_tx.send(()).expect("late cancellation");
+        } else {
+            input.write_all(b"exit\n").expect("release child to exit");
+        }
+        let outcome = done_rx
+            .recv_timeout(path_std_time::Duration::from_secs(5))
+            .expect("terminal must wake before deadline");
+        assert_eq!(outcome.cancelled, cancel);
+        assert!(!outcome.timed_out);
+        if !cancel {
+            assert!(outcome.success);
+        }
+        worker.join().expect("worker");
+    }
+}
+
+/// Exercise the real pipe/PTY coordinator, not only the capture clock: a
+/// nonterminal report arrives while the process is alive, cancellation reaps
+/// it, and VCR replay retains the same output without executing it again.
+#[test]
+fn live_stream_can_cancel_running_shell_and_replay_preserves_batches() {
+    let cassette_dir = tempfile::tempdir().expect("cassette directory");
+    let marker = cassette_dir.path().join("executed");
+    let arguments = shell_args(
+        &format!(
+            "printf ran > '{}'; printf STREAM_SENTINEL; sleep 60; printf NATURAL_EXIT",
+            marker.display()
+        ),
+        90,
+    );
+    for mode in [
+        tau_vcr::VcrMode::RecordIfMissing,
+        tau_vcr::VcrMode::ReplayOnly,
+    ] {
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "stream-vcr",
+            &arguments,
+            Some(tau_vcr::VcrConfig::new(mode, cassette_dir.path())),
+        )
+        .expect("shell world");
+        let (output_tx, output_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let arguments = arguments.clone();
+        let worker = std::thread::spawn(move || {
+            let outcome = run_command_cancellable_for_tool(
+                ShellInvocation {
+                    surface: path_crate_tools::ShellSurface::Generic,
+                    call_id: "stream-vcr",
+                    arguments: &arguments,
+                    authorized_cwd: None,
+                    output_stream: Some(
+                        OutputStreamCapture::new(
+                            crate::Output::channel(output_tx),
+                            "stream-vcr".into(),
+                            tau_proto::ToolName::new("shell"),
+                        )
+                        .expect("stream capture"),
+                    ),
+                },
+                &ShellConfig::default(),
+                ShellCommandMode::READ_WRITE_HIDDEN,
+                false,
+                Some(cancel_rx),
+                &mut world,
+            );
+            world.finish().expect("finish shell world");
+            done_tx.send(outcome).expect("send outcome");
+        });
+        let message = output_rx.recv_timeout(path_std_time::Duration::from_secs(30));
+        let still_running = done_rx.try_recv().is_err();
+        cancel_tx.send(()).expect("cancel running invocation");
+        let outcome = done_rx
+            .recv_timeout(path_std_time::Duration::from_secs(10))
+            .expect("prompt cancellation")
+            .expect("shell invocation");
+        worker.join().expect("worker");
+        assert!(still_running, "output must precede terminal completion");
+        assert!(matches!(outcome, CommandOutcome::Cancelled { .. }));
+        let tau_proto::HarnessInputMessage::Emit(emit) = message.expect("streamed output") else {
+            panic!("expected output emission");
+        };
+        let tau_proto::Event::ToolOutputReported(report) = *emit.event else {
+            panic!("expected output report");
+        };
+        assert_eq!(report.sequence, 0);
+        assert!(report.text.contains("STREAM_SENTINEL"));
+        assert!(!report.text.contains("NATURAL_EXIT"));
+        assert_eq!(report.omitted_bytes, 0);
+        assert!(
+            output_rx.try_recv().is_err(),
+            "terminal cannot repeat the batch"
+        );
+        if mode == tau_vcr::VcrMode::RecordIfMissing {
+            assert!(marker.exists(), "recording must execute");
+            std::fs::remove_file(&marker).expect("remove live marker");
+        } else {
+            assert!(!marker.exists(), "replay must not execute the command");
+        }
+    }
+}
+
 /// GPT surface validation must run before VCR replay so a cassette cannot
 /// turn the removed legacy `cwd` spelling into a successful invocation.
 #[test]
@@ -74,7 +314,7 @@ fn replay_rejects_legacy_gpt_cwd_without_consuming_outcome() {
         Some(record_config),
     )
     .expect("recording world");
-    recording.record_shell_outcome(WorldShellOutcome::Cancelled);
+    recording.record_shell_outcome(WorldShellOutcome::Cancelled { output: None });
     recording.finish().expect("finish recording");
 
     let replay_config = tau_vcr::VcrConfig::new(tau_vcr::VcrMode::ReplayOnly, cassette_dir.path());
@@ -87,6 +327,7 @@ fn replay_rejects_legacy_gpt_cwd_without_consuming_outcome() {
     .expect("replay world");
     let error = run_command_cancellable_for_tool(
         ShellInvocation {
+            output_stream: None,
             surface: path_crate_tools::ShellSurface::ChatGpt,
             call_id: "legacy-gpt-cwd",
             arguments: &arguments,
@@ -380,7 +621,7 @@ fn record_cancelled_shell(
         .join()
         .expect("join recording")
         .expect("record shell");
-    assert!(matches!(outcome, CommandOutcome::Cancelled));
+    assert!(matches!(outcome, CommandOutcome::Cancelled { .. }));
     args
 }
 
@@ -538,7 +779,7 @@ fn shell_vcr_cancelled_replay_requires_cancel_request() {
     cancel_tx.send(()).expect("send cancel");
 
     let outcome = handle.join().expect("join replay").expect("replay shell");
-    assert!(matches!(outcome, CommandOutcome::Cancelled));
+    assert!(matches!(outcome, CommandOutcome::Cancelled { .. }));
 }
 
 #[test]

@@ -22,6 +22,13 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ### Unpublished source SDK 0.28.0
 
+The current source uses protocol **21.0**, adding ordered tool report, update,
+and final-capture types, declaration-frozen policy, and receipt-only background
+waits. Configured extensions and UI peers require a coordinated rebuild. The
+source SDK package version remains **0.28.0**; this change requests no new SDK
+release, version bump, publication, or runtime activation. See
+[SPEC-streamed-tool-output](../specs/SPEC-streamed-tool-output.md).
+
 Protocol 20.0 / source SDK 0.28.0 remove deprecated full-digest artifact keys.
 Only the fixed 24-lowercase-hex identity is accepted in references and typed DTOs.
 Rebuild configured extensions and UI peers together before activation. Old full-key
@@ -51,7 +58,7 @@ paths remain unchanged. This source update does not publish packages or activate
 installed binaries.
 
 Canonical-main bridge receivers require Configure's advertised protocol major to
-match the SDK's compiled major, currently 20, and accept all minors within that
+match the SDK's compiled major, currently 21, and accept all minors within that
 major. This replaces the stale guard for the feature's introduction in protocol
 16.5. Missing revisions and other majors, including future majors, fail closed.
 Ordinary receiver requests remain unchanged.

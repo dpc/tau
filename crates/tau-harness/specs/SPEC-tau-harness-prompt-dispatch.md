@@ -266,38 +266,36 @@ created. This implements
 
 Harness-generated active and passive background-tool completion prompts carry
 `internal_kind=background_tool_completion` when they reach model context. A
-completion with no winning installed wait queues a correlated
-`tau_background_result` transcript preview. The canonical background terminal
-remains the only payload and retrieval authority; previewing never consumes it.
-A matching wait can remove the preview only while the runtime pending-prompt queue
-still owns it. After transfer to ordinary prompt publication, interception,
-publication retry, commit, or provider observation may coexist with a wait result.
-The envelope family and typed transcript provenance follow
+completion with no winning installed wait queues a correlated, payload-free
+completion notice. The accepted canonical output stream owns source text; the
+canonical terminal owns the bounded final source tail and outcome. Notices and
+normal wait results carry receipts without copies or previews of that source
+text. A matching wait can remove the notice only while the runtime pending-prompt
+queue still owns it. After ownership transfers to ordinary prompt publication,
+interception, publication retry, commit, or provider observation may coexist with
+a wait result. The envelope family and typed transcript provenance follow
 [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md);
 the source declaration and terminal identities follow
 [SPEC-durable-tool-observation-correlation](../../../specs/SPEC-durable-tool-observation-correlation.md).
 
-Immediately before publication ownership transfer, the harness lazily renders and
-stores the exact generic-user envelope bytes from the exact retained completion
-generation. One tool-round prompt drain shares an 8 KiB final-body budget in queue
-order; passive previews folded before one real user prompt share another such
-budget; a standalone idle preview is a singleton group. The bound is per publication
-group, not per complete provider input, and historical committed previews are not
-recounted. Interception, deferred publication, retry, and the prompt-fact commit
-occur after that transfer. Only the later committed prompt fact owns transcript
-inclusion. Bodies that do not fit become deterministic summaries with explicit
-retrieval. Logical tool result does not imply process success: summaries for
-recognized shell tools use only the strict canonical-CBOR process projection, with
-explicit unavailable and not-applicable states.
+Immediately before publication ownership transfer, the harness renders the
+bounded control notice from the exact retained completion generation without
+fetching, summarizing, budgeting, or copying tool output. Interception, deferred
+publication, retry, and prompt-fact commit follow that transfer. Only the later
+committed prompt fact owns notice inclusion. Source framing, finite capture
+budgets, terminal custody, explicit recovery pages, and incremental-output wake
+semantics are specified by
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 
-The tag changes UI classification and anchors the replay-derived exact-node
+The tag controls UI classification and anchors the replay-derived exact-node
 provenance used by provider prompt assembly. Existing activation, wake,
 continuation, placeholder, owner routing, in-flight inference, and wait selection
-behavior remains unchanged. A prompt commit owns transcript inclusion rather than
-proof of provider observation. Committed previews replay at their original position;
-cold restore never synthesizes a preview from a terminal alone, and restored wait
-state may offer canonical output again. These exact preview and restart semantics
-were explicitly approved by the user on September 5, 2026.
+behavior remains unchanged except for the approved incremental-output activation
+and `complete_only` masking rules. A prompt commit establishes transcript
+inclusion, not proof of provider observation. Historical committed previews replay at their
+original position; current completion notices remain payload-free. Cold restore
+does not synthesize a final-source wake from a terminal alone. Restored waits
+can return completion receipts again without repeating source text.
 
 Prompt-injected notification admission remains separate from provider-trigger
 readiness. A natural user prompt, timer prompt, or tool continuation

@@ -57,6 +57,17 @@ does not repeat image I/O. See
 
 ## Canonical projections and completion
 
+Opted-in ordered-text tools retain a bounded typed final source capture before
+terminal publication custody. Their canonical raw payload retains only bounded
+process metadata, and native foreground projection closes with a typed receipt.
+The harness also projects background source at its canonical terminal rather
+than copying it through a later wait or notice. Accepted updates precede that
+final occurrence.
+See [SPEC-streamed-tool-output](SPEC-streamed-tool-output.md) for frozen policy,
+capture bounds, receipt-only waits, and the distinction between incremental and
+terminal activation. Ordinary non-streamed foreground results retain the native
+payload and image rules below.
+
 A valid foreground result report publishes protected harness-sourced
 `provider.tool_result` and then derives transient `tool.result` plus
 `tool.result_display` after the provider terminal commits. The generic

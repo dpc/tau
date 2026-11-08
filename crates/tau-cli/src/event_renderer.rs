@@ -923,6 +923,9 @@ struct ToolCallState {
     /// Latest live display for the block, used when `:set show-tools`
     /// flips while the call is still running.
     live_display: Option<ToolCallDisplay>,
+    /// Exact source occurrence last rendered on this live row. Presentation may
+    /// replace its preview; canonical transcript frames remain independent.
+    output_sequence: Option<(tau_proto::ToolCallRef, u64)>,
     /// Safe action descriptor extracted from a `blocker` start. Terminal
     /// reports do not repeat invocation arguments, so this survives until the
     /// final display replaces the live row.
@@ -5833,6 +5836,12 @@ impl EventRenderer {
                     .get(&progress.call_id)
                     .cloned(),
             ),
+            Event::ToolOutputUpdated(update) => EventAgentIdResolution::from_agent_id(
+                self.event_owners
+                    .tool_agents
+                    .get(&update.output.call_id)
+                    .cloned(),
+            ),
             Event::ToolResultDisplay(result) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
@@ -8075,6 +8084,10 @@ impl EventRenderer {
                 self.handle_tool_progress(progress);
                 true
             }
+            Event::ToolOutputUpdated(update) => {
+                self.handle_tool_output(update);
+                true
+            }
             Event::ProviderToolResult(result) => {
                 self.handle_tool_result_fields(
                     &result.call_id,
@@ -8130,6 +8143,55 @@ impl EventRenderer {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Update the generic live payload without inventing a start or changing
+    /// tool arguments, status, timers, or terminal history.
+    fn handle_tool_output(&mut self, update: &tau_proto::ToolOutputUpdate) {
+        let freeze_multiline_payloads = self.freeze_multiline_live_payloads();
+        let Some(state) = self
+            .transcript
+            .runtime
+            .tool_calls
+            .get_mut(&update.output.call_id)
+        else {
+            return;
+        };
+        if state.is_sub_agent
+            || state.is_blocker
+            || state.output_sequence.is_some_and(|(call, sequence)| {
+                call != update.call || sequence >= update.output.sequence
+            })
+        {
+            return;
+        }
+        let duration = Self::live_tool_duration(state);
+        let (Some(block), Some(display)) = (state.block_id, state.live_display.as_mut()) else {
+            return;
+        };
+        let mut text = update.output.text.clone();
+        if update.output.omitted_bytes != 0 {
+            text.insert_str(
+                0,
+                &format!("[{} output bytes omitted]\n", update.output.omitted_bytes),
+            );
+        }
+        display.payload = Some(tau_proto::ToolUsePayload::Text { text });
+        Self::normalize_live_tool_duration(
+            freeze_multiline_payloads,
+            display,
+            duration,
+            state.effective_tool_timeout,
+        );
+        state.output_sequence = Some((update.call, update.output.sequence));
+        let display = display.clone();
+        let rendered = self.render_live_tool_block(&display);
+        self.resources.handle.set_block(block, rendered);
+        if self.transcript.runtime.model_status_block.is_some() {
+            self.render_model_status();
+        } else {
+            self.resources.handle.redraw();
         }
     }
 

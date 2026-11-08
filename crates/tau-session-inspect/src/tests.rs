@@ -466,6 +466,7 @@ fn try_append_trace_provider_terminal(
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -530,6 +531,7 @@ fn append_background_tool_calls(
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -564,6 +566,7 @@ fn append_background_tool_calls(
                 agent_id.as_str(),
                 None,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: (*call_id).into(),
                     tool_name: tool_name.clone(),
@@ -592,6 +595,7 @@ fn append_background_tool_calls(
                 agent_id.as_str(),
                 None,
                 Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+                    captured_output: None,
                     call_id: (*call_id).into(),
                     tool_name,
                     tool_type: ToolType::Function,

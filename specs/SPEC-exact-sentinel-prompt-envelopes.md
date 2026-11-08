@@ -37,7 +37,8 @@ model-facing payload families:
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher`, optional `sender_trust`, and optional descriptive JSON `mentions` before `content_trust` |
 | `quoted_message` | Generic user-role text attached to a canonical delivered/edited message | Optional descriptive reference, author, and excerpt metadata; `content_trust="external"` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
-| `tau_background_result` | Generic user-role text | Canonical background-preview attributes |
+| `tau_background_result` | Generic user-role text | Historical canonical background-preview attributes |
+| `tau_tool_output` | Generic user-role text | `call_id`, `tool`, `sequence`, `terminal`, `omitted_bytes`; ordered canonical tool source |
 
 Each change that adds or reframes a generic-user family must register it and use
 the registry's shared metadata and exact-close helper. Family renderers own
@@ -124,8 +125,8 @@ or authority. These notice snapshot, wire, rendering, bounds, mixed-version,
 and replay semantics were explicitly approved by the user on September 12,
 2026.
 
-The harness renders a complete `tau_background_result` envelope from typed
-background-terminal and call correlation before publishing its prompt fact. Its
+Historical background-preview facts retain the `tau_background_result` envelope
+rendered from typed background-terminal and call correlation. Its
 ordered attributes authenticate call identity, tool name, logical tool outcome,
 full-versus-summary delivery, canonical rendered-body byte count, retrieval, and
 optional bounded summary metadata. The complete body remains untrusted tool data.
@@ -141,6 +142,15 @@ this authority, while a retained suffix node keeps it. Provider projection prese
 the authoritative node's exact bytes and uses this registry family's close escaping
 to prevent every other generic text item from forming a complete
 `tau_background_result` envelope.
+
+New output uses `tau_tool_output`, rendered only from accepted canonical updates
+or the final canonical terminal. The exact declaration reference governs source
+ownership; text spelling cannot confer it. The harness retains final source before
+native closure, and completion notices and waits carry control receipts rather than
+another payload copy. The harness preserves canonical source bytes through
+deferred placement and replay, sanitizes provider controls, and uses the registry's
+exact-close escaping for the untrusted body. See
+[SPEC-streamed-tool-output](SPEC-streamed-tool-output.md).
 
 These durable typed-span and tool-presentation semantics have the explicit approval
 required by

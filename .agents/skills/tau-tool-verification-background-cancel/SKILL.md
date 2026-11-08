@@ -16,6 +16,22 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Background tools and `wait`
 
+Tool source and synchronization are separate. Accepted incremental updates and
+final output appear once in ordered `tau_tool_output` context. `wait` returns a
+successful receipt with `original_tool_call_id` and `target_outcome` (`completed`,
+`error`, or `cancelled`), including when the target failed. It never copies the
+source body. Use `tool_output` deliberately for bounded recovery; omitted raw
+bytes and expired temporary files are not recoverable through it.
+
+Verify that a real shell prints a sentinel and stays alive: the sentinel must arrive
+after 15 seconds idle or 30 seconds of continuing output, before completion,
+and the agent must be able to cancel in response. Silence must not produce
+updates, size pressure must not flush early, and accepted chunks must remain
+ordered before final source. Live inference must not be cancelled by output.
+For every wait mode, `complete_only: true` must mask already queued and newly
+arriving nonterminal tool wakeups for that agent while retaining source context.
+Unrelated input and actual completion must still wake it.
+
 Some tools can run in the background. The agent first receives a synthetic tool result with `kind: background_placeholder` saying:
 
 ```
@@ -24,24 +40,21 @@ tau_internal: true
 Tool call `<tool_call_id>` is running in the background.
 ```
 
-When the real tool finishes, Tau queues an internal, UI-hidden prompt for the owning conversation saying:
+When the real tool finishes, Tau may queue an internal, UI-hidden completion
+notice for the owning conversation. The notice carries control and correlation,
+not the source output.
 
-```
-[tau-internal] Tool call `<tool_call_id>` completed. Its result is queued; use
-`wait` to consume it.
-```
-
-This prompt is a notification, not result delivery or consumption. The completed
-result remains queued until `wait` consumes it. The prompt is model-visible only
-if it reaches the agent before the completion is consumed by `wait`. If the
+This notice does not deliver source or consume completion. The completion remains
+queued until `wait` consumes it. The prompt is model-visible only if it reaches
+the agent before `wait` consumes the completion. If the
 agent is already in a model turn, the prompt may sit in the pending prompt
-queue. A later `wait` can consume the completed result and suppress/remove that
-queued prompt before the model ever sees it. This is expected and is not a
+queue. A later `wait` can consume the completion and suppress/remove that
+queued prompt before the model sees it. This is expected and is not a
 delivery failure.
 
-The agent can call `wait({"tool_call_id": "..."})` to collect that specific real
-result; this is the unambiguous choice when targeting a call. `wait({})`
-consumes the oldest unconsumed completed background result in the current
+The agent can call `wait({"tool_call_id": "..."})` to collect that specific
+completion receipt; this is the unambiguous choice when targeting a call. `wait({})`
+consumes the oldest unconsumed background completion in the current
 conversation. Only if none is complete and an owned background call is running
 does it wait for the next completion; otherwise it returns an error. The no-arg
 form is conversation-scoped: it must not consume completions from parent, child,
@@ -54,15 +67,15 @@ technical requirement. The `wait` tool must work well when called for tool
 calls that are still running, and it must have reasonable semantics in all
 cases. If `wait` is used for a backgrounded call before completion, Tau
 suppresses that internal completion prompt while still emitting the real
-background result/error event. If `wait` consumes an already-completed result
-before its queued completion prompt is delivered to the model, Tau also
+background terminal event. If `wait` consumes an already-queued completion
+before its queued completion prompt reaches the model, Tau also
 suppresses/removes that prompt. It cannot suppress a notification already
 delivered to the model. If `wait({})` consumes a completion, it returns an
 `original_tool_call_id: <tool_call_id>` provider-visible header so the agent
 knows which background call was collected.
 
 `wait({"timeout_minutes": N})` is the separate activating-input form. `N` must
-be a positive integer and is silently clamped to the configured bounds (five
+be a positive integer and is silently clamped to the configured bounds (one
 through 1,440 minutes by default). It returns
 `input_available: true` when accepted input wins or `timed_out: true` when the
 monotonic deadline wins, without consuming input or background results. Exact-id
@@ -73,11 +86,11 @@ substantive tool admission, the third result also carries one `advice` string
 suggesting `status(waiting)` and event-driven wakeups. Later timeouts in that
 no-progress run omit it, and current Waiting suppresses it.
 
-Exact-id and bare waits arbitrate completed results against activating input.
-A wait may consume its matching completed result before that completion's own
+Exact-id and bare waits arbitrate completions against activating input.
+A wait may consume its matching completion before that completion's own
 queued notification preempts it. A different unsuppressed completion prompt,
 watch notification, or direct message is ordinary activating input and may
-interrupt the wait even when the requested result is already complete. The
+interrupt the wait even when the requested call is already complete. The
 successful interruption result must use exactly these closed headers, with LF
 line endings and one blank line before any optional concise prose:
 
@@ -90,7 +103,7 @@ wait_mode: exact
 
 Bare waits use `wait_mode: any_background`. The result must not echo a target ID
 or copy activating input into a header. Report which activation preempted the
-wait; after it drains, retrying the exact wait must still deliver the result
+wait; after it drains, retrying the exact wait must still deliver the receipt
 once.
 
 Do not infer an exact-wait result from a delegate's prose. Confirm the actual
@@ -117,7 +130,7 @@ Also verify the active-`wait` variant of the same scenario. Use a delegate promp
 
 Because `agent_start` enables a persistent watch, these message-delivery probes can produce later watch notifications if the child leaves an earlier background tool running. For example, after an active-`wait` interruption, the original sleep may complete later, queue a normal background-completion prompt in the child, and the child may answer something like `Received.`. That is not a duplicate watch notification by itself; it is a later child turn caused by the delayed inner completion. If the verifier no longer wants notifications from that child after the success nonce, explicitly call `agent_watch({"agent_id":"<sub_agent_id>","enable":false})`.
 
-A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should fail. At most one *installed* no-arg waiter may target the same next completion: with no completed result and one running call, sibling bare waits must produce one registration and one clear duplicate/in-progress error. If two results are already complete, two sibling bare waits may immediately consume the two distinct results in completion order; that does not install duplicate waiters. The exact race error depends on timing, but each result must be consumed at most once.
+The first successful `wait` consumes a queued background completion and returns its receipt. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the receipt, and the rest should fail. At most one *installed* no-arg waiter may target the same next completion: with no queued completion and one running call, sibling bare waits must produce one registration and one clear duplicate/in-progress error. If two completions are already queued, two sibling bare waits may consume them in completion order; that does not install duplicate waiters. The exact race error depends on timing, but each completion must be consumed at most once.
 
 
 ### Background tool `cancel`
@@ -131,8 +144,9 @@ cancellation requested`, emits a harness notice event containing `tool call
 cancellation request`, and targets only the requested tool call. Cancellation is
 async and best effort: the success result only means Tau accepted the request,
 not that the child process or agent has already stopped. A canceled shell call
-should complete through `wait`, include timing headers if it ran longer than
-about 5 seconds, and must not keep running to normal `status: 0` completion.
+should close through a successful `wait` receipt with `target_outcome: cancelled`.
+Timing and captured diagnostics belong to source output, not the receipt. The
+process must not keep running to normal `status: 0` completion.
 For an admitted ext-shell model call, cancellation processed before the
 extension's effect-start transition prevents process spawn or file mutation and
 produces one cancelled terminal. If effect start wins first, cancellation keeps
@@ -140,7 +154,7 @@ the active process/search behavior and cannot roll back effects already started.
 
 Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Unknown ids should be distinguished from already-completed ids. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
 
-When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification is delivered to the model when no wait consumes the completion first, and `wait` returns a completed result once and only once. Completion prompt suppression is expected when a matching `wait` is already active before the background call finishes, and also when a completion prompt has been queued but not yet delivered to the model before `wait` consumes the result. If the tool finishes first and Tau already showed `[tau-internal] Tool call ... completed. Its result is queued; use wait to consume it.` to the model, a later `wait` can still consume the result and that earlier prompt is not a bug.
+When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification reaches the model when no wait consumes the completion first, and `wait` returns a successful completion receipt once and only once. Completion prompt suppression is expected when a matching `wait` is already active before the background call finishes, and when `wait` consumes a completion whose prompt is queued but has not reached the model. If the tool finishes first and Tau already showed `[tau-internal] Tool call ... completed. Its result is queued; use wait to consume it.` to the model, a later `wait` can still consume the completion and that earlier prompt is not a bug.
 
 
 ### Cancel tool verification plan
@@ -164,14 +178,14 @@ Record all of these observations:
 * A successful cancel returns exactly `Tool cancellation requested` and does not background.
 * The harness emits a `harness.notice` event containing `tool call cancellation request` if event logs are available.
 * If delegate cancellation is supported, the canceled delegate produces a background error that `wait` can collect.
-* `wait({"tool_call_id": id})` returns the canceled result once and only once.
+* `wait({"tool_call_id": id})` returns a successful receipt with `target_outcome: cancelled` once and only once for current tools. Preserve the version-specific error expectations below for legacy delegate calls.
 * `wait({})` can collect a canceled completion and includes `original_tool_call_id`.
 * Waiting before the delegate has completed suppresses the later model-visible completion prompt. Waiting after a completion prompt was already delivered is still valid, but does not retroactively suppress that prompt.
 * Duplicate cancel requests race cleanly: one succeeds, later or parallel ones fail with `Tool call already canceled` or another clear duplicate error.
 * Canceling an unknown id, unsupported running tool id, empty id, or `sub_agent_id` returns a tool error. If legacy/background `agent_start` is present, a completed agent_start id also returns a clear already-done error.
 * If delegate cancellation is supported, canceling one delegate does not cancel a sibling delegate.
 * Canceling a long-running shell call works and does not let the command complete normally.
-* Slow canceled shell calls, and slow canceled delegates when supported, include `duration_seconds` after about 5 seconds. A few seconds of timing overhead is normal and not worth reporting by itself.
+* Timing metadata belongs to canonical source output, not the completion receipt. A few seconds of timing overhead is normal and not worth reporting by itself.
 * If delegate cancellation is supported, a canceled delegate does not leak completions from its own in-flight or backgrounded inner tool calls into the parent conversation.
 * The user-visible UI does not show hidden internal completion prompts unless the current UI settings intentionally expose them.
 
@@ -249,7 +263,7 @@ answer is still available once.
 
 Start a shell command long enough to background, such as `sleep 20`. When the shell placeholder gives a tool call ID, call `cancel` for that ID. Expect the foreground result to be exactly `Tool cancellation requested`.
 
-Then call `wait` for the shell call. Expect a canceled or terminated result, not a normal `status: 0` completion. If the command ran longer than about 5 seconds, verify the result includes a `duration_seconds` header. If `cancel` rejects the shell call as not cancellable, or if `wait` later returns normal `status: 0`, record this as a discrepancy because shell cancellation is expected to work.
+Then call `wait` for the shell call. Expect a successful receipt with `target_outcome: cancelled`. Check the canonical source for captured diagnostics and timing, not the receipt. If the command ran longer than about 5 seconds, verify that the source includes a `duration_seconds` header. If `cancel` rejects the shell call as not cancellable, or if `wait` later returns `target_outcome: completed` with normal `status: 0` completion in the source, record this as a discrepancy because shell cancellation is expected to work.
 
 #### Phase 5: target isolation (legacy/conditional)
 
@@ -304,7 +318,7 @@ If you have direct access to harness event logs, verify:
 * Successful cancel emitted `harness.notice` with `tool call cancellation request`.
 * The canceled delegate emitted `ToolBackgroundError` with `Tool call canceled`.
 * No `AgentPromptSteered` or queued pending prompt remains for canceled nested delegate completions.
-* Completed results are consumed once, and the consumed result is not available to later `wait` calls.
+* Each completion is consumed once and is unavailable to later `wait` calls. Canonical source remains separate from consumption.
 
 #### Reporting format for `cancel` verification
 

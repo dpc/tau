@@ -35,6 +35,7 @@ mod client_handle;
 mod config;
 mod contexts;
 mod detached_output;
+pub use detached_output::DetachedCapacityToken;
 mod event_payload;
 mod extension_trait;
 mod handler;

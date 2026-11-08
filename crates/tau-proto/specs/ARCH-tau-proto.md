@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 21.0 separates ordered tool source from native completion receipts.
+The protocol owns bounded output/update/final-capture DTOs, exact declaration
+references, and the shared `tau_tool_output` envelope. The harness owns canonical
+declaration policy and final capture; producers cannot author them. Rebuild
+configured peers together; publication and activation remain separate.
+See [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
+
 Protocol 20.1 adds an optional compaction transcript archive locator to
 `agent.prompt_started`. The locator carries the accepted transaction and artifact
 key for UI reconstruction; it does not change replacement bytes, retention, or
@@ -423,8 +430,13 @@ optional `InternalPromptKind`. `context_size_alert` marks the existing fact at
 which that harness-owned alert reaches model context; it has specialized
 presentation. `background_tool_completion` identifies the harness lifecycle
 prompt for a completed background tool so human UIs can suppress it without
-classifying prompt prose. The prompt may carry the registered untrusted-body
-`tau_background_result` preview while retaining internal lifecycle classification.
+classifying prompt prose. Current completion prompts carry payload-free control
+notices rather than `tau_background_result` previews. That registered envelope
+remains recognizable in historical context. Ordered source text instead uses
+`tau_tool_output`; typed waits carry successful completion receipts with no
+source body. Their `target_outcome` distinguishes `completed`, `error`, and
+`cancelled`. See
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 The contracts are
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md)
 and

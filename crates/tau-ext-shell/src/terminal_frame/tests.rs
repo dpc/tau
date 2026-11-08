@@ -34,6 +34,7 @@ fn result_event(
     display: ToolUseState,
 ) -> Event {
     Event::ToolResultReported(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: ToolCallId::new("call"),
         tool_name: ToolName::new("edit"),
@@ -124,6 +125,7 @@ fn oversized_non_diff_terminal_is_retained_as_mandatory_failure() {
         usize::try_from(tau_client::MAX_OUTBOUND_FRAME_BYTES).expect("frame limit fits usize"),
     );
     let event = Event::ToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: ToolCallId::new("call"),
         tool_name: ToolName::new("read"),
@@ -287,6 +289,7 @@ fn oversized_failure_diff_retains_partial_change_details() {
         CborValue::Array(vec![CborValue::Text("src/applied.rs".to_owned())]),
     )]);
     let event = Event::ToolErrorReported(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: ToolCallId::new("call"),
         tool_name: ToolName::new("apply_patch"),

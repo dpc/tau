@@ -91,6 +91,12 @@ recovery on the first resume and no provider work on the next, an acknowledged
 interrupted worker foreground tool repaired exactly once across two cold resumes,
 and startup rejection of invalid scenario config.
 
+The Unix core-shell test binary also checks that the fake model sees a real
+child's sentinel through incremental source and cancels it before natural exit.
+The test uses the actual 15-second idle batching deadline and checks the ordered
+source, model-authored cancellation, and payload-free cancelled receipt. It
+exposes only production `shell`, `wait`, and `cancel` with a fixed probe.
+
 The Unix core-shell test binary also contains one closed sibling-concurrency
 oracle. It preflights the exact Cargo-built `tau-e2e-shell-probe` executable
 before fixture startup and has one parallel-capable fake-provider

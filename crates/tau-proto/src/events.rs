@@ -1470,6 +1470,8 @@ pub enum ToolResultPresentation {
     ToolPayload,
     /// Harness-authenticated pointer to an earlier identical tool terminal.
     HarnessDedupPointer,
+    /// Payload is the final stream tail; close the native call with a receipt.
+    ToolStreamReceipt,
 }
 
 /// Successful logical tool completion.
@@ -1484,6 +1486,9 @@ pub enum ToolResultPresentation {
 /// canonical projections.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Harness-owned final source capture for opted-in ordered text output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_output: Option<crate::ToolFinalOutput>,
     /// Stable id of the completed tool call.
     pub call_id: ToolCallId,
     /// Tool name that produced this result.
@@ -1573,6 +1578,9 @@ impl From<&ToolResult> for ToolResultDisplay {
 /// canonical projections.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolError {
+    /// Harness-owned final source capture for opted-in ordered text output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_output: Option<crate::ToolFinalOutput>,
     /// Stable id of the failed tool call.
     pub call_id: ToolCallId,
     /// Tool name that produced this error.
@@ -1604,6 +1612,9 @@ pub struct ToolError {
 /// with a synthetic background placeholder.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolBackgroundResult {
+    /// Harness-owned final source capture for opted-in ordered text output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_output: Option<crate::ToolFinalOutput>,
     /// Stable id of the backgrounded tool call.
     pub call_id: ToolCallId,
     /// Tool name that produced this result.
@@ -1654,6 +1665,12 @@ impl From<&ToolBackgroundResult> for ToolBackgroundResultDisplay {
 /// with a synthetic background placeholder.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolBackgroundError {
+    /// Actual terminal outcome, independent of optional cancellation causality.
+    #[serde(default)]
+    pub outcome: ToolBackgroundErrorOutcome,
+    /// Harness-owned final source capture for opted-in ordered text output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_output: Option<crate::ToolFinalOutput>,
     /// Stable id of the backgrounded tool call.
     pub call_id: ToolCallId,
     /// Tool name that produced this error.
@@ -1672,6 +1689,27 @@ pub struct ToolBackgroundError {
     /// [`ToolResult::originator`].
     #[serde(default)]
     pub originator: PromptOriginator,
+}
+
+/// Non-success terminal outcome of a backgrounded tool.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolBackgroundErrorOutcome {
+    /// Logical failure rather than cancellation.
+    #[default]
+    Error,
+    /// Explicit cancellation, whether requested by the harness or reported by
+    /// the routed producer without an observed harness request.
+    Cancelled,
+}
+
+impl From<ToolBackgroundErrorOutcome> for crate::ToolCompletionOutcome {
+    fn from(outcome: ToolBackgroundErrorOutcome) -> Self {
+        match outcome {
+            ToolBackgroundErrorOutcome::Error => Self::Error,
+            ToolBackgroundErrorOutcome::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 /// Generic UI state for one tool use at one point in its lifecycle.
@@ -1928,6 +1966,13 @@ pub struct ToolCancelRequest {
 /// cancellation; backgrounded cancellation becomes [`ToolBackgroundError`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancelled {
+    /// Producer's available, not-yet-published final text; `None` means
+    /// unavailable, while an empty string means an available empty tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Harness-owned bounded final source. Peer-supplied values are discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_output: Option<crate::ToolFinalOutput>,
     /// Stable id of the cancelled tool call.
     pub call_id: ToolCallId,
     /// Tool name associated with the cancelled call.
@@ -6799,6 +6844,7 @@ impl ProviderResponseFinishedReport {
     ) -> ProviderResponseFinished {
         ProviderResponseFinished {
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition,
             agent_prompt_id: self.agent_prompt_id,
             agent_id: self.agent_id,
@@ -6891,6 +6937,13 @@ pub enum FinalStatusDisposition {
 /// Harness-canonical `provider.response_finished` fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
+    /// Harness-owned opt-in output policy, frozen from this prompt's tool
+    /// specs. Indices identify tool-call items in `output_items`, in
+    /// strictly increasing order. This policy remains authoritative for
+    /// silent calls and restart repair; later registry changes cannot alter
+    /// it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streamed_tool_items: Vec<u32>,
     /// Optional ordinary-input byte comparison for an accepted compact result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_input_bytes: Option<CompactionInputBytes>,
@@ -7337,6 +7390,12 @@ pub enum Event {
     /// Peer-authored observation awaiting routed-call validation.
     #[serde(rename = "tool.progress_reported")]
     ToolProgressReported(ToolProgress),
+    /// Configured producer's bounded nonterminal output observation.
+    #[serde(rename = "tool.output_reported")]
+    ToolOutputReported(crate::ToolOutputReport),
+    /// Accepted ordered output; does not settle the logical invocation.
+    #[serde(rename = "tool.output_updated")]
+    ToolOutputUpdated(crate::ToolOutputUpdate),
     /// Harness-authored canonical progress fact.
     #[serde(rename = "tool.progress")]
     ToolProgress(ToolProgress),
@@ -7871,6 +7930,8 @@ impl Event {
             Self::ToolBackgroundResultDisplay(_) => EventName::TOOL_BACKGROUND_RESULT_DISPLAY,
             Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
             Self::ToolProgressReported(_) => EventName::TOOL_PROGRESS_REPORTED,
+            Self::ToolOutputReported(_) => EventName::TOOL_OUTPUT_REPORTED,
+            Self::ToolOutputUpdated(_) => EventName::TOOL_OUTPUT_UPDATED,
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancelRequest(_) => EventName::TOOL_CANCEL_REQUEST,
             Self::ToolCancelledReported(_) => EventName::TOOL_CANCELLED_REPORTED,
@@ -8199,6 +8260,7 @@ impl Event {
                 | Self::HarnessProviderQuotaChanged(_)
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgressReported(_)
+                | Self::ToolOutputReported(_)
                 | Self::ToolProgress(_)
                 | Self::ToolError(_)
                 | Self::ActionSchemaDeclared(_)

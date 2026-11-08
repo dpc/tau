@@ -356,6 +356,7 @@ fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -400,6 +401,7 @@ fn full_scan_loaded_tool_call_ids(store: &AgentStore) -> HashSet<ToolCallId> {
 
 fn background_placeholder(call_id: &str) -> Event {
     Event::ProviderToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: ToolCallId::from(call_id),
         tool_name: ToolName::new("example_tool"),
@@ -414,6 +416,7 @@ fn background_placeholder(call_id: &str) -> Event {
 
 fn background_result(call_id: &str) -> Event {
     Event::ToolBackgroundResult(ToolBackgroundResult {
+        captured_output: None,
         call_id: ToolCallId::from(call_id),
         tool_name: ToolName::new("example_tool"),
         tool_type: ToolType::Function,
@@ -425,6 +428,8 @@ fn background_result(call_id: &str) -> Event {
 
 fn background_error(call_id: &str) -> Event {
     Event::ToolBackgroundError(ToolBackgroundError {
+        outcome: Default::default(),
+        captured_output: None,
         call_id: ToolCallId::from(call_id),
         tool_name: ToolName::new("example_tool"),
         tool_type: ToolType::Function,

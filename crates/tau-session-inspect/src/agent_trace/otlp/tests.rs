@@ -43,6 +43,7 @@ fn tool_started(id: &str) -> Event {
 
 fn tool_result(id: &str) -> Event {
     Event::ProviderToolResult(tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: id.into(),
         tool_name: ToolName::new("trace_tool"),
@@ -65,6 +66,7 @@ fn background_placeholder(id: &str) -> Event {
 
 fn background_result(id: &str) -> Event {
     Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: id.into(),
         tool_name: ToolName::new("trace_tool"),
         tool_type: ToolType::Function,

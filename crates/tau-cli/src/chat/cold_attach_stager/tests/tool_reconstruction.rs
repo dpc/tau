@@ -18,6 +18,7 @@ fn tool_started(call_id: &str) -> Event {
 /// Builds one canonical failed-tool terminal.
 fn tool_error(call_id: &str) -> Event {
     Event::ToolError(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new("fixture"),
@@ -38,6 +39,55 @@ fn tool_progress(call_id: &str) -> Event {
         progress: None,
         display: None,
     })
+}
+
+fn tool_output(call_id: &str) -> Event {
+    Event::ToolOutputUpdated(tau_proto::ToolOutputUpdate {
+        call: tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([9; 16]),
+            item_index: 0,
+        },
+        output: tau_proto::ToolOutputReport {
+            call_id: call_id.into(),
+            tool_name: tau_proto::ToolName::new("fixture"),
+            sequence: 0,
+            text: "replayed live fragment".to_owned(),
+            omitted_bytes: 0,
+        },
+    })
+}
+
+/// Durable updates wait for their reconstructed live owner. Historical closed
+/// calls and orphan updates cannot become free-standing progress blocks.
+#[test]
+fn replayed_tool_output_requires_reconstructed_unfinished_owner() {
+    for completed in [false, true] {
+        let mut stager = ColdAttachStager::staging();
+        stager.admit(replay(session_started(), 1, 0));
+        stager.admit(replay(agent_loaded(), 1, 1));
+        stager.admit(replay(tool_call_response("stream"), 1, 2));
+        assert!(
+            stager
+                .admit(replay(tool_started("stream"), 1, 3))
+                .is_empty()
+        );
+        assert!(stager.admit(replay(tool_output("stream"), 1, 4)).is_empty());
+        assert!(stager.admit(replay(tool_output("orphan"), 1, 5)).is_empty());
+        if completed {
+            stager.admit(replay(tool_error("stream"), 1, 6));
+        }
+        let ready = stager.admit(live(replay_complete(), 7));
+        if completed {
+            assert!(matches!(ready.as_slice(), [boundary]
+                if matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
+        } else {
+            assert!(matches!(ready.as_slice(), [start, output, boundary]
+                if matches!(start.event.as_ref(), Event::ToolStarted(_))
+                    && matches!(output.event.as_ref(), Event::ToolOutputUpdated(update)
+                        if update.output.call_id.as_str() == "stream")
+                    && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
+        }
+    }
 }
 
 /// Builds the current session identity used to scope loaded-agent replay.
@@ -242,6 +292,7 @@ fn tool_call_response(call_id: &str) -> Event {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -567,6 +618,8 @@ fn canonical_tool_terminal_matrix_excludes_background_placeholder() {
         base_result(tau_proto::ToolResultKind::Final),
         tool_error("call"),
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call".into(),
             tool_name: tau_proto::ToolName::new("fixture"),
@@ -581,6 +634,8 @@ fn canonical_tool_terminal_matrix_excludes_background_placeholder() {
             originator: tau_proto::PromptOriginator::User,
         }),
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: "call".into(),
             tool_name: tau_proto::ToolName::new("fixture"),
             tool_type: tau_proto::ToolType::Function,

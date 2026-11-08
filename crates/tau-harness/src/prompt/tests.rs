@@ -2919,6 +2919,7 @@ fn finished_tool_call(prompt_id: &str, call_id: &str) -> Event {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -2959,6 +2960,7 @@ fn assemble_conversation_includes_tool_error_details() {
         ),
     ]);
     tree.apply_event(&Event::ProviderToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("shell"),
@@ -3010,6 +3012,7 @@ fn canonical_dedup_tool_result_preflight_matches_materialization() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&finished_tool_call("sp-dedup", "call-dedup"));
     tree.apply_event(&Event::ProviderToolError(ToolError {
+        captured_output: None,
         presentation: tau_proto::ToolResultPresentation::HarnessDedupPointer,
         call_id: "call-dedup".into(),
         tool_name: tau_proto::ToolName::new("shell"),
@@ -3057,6 +3060,7 @@ fn assemble_conversation_preserves_agent_phase() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3481,6 +3485,7 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -3541,6 +3546,7 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,

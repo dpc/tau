@@ -107,6 +107,7 @@ fn equal_local_model_request_ids_commit_and_continue_for_both_targets() {
 
     for (cid, _, sibling_call_id) in &calls {
         h.finish_prebuilt_internal_tool_result(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: (*sibling_call_id).into(),
             tool_name: ToolName::new("sibling"),

@@ -748,6 +748,7 @@ fn tool_prefix_composition_is_additive_and_envelope_is_exact() {
 #[test]
 fn typed_image_tool_result_cbor_roundtrip_and_safe_debug() {
     let event = Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: ToolName::new("read_image"),
@@ -1388,6 +1389,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
@@ -1399,6 +1401,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
@@ -1418,6 +1421,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolErrorReported(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
@@ -1428,6 +1432,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
@@ -1438,6 +1443,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolBackgroundResult(ToolBackgroundResult {
+            captured_output: None,
             call_id: "call-bg".into(),
             tool_name: ToolName::new("slow_echo"),
             tool_type: ToolType::Function,
@@ -1453,6 +1459,8 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolBackgroundError(ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: "call-bg-err".into(),
             tool_name: ToolName::new("slow_echo"),
             tool_type: ToolType::Function,
@@ -1482,6 +1490,8 @@ fn representative_events() -> Vec<Event> {
             target_call_id: "call-1".into(),
         }),
         Event::ToolCancelledReported(ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
@@ -1489,6 +1499,8 @@ fn representative_events() -> Vec<Event> {
             display: None,
         }),
         Event::ToolCancelled(ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
@@ -1975,6 +1987,7 @@ fn representative_events() -> Vec<Event> {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: FinalStatusDisposition::Accepted,
             recovery_disposition: ContextRecoveryDisposition::None,
             output_length_disposition: OutputLengthDisposition::None,
@@ -2300,6 +2313,7 @@ fn representative_events() -> Vec<Event> {
             sequence: ProviderQuotaSequence::new(3),
         }),
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
@@ -2311,6 +2325,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ProviderToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
@@ -5077,6 +5092,7 @@ fn tool_progress_report_and_canonical_fact_have_distinct_wire_names() {
 #[test]
 fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "result-call".into(),
         tool_name: ToolName::new("owned_tool"),
@@ -5088,6 +5104,7 @@ fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
         originator: PromptOriginator::User,
     };
     let error = ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "error-call".into(),
         tool_name: ToolName::new("owned_tool"),
@@ -5098,6 +5115,8 @@ fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
         originator: PromptOriginator::User,
     };
     let cancelled = ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "cancelled-call".into(),
         tool_name: ToolName::new("owned_tool"),
@@ -5184,6 +5203,7 @@ fn execution_events_use_provider_wire_family() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: FinalStatusDisposition::Accepted,
                 recovery_disposition: ContextRecoveryDisposition::None,
                 output_length_disposition: OutputLengthDisposition::None,
@@ -5971,6 +5991,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             cancelled: false,
         }),
         Event::ToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("read"),
@@ -7392,6 +7413,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
@@ -8064,6 +8086,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
@@ -8156,6 +8179,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     let none_event = Event::ProviderResponseFinished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,

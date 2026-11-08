@@ -6,6 +6,15 @@ This contract is necessarily distributed across fixture configuration, fake-prov
 
 ## Closed sibling-shell concurrency
 
+The closed live-output fixture exposes only production `shell`, `wait`, and
+`cancel`. Its five fixed steps start a Cargo-built probe, wait for a canonical
+nonterminal sentinel, cancel only after the fake model sees that sentinel,
+collect a payload-free cancelled receipt, and finish. The probe flushes its
+fixed sentinel before a 60-second natural exit and uses only private cwd markers.
+The oracle requires the canonical update before the model's cancel call, one
+cancelled terminal, a payload-free receipt, and completion before natural exit.
+It uses the real 15-second shell idle deadline, not a shortened production clock.
+
 The same private core-shell fixture also admits one fixed UI-owned
 `printf endpoint-completed` command through the opaque shell endpoint protocol.
 Two attached UIs observe it; duplicate intent produces one durable generic
@@ -21,7 +30,8 @@ one-call guidance and still requires lossless aggregation. Each fixed command
 uses the preflight-resolved Cargo-built helper path, synchronizes through private cwd marker
 files retained for the fixture lifetime, and records monotonic timestamps around
 a three-second sleep. One bounded plural exact `wait` call collects the real
-background results in request order after the commands finish in reverse order. The oracle
+background receipts in request order after the commands finish in reverse order.
+Canonical source occurrences carry each command's output exactly once. The oracle
 requires all requests and starts before the first placeholder, exact
 call/wait/result correlation without extras, common overlap, and a makespan
 below six seconds. It does not alter runtime scheduling.
@@ -29,7 +39,7 @@ below six seconds. It does not alter runtime scheduling.
 One separate closed mixed-result scenario emits a fixed successful core-shell
 `shell --version` call, a fixed failing relative `workdir` call, and one bounded
 plural exact wait in the same provider terminal. Its continuation requires one
-aggregate containing the success and error members in request order without
+aggregate containing typed completed and error receipts in request order without
 fail-fast behavior.
 
 Deterministic harness acceptance uses a test-only supervised provider subprocess
@@ -61,8 +71,9 @@ The V2 semantic-text matcher accepts the same exact HumanUi form with an optiona
 of its visible response. Direct harness admission tests verify the causal
 annotation; V1's initial-input oracle still requires an unannotated envelope.
 
-The closed task-text matcher skips whole registered `tau_discovery` user
-envelopes so lazy harness guidance does not replace the scenario's task text.
+The closed task-text matcher skips whole registered `tau_discovery` and
+`tau_tool_output` user envelopes so harness guidance and tool output do not
+replace the scenario's task text.
 This rule applies only to fixture matching, not runtime provenance recognition.
 Exact context-order oracles still inspect the original provider context,
 including discovery nodes.

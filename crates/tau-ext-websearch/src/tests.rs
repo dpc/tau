@@ -2156,6 +2156,7 @@ fn cancellation_processed_before_publication_replaces_queued_success() {
         Arc::new(AtomicBool::new(true)),
     )]));
     let terminal = tau_client::ToolTerminalOutcome::from(ToolResult {
+        captured_output: None,
         call_id: "queued-success".into(),
         tool_name: ToolName::new(HYBRID_SEARCH_TOOL_NAME),
         tool_type: tau_proto::ToolType::Function,

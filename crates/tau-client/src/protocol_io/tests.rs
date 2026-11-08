@@ -325,6 +325,7 @@ fn protocol_io_detailed_meter_integrates_delivery_and_cumulative_accounting() {
     let tool = HarnessOutputMessage::deliver_live(
         UnixMicros::new(4),
         Event::ToolResult(tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("read"),

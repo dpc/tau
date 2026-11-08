@@ -161,6 +161,20 @@ The client exports this same counting measurement and individual-frame limit so
 effectful producers can budget an actual complete envelope before submitting it;
 payload byte counts are not a substitute for frame admission.
 
+Effectful stream producers can reserve one of 64 payload-free detached-capacity
+tokens before starting work. Runtime admission and callback arming are atomic
+under the queue lock. When capacity is released or the writer closes, the client
+takes armed callbacks under that lock and invokes them outside it. Payload-free
+wakes are coalesced retry hints, not reservations.
+Oversized individual frames fail permanently without arming; dropping a token
+releases its registration. Callbacks must not block or retain output payloads.
+The checked `send_after_detached` call provides an acknowledged runtime ordering
+barrier behind earlier accepted detached frames, so producers can send final
+output after accepted reports. Ordinary `send` does not provide that barrier.
+Stream producers continue draining pipes while detached capacity is exhausted,
+then use the ordered barrier only after process draining has ended. See
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
+
 Before `Ready`, the FIFO retains accepted output without writing it. The writer
 activates ordered draining only after flushing `Ready`, so runtime output cannot
 overtake pre-Ready output. A successfully admitted pre-Ready `ConfigError`

@@ -920,6 +920,7 @@ fn report_result(output: &Output, invoke: &ToolStarted, result: CborValue) -> bo
     });
     output
         .report_tool_terminal(Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -938,6 +939,7 @@ fn report_error(output: &Output, invoke: &ToolStarted, message: String) {
         .with_args(invocation_args(invoke))
         .display;
     let _ = output.report_tool_terminal(Event::ToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
@@ -957,6 +959,8 @@ fn report_cancelled(output: &Output, invoke: ToolStarted, lifecycle: ToolLifecyc
         ..Default::default()
     };
     let _ = output.report_tool_terminal(Event::ToolCancelled(ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,

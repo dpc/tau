@@ -1738,6 +1738,8 @@ fn deferred_compaction_wait_claim_cleanup_is_silent_and_not_logged() {
     let baseline_seq = h.runtime_io.event_log.next_seq();
 
     h.rollback_failed_wait_compaction_terminal(&Event::ToolCancelled(tau_proto::ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: wait_call_id,
         tool_name: tau_proto::ToolName::new("wait"),

@@ -161,6 +161,7 @@ impl Harness {
         // extensions share this wire type for transport, so discard any value
         // supplied across that trust boundary before evaluating eligibility.
         response.final_status_disposition = tau_proto::FinalStatusDisposition::Accepted;
+        response.streamed_tool_items.clear();
         response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
         response.output_length_disposition = tau_proto::OutputLengthDisposition::None;
         response.provider_attempt = tau_proto::ProviderAttempt::ONE;
@@ -509,6 +510,44 @@ impl Harness {
             };
             self.prepare_standalone_terminal(&cid, &response, plan)
         });
+        response.streamed_tool_items = self
+            .prompt_coordination
+            .prompt_runtime
+            .tool_specs
+            .get(&response.agent_prompt_id)
+            .map(|specs| {
+                response
+                    .output_items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        let ContextItem::ToolCall(call) = item else {
+                            return None;
+                        };
+                        if !projection
+                            .tool_calls
+                            .iter()
+                            .any(|invocation| invocation.id == call.call_id)
+                        {
+                            return None;
+                        }
+                        specs
+                            .iter()
+                            .any(|spec| {
+                                self.tool_model_visible_name(spec) == &call.name
+                            // This is a text-only lane. Native image-bearing
+                            // results retain their existing provider closure.
+                            && !spec.tags.iter().any(|tag| tag.as_str() == "provider-content:image")
+                            && spec.tags.iter().any(|tag| {
+                                tag.as_str() == tau_proto::TOOL_OUTPUT_STREAM_TAG
+                            })
+                            })
+                            .then(|| u32::try_from(index).ok())
+                            .flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // Every immediately output-bearing canonical field is now fixed.
         // Applying the prepared effects preserves their established source
         // order.

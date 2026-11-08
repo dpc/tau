@@ -88,6 +88,26 @@ arguments, so an already-applied effect remains truthfully reportable.
 
 ## User-shell execution and completion
 
+Model `shell` and `shell_command` opt into
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
+Their worker-local capture forms immutable ordered batches after 15 seconds idle
+or 30 seconds from the first pending output, never on size alone. Bounded rolling
+buffers retain recent diagnostics, report omissions, and keep draining both
+streams without cancelling execution on overflow. A checked final flush follows
+earlier accepted reports. The producer retains available cancellation tails
+without repeating accepted batches; an unavailable tail does not erase them.
+Writer pressure uses a bounded capacity token reserved before effects and an
+event-driven wake, with no retry timer. The producer retains one bounded,
+immutable sealed frame while continuing to drain pipes into its bounded recent
+tail. Unix capacity callbacks own both
+ends of a nonblocking wake pipe; non-Unix callbacks use the existing coalesced
+output channel. The producer uses an explicitly ordered checked send to flush
+final output after accepted detached frames.
+The optional saved-output spool is capped at 16 MiB and reports incompleteness
+truthfully. Shell VCR replay preserves recorded batches without executing the
+command. User-shell endpoints and non-model adapters retain their existing
+separate lifecycle.
+
 On Linux, Android, and macOS, model and user shell commands attach independent
 pseudo-terminals to stdout and stderr. This makes both output descriptors
 TTY-like without merging the captured streams. Stdin remains closed, preserving

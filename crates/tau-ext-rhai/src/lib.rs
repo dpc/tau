@@ -1587,6 +1587,7 @@ fn emit_pending_tool_result(
     result: CborValue,
 ) -> ClientResult {
     output.report_tool_result(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call.call_id.clone(),
         tool_name: call.tool_name.clone(),
@@ -1605,6 +1606,7 @@ fn emit_pending_tool_error(
     message: String,
 ) -> ClientResult {
     output.report_tool_error(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call.call_id.clone(),
         tool_name: call.tool_name.clone(),

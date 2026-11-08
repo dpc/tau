@@ -149,6 +149,15 @@ struct BackgroundCompletionPromptSource {
 /// semantic settlement.
 #[derive(Default)]
 pub(crate) struct ToolRuntimeState {
+    /// Synchronous admission errors complete calls while the dispatch loop is
+    /// on-stack. Let that loop continue rather than recursively draining a
+    /// round.
+    draining_invocations: bool,
+    /// Ordered output publication custody for opted-in running tools.
+    pub(super) output_lanes: HashMap<ToolCallId, super::tool_output_runtime::ToolOutputLane>,
+    /// Capture/context slots outlive execution while accepted output is
+    /// deferred.
+    pub(super) output_residencies: HashMap<tau_proto::ToolCallRef, AgentId>,
     /// Pending prepared-image I/O and its revocable logical owners.
     pub(super) images: super::image_admission::ImageAdmissionRuntime,
     /// Owning transcript agent for every tool call currently in flight.
@@ -233,6 +242,16 @@ impl ToolRuntimeState {
 impl Harness {
     /// Drain scheduler-selected tool invocations into harness side effects.
     pub(super) fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
+        if self.tool_routing.tool_runtime.draining_invocations {
+            return Ok(());
+        }
+        self.tool_routing.tool_runtime.draining_invocations = true;
+        let result = self.drain_pending_tool_invocations_inner();
+        self.tool_routing.tool_runtime.draining_invocations = false;
+        result
+    }
+
+    fn drain_pending_tool_invocations_inner(&mut self) -> Result<(), HarnessError> {
         loop {
             let waits_for_staged_registration = {
                 let Some(next) = self.tool_routing.tool_runtime.tool_turn.next_dispatchable()
@@ -392,6 +411,7 @@ impl Harness {
             return;
         };
         let result = ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: tool.name,
@@ -453,6 +473,7 @@ impl Harness {
             tau_proto::TAU_INTERNAL_HEADER_NAME
         );
         let result = ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: tool.name,
@@ -561,6 +582,7 @@ impl Harness {
             tool.restore_terminal_result_metadata(&mut result);
         }
         let background = ToolBackgroundResult {
+            captured_output: result.captured_output,
             call_id: result.call_id,
             tool_name: result.tool_name,
             tool_type: result.tool_type,
@@ -619,8 +641,9 @@ impl Harness {
     pub(super) fn handle_background_tool_cancelled(
         &mut self,
         source_id: &tau_proto::ConnectionId,
-        cancelled: ToolCancelled,
+        mut cancelled: ToolCancelled,
     ) {
+        super::tool_output_runtime::capture_cancelled(&mut cancelled);
         let cause = self
             .tool_routing
             .tool_runtime
@@ -631,6 +654,7 @@ impl Harness {
                 tau_proto::ToolTerminalCause::Cancellation { request }
             });
         let error = ToolError {
+            captured_output: cancelled.captured_output,
             presentation: Default::default(),
             call_id: cancelled.call_id,
             tool_name: cancelled.tool_name,
@@ -640,19 +664,44 @@ impl Harness {
             display: cancelled.display,
             originator: PromptOriginator::User,
         };
-        self.handle_background_tool_error_inner(
+        self.handle_background_tool_error_with_outcome(
             Some(source_id),
             error,
             BackgroundCompletionPromptMode::QueueAndAdvance,
             cause,
+            BackgroundErrorOutcome::Cancelled,
         );
     }
     pub(super) fn handle_background_tool_error_inner(
         &mut self,
         source: Option<&tau_proto::ConnectionId>,
+        error: ToolError,
+        completion_prompt_mode: BackgroundCompletionPromptMode,
+        cause: tau_proto::ToolTerminalCause,
+    ) {
+        let outcome = if matches!(cause, tau_proto::ToolTerminalCause::Cancellation { .. }) {
+            BackgroundErrorOutcome::Cancelled
+        } else {
+            BackgroundErrorOutcome::Error
+        };
+        self.handle_background_tool_error_with_outcome(
+            source,
+            error,
+            completion_prompt_mode,
+            cause,
+            outcome,
+        );
+    }
+
+    /// Preserve observed cancellation independently of whether its request was
+    /// seen by this harness.
+    fn handle_background_tool_error_with_outcome(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
         mut error: ToolError,
         completion_prompt_mode: BackgroundCompletionPromptMode,
         cause: tau_proto::ToolTerminalCause,
+        error_outcome: BackgroundErrorOutcome,
     ) {
         let peer_internal = self
             .tool_routing
@@ -685,6 +734,8 @@ impl Harness {
             error.tool_type = tool.tool_type;
         }
         let background = ToolBackgroundError {
+            outcome: error_outcome,
+            captured_output: error.captured_output,
             call_id: error.call_id,
             tool_name: error.tool_name,
             tool_type: error.tool_type,
@@ -697,15 +748,10 @@ impl Harness {
             // Settle ownerless runtime/wait state without creating transcript
             // or background-completion-prompt ownership.
             self.publish_event(source, Event::ToolBackgroundError(background.clone()));
-            self.record_wait_background_error(background, None, BackgroundErrorOutcome::Error);
+            self.record_wait_background_error(background, None, error_outcome);
             self.finish_harness_owned_tool_tracking(&call_id);
             return;
         }
-        let error_outcome = if matches!(cause, tau_proto::ToolTerminalCause::Cancellation { .. }) {
-            BackgroundErrorOutcome::Cancelled
-        } else {
-            BackgroundErrorOutcome::Error
-        };
         let terminal = self.observe_tool_terminal(&cid, &call_id, cause);
         let pending = PendingBackgroundCompletion {
             mode: completion_prompt_mode,
@@ -1703,34 +1749,18 @@ impl Harness {
         if pending.is_empty() {
             return PromptFoldDisposition::Empty;
         }
-        self.materialize_background_completion_preview_group(&mut pending);
+        self.materialize_background_completion_notices(&mut pending);
         self.publish_prompts_as_steered(cid, pending, completion);
         PromptFoldDisposition::Published
     }
 
-    /// Materialize one exact preview-publication group before ownership
-    /// transfer.
-    pub(super) fn materialize_background_completion_preview_group(
-        &self,
-        prompts: &mut [PendingPrompt],
-    ) {
-        let mut budget = BackgroundPreviewBudget::default();
+    /// Completion notices carry control only; canonical terminals already own
+    /// the output context. This hook never copies retained recovery payloads.
+    pub(super) fn materialize_background_completion_notices(&self, prompts: &mut [PendingPrompt]) {
         for prompt in prompts {
-            let Some(correlation) = prompt.background_completion.as_ref() else {
-                continue;
-            };
-            let Some(source_terminal) = correlation.source_terminal else {
-                continue;
-            };
-            let Some(text) = self.background_completion_preview_for(
-                &correlation.call_id,
-                source_terminal,
-                &mut budget,
-            ) else {
-                continue;
-            };
-            prompt.text = text;
-            prompt.trusted_internal_spans.clear();
+            if let Some(correlation) = &prompt.background_completion {
+                prompt.text = background_completion_prompt(&correlation.call_id);
+            }
         }
     }
 
@@ -1785,6 +1815,7 @@ impl Harness {
             Some(cid),
             source,
             ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name,
@@ -2105,6 +2136,7 @@ impl Harness {
                 Some(cid),
                 source,
                 ToolError {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: call_id.clone(),
                     tool_name,
@@ -2125,6 +2157,7 @@ impl Harness {
             .tags
             .iter()
             .any(|tag| tag.as_str() == "provider-content:image");
+        let streams_output = self.tool_call_streams_output(cid, &call.id);
         let mut repaired_arguments = None;
         if self
             .tool_routing
@@ -2177,12 +2210,23 @@ impl Harness {
                 return Ok(());
             }
         }
-        let arguments = repaired_arguments.unwrap_or(call.arguments);
-
         let call_id: ToolCallId = call.id.clone();
         let owner_agent_id = self.tool_owner_agent_id(cid);
         let owner_originator = self.tool_owner_originator(cid);
 
+        if streams_output && !allows_provider_image && !self.admit_tool_output_stream(cid, &call_id)
+        {
+            self.reject_agent_tool_call_before_dispatch_from(
+                cid,
+                &call,
+                visible_tool_name,
+                "Concurrent tool-output capacity is full; wait for a running call before retrying."
+                    .to_owned(),
+                source,
+            );
+            return Ok(());
+        }
+        let arguments = repaired_arguments.unwrap_or(call.arguments);
         // Track conversation attribution before publishing the runtime
         // `ToolRequest`; terminal tool facts use this metadata to fold into the
         // owning agent transcript.
@@ -2320,6 +2364,7 @@ impl Harness {
                     }),
                 );
                 let error = ToolError {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: call_id.clone(),
                     tool_name: visible_tool_name.clone(),

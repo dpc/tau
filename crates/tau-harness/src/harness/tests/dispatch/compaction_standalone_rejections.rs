@@ -349,6 +349,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             failure_kind,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: (label != "provider error").then_some(tau_proto::ProviderTokenUsage {

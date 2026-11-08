@@ -1783,6 +1783,7 @@ fn unsuccessful_working_terminal_bypasses_reminders() {
         failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

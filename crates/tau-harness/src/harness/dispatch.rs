@@ -104,7 +104,7 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let mut prompts = [prompt.into()];
-        self.materialize_background_completion_preview_group(&mut prompts);
+        self.materialize_background_completion_notices(&mut prompts);
         let [prompt] = prompts;
         self.publish_pending_prompt_for_agent_inner(agent_id, prompt, None, true)
     }
@@ -321,9 +321,7 @@ impl Harness {
                 self.take_passive_background_completion_prompts_for_user_prompt(agent_id);
             let restore_prompts = self.take_pending_restore_prompts_for_user_prompt(agent_id);
             if !passive_background_prompts.is_empty() || !restore_prompts.is_empty() {
-                self.materialize_background_completion_preview_group(
-                    &mut passive_background_prompts,
-                );
+                self.materialize_background_completion_notices(&mut passive_background_prompts);
                 for passive_prompt in passive_background_prompts {
                     self.publish_pending_prompt_for_agent_inner(
                         agent_id,
@@ -346,7 +344,7 @@ impl Harness {
             }
         }
 
-        self.materialize_background_completion_preview_group(std::slice::from_mut(&mut prompt));
+        self.materialize_background_completion_notices(std::slice::from_mut(&mut prompt));
         self.publish_pending_prompt_for_agent_inner(
             agent_id,
             prompt,

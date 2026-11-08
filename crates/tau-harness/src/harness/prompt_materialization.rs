@@ -798,6 +798,7 @@ impl Harness {
             failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -972,6 +973,7 @@ impl Harness {
                     failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                     context_limit_telemetry: None,
                     interrupted_retry: false,
+                    streamed_tool_items: Vec::new(),
                     final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                     recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                     output_length_disposition,
@@ -1089,6 +1091,7 @@ impl Harness {
                     failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                     context_limit_telemetry: None,
                     interrupted_retry: false,
+                    streamed_tool_items: Vec::new(),
                     final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                     recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                     output_length_disposition: tau_proto::OutputLengthDisposition::None,

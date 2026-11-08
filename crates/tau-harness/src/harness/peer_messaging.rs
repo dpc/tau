@@ -403,6 +403,7 @@ impl Harness {
 
     /// Resolve wakes buffered behind an open provider tool round.
     pub(super) fn resolve_materialized_message_wakes(&mut self, cid: &AgentId) {
+        self.release_materialized_tool_output(cid);
         let Some(agent_id) = self
             .agent_runtime
             .agent_registry
@@ -415,17 +416,16 @@ impl Harness {
         let Some(tree) = self.session_runtime.agent_store.agent(agent_id) else {
             return;
         };
-        let resolved_message_inputs: HashMap<_, _> = tree
-            .nodes()
-            .iter()
-            .filter_map(|node| match &node.entry {
-                tau_core::AgentEntry::MessageFact {
-                    durable_event_seq, ..
-                } => Some((*durable_event_seq, node.id)),
-                tau_core::AgentEntry::AgentMessage {
-                    durable_event_seq, ..
-                } => Some((*durable_event_seq, node.id)),
-                _ => None,
+        let resolved_message_inputs: HashMap<_, _> = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .into_iter()
+            .flat_map(|agent| &agent.dispatch.pending_message_wakes)
+            .filter_map(|wake| {
+                let seq = wake.source.durable_event_seq();
+                tree.node_for_durable_event_seq(seq).map(|node| (seq, node))
             })
             .collect();
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
@@ -504,42 +504,14 @@ impl Harness {
         ))
     }
 
-    /// Returns whether accepted message input should interrupt a newly
-    /// registered wait.
-    ///
-    /// Unmaterialized wakes remain globally actionable while tool adjacency is
-    /// open. Once materialized, only wakes on the selected branch interrupt;
-    /// sibling-branch wakes stay dormant until navigation reselects them.
-    /// Return whether queued input is ready under a prospective wait mode.
-    pub(crate) fn has_wait_preempting_message_wake_for_kind(
+    /// Apply the prospective and installed wait filters to wake causes only.
+    pub(super) fn wait_preempting_wake(
         &self,
         cid: &AgentId,
         deadline_kind: crate::agent::DeliveryDeadlineKind,
-    ) -> bool {
-        self.agent_runtime
-            .agent_registry
-            .agents
-            .get(cid)
-            .is_some_and(|agent| {
-                agent.dispatch.pending_message_wakes.iter().any(|wake| {
-                    wake.node_id.is_none()
-                        && wake.delivery_schedule.as_ref().is_none_or(|schedule| {
-                            schedule.is_ready_at(deadline_kind, Instant::now())
-                        })
-                })
-            })
-            || self
-                .selected_branch_wake_probe_for_kind(cid, deadline_kind)
-                .is_some_and(|probe| probe.ready)
-    }
-
-    /// Return the first branch-applicable activation ready under a prospective
-    /// wait mode.
-    pub(crate) fn first_wait_preempting_message_activation_for_kind(
-        &self,
-        cid: &AgentId,
-        deadline_kind: crate::agent::DeliveryDeadlineKind,
-    ) -> Option<tau_proto::ObservationId> {
+        complete_only: bool,
+    ) -> Option<&crate::agent::PendingMessageWake> {
+        let complete_only = complete_only || self.suppresses_tool_update_wakes(cid);
         let selected_nodes = self.notification_selected_branch_nodes(cid);
         self.agent_runtime
             .agent_registry
@@ -549,14 +521,22 @@ impl Harness {
             .pending_message_wakes
             .iter()
             .find(|wake| {
-                wake.node_id
-                    .is_none_or(|node| selected_nodes.contains(&node))
+                !(complete_only
+                    && matches!(
+                        wake.source,
+                        crate::agent::PendingMessageWakeSource::ToolOutput {
+                            terminal: false,
+                            ..
+                        }
+                    ))
+                    && wake
+                        .node_id
+                        .is_none_or(|node| selected_nodes.contains(&node))
                     && wake
                         .delivery_schedule
                         .as_ref()
                         .is_none_or(|schedule| schedule.is_ready_at(deadline_kind, Instant::now()))
             })
-            .and_then(|wake| wake.activation_observation)
     }
 
     /// Builds one immutable projection of pending wakes onto the selected
@@ -626,6 +606,8 @@ impl Harness {
             self.publish_for_agent(
                 cid,
                 Event::ToolCancelled(ToolCancelled {
+                    output: None,
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id,
                     tool_name,

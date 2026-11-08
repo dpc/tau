@@ -10,7 +10,7 @@ use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 use path_crate_harness::start_coordinator::StartPhase;
 
 use crate::agent::DeliveryDeadlineKind;
-use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
+use crate::background_completion_outcome::BackgroundErrorOutcome;
 use crate::harness::SessionGeneration;
 use crate::{harness as path_crate_harness, runtime_dir as path_crate_runtime_dir};
 
@@ -663,19 +663,6 @@ impl Harness {
         self.publish_wait_replies(replies);
     }
 
-    /// Render the preview for one exact retained completion terminal.
-    pub(crate) fn background_completion_preview_for(
-        &self,
-        call_id: &ToolCallId,
-        terminal: tau_proto::ObservationId,
-        budget: &mut BackgroundPreviewBudget,
-    ) -> Option<String> {
-        self.agent_runtime
-            .subagents
-            .wait_tracker
-            .render_background_completion_preview(call_id, terminal, budget)
-    }
-
     /// Record that runtime prompt policy would have queued a reserved plural
     /// member's completion notice.
     pub(crate) fn record_wait_exact_all_notice_blocked(&mut self, call_id: &ToolCallId) {
@@ -914,6 +901,14 @@ impl Harness {
             .activate_waits_for(owner, activation);
         self.synchronize_work_waits();
         self.publish_wait_replies(replies);
+    }
+
+    /// Owner-wide policy of an installed wait; context capture is unaffected.
+    pub(super) fn suppresses_tool_update_wakes(&self, owner: &AgentId) -> bool {
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .suppresses_tool_updates(owner)
     }
 
     /// Drop runtime-only input-wait registration when its owning agent endpoint
@@ -3133,19 +3128,25 @@ impl Harness {
                 .exact_all_preflight_succeeds(targets, agent_id),
             _ => true,
         };
+        let complete_only = matches!(&call.arguments, CborValue::Map(entries) if entries.iter().any(
+            |(key, value)| key == &CborValue::Text("complete_only".to_owned())
+                && value == &CborValue::Bool(true)));
         if wait_can_be_preempted
-            && self.has_pending_wait_preempting_prompt(
+            && self.has_pending_wait_preempting_prompt_filtered(
                 agent_id,
                 &consumable_completions,
                 prospective_kind,
+                complete_only,
             )
         {
-            let activation = self.pending_wait_preempting_activation(
+            let activation = self.pending_wait_preempting_activation_filtered(
                 agent_id,
                 &consumable_completions,
                 prospective_kind,
+                complete_only,
             );
             let wait = WaitRequest {
+                complete_only,
                 call_id: call_id.clone(),
                 tool_name: visible_tool_name.clone(),
                 owner: agent_id.clone(),
@@ -3269,13 +3270,19 @@ impl Harness {
         Ok(())
     }
 
-    pub(crate) fn has_pending_wait_preempting_prompt(
+    /// Prospective wait registration uses the same cause filter as live
+    /// updates.
+    pub(super) fn has_pending_wait_preempting_prompt_filtered(
         &self,
         agent_id: &AgentId,
         consumable_completions: &HashSet<(ToolCallRef, tau_proto::ObservationId)>,
         deadline_kind: crate::agent::DeliveryDeadlineKind,
+        complete_only: bool,
     ) -> bool {
-        if self.has_wait_preempting_message_wake_for_kind(agent_id, deadline_kind) {
+        if self
+            .wait_preempting_wake(agent_id, deadline_kind, complete_only)
+            .is_some()
+        {
             return true;
         }
         self.agent_runtime
@@ -3310,14 +3317,18 @@ impl Harness {
             })
     }
 
-    pub(crate) fn pending_wait_preempting_activation(
+    /// Select the first eligible identity, never an update suppressed by this
+    /// wait.
+    pub(super) fn pending_wait_preempting_activation_filtered(
         &self,
         agent_id: &AgentId,
         consumable_completions: &HashSet<(ToolCallRef, tau_proto::ObservationId)>,
         deadline_kind: crate::agent::DeliveryDeadlineKind,
+        complete_only: bool,
     ) -> Option<tau_proto::ObservationId> {
         let agent = self.agent_runtime.agent_registry.agents.get(agent_id)?;
-        self.first_wait_preempting_message_activation_for_kind(agent_id, deadline_kind)
+        self.wait_preempting_wake(agent_id, deadline_kind, complete_only)
+            .and_then(|wake| wake.activation_observation)
             .or_else(|| {
                 agent.dispatch.pending_prompts.iter().find_map(|prompt| {
                     (prompt.creates_inference_activation()
@@ -3407,6 +3418,7 @@ impl Harness {
         display: Option<tau_proto::ToolUseState>,
     ) {
         let result = ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name,
@@ -3447,6 +3459,7 @@ impl Harness {
         display: Option<tau_proto::ToolUseState>,
     ) {
         let error = ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name,
@@ -3650,6 +3663,7 @@ impl Harness {
                         transcript_owner,
                         None,
                         ToolResult {
+                            captured_output: None,
                             presentation: Default::default(),
                             call_id: reply.wait_call_id,
                             tool_name: reply.wait_tool_name,
@@ -3669,6 +3683,7 @@ impl Harness {
                     transcript_owner,
                     None,
                     ToolError {
+                        captured_output: None,
                         presentation: Default::default(),
                         call_id: reply.wait_call_id,
                         tool_name: reply.wait_tool_name,

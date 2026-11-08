@@ -160,6 +160,7 @@ fn protocol_io_meter_attributes_tool_result_fields_without_contents() {
     let mut meter = TestMeter::default();
     finish_protocol_io_cold_attach(&mut meter);
     let result = tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("read"),
@@ -226,6 +227,7 @@ fn protocol_io_meter_attributes_tool_result_fields_without_contents() {
 fn protocol_io_meter_attributes_background_tool_results() {
     let mut meter = TestMeter::default();
     let result = tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: "call-background".into(),
         tool_name: ToolName::new("shell"),
         tool_type: ToolType::Function,
@@ -259,6 +261,7 @@ fn protocol_io_meter_attributes_provider_tool_results() {
     let mut meter = TestMeter::default();
     finish_protocol_io_cold_attach(&mut meter);
     let result = tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-provider".into(),
         tool_name: ToolName::new("read_image"),
@@ -367,6 +370,7 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

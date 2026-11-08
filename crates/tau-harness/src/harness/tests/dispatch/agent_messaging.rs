@@ -211,6 +211,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
@@ -274,6 +275,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -4381,6 +4383,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         failure_kind: Some(tau_proto::ProviderFailureKind::RequestRejected),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -5401,7 +5404,8 @@ fn wait_start_cites_selected_branch_activation_after_off_branch_wake() {
         )]),
     };
     assert_eq!(
-        h.first_wait_preempting_message_activation_for_kind(&cid, DeliveryDeadlineKind::WaitTool,),
+        h.wait_preempting_wake(&cid, DeliveryDeadlineKind::WaitTool, false)
+            .and_then(|wake| wake.activation_observation),
         Some(selected_activation),
         "the earlier dormant sibling cannot own wait settlement correlation"
     );
@@ -6129,6 +6133,7 @@ fn side_agent_error_response_propagates_error_result() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -6241,6 +6246,7 @@ fn side_agent_output_length_never_completes_successfully() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,

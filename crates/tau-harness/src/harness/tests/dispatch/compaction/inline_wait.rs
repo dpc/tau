@@ -169,6 +169,7 @@ fn wake(h: &mut Harness, cid: &AgentId, kind: Wake, deadline: Option<Instant>) {
         Wake::Input => h.activate_waits_for(cid, tau_proto::ObservationId::random()),
         Wake::Exact | Wake::Bare => h.record_wait_background_result(
             tau_proto::ToolBackgroundResult {
+                captured_output: None,
                 call_id: "inline-background".into(),
                 tool_name: ToolName::new("slow"),
                 tool_type: tau_proto::ToolType::Function,
@@ -207,6 +208,7 @@ fn check_arbitration(kind: Wake, reject: bool, wake_before_release: bool) {
         h.record_wait_tool_request(&background);
         h.record_wait_tool_result(
             &ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: background.clone(),
                 tool_name: ToolName::new("slow"),

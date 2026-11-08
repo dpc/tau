@@ -109,19 +109,20 @@ CBOR envelope in request order:
 ```text
 results:
   - original_tool_call_id: <member ID>
-    outcome: result
-    output: <original typed CBOR>
+    target_outcome: completed
   - original_tool_call_id: <member ID>
-    outcome: error
-    message: <original message>
-    details: <original typed details or null>
+    target_outcome: error
 ```
 
-Member payloads remain nested unchanged. Cancellation uses the error member
-shape and retains its message and details. Invalid invocation, ownership,
-reservation, and wait-operation failures remain tool errors. The runtime consumes
-all member outputs atomically only after the wait terminal publishes
-successfully. If that terminal append rejects, the harness retains and retries
+Each member contains a synchronization receipt with no source body.
+Cancellation uses `target_outcome: cancelled` in the same successful receipt
+shape. Accepted text remains in the canonical ordered source stream; callers can
+explicitly recover it through bounded `tool_output` pages. See
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
+Invalid invocation, ownership, reservation, and wait-operation failures remain
+tool errors. The runtime consumes all member completion receipts atomically only
+after the wait terminal publishes successfully. If that terminal append rejects,
+the harness retains and retries
 the exact preallocated terminal; a later terminal for a reused display ID cannot
 commit the pending plural settlement or clear the newer generation's notice
 ownership.

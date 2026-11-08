@@ -540,6 +540,85 @@ impl ClientHandle {
         ack.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
+    /// Flush a runtime frame after every earlier accepted detached frame.
+    ///
+    /// Unlike [`Self::send`], this is an ordering barrier for detached output.
+    /// It blocks on transport progress and must not run in a pipe-drain loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before startup completes, for raw `Ready`, or when
+    /// frame admission, encoding, or transport flushing fails.
+    pub fn send_after_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        if !self.startup_complete.load(Ordering::Acquire)
+            || matches!(message, tau_proto::HarnessInputMessage::Ready(_))
+        {
+            return Err(ClientError::handler(
+                "ordered runtime send requires completed startup and cannot send Ready",
+            ));
+        }
+        Self::wait_for_ack(self.enqueue_after_detached(message)?)
+    }
+
+    /// Reserve one of 64 payload-free capacity notification slots.
+    ///
+    /// Reserve before command effects and install a nonblocking waker before
+    /// calling [`Self::send_detached_or_arm`]. Dropping the token releases it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Overloaded` when all slots are reserved, or `WriterClosed`.
+    pub fn reserve_detached_capacity(&self) -> ClientResult<crate::DetachedCapacityToken> {
+        self.sender
+            .lock()
+            .expect("lock client handle sender")
+            .as_ref()
+            .ok_or(ClientError::WriterClosed)?
+            .reserve_detached_capacity()
+    }
+
+    /// Admit a runtime frame or atomically arm a capacity wake on exhaustion.
+    ///
+    /// No report is retained on failure. Capacity wakes are advisory and
+    /// coalesced; retry can lose a race and arm again. Oversized frames fail
+    /// permanently without arming. The token must belong to this writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Overloaded`, `WriterClosed`, encoding errors, or a handler
+    /// error for an invalid token, missing waker, pre-Ready use, or raw
+    /// `Ready`.
+    pub fn send_detached_or_arm(
+        &self,
+        message: tau_proto::HarnessInputMessage,
+        token: &crate::DetachedCapacityToken,
+    ) -> ClientResult<()> {
+        if !self.startup_complete.load(Ordering::Acquire)
+            || matches!(message, tau_proto::HarnessInputMessage::Ready(_))
+        {
+            return Err(ClientError::handler(
+                "armed runtime send requires completed startup and cannot send Ready",
+            ));
+        }
+        let output = PeerOutput::prepare(message)?;
+        let observation = output.begin_admission(OutputLane::Detached);
+        let frame = match QueuedFrame::admit(output) {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Some(observation) = observation {
+                    observation.rejected("frame_overloaded");
+                }
+                return Err(error);
+            }
+        };
+        self.sender
+            .lock()
+            .expect("lock client handle sender")
+            .as_ref()
+            .ok_or(ClientError::WriterClosed)?
+            .admit_detached_or_arm(frame, observation, token)
+    }
+
     /// Enqueues one peer-to-harness message without waiting for it to flush.
     ///
     /// This is intended for detached background workers whose result should not

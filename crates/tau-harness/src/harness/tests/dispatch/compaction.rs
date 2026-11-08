@@ -602,6 +602,7 @@ fn ordinary_inference_rejects_private_compaction_output_before_persistence() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: Some(tau_proto::ProviderTokenUsage {
@@ -752,6 +753,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: None,
@@ -767,6 +769,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-reactive".into(),
             tool_name: ToolName::new("reactive_tool"),
@@ -1571,6 +1574,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
     )));
 
     h.finish_prebuilt_internal_tool_result(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-sibling".into(),
         tool_name: ToolName::new("sibling"),
@@ -2137,6 +2141,7 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2272,6 +2277,7 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
@@ -2416,6 +2422,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
     )
     .expect("register delivery interceptor");
     h.finish_prebuilt_internal_tool_result(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-cancel-sibling".into(),
         tool_name: ToolName::new("sibling"),
@@ -3598,6 +3605,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
@@ -3650,6 +3658,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderToolResult(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
@@ -3744,12 +3753,8 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             tau_proto::UnixMicros::new(10),
         )
         .expect("append standalone success");
-    let seeded_through = store
-        .agent(agent_id.as_str())
-        .and_then(tau_core::AgentTree::head)
-        .map(tau_proto::AgentHead::Node)
-        .expect("compacted head");
     let background_result = tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: call_id.clone(),
         tool_name: tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,
@@ -3783,6 +3788,14 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             tau_proto::UnixMicros::new(11),
         )
         .expect("append retained caller background result");
+    // The terminal now contributes canonical source context after the compact
+    // replacement. The owed checkpoint includes that context, not just the
+    // earlier compact boundary, without creating another activation.
+    let seeded_through = store
+        .agent(agent_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map(tau_proto::AgentHead::Node)
+        .expect("compacted head with final source context");
     let seeded_records = store
         .snapshot_agent_events_for_test(agent_id.as_str())
         .expect("seeded records");
@@ -4332,6 +4345,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
@@ -4352,6 +4366,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderToolResult(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
@@ -7522,6 +7537,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         originator: tau_proto::PromptOriginator::User,
@@ -7685,6 +7701,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
             failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
             originator: tau_proto::PromptOriginator::User,
@@ -8396,6 +8413,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
@@ -8529,6 +8547,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
@@ -8593,6 +8612,7 @@ fn failed_ui_compaction_replay_restores_inference_pause() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
@@ -9220,6 +9240,7 @@ fn standalone_interrupted_inference_recovers_after_restart() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
@@ -9487,6 +9508,7 @@ fn standalone_auto_compaction_includes_complete_mixed_tool_round() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: None,
@@ -9506,6 +9528,7 @@ fn standalone_auto_compaction_includes_complete_mixed_tool_round() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-success".into(),
             tool_name: ToolName::new("success_tool"),
@@ -9520,6 +9543,7 @@ fn standalone_auto_compaction_includes_complete_mixed_tool_round() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolError(tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-error".into(),
             tool_name: ToolName::new("error_tool"),
@@ -9533,6 +9557,8 @@ fn standalone_auto_compaction_includes_complete_mixed_tool_round() {
     h.publish_for_agent(
         &cid,
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-cancel".into(),
             tool_name: ToolName::new("cancel_tool"),
@@ -9712,6 +9738,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
             originator: tau_proto::PromptOriginator::User,

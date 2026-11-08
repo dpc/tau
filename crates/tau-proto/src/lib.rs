@@ -71,7 +71,7 @@ mod suggestion;
 mod token_count;
 mod token_usage;
 mod tool_name_prefix;
-
+mod tool_output;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::marker::PhantomData;
 
@@ -125,11 +125,12 @@ pub use token_usage::*;
 pub use tool_name_prefix::{
     InvalidToolNamePrefix, ToolNameCompositionError, ToolNamePrefix, ToolNameTarget,
 };
+pub use tool_output::*;
 
 /// Current harness-peer wire and extension-visible event contract revision.
 ///
 /// `SPEC-extension-protocol-versioning` defines bump and admission policy.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(20, 1);
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(21, 0);
 
 /// Reporter-owned filename used by the locked papercut history RPC.
 pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";

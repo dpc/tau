@@ -23,6 +23,7 @@ pub(super) fn encoded_test_png() -> Vec<u8> {
 
 pub(super) fn image_result(call_id: &str, bytes: Vec<u8>) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("read_image"),
@@ -326,6 +327,7 @@ fn run_tool_result(
     h.handle_extension_event(
         "shell",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id_typed.clone(),
             tool_name: name,
@@ -408,6 +410,7 @@ fn run_tool_error(
     h.handle_extension_event(
         "shell",
         TestProtocolItem::Event(Event::ToolErrorReported(tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id_typed.clone(),
             tool_name: name,
@@ -803,6 +806,7 @@ fn same_round_identical_results_collapse_to_first_call() {
         h.handle_extension_event(
             "shell",
             TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.into(),
                 tool_name: ToolName::new(tool_name),
@@ -859,6 +863,7 @@ fn configured_extension_cannot_report_harness_pointer_presentation() {
         tau_proto::ClientKind::Tool,
     );
     let reported = ToolResult {
+        captured_output: None,
         presentation: tau_proto::ToolResultPresentation::HarnessDedupPointer,
         call_id: "forged-pointer".into(),
         tool_name: ToolName::new("shell"),
@@ -1164,6 +1169,7 @@ fn dedup_refuses_to_self_point() {
     // would produce a dedup pointer to `call_solo` —
     // a pointer to itself.
     let mut replay = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call_solo".into(),
         tool_name: ToolName::new("read"),

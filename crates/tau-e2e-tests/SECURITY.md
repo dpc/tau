@@ -1,5 +1,13 @@
 # tau-e2e-tests security boundaries
 
+The live-output cancellation fixture is a closed core-shell exception exposing
+only `shell`, `wait`, and `cancel`. Its preflight-resolved Cargo-built probe accepts
+one fixed `stream-until-cancel` mode, writes fixed private cwd markers, flushes a
+fixed sentinel, and sleeps before natural exit. Five enumerated fake-provider
+steps cannot choose arbitrary shell text, environment, file paths, or commands.
+The fake provider issues cancellation only after validating the sentinel in canonical
+nonterminal model context; the driver checks that natural exit did not occur.
+
 The shell-endpoint acceptance test reuses the private production core-shell
 fixture for one fixed `printf endpoint-completed` command from an attached test
 UI. It checks duplicate intent and two passive observers without activating the
@@ -74,7 +82,8 @@ value from that form. This is test matching, not prompt-control authority, and a
 fixture needing literal canonical wrapper syntax requires a typed scenario
 distinction.
 
-The closed task-text matcher also skips whole registered `tau_discovery`
+The closed task-text matcher also skips whole registered `tau_discovery` and
+`tau_tool_output`
 envelopes when selecting task text. It does not infer runtime receipt authority or
 remove those envelopes from the provider request. Canonical delivery and
 context-order tests cover that content.

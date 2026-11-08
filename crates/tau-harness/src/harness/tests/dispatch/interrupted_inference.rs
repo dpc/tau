@@ -834,6 +834,7 @@ fn interrupted_post_tool_fixture_with_compaction(
     append_seed_agent_event(
         &mut store,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "prior-send".into(),
             tool_name: ToolName::new("message"),

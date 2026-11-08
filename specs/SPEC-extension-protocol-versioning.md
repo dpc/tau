@@ -8,6 +8,15 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 21.0 adds ordered tool-output reports and canonical source facts,
+declaration-frozen streaming policy, bounded typed final captures, and native
+stream-completion receipts. All background waits now return successful typed
+completion receipts rather than copies of source output; `complete_only` suppresses
+nonterminal tool wake causes without discarding capture. Configured extensions
+and UIs must rebuild together. Existing journal framing and crash guarantees
+remain unchanged; SDK publication and runtime activation are separate operations.
+See [SPEC-streamed-tool-output](SPEC-streamed-tool-output.md).
+
 Protocol 20.1 adds optional `compaction_recall_artifact` metadata to
 `agent.prompt_started`. Older readers ignore it; new readers treat omission as
 unknown. The locator leaves compaction, retention, replay authority, and journal
@@ -86,7 +95,7 @@ Omitted targets preserve ordinary behavior. The original 16.x SDK required
 Configure's advertised revision to be at least 16.5 within 16.x because older
 harnesses could ignore the constraint. After coordinated major migrations, the
 current SDK requires Configure's advertised protocol major to match its compiled
-major, currently 20, and accepts all minors within that major. Missing revisions
+major, currently 21, and accepts all minors within that major. Missing revisions
 and other majors, including future majors, fail closed. Protocol 16.5 marks the
 historical introduction, not permission for cross-major use. The public
 request and config fields first appeared in source SDK 0.20.0.

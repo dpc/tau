@@ -337,6 +337,7 @@ fn message_call(recipient_id: &str, message: &str) -> AgentToolCall {
 
 fn tool_result(call_id: &str, kind: ToolResultKind) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("shell"),
@@ -351,6 +352,7 @@ fn tool_result(call_id: &str, kind: ToolResultKind) -> ToolResult {
 
 fn tool_background_result(call_id: &str) -> tau_proto::ToolBackgroundResult {
     tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: call_id.into(),
         tool_name: ToolName::new("shell"),
         tool_type: ToolType::Function,
@@ -362,6 +364,7 @@ fn tool_background_result(call_id: &str) -> tau_proto::ToolBackgroundResult {
 
 fn tool_error(call_id: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
+        captured_output: None,
         call_id: call_id.into(),
         tool_name: ToolName::new("shell"),
         tool_type: ToolType::Function,
@@ -375,6 +378,8 @@ fn tool_error(call_id: &str) -> tau_proto::ToolError {
 
 fn tool_background_error(call_id: &str) -> tau_proto::ToolBackgroundError {
     tau_proto::ToolBackgroundError {
+        outcome: Default::default(),
+        captured_output: None,
         call_id: call_id.into(),
         tool_name: ToolName::new("shell"),
         tool_type: ToolType::Function,
@@ -1259,6 +1264,8 @@ fn wait_initial_display_tracks_only_running_or_backgrounded_tools() {
         Event::ToolBackgroundResult(tool_background_result("shell-call")),
         Event::ToolBackgroundError(tool_background_error("shell-call")),
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             call_id: "shell-call".into(),
             tool_name: ToolName::new("shell"),
             tool_type: ToolType::Function,

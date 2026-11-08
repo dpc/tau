@@ -3385,6 +3385,7 @@ fn provider_terminal_finishes_harness_originated_message_progress() {
         }),
     }));
     renderer.handle(&Event::ProviderToolResult(tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "message-call".into(),
         tool_name: tau_proto::ToolName::new("message"),
@@ -4566,6 +4567,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {

@@ -77,7 +77,7 @@ use crate::agent::{
 };
 use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
-use crate::background_completion_preview::{BackgroundErrorOutcome, BackgroundPreviewBudget};
+use crate::background_completion_outcome::BackgroundErrorOutcome;
 use crate::client_writer_lifecycle::{
     ClientWriterLifecycle, FINAL_UI_DISCONNECT_GRACE, REJECTED_SOCKET_DISCONNECT_GRACE,
     STARTUP_DISCONNECT_GRACE,
@@ -524,8 +524,8 @@ fn protocol_message_fits(message: &HarnessOutputMessage) -> bool {
 
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
     format!(
-        "Tool call `{call_id}` completed. Its result is queued. Call `wait` to consume it when \
-         useful; otherwise, you can leave it queued."
+        "Tool call `{call_id}` completed. Its output is recorded separately. Call `wait` for \
+         a completion receipt, or `tool_output` to deliberately recover retained output."
     )
 }
 
@@ -1670,6 +1670,7 @@ mod terminal_policy_projection;
 mod terminal_response_projection;
 #[cfg(test)]
 mod terminal_response_projection_tests;
+mod tool_output_runtime;
 mod tool_routing_state;
 mod tool_runtime;
 mod ui_runtime;
@@ -2095,17 +2096,16 @@ where
                 }),
             ))?;
 
-            let is_tool_result = context_items
-                .last()
-                .is_some_and(|item| matches!(item, ContextItem::ToolResult(_)));
-            if is_tool_result {
-                let text = context_items
-                    .last()
-                    .and_then(|item| match item {
-                        ContextItem::ToolResult(result) => Some(result.output.render()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
+            // Canonical output follows the native receipt as user-role source
+            // context. It is not a new command for this deterministic fixture.
+            let last_command_item = context_items.iter().rev().find(|item| {
+                !matches!(item, ContextItem::Message(message)
+                    if message.role == ContextRole::User
+                        && matches!(message.content.first(), Some(ContentPart::Text { text })
+                            if tau_proto::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(text)))
+            });
+            if let Some(ContextItem::ToolResult(result)) = last_command_item {
+                let text = result.output.render();
                 writer.write_message(&HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(
                         tau_proto::ProviderResponseFinishedReport {

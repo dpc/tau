@@ -85,6 +85,7 @@ fn ui_result_subscriptions_exclude_raw_foreground_and_background_facts() {
 
     let result = final_tool_result("routing-result", "owned_tool", "raw-marker");
     let background = tau_proto::ToolBackgroundResult {
+        captured_output: None,
         call_id: "routing-background".into(),
         tool_name: ToolName::new("owned_tool"),
         tool_type: tau_proto::ToolType::Function,
@@ -925,6 +926,8 @@ fn sibling_extension_terminals_recover_once_after_admission_pressure() {
         )),
         Event::ToolErrorReported(tool_error(calls[1], "owned_tool", "original failure")),
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: calls[2].into(),
             tool_name: ToolName::new("owned_tool"),
@@ -1209,6 +1212,8 @@ fn direct_append_fault_retains_deferred_terminal() {
     harness.publish_event(
         None,
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            outcome: Default::default(),
+            captured_output: None,
             call_id: "ownerless-background-after-fault".into(),
             tool_name: ToolName::new("ownerless"),
             tool_type: tau_proto::ToolType::Function,
@@ -1492,6 +1497,8 @@ fn cancellation_report_replacement_drives_protected_canonical_fact() {
     );
     let cancellation = |tool_name: &str| {
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "cancel-replaced".into(),
             tool_name: tau_proto::ToolName::new(tool_name),
@@ -1526,6 +1533,8 @@ fn cancellation_report_replacement_drives_protected_canonical_fact() {
         &mut harness,
         InterceptAction::Pass(Some(Box::new(Event::ToolCancelled(
             tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "cancel-replaced".into(),
                 tool_name: tau_proto::ToolName::new("forged_canonical"),
@@ -1570,6 +1579,8 @@ fn cancellation_report_preserves_display_on_canonical_fact() {
         .handle_extension_event(
             "conn-owner",
             TestProtocolItem::Event(Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "cancel-display".into(),
                 tool_name: tau_proto::ToolName::new("forged"),
@@ -1606,6 +1617,8 @@ fn dropped_cancellation_report_has_no_downstream_effect() {
         .handle_extension_event(
             "conn-owner",
             TestProtocolItem::Event(Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "cancel-dropped".into(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
@@ -1829,6 +1842,8 @@ fn backgrounded_terminal_reports_preserve_background_completion_behavior() {
         (
             "cancel",
             Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "background-cancel".into(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
@@ -2189,6 +2204,8 @@ fn retained_result_wins_before_late_cancellation_report() {
         .handle_extension_event(
             "conn-owner",
             TestProtocolItem::Event(Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),

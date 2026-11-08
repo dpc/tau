@@ -23,6 +23,102 @@ const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
 const SHELL_PROBE: &str = env!("CARGO_BIN_EXE_tau-e2e-shell-probe");
 const SESSION: &str = "deterministic-e2e-session";
 
+#[test]
+fn core_shell_incremental_output_drives_model_cancellation()
+-> Result<(), Box<dyn std::error::Error>> {
+    use tau_e2e_tests::scenario::ShellStreamStep;
+    const PROMPT: &str = "cancel the live shell after its sentinel";
+    let probe_executable = resolve_executable(SHELL_PROBE).ok_or("missing shell probe")?;
+    let scenario = ScenarioV2::new(
+        "core-shell-stream",
+        vec![ScenarioLaneV2 {
+            ctx_id: "stream-lane".to_owned(),
+            actions: [
+                ShellStreamStep::Start,
+                ShellStreamStep::Wait,
+                ShellStreamStep::Cancel,
+                ShellStreamStep::Receipt,
+                ShellStreamStep::Finished,
+            ]
+            .into_iter()
+            .map(|step| ScenarioActionV2::CoreShellStream {
+                user_text: PROMPT.to_owned(),
+                probe_executable: probe_executable.clone(),
+                step,
+            })
+            .collect(),
+        }],
+    );
+    let fixture = DeterministicFixture::new_core_shell_stream(
+        "core_shell_incremental_output_drives_model_cancellation",
+        &scenario,
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("stream-shell");
+    let daemon = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent_without_prompt(&mut peer)?;
+    let agent_id = wait_agent_and_context_ready(&mut peer, false, fixture.shell_base())?;
+    let started = Instant::now();
+    submit_prompt(&mut peer, &agent_id, "stream-lane", PROMPT)?;
+    let final_response = loop {
+        let event = recv_observed_before(&mut peer, started + Duration::from_secs(45))?.event;
+        if let Event::ProviderResponseFinished(response) = event
+            && response.stop_reason == ProviderStopReason::EndTurn
+        {
+            break response;
+        }
+    };
+    assert_eq!(
+        assistant_text(&final_response.output_items),
+        "stream observed and cancelled"
+    );
+    assert!(started.elapsed() < Duration::from_secs(45));
+    assert!(fixture.shell_base().join(".tau-stream-started").exists());
+    assert!(
+        !fixture
+            .shell_base()
+            .join(".tau-stream-natural-exit")
+            .exists()
+    );
+    disconnect_ui(&mut peer)?;
+    daemon.finish()?;
+    let events = DurableSnapshot::load(fixture.harness_state_dir(), &SessionId::parse(SESSION)?)?
+        .agent_events
+        .into_iter()
+        .map(|record| record.event)
+        .collect::<Vec<_>>();
+    let updates = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            Event::ToolOutputUpdated(update)
+                if update.output.call_id.as_str() == "stream-child" =>
+            {
+                assert!(update.output.text.contains("tau-stream-live-sentinel"));
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 1);
+    let cancel = events.iter().position(|event| matches!(event,
+        Event::ProviderResponseFinished(response) if response.output_items.iter().any(|item|
+            matches!(item, tau_proto::ContextItem::ToolCall(call) if call.call_id.as_str() == "stream-cancel")
+        )
+    )).expect("model must issue cancellation");
+    let terminal = events
+        .iter()
+        .position(|event| match event {
+            Event::ToolBackgroundError(error) => error.call_id.as_str() == "stream-child",
+            _ => false,
+        })
+        .expect("cancelled child terminal");
+    assert!(updates[0] < cancel && cancel < terminal);
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
 /// The production shell endpoint and generic bus commit one passive result for
 /// two observing UIs, without provider activation or semantic custom records.
 #[test]
@@ -499,9 +595,17 @@ fn run_core_shell_four_sibling_commands(
         "aggregate order must remain provider request order despite reverse completion",
     );
 
+    // Debug traces abbreviate strings. Timing is authoritative source data,
+    // so read complete canonical captures from the durable store.
+    let canonical_events =
+        DurableSnapshot::load(fixture.harness_state_dir(), &SessionId::parse(SESSION)?)?
+            .agent_events
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>();
     let intervals = call_ids
         .iter()
-        .map(|call_id| shell_interval(&events, call_id))
+        .map(|call_id| shell_interval(&canonical_events, call_id))
         .collect::<Result<Vec<_>, _>>()?;
     assert!(
         intervals.windows(2).all(|pair| pair[0].end > pair[1].end),
@@ -1130,9 +1234,11 @@ fn shell_interval(
     let output = events
         .iter()
         .find_map(|event| match event {
-            Event::ToolBackgroundResult(result) if &result.call_id == call_id => {
-                cbor_text_field(&result.result, "output")
-            }
+            Event::ToolBackgroundResult(result) if &result.call_id == call_id => result
+                .captured_output
+                .as_ref()
+                .map(|output| output.text.as_str())
+                .or_else(|| cbor_text_field(&result.result, "output")),
             _ => None,
         })
         .ok_or_else(|| format!("missing shell output for {call_id}"))?;

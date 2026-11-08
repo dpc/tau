@@ -27,6 +27,10 @@ pub(crate) struct AgentDispatchState {
     pub(crate) discovery_fold_pending: bool,
     /// Canonical incoming facts waiting to activate one coalesced agent turn.
     pub(crate) pending_message_wakes: VecDeque<PendingMessageWake>,
+    /// Cold output custody must drain before any new capture can reserve space.
+    /// Restored processes never resume, so no per-call capture slots are
+    /// minted.
+    pub(crate) restored_tool_output_debt: bool,
     /// Replay found a committed activation after the latest completed dispatch.
     pub(crate) pending_replay_activation: bool,
     /// Whether terminal teardown has begun and new work must be rejected.

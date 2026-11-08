@@ -39,6 +39,7 @@ fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
 #[test]
 fn oversized_prepared_image_becomes_byte_free_error() {
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: tau_proto::ToolCallId::new("oversized"),
         tool_name: tau_proto::ToolName::new("read_image"),

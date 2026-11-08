@@ -5592,6 +5592,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
             failure_kind: None,
             context_limit_telemetry: None,
             interrupted_retry: false,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -5624,6 +5625,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     h.handle_extension_event(
         "tool-provider",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
@@ -6628,6 +6630,7 @@ fn interception_replacement_of_agent_message_received_publishes_original() {
 
 fn tool_result_event(call_id: &str, text: &str) -> Event {
     Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("test_tool"),
@@ -6642,6 +6645,8 @@ fn tool_result_event(call_id: &str, text: &str) -> Event {
 
 fn tool_cancelled_event(call_id: &str) -> Event {
     Event::ToolCancelled(tau_proto::ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("test_tool"),

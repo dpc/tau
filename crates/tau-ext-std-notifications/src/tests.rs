@@ -468,6 +468,7 @@ fn tool_background_placeholder(
     originator: tau_proto::PromptOriginator,
 ) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new("shell"),
@@ -500,6 +501,7 @@ fn tool_background_result(
     originator: tau_proto::PromptOriginator,
 ) -> ToolBackgroundResult {
     ToolBackgroundResult {
+        captured_output: None,
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new("shell"),
         tool_type: tau_proto::ToolType::Function,
@@ -658,6 +660,7 @@ fn assistant_finished_response_for_agent(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -694,6 +697,7 @@ fn tool_call_finished_response(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,

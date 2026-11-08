@@ -4,11 +4,14 @@ use std::{io as path_std_io, os as path_std_os, sync as path_std_sync, time as p
 
 use crate::tools as path_crate_tools;
 
+mod output_stream;
 #[cfg(test)]
 mod tests;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::task as path_std_task;
 
+pub(crate) use output_stream::OutputStreamCapture;
 use tau_proto::{
     CborValue, Event, HarnessInputMessage, ToolUsePayload, ToolUseState, ToolUseStatus,
 };
@@ -20,7 +23,7 @@ use crate::config::ShellConfig;
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
 use crate::shell_output_spool::{MAX_SAVED_OUTPUT_BYTES, SavedArtifact};
 use crate::shell_process::{ShellProcess, ShellStderr, ShellStdout};
-use crate::tools::world::{ShellWorld, WorldShellOutcome};
+use crate::tools::world::{RecordedShellUpdate, ShellWorld, WorldShellOutcome};
 use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented_lines_with_byte_limit,
 };
@@ -175,7 +178,10 @@ fn bounded_utf8_prefix(text: &str, max_bytes: usize) -> String {
 #[derive(Debug)]
 pub(crate) enum CommandOutcome {
     Finished(Box<ToolOutput>),
-    Cancelled,
+    Cancelled {
+        /// Available final text, excluding earlier accepted stream batches.
+        output: Option<String>,
+    },
 }
 
 /// Generic-shell test adapter for the production cancellable execution path.
@@ -195,6 +201,7 @@ pub(crate) fn run_command_cancellable(
             call_id,
             arguments,
             authorized_cwd: None,
+            output_stream: None,
         },
         shell_config,
         command_mode,
@@ -206,6 +213,8 @@ pub(crate) fn run_command_cancellable(
 
 /// Identity and arguments for one shell tool invocation.
 pub(crate) struct ShellInvocation<'a> {
+    /// Optional incremental publisher; absent in final-only recording adapters.
+    pub(crate) output_stream: Option<OutputStreamCapture>,
     /// Provider-facing shell surface selecting its argument dialect.
     pub(crate) surface: crate::tools::ShellSurface,
     /// Stable tool call id used by recording and replay.
@@ -230,23 +239,49 @@ pub(crate) fn run_command_cancellable_for_tool(
         call_id,
         arguments,
         authorized_cwd,
+        mut output_stream,
     } = invocation;
     validate_surface_arguments(surface, arguments)?;
+    let updates = world.replay_shell_updates();
     if let Some(outcome) = world.replay_shell_outcome()? {
-        return replay_shell_outcome(call_id, outcome, arguments, cancel_rx);
+        return replay_shell_outcome(
+            call_id,
+            outcome,
+            arguments,
+            cancel_rx,
+            output_stream,
+            updates,
+        );
     }
 
     let started = path_std_time::Instant::now();
+    let recording = if world.is_recording()
+        && let Some(stream) = output_stream.as_mut()
+    {
+        let recording = path_std_sync::Arc::default();
+        stream.record_to(started, path_std_sync::Arc::clone(&recording));
+        Some(recording)
+    } else {
+        None
+    };
     let outcome = run_command_live_for_surface_with_authorized_cwd(
         surface,
         arguments,
         shell_config,
         command_mode,
         enforce_ro_bind,
-        cancel_rx,
         authorized_cwd,
+        ShellRunControl {
+            cancel_rx,
+            output_stream,
+        },
     )?;
     let elapsed_ms = elapsed_millis(started.elapsed());
+    if let Some(recording) = recording {
+        world.record_shell_updates(std::mem::take(
+            &mut *recording.lock().unwrap_or_else(|error| error.into_inner()),
+        ));
+    }
     let recorded = match &outcome {
         CommandOutcome::Finished(output) => WorldShellOutcome::Finished {
             result: output.result.clone(),
@@ -254,7 +289,9 @@ pub(crate) fn run_command_cancellable_for_tool(
             elapsed_ms,
             saved_output: None,
         },
-        CommandOutcome::Cancelled => WorldShellOutcome::Cancelled,
+        CommandOutcome::Cancelled { output } => WorldShellOutcome::Cancelled {
+            output: output.clone(),
+        },
     };
     world.record_shell_outcome(recorded);
     Ok(outcome)
@@ -296,9 +333,20 @@ pub(crate) fn run_command_live_for_surface(
         shell_config,
         command_mode,
         enforce_ro_bind,
-        cancel_rx,
         authorized_cwd.as_deref(),
+        ShellRunControl {
+            cancel_rx,
+            output_stream: None,
+        },
     )
+}
+
+/// Per-invocation lifecycle inputs owned by the process coordinator.
+struct ShellRunControl {
+    /// Optional explicit cancellation receiver.
+    cancel_rx: Option<mpsc::Receiver<()>>,
+    /// Optional bounded output publisher reserved before command effects.
+    output_stream: Option<OutputStreamCapture>,
 }
 
 /// Run one live shell tool call after any pre-replay authorization.
@@ -308,8 +356,8 @@ fn run_command_live_for_surface_with_authorized_cwd(
     shell_config: &ShellConfig,
     command_mode: ShellCommandMode,
     enforce_ro_bind: bool,
-    cancel_rx: Option<mpsc::Receiver<()>>,
     authorized_cwd: Option<&std::path::Path>,
+    control: ShellRunControl,
 ) -> Result<CommandOutcome, ToolFailure> {
     let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
     validate_surface_arguments(surface, arguments)?;
@@ -363,7 +411,8 @@ fn run_command_live_for_surface_with_authorized_cwd(
     let child_id = child.child.id();
     debug!(child_id, "shell command spawned");
     let started = path_std_time::Instant::now();
-    let wait = wait_with_timeout(child, timeout, cancel_rx);
+    let mut wait =
+        wait_with_timeout_stream(child, timeout, control.cancel_rx, control.output_stream);
     let elapsed = started.elapsed();
     let duration_seconds =
         if path_std_time::Duration::from_secs(SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS) < elapsed {
@@ -375,16 +424,23 @@ fn run_command_live_for_surface_with_authorized_cwd(
     let status_code = wait.status_code;
     let signal = wait.signal;
     let success = wait.success;
+    let streamed = wait
+        .output
+        .stream
+        .as_ref()
+        .is_some_and(OutputStreamCapture::emitted);
+    let tail = wait.output.stream.as_mut().map(OutputStreamCapture::finish);
 
     if wait.cancelled {
         debug!(child_id, duration_seconds = ?duration_seconds, "shell command cancelled");
-        return Ok(CommandOutcome::Cancelled);
+        return Ok(CommandOutcome::Cancelled { output: tail });
     }
 
     let output_trunc = wait.output.truncate();
+    let use_stream_tail = streamed || (tail.is_some() && output_trunc.was_truncated);
     let combined = output_trunc.content.clone();
 
-    let saved_output = output_trunc.was_truncated.then(|| {
+    let saved_output = (output_trunc.was_truncated || streamed).then(|| {
         match crate::shell_output_spool::save(
             &wait.output.saved_output,
             wait.output.saved_output_incomplete,
@@ -405,7 +461,11 @@ fn run_command_live_for_surface_with_authorized_cwd(
         total_bytes: output_trunc
             .was_truncated
             .then_some(output_trunc.total_bytes),
-        output: output_trunc.content,
+        output: if use_stream_tail {
+            tail.unwrap_or_default()
+        } else {
+            output_trunc.content
+        },
         truncated: output_trunc.was_truncated,
         valid_utf8: !wait.had_invalid_utf8,
         saved_output,
@@ -494,7 +554,68 @@ fn replay_shell_outcome(
     outcome: WorldShellOutcome,
     arguments: &CborValue,
     cancel_rx: Option<mpsc::Receiver<()>>,
+    mut output_stream: Option<OutputStreamCapture>,
+    updates: Vec<RecordedShellUpdate>,
 ) -> Result<CommandOutcome, ToolFailure> {
+    let mut previous_ms = 0;
+    let mut bytes = 0usize;
+    if updates.len() > tau_proto::MAX_TOOL_OUTPUT_UPDATES as usize {
+        return Err(ToolFailure::new(
+            "vcr shell output exceeds the batch count limit",
+        ));
+    }
+    // Validate the entire series before exposing any replayed output.
+    for update in &updates {
+        bytes = bytes.saturating_add(update.text.len());
+        if update.text.len() > tau_proto::MAX_TOOL_OUTPUT_CHUNK_BYTES
+            || bytes > tau_proto::MAX_TOOL_OUTPUT_LIVE_BYTES
+            || (update.text.is_empty() && update.omitted_bytes == 0)
+            || update.elapsed_ms < previous_ms
+        {
+            return Err(ToolFailure::new(
+                "vcr shell output has invalid bounded batch data",
+            ));
+        }
+        previous_ms = update.elapsed_ms;
+    }
+    if let WorldShellOutcome::Finished { elapsed_ms, .. } = &outcome
+        && previous_ms > *elapsed_ms
+    {
+        return Err(ToolFailure::new(
+            "vcr shell output occurs after its terminal",
+        ));
+    }
+    previous_ms = 0;
+    for update in updates {
+        let Some(stream) = output_stream.as_mut() else {
+            return Err(ToolFailure::new(
+                "vcr shell output requires a streaming invocation",
+            ));
+        };
+        let delay = path_std_time::Duration::from_millis(
+            (update.elapsed_ms - previous_ms).div_ceil(VCR_REPLAY_SPEEDUP),
+        );
+        if let Some(cancel_rx) = cancel_rx.as_ref() {
+            let deadline = path_std_time::Instant::now() + delay;
+            match cancel_rx.recv_timeout(delay) {
+                Ok(()) => {
+                    return Err(ToolFailure::new(format!(
+                        "vcr replay for {key} cancelled before recorded output"
+                    )));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(
+                        deadline.saturating_duration_since(path_std_time::Instant::now()),
+                    );
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        } else {
+            std::thread::sleep(delay);
+        }
+        previous_ms = update.elapsed_ms;
+        stream.replay(update);
+    }
     match outcome {
         WorldShellOutcome::Finished {
             result,
@@ -507,7 +628,7 @@ fn replay_shell_outcome(
                     "vcr replay for {key} expected finished shell call but cancellation was requested"
                 )));
             }
-            sleep_for_replay_elapsed(elapsed_ms);
+            sleep_for_replay_elapsed(elapsed_ms.saturating_sub(previous_ms));
             if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                 return Err(ToolFailure::new(format!(
                     "vcr replay for {key} expected finished shell call but cancellation was requested"
@@ -519,7 +640,7 @@ fn replay_shell_outcome(
                 display: *display,
             })))
         }
-        WorldShellOutcome::Cancelled => {
+        WorldShellOutcome::Cancelled { output } => {
             let timeout = parse_timeout(arguments).map_err(ToolFailure::from)?;
             let Some(cancel_rx) = cancel_rx else {
                 return Err(ToolFailure::new(format!(
@@ -527,7 +648,7 @@ fn replay_shell_outcome(
                 )));
             };
             match cancel_rx.recv_timeout(timeout) {
-                Ok(()) => Ok(CommandOutcome::Cancelled),
+                Ok(()) => Ok(CommandOutcome::Cancelled { output }),
                 Err(mpsc::RecvTimeoutError::Timeout) => Err(ToolFailure::new(format!(
                     "vcr replay for {key} expected shell cancellation before timeout"
                 ))),
@@ -1007,7 +1128,7 @@ fn read_available_user_shell<R: std::io::Read>(
 
     let mut close_pipe = false;
     let mut buf = [0u8; USER_SHELL_READ_CHUNK_BYTES];
-    loop {
+    for _ in 0..32 {
         match pipe_ref.read(&mut buf) {
             Ok(0) => {
                 close_pipe = true;
@@ -1764,13 +1885,20 @@ fn shell_wait_write_wake_byte(fd: &path_std_os::fd::OwnedFd) {
     use std::os::fd::AsRawFd;
 
     let byte = [1u8];
-    #[allow(unsafe_code)]
-    unsafe {
-        let _ = libc::write(
-            fd.as_raw_fd(),
-            byte.as_ptr().cast::<libc::c_void>(),
-            byte.len(),
-        );
+    loop {
+        #[allow(unsafe_code)]
+        let written = unsafe {
+            libc::write(
+                fd.as_raw_fd(),
+                byte.as_ptr().cast::<libc::c_void>(),
+                byte.len(),
+            )
+        };
+        if 0 <= written
+            || path_std_io::Error::last_os_error().kind() != path_std_io::ErrorKind::Interrupted
+        {
+            break;
+        }
     }
 }
 
@@ -1864,11 +1992,32 @@ struct ShellWaitState {
     event_rx: mpsc::Receiver<ShellWaitEvent>,
     /// Cross-thread cancellation flag set by the cancellation waiter.
     cancelled_by_request: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
+    /// Bounded test notification at a closed-output poll boundary.
+    #[cfg(test)]
+    closed_output_poll: Option<mpsc::SyncSender<()>>,
 }
 
 #[cfg(unix)]
 impl ShellWaitState {
-    fn start(mut process: ShellProcess, cancel_rx: Option<mpsc::Receiver<()>>) -> Self {
+    fn start(
+        process: ShellProcess,
+        cancel_rx: Option<mpsc::Receiver<()>>,
+        lifecycle_wake: Option<path_std_task::Waker>,
+    ) -> Self {
+        let wake_pipe = if lifecycle_wake.is_some() {
+            None
+        } else {
+            ShellWaitWakePipe::open()
+        };
+        Self::start_with_wake_pipe(process, cancel_rx, lifecycle_wake, wake_pipe)
+    }
+
+    fn start_with_wake_pipe(
+        mut process: ShellProcess,
+        cancel_rx: Option<mpsc::Receiver<()>>,
+        lifecycle_wake: Option<path_std_task::Waker>,
+        wake_pipe: Option<ShellWaitWakePipe>,
+    ) -> Self {
         use std::os::fd::AsRawFd;
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
@@ -1889,7 +2038,6 @@ impl ShellWaitState {
             shell_wait_set_nonblocking(pipe.as_raw_fd());
         }
 
-        let wake_pipe = ShellWaitWakePipe::open();
         let cancel_wake_write = wake_pipe
             .as_ref()
             .and_then(|wake_pipe| shell_wait_dup_owned_fd(&wake_pipe.write));
@@ -1904,12 +2052,20 @@ impl ShellWaitState {
             Arc::clone(&cancelled_by_request),
             cancel_wake_write,
             event_tx.clone(),
+            lifecycle_wake.clone(),
         );
 
         let (wake_read, wake_write) = wake_pipe
             .map(|wake_pipe| (Some(wake_pipe.read), Some(wake_pipe.write)))
             .unwrap_or((None, None));
-        spawn_shell_child_waiter(pid, process.child, wake_write, waiter_wake_read, event_tx);
+        spawn_shell_child_waiter(
+            pid,
+            process.child,
+            wake_write,
+            waiter_wake_read,
+            event_tx,
+            lifecycle_wake,
+        );
         Self {
             pid,
             stdout_pipe,
@@ -1919,16 +2075,25 @@ impl ShellWaitState {
             wake_read,
             event_rx,
             cancelled_by_request,
+            #[cfg(test)]
+            closed_output_poll: None,
         }
     }
 
-    fn wait(mut self, timeout: std::time::Duration) -> WaitResult {
+    fn wait(
+        mut self,
+        timeout: std::time::Duration,
+        stream: Option<OutputStreamCapture>,
+    ) -> WaitResult {
         debug!(
             pid = self.pid,
             timeout_ms = timeout.as_millis(),
             "waiting for shell child"
         );
-        let mut output = CapturedOutput::default();
+        let mut output = CapturedOutput {
+            stream,
+            ..Default::default()
+        };
         let mut status = None;
         let mut timed_out = false;
         let mut cancelled = false;
@@ -1965,6 +2130,9 @@ impl ShellWaitState {
     ) -> ShellWaitPoll {
         use std::sync::atomic::Ordering;
 
+        if let Some(stream) = output.stream.as_ref() {
+            stream.drain_wake();
+        }
         self.read_available_output(output);
         if shell_wait_collect_status(&self.event_rx, status) {
             debug!(pid = self.pid, status = ?status, "shell wait loop observed child status");
@@ -1989,7 +2157,15 @@ impl ShellWaitState {
             return ShellWaitPoll::TimedOut;
         }
 
-        if let Some(event) = self.wait_for_io_or_wake(deadline) {
+        if let Some(stream) = output.stream.as_mut() {
+            stream.poll(now);
+        }
+        let wake_deadline = output
+            .stream
+            .as_ref()
+            .and_then(OutputStreamCapture::deadline)
+            .map_or(deadline, |batch| batch.min(deadline));
+        if let Some(event) = self.wait_for_io_or_wake(wake_deadline, output) {
             match event {
                 ShellWaitEvent::Exited(received) => {
                     *status = Some(received);
@@ -2045,12 +2221,30 @@ impl ShellWaitState {
         shell_wait_read_available(&mut self.stderr_pipe, OutputStream::Stderr, output);
     }
 
-    fn wait_for_io_or_wake(&self, deadline: std::time::Instant) -> Option<ShellWaitEvent> {
+    fn wait_for_io_or_wake(
+        &self,
+        deadline: std::time::Instant,
+        output: &CapturedOutput,
+    ) -> Option<ShellWaitEvent> {
         let mut poll_fds = self.output_and_wake_poll_fds();
+        if let Some(stream) = output.stream.as_ref() {
+            poll_fds.push(libc::pollfd {
+                fd: stream.capacity_fd(),
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            });
+        }
         if poll_fds.is_empty() {
             return shell_wait_recv_event_until(&self.event_rx, deadline);
         }
 
+        #[cfg(test)]
+        if self.stdout_pipe.is_none()
+            && self.stderr_pipe.is_none()
+            && let Some(notify) = &self.closed_output_poll
+        {
+            let _ = notify.try_send(());
+        }
         shell_wait_poll_fds_until(&mut poll_fds, deadline);
         if let Some(wake_read) = self.wake_read.as_ref() {
             shell_wait_drain_wake_fd(wake_read);
@@ -2101,6 +2295,7 @@ fn spawn_shell_cancel_waiter(
     cancelled_by_request: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
     cancel_wake_write: Option<path_std_os::fd::OwnedFd>,
     event_tx: mpsc::Sender<ShellWaitEvent>,
+    lifecycle_wake: Option<path_std_task::Waker>,
 ) {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -2114,6 +2309,9 @@ fn spawn_shell_cancel_waiter(
             debug!(pid, "shell cancellation signal received");
             cancelled_by_request.store(true, Ordering::SeqCst);
             let _ = event_tx.send(ShellWaitEvent::Cancelled);
+            if let Some(wake) = lifecycle_wake {
+                wake.wake();
+            }
             if let Some(cancel_wake_write) = cancel_wake_write {
                 trace!(pid, "waking shell wait loop after cancellation");
                 shell_wait_write_wake_byte(&cancel_wake_write);
@@ -2129,6 +2327,7 @@ fn spawn_shell_child_waiter(
     wake_write: Option<path_std_os::fd::OwnedFd>,
     waiter_wake_read: Option<path_std_os::fd::OwnedFd>,
     event_tx: mpsc::Sender<ShellWaitEvent>,
+    lifecycle_wake: Option<path_std_task::Waker>,
 ) {
     let _waiter = std::thread::spawn(move || {
         // Keep a duplicate read end alive until the waiter publishes status and
@@ -2146,6 +2345,9 @@ fn spawn_shell_child_waiter(
                 let _ = event_tx.send(ShellWaitEvent::WaitFailed);
             }
         }
+        if let Some(wake) = lifecycle_wake {
+            wake.wake();
+        }
         if let Some(wake_write) = wake_write {
             shell_wait_write_wake_byte(&wake_write);
         }
@@ -2153,10 +2355,11 @@ fn spawn_shell_child_waiter(
 }
 
 #[cfg(unix)]
-fn wait_with_timeout(
+fn wait_with_timeout_stream(
     child: ShellProcess,
     timeout: std::time::Duration,
     cancel_rx: Option<mpsc::Receiver<()>>,
+    stream: Option<OutputStreamCapture>,
 ) -> WaitResult {
     // On Unix the shell tool must not wait for stdout/stderr EOF: background
     // or detached descendants can retain output endpoints long after the
@@ -2164,7 +2367,8 @@ fn wait_with_timeout(
     // nonblocking outputs and an internal child-exit wake pipe together, then
     // returns after foreground exit or timeout with only a brief nonblocking
     // drain.
-    ShellWaitState::start(child, cancel_rx).wait(timeout)
+    let lifecycle_wake = stream.as_ref().map(OutputStreamCapture::lifecycle_waker);
+    ShellWaitState::start(child, cancel_rx, lifecycle_wake).wait(timeout, stream)
 }
 
 /// Wait for a child process with a timeout, preserving output even when
@@ -2173,23 +2377,42 @@ fn wait_with_timeout(
 /// Non-Unix waits for child/cancel/deadline events without fixed polling and
 /// performs only a bounded drain after the child reaches a terminal state.
 #[cfg(not(unix))]
-fn wait_with_timeout(
+fn wait_with_timeout_stream(
     mut process: ShellProcess,
     timeout: std::time::Duration,
     cancel_rx: Option<mpsc::Receiver<()>>,
+    stream: Option<OutputStreamCapture>,
 ) -> WaitResult {
     let stdout_pipe = process.stdout.take();
     let stderr_pipe = process.stderr.take();
 
-    let output = path_std_sync::Arc::new(path_std_sync::Mutex::new(CapturedOutput::default()));
+    let output = path_std_sync::Arc::new(path_std_sync::Mutex::new(CapturedOutput {
+        stream,
+        ..Default::default()
+    }));
     let stop_pipe_readers = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
-    let pipe_done_rx =
-        spawn_nonunix_shell_pipe_captures(stdout_pipe, stderr_pipe, &output, &stop_pipe_readers);
-
     let child_wait = NonUnixChildWait::start(&process.child, timeout, cancel_rx);
+    if let Some(stream) = output
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .stream
+        .as_ref()
+    {
+        stream.set_capacity_waker(path_std_task::Waker::from(path_std_sync::Arc::new(
+            child_wait.output_wake.clone(),
+        )));
+    }
+    let pipe_done_rx = spawn_nonunix_shell_pipe_captures(
+        stdout_pipe,
+        stderr_pipe,
+        &output,
+        &stop_pipe_readers,
+        &child_wait.output_wake,
+    );
+
     let mut timed_out = false;
     let mut cancelled = false;
-    let status = match child_wait.recv() {
+    let status = match child_wait.recv_with_output(&output) {
         NonUnixChildEvent::Exited => process.child.wait().ok(),
         NonUnixChildEvent::Cancelled => match process.child.try_wait() {
             Ok(Some(status)) => Some(status),
@@ -2227,6 +2450,7 @@ fn spawn_nonunix_shell_pipe_captures(
     stderr_pipe: Option<impl std::io::Read + Send + 'static>,
     output: &std::sync::Arc<std::sync::Mutex<CapturedOutput>>,
     stop: &std::sync::Arc<path_std_sync::atomic::AtomicBool>,
+    wake: &NonUnixOutputWake,
 ) -> mpsc::Receiver<()> {
     let (done_tx, done_rx) = mpsc::channel();
     spawn_nonunix_shell_pipe_capture(
@@ -2235,6 +2459,7 @@ fn spawn_nonunix_shell_pipe_captures(
         path_std_sync::Arc::clone(output),
         path_std_sync::Arc::clone(stop),
         done_tx.clone(),
+        wake.clone(),
     );
     spawn_nonunix_shell_pipe_capture(
         stderr_pipe,
@@ -2242,6 +2467,7 @@ fn spawn_nonunix_shell_pipe_captures(
         path_std_sync::Arc::clone(output),
         path_std_sync::Arc::clone(stop),
         done_tx,
+        wake.clone(),
     );
     done_rx
 }
@@ -2253,6 +2479,7 @@ fn spawn_nonunix_shell_pipe_capture(
     output: std::sync::Arc<std::sync::Mutex<CapturedOutput>>,
     stop: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
     done_tx: mpsc::Sender<()>,
+    wake: NonUnixOutputWake,
 ) {
     let Some(mut pipe) = pipe else {
         let _ = done_tx.send(());
@@ -2264,13 +2491,13 @@ fn spawn_nonunix_shell_pipe_capture(
             match pipe.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    let mut capture = output.lock().unwrap_or_else(|error| error.into_inner());
                     if stop.load(path_std_sync_atomic::Ordering::SeqCst) {
                         break;
                     }
-                    output
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .push_bytes(stream, &buf[..n]);
+                    capture.push_bytes(stream, &buf[..n]);
+                    drop(capture);
+                    wake.notify();
                 }
             }
         }
@@ -2305,6 +2532,42 @@ enum NonUnixChildEvent {
 }
 
 #[cfg(not(unix))]
+enum NonUnixWaitEvent {
+    Child(NonUnixChildEvent),
+    OutputReady,
+}
+
+/// Coalesce activity notifications independently of output volume. Pipe readers
+/// never wait for the coordinator to consume a notification.
+#[cfg(not(unix))]
+#[derive(Clone)]
+struct NonUnixOutputWake {
+    /// Coordinator channel shared with process-lifecycle notifications.
+    tx: mpsc::Sender<NonUnixWaitEvent>,
+    /// Whether an unconsumed output wake already occupies that channel.
+    pending: path_std_sync::Arc<path_std_sync_atomic::AtomicBool>,
+}
+
+#[cfg(not(unix))]
+impl NonUnixOutputWake {
+    fn notify(&self) {
+        if !self
+            .pending
+            .swap(true, path_std_sync_atomic::Ordering::SeqCst)
+        {
+            let _ = self.tx.send(NonUnixWaitEvent::OutputReady);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl path_std_task::Wake for NonUnixOutputWake {
+    fn wake(self: path_std_sync::Arc<Self>) {
+        self.notify();
+    }
+}
+
+#[cfg(not(unix))]
 // Coordinates non-Unix process completion without taking ownership of `Child`.
 // The foreground caller keeps the only `Child`, so it can call `kill()` and
 // `wait()` on cancellation or timeout. Watchers only report child-exit,
@@ -2312,7 +2575,8 @@ enum NonUnixChildEvent {
 // detached because `std::sync::mpsc::Receiver` cannot be woken by the stopper
 // channel used for the timeout watcher.
 struct NonUnixChildWait {
-    event_rx: mpsc::Receiver<NonUnixChildEvent>,
+    event_rx: mpsc::Receiver<NonUnixWaitEvent>,
+    output_wake: NonUnixOutputWake,
     exit_handle: std::thread::JoinHandle<()>,
     timeout_stop_tx: mpsc::Sender<()>,
     timeout_handle: std::thread::JoinHandle<()>,
@@ -2332,21 +2596,26 @@ impl NonUnixChildWait {
             let event_tx = event_tx.clone();
             move || match timeout_stop_rx.recv_timeout(timeout) {
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let _ = event_tx.send(NonUnixChildEvent::TimedOut);
+                    let _ = event_tx.send(NonUnixWaitEvent::Child(NonUnixChildEvent::TimedOut));
                 }
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
             }
         });
+        let output_wake = NonUnixOutputWake {
+            tx: event_tx.clone(),
+            pending: path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false)),
+        };
         if let Some(cancel_rx) = cancel_rx {
             let _cancel_handle = std::thread::spawn(move || {
                 if cancel_rx.recv().is_ok() {
-                    let _ = event_tx.send(NonUnixChildEvent::Cancelled);
+                    let _ = event_tx.send(NonUnixWaitEvent::Child(NonUnixChildEvent::Cancelled));
                 }
             });
         }
 
         Self {
             event_rx,
+            output_wake,
             exit_handle,
             timeout_stop_tx,
             timeout_handle,
@@ -2354,9 +2623,49 @@ impl NonUnixChildWait {
     }
 
     fn recv(&self) -> NonUnixChildEvent {
-        self.event_rx
-            .recv()
-            .unwrap_or(NonUnixChildEvent::WaitFailed)
+        loop {
+            match self.event_rx.recv() {
+                Ok(NonUnixWaitEvent::Child(event)) => return event,
+                Ok(NonUnixWaitEvent::OutputReady) => {}
+                Err(_) => return NonUnixChildEvent::WaitFailed,
+            }
+        }
+    }
+
+    fn recv_with_output(&self, output: &path_std_sync::Mutex<CapturedOutput>) -> NonUnixChildEvent {
+        loop {
+            // Terminal activity wins over a due timer. There is at most one
+            // queued output notification, not one per read.
+            while let Ok(event) = self.event_rx.try_recv() {
+                if let NonUnixWaitEvent::Child(event) = event {
+                    return event;
+                }
+            }
+            self.output_wake
+                .pending
+                .store(false, path_std_sync_atomic::Ordering::SeqCst);
+            let deadline = {
+                let mut output = output.lock().unwrap_or_else(|error| error.into_inner());
+                output.stream.as_mut().and_then(|stream| {
+                    stream.poll(path_std_time::Instant::now());
+                    stream.deadline()
+                })
+            };
+            let event = match deadline {
+                Some(deadline) => self.event_rx.recv_timeout(
+                    deadline.saturating_duration_since(path_std_time::Instant::now()),
+                ),
+                None => self
+                    .event_rx
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            };
+            match event {
+                Ok(NonUnixWaitEvent::Child(event)) => return event,
+                Ok(NonUnixWaitEvent::OutputReady) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return NonUnixChildEvent::WaitFailed,
+            }
+        }
     }
 
     fn join_exit_and_timeout_watchers(self) {
@@ -2368,7 +2677,7 @@ impl NonUnixChildWait {
     #[cfg(windows)]
     fn spawn_exit_watcher(
         child: &std::process::Child,
-        event_tx: mpsc::Sender<NonUnixChildEvent>,
+        event_tx: mpsc::Sender<NonUnixWaitEvent>,
     ) -> std::thread::JoinHandle<()> {
         use std::os::windows::io::AsRawHandle;
 
@@ -2396,7 +2705,7 @@ impl NonUnixChildWait {
                 } else {
                     NonUnixChildEvent::Exited
                 };
-                let _ = event_tx.send(event);
+                let _ = event_tx.send(NonUnixWaitEvent::Child(event));
             }
         })
     }
@@ -2404,10 +2713,10 @@ impl NonUnixChildWait {
     #[cfg(all(not(unix), not(windows)))]
     fn spawn_exit_watcher(
         _child: &std::process::Child,
-        event_tx: mpsc::Sender<NonUnixChildEvent>,
+        event_tx: mpsc::Sender<NonUnixWaitEvent>,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
-            let _ = event_tx.send(NonUnixChildEvent::WaitFailed);
+            let _ = event_tx.send(NonUnixWaitEvent::Child(NonUnixChildEvent::WaitFailed));
         })
     }
 }
@@ -2524,6 +2833,8 @@ enum LineEndingKind {
 
 #[derive(Default)]
 struct CapturedOutput {
+    /// Incremental model-output capture, independent of aggregate/spool limits.
+    stream: Option<OutputStreamCapture>,
     /// Incremental stdout decoder.
     stdout: StreamDecoder,
     /// Incremental stderr decoder.
@@ -2546,6 +2857,9 @@ struct CapturedOutput {
 
 impl CapturedOutput {
     fn push_bytes(&mut self, stream: OutputStream, bytes: &[u8]) {
+        if let Some(capture) = self.stream.as_mut() {
+            capture.push(stream, bytes, path_std_time::Instant::now());
+        }
         let decoder = match stream {
             OutputStream::Stdout => &mut self.stdout,
             OutputStream::Stderr => &mut self.stderr,

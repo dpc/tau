@@ -130,6 +130,8 @@ pub(super) fn arbitrate_cancelled_terminal(
     match terminal {
         tau_client::ToolTerminalOutcome::Cancelled(cancelled) => cancelled.into(),
         tau_client::ToolTerminalOutcome::Result(result) => tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             call_id: result.call_id,
             tool_name: result.tool_name,
             tool_type: result.tool_type,
@@ -138,6 +140,8 @@ pub(super) fn arbitrate_cancelled_terminal(
         }
         .into(),
         tau_client::ToolTerminalOutcome::Failure(error) => tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             call_id: error.call_id,
             tool_name: error.tool_name,
             tool_type: error.tool_type,
@@ -478,6 +482,7 @@ impl CompositeCall<'_> {
                         };
                     display.info_chips = vec![attempt_chip(&attempts, None)];
                     return Event::ToolResult(ToolResult {
+                        captured_output: None,
                         presentation: Default::default(),
                         call_id: self.invoke.call_id,
                         tool_name: self.invoke.tool_name,
@@ -643,6 +648,8 @@ fn cancelled_event(
         display.info_chips = vec![chip];
     }
     Event::ToolCancelled(tau_proto::ToolCancelled {
+        output: None,
+        captured_output: None,
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

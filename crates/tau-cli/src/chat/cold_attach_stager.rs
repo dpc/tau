@@ -673,7 +673,9 @@ impl ColdAttachStager {
             }
             ToolReconciliation::Active(_) => {}
         }
-        if !delivery.replay && is_tool_lifecycle_event(delivery.event.as_ref()) {
+        if (!delivery.replay && is_tool_lifecycle_event(delivery.event.as_ref()))
+            || matches!(delivery.event.as_ref(), Event::ToolOutputUpdated(_))
+        {
             if !self.can_retain(&delivery) {
                 return ToolFold::Overflow(delivery);
             }
@@ -1037,8 +1039,10 @@ fn is_tool_transcript_event(event: &Event) -> bool {
 
 /// Identifies frames whose ordering depends on the replayed tool baseline.
 fn is_tool_lifecycle_event(event: &Event) -> bool {
-    matches!(event, Event::ToolStarted(_) | Event::ToolProgress(_))
-        || tool_terminal_id(event).is_some()
+    matches!(
+        event,
+        Event::ToolStarted(_) | Event::ToolProgress(_) | Event::ToolOutputUpdated(_)
+    ) || tool_terminal_id(event).is_some()
 }
 
 /// Returns the call id for canonical UI lifecycle terminals.
@@ -1076,6 +1080,9 @@ fn tool_lifecycle_frame(event: &Event) -> Option<ToolLifecycleFrame<'_>> {
     match event {
         Event::ToolStarted(event) => Some(ToolLifecycleFrame::Started(&event.call_id)),
         Event::ToolProgress(event) => Some(ToolLifecycleFrame::Progress(&event.call_id)),
+        Event::ToolOutputUpdated(event) => {
+            Some(ToolLifecycleFrame::Progress(&event.output.call_id))
+        }
         event => tool_terminal_id(event).map(ToolLifecycleFrame::Terminal),
     }
 }

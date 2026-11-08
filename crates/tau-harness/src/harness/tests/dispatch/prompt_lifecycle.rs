@@ -72,6 +72,7 @@ fn seed_sensitive_tool_context(h: &mut Harness, cid: &AgentId) {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -89,6 +90,7 @@ fn seed_sensitive_tool_context(h: &mut Harness, cid: &AgentId) {
         .append_agent_event(&agent_id, None, Event::ProviderResponseFinished(response))
         .expect("append sensitive tool call");
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id,
         tool_name: ToolName::new("schema_canary_tool"),
@@ -1188,6 +1190,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1269,6 +1272,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1379,6 +1383,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1908,6 +1913,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -1978,6 +1984,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
@@ -2583,6 +2590,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
         h.record_wait_tool_request(call_id);
         h.record_wait_tool_result(
             &ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: ToolName::new("slow"),
@@ -2602,6 +2610,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
         .insert(call_b.clone(), cid.clone());
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
+            captured_output: None,
             call_id: call_b.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -2664,6 +2673,7 @@ fn distinct_queued_completion_preempts_wait_with_consumable_candidate() {
                 .insert(call_id.clone(), cid.clone());
             h.record_wait_background_result(
                 tau_proto::ToolBackgroundResult {
+                    captured_output: None,
                     call_id: call_id.clone(),
                     tool_name: ToolName::new("slow"),
                     tool_type: tau_proto::ToolType::Function,
@@ -4394,6 +4404,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,

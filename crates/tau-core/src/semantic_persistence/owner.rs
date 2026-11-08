@@ -249,6 +249,9 @@ pub(crate) struct FrameReservation {
     capacity_rejections_at_reservation: u64,
     /// Whether this permit transferred into a byte reservation.
     transferred: bool,
+    /// Capacity incremental output may not consume; ordinary terminals and
+    /// control facts keep the full shared ceiling.
+    output_headroom_bytes: usize,
 }
 
 impl FrameReservation {
@@ -274,7 +277,8 @@ impl FrameReservation {
         let bytes = caller_bytes
             .checked_add(internal_bytes)
             .ok_or(PersistenceAdmissionError::Full)?;
-        if bytes > available_bytes(&self.shared, &state) {
+        if bytes > available_bytes(&self.shared, &state).saturating_sub(self.output_headroom_bytes)
+        {
             state.ledger.frames = state
                 .ledger
                 .frames
@@ -295,6 +299,7 @@ impl FrameReservation {
             internal_bytes,
             capacity_rejections_at_reservation: self.capacity_rejections_at_reservation,
             settled: false,
+            output_headroom_bytes: self.output_headroom_bytes,
         })
     }
 }
@@ -331,6 +336,8 @@ pub(crate) struct StagingReservation {
     capacity_rejections_at_reservation: u64,
     /// Whether permits transferred into the FIFO or were already rolled back.
     settled: bool,
+    /// Same lower ceiling used during initial scratch admission.
+    output_headroom_bytes: usize,
 }
 
 impl StagingReservation {
@@ -355,7 +362,9 @@ impl StagingReservation {
             &self.identity.stream,
             self.identity.generation,
         )?;
-        if additional > available_bytes(&self.shared, &state) {
+        if additional
+            > available_bytes(&self.shared, &state).saturating_sub(self.output_headroom_bytes)
+        {
             // Roll back this attempt under the same lock as the Full edge.
             // Its own scratch release must not wake an identical retry. But
             // another producer rejected while we held capacity may now fit,
@@ -1911,6 +1920,22 @@ impl PersistenceLease {
 
     /// Reserves one authoritative FIFO slot before serialized-size counting.
     pub(crate) fn try_reserve_frame(&self) -> Result<FrameReservation, PersistenceAdmissionError> {
+        self.try_reserve_frame_with_output_headroom(false)
+    }
+
+    /// Incremental output cannot exhaust capacity needed to close tool rounds.
+    /// This is an atomic lower ceiling, not a promise against unrelated
+    /// producers.
+    pub(crate) fn try_reserve_tool_output_frame(
+        &self,
+    ) -> Result<FrameReservation, PersistenceAdmissionError> {
+        self.try_reserve_frame_with_output_headroom(true)
+    }
+
+    fn try_reserve_frame_with_output_headroom(
+        &self,
+        incremental_output: bool,
+    ) -> Result<FrameReservation, PersistenceAdmissionError> {
         let shared = self
             .identity
             .shared
@@ -1931,7 +1956,19 @@ impl PersistenceLease {
             report_capacity_full(&shared, &mut state, PersistenceCapacityLimit::Injected);
             return Err(PersistenceAdmissionError::Full);
         }
-        if state.ledger.frames >= shared.capacity.max_frames {
+        // Default headroom covers 64 admitted streams' final projections and
+        // control facts. Tiny test/deployment capacities retain half instead.
+        let reserved_frames = if incremental_output {
+            (shared.capacity.max_frames / 2).min(128)
+        } else {
+            0
+        };
+        let output_headroom_bytes = if incremental_output {
+            (shared.capacity.max_bytes / 2).min(32 * 1024 * 1024)
+        } else {
+            0
+        };
+        if state.ledger.frames >= shared.capacity.max_frames.saturating_sub(reserved_frames) {
             report_capacity_full(&shared, &mut state, PersistenceCapacityLimit::Frames);
             return Err(PersistenceAdmissionError::Full);
         }
@@ -1943,6 +1980,7 @@ impl PersistenceLease {
             identity: Arc::clone(&self.identity),
             capacity_rejections_at_reservation,
             transferred: false,
+            output_headroom_bytes,
         })
     }
 }

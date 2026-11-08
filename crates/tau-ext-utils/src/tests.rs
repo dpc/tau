@@ -390,6 +390,7 @@ fn overdue_timer_waits_for_agent_replay_complete() {
     let start = started("call-1", agent.as_ref(), args);
     rt.handle_started_replay(&start, Some(base));
     rt.handle_result_replay(&ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: start.call_id.clone(),
         tool_name: start.tool_name.clone(),
@@ -456,6 +457,7 @@ fn replay_terminal_correlation_preserves_typed_call_ids_and_fallback_timer_ids()
 
     rt.handle_error_replay(&second.call_id);
     rt.handle_result_replay(&ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: second.call_id.clone(),
         tool_name: second.tool_name.clone(),
@@ -472,6 +474,7 @@ fn replay_terminal_correlation_preserves_typed_call_ids_and_fallback_timer_ids()
     }));
 
     rt.handle_result_replay(&ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: first.call_id.clone(),
         tool_name: first.tool_name.clone(),
@@ -731,6 +734,7 @@ fn restored_local_timer_recovers_after_timezone_lookup_failure() {
     );
     rt.handle_started_replay(&start, Some(started_at));
     rt.handle_result_replay(&ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: start.call_id.clone(),
         tool_name: start.tool_name.clone(),
@@ -771,6 +775,7 @@ fn replay_schedule_anchor_matches_live_across_exact_minute_boundary() {
     );
     rt.handle_started_replay(&start, Some(started_at));
     rt.handle_result_replay(&ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: start.call_id,
         tool_name: start.tool_name,
@@ -814,6 +819,7 @@ fn replayed_daily_prompt_advances_reconstructed_schedule() {
     );
     rt.handle_started_replay(&start, Some(started_at));
     rt.handle_result_replay(&ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: start.call_id,
         tool_name: start.tool_name,
@@ -2361,6 +2367,7 @@ fn timer_runtime_replay_declares_reconstructed_presence() {
     );
     start.tool_name = tau_proto::ToolName::new("work_timer");
     let result = ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: start.call_id.clone(),
         tool_name: start.tool_name.clone(),

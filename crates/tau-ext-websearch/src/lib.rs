@@ -1349,6 +1349,7 @@ fn dispatch_tool_invoke(
             deadline,
         ),
         _ => Event::ToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
@@ -1474,6 +1475,7 @@ fn dispatch_exa_fetch(invoke: ToolStarted, searcher: &dyn Searcher, display_args
                 Err(message) => return tool_error(invoke, message, display_args),
             };
             Event::ToolResult(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -1500,6 +1502,7 @@ fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher, display_args: Stri
                         Err(message) => return tool_error(invoke, message, display_args),
                     };
                 Event::ToolResult(ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
@@ -1556,6 +1559,7 @@ fn dispatch_parallel(
                     Err(message) => return tool_error(invoke, message, display_args),
                 };
                 Event::ToolResult(ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
@@ -1655,6 +1659,7 @@ fn project_web_content(
 
 fn tool_error(invoke: ToolStarted, message: String, display_args: String) -> Event {
     Event::ToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,

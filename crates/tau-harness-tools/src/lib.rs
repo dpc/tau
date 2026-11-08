@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 mod message_release;
 mod status;
+mod tool_output;
 
 #[cfg(test)]
 use status::parse_args as parse_status_args;
@@ -30,6 +31,7 @@ use tau_proto::{PromptOriginator, ToolResult};
 const SKILL_TOOL_NAME: &str = "skill";
 const AGENT_START_TOOL_NAME: &str = "agent_start";
 const WAIT_TOOL_NAME: &str = "wait";
+const TOOL_OUTPUT_NAME: &str = "tool_output";
 const CANCEL_TOOL_NAME: &str = "cancel";
 const MESSAGE_TOOL_NAME: &str = "message";
 const MESSAGE_RELEASE_TOOL_NAME: &str = "message_release";
@@ -262,6 +264,7 @@ impl InternalToolHandler for BuiltinTools {
             skill_tool_spec(),
             agent_start_tool_spec(),
             wait_tool_spec(),
+            tool_output::tool_spec(),
             cancel_tool_spec(),
             message_tool_spec(),
             message_release::tool_spec(),
@@ -294,6 +297,7 @@ impl InternalToolHandler for BuiltinTools {
             SKILL_TOOL_NAME
                 | AGENT_START_TOOL_NAME
                 | WAIT_TOOL_NAME
+                | TOOL_OUTPUT_NAME
                 | CANCEL_TOOL_NAME
                 | MESSAGE_TOOL_NAME
                 | MESSAGE_RELEASE_TOOL_NAME
@@ -348,6 +352,12 @@ impl InternalToolHandler for BuiltinTools {
                     WAIT_TOOL_NAME => {
                         host.handle_wait_tool_call(&conversation_id, &call, visible_tool_name)
                     }
+                    TOOL_OUTPUT_NAME => tool_output::handle_tool_call(
+                        host,
+                        &conversation_id,
+                        &call,
+                        visible_tool_name,
+                    ),
                     MESSAGE_TOOL_NAME => {
                         handle_message_tool_call(host, &conversation_id, &call, visible_tool_name)
                     }
@@ -2208,7 +2218,51 @@ fn cancel_tool_spec() -> ToolSpec {
 }
 
 fn wait_tool_spec() -> ToolSpec {
-    ToolSpec { provider_scope: None, name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for one background tool call with `wait({\"tool_call_id\":\"ID\"})`, transactionally wait for all calls in request order with `wait({\"tool_call_ids\":[\"A\",\"B\"]})`, wait for the oldest unconsumed completed background result with `wait({})`, or wait for activating input with `wait({\"timeout_minutes\":N})`. `tool_call_ids` accepts 1 through 64 distinct nonempty IDs and is mutually exclusive with the other modes. A plural wait succeeds only after every member terminates, preserves typed member payloads in a `results` array, and represents member failures or cancellations as error members rather than failing fast. If no background result is complete and an owned background call is running, bare wait remains pending; otherwise it returns an error. Input waits accept positive integer minutes and silently clamp to the configured bounds (one through 1,440 minutes by default); they do not consume input or background output. Activating input can return a successful interruption with `wait_outcome: interrupted`, `wait_reason: activating_input`, and `wait_mode: exact` or `any_background`; plural interruption uses `wait_mode: exact_all`. The interruption consumes no background result or reserved completion. Already-finished matching results and already-queued activating input return immediately. Completion notifications leave results queued until `wait` consumes them; a wait suppresses or removes a completion notice only while it is pending, and plural rollback restores only undelivered notices.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. Wait for this conversation's specific background tool call."},"tool_call_ids":{"type":"array","minItems":1,"maxItems":tau_proto::MAX_WAIT_ALL_MEMBERS,"uniqueItems":true,"items":{"type":"string","minLength":1},"description":"Optional. Wait transactionally for all listed background tool calls in request order."},"timeout_minutes":{"type":"integer","minimum":1,"description":"Wait up to this many minutes for activating input addressed to this agent. The harness silently clamps this to configured effective bounds."}},"additionalProperties":false})), format: None, tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)], enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec {
+        provider_scope: None,
+        name: ToolName::new(WAIT_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Wait for one background call with tool_call_id, all listed calls with tool_call_ids, \
+             the oldest unconsumed completed call with no selector, or activating input with \
+             timeout_minutes. Selectors are mutually exclusive. Plural waits accept 1–64 distinct \
+             nonempty IDs and settle only after every member terminates, returning receipts in \
+             request order. All completion receipts are successful synchronization results with \
+             target_outcome completed, error, or cancelled; they never repeat target output. \
+             Output arrives separately in ordered tool-origin context. Use tool_output for \
+             deliberate bounded recovery. Bare wait remains pending while an owned background \
+             call runs; with no available or running call it fails. Input timeouts are positive \
+             minutes clamped to configured bounds (normally 1–1,440), and consume no input or \
+             completion. Activating input may interrupt any wait successfully without consuming \
+             a completion or reserved member. Already-queued eligible input is also actionable. \
+             complete_only defaults to false; while true, this wait suppresses nonterminal tool \
+             update wakeups owner-wide, including already-queued updates, but does not suppress \
+             capture or context. User input, messages, timers and normal terminal notifications \
+             keep their usual behavior. Completion notices do not consume receipts; interrupted \
+             plural waits restore only undelivered notices."
+                .to_owned(),
+        ),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tool_call_id": {"type": "string", "description": "Wait for this agent's specific background call."},
+                "tool_call_ids": {
+                    "type": "array", "minItems": 1, "maxItems": tau_proto::MAX_WAIT_ALL_MEMBERS,
+                    "uniqueItems": true, "items": {"type": "string", "minLength": 1},
+                    "description": "Wait transactionally for all listed calls in request order."
+                },
+                "timeout_minutes": {"type": "integer", "minimum": 1, "description": "Wait for activating input up to this many minutes, clamped to configured bounds."},
+                "complete_only": {"type": "boolean", "default": false, "description": "Suppress only nonterminal tool-update wakeups while this wait is active; valid in every wait mode."}
+            },
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)],
+        enabled_by_default: true,
+        background_support: Some(BackgroundSupport::Never),
+        examples: Vec::new(),
+    }
 }
 
 fn compact_tool_spec() -> ToolSpec {

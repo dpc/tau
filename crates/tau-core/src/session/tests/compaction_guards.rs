@@ -239,6 +239,7 @@ fn compaction_success_rejects_open_cut_without_mutation_live_and_cold() {
                 &mut records,
                 AgentEventParent::InheritHead,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: call,
                     tool_name: ToolName::new("tool"),

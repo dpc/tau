@@ -1082,6 +1082,7 @@ impl Harness {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 interrupted_retry: false,
+                streamed_tool_items: Vec::new(),
                 final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 output_length_disposition:
@@ -1405,6 +1406,7 @@ impl Harness {
             );
         }
         let error = ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: target.call_id,
             tool_name: target.tool_name,
@@ -2410,6 +2412,8 @@ impl Harness {
                 .or_insert_with(|| cid.clone());
             let call_id = target.call_id;
             let cancelled = ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: target.tool_name,

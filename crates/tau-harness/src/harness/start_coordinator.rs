@@ -727,6 +727,10 @@ impl Harness {
             .publication
             .capacity_rejected_activations
             .remove(cid);
+        self.tool_routing
+            .tool_runtime
+            .output_residencies
+            .retain(|_, owner| owner != cid);
         self.agent_runtime.agent_registry.agents.remove(cid);
         self.cancel_agent_synchronized_publications(cid);
     }

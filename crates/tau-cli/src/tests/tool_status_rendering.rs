@@ -10,6 +10,83 @@ use crate::turn_stats_projection::{
     PreviousTurnUsageProjection,
 };
 
+/// Any extension's ordered text updates share the existing live payload path.
+/// They keep the argument label and disappear with the terminal, including late
+/// duplicate deliveries which must not create an orphan history row.
+#[test]
+fn generic_tool_output_updates_live_payload_and_terminal_closes_it() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&tool_started("stream", "custom_stream", CborValue::Null));
+    renderer.handle(&initial_tool_progress(
+        "stream",
+        "custom_stream",
+        "stable argument",
+        "",
+    ));
+    let update = |sequence, text: &str| {
+        Event::ToolOutputUpdated(tau_proto::ToolOutputUpdate {
+            call: tau_proto::ToolCallRef {
+                declaration: tau_proto::ObservationId::from_bytes([7; 16]),
+                item_index: 0,
+            },
+            output: tau_proto::ToolOutputReport {
+                call_id: "stream".into(),
+                tool_name: tau_proto::ToolName::new("custom_stream"),
+                sequence,
+                text: text.to_owned(),
+                omitted_bytes: 0,
+            },
+        })
+    };
+    renderer.handle(&update(0, "first live fragment"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "first live fragment"));
+    assert!(vt.screen_contains(100, "stable argument"));
+    renderer.handle(&update(1, "second live fragment"));
+    renderer.handle(&update(0, "stale fragment must stay hidden"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "second live fragment"));
+    assert!(!vt.screen_contains(100, "first live fragment"));
+    assert!(!vt.screen_contains(100, "stale fragment"));
+    renderer.handle(&update(2, "multiline fragment\nsecond line"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "multiline fragment"));
+    assert!(
+        vt.screen_contains(100, "-s"),
+        "multiline live output needs the static duration marker"
+    );
+    renderer.handle(&update(3, "single line again"));
+    sync(&handle);
+    assert!(
+        !vt.screen_contains(100, "-s"),
+        "single-line output restores the live numeric duration"
+    );
+    renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
+        captured_output: None,
+        call_id: "stream".into(),
+        tool_name: tau_proto::ToolName::new("custom_stream"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Null,
+        display: Some(tau_proto::ToolUseState {
+            args: "stable argument".to_owned(),
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    renderer.handle(&update(4, "late fragment must stay hidden"));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "second live fragment"));
+    assert!(!vt.screen_contains(100, "late fragment"));
+    assert!(vt.screen_contains(100, "stable argument"));
+}
+
 /// Live and attach-reconstructed blocks must use the same mode projection when
 /// they move between visible and detached agent transcripts.
 #[test]
@@ -86,6 +163,8 @@ fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
     assert!(!pending.contains("SECRET_ATTACH_ARGUMENT"), "{pending}");
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "attach-tool".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -131,6 +210,8 @@ fn tool_timer_notifier_tracks_event_lifecycle_with_typed_call_ids() {
     }
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "timer-first".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -138,6 +219,8 @@ fn tool_timer_notifier_tracks_event_lifecycle_with_typed_call_ids() {
         display: None,
     }));
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "unknown-timer-call".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -1116,6 +1199,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -1176,6 +1260,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
     );
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "side-call".into(),
         tool_name: tau_proto::ToolName::new("grep"),
@@ -1192,6 +1277,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         display: None,
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -1237,6 +1323,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
     assert!(status_row.contains('%'));
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
@@ -1361,6 +1448,8 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
     // The Ctrl-D guard must clear it, otherwise a cancelled tool leaves the
     // session looking busy forever after the harness has stopped the tool.
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -1713,6 +1802,7 @@ fn watched_agent_response_finished_keeps_status_row() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -1980,6 +2070,7 @@ fn watched_agent_provider_response_update_hides_unreported_row_after_terminal() 
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -2897,6 +2988,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     assert!(!compacted.contains("complete"), "{compacted}");
 
     renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
+        captured_output: None,
         call_id: "call-self".into(),
         tool_name: tau_proto::ToolName::new("compact"),
         tool_type: tau_proto::ToolType::Function,
@@ -3126,6 +3218,7 @@ fn watched_agent_provider_prompt_terminal_hides_unreported_row() {
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -3168,6 +3261,7 @@ fn immediate_agent_start_completion_shows_agent_stats_and_standard_status() {
         CborValue::Map(Vec::new()),
     ));
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "delegate-call".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
@@ -3230,6 +3324,7 @@ fn shell_command_duration_shows_effective_timeout() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "shell-default".into(),
             tool_name: tau_proto::ToolName::new("gpt_shell"),
@@ -3268,6 +3363,7 @@ fn shell_command_duration_shows_effective_timeout() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "shell-explicit".into(),
             tool_name: tau_proto::ToolName::new("gpt_shell"),
@@ -3364,6 +3460,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
@@ -3420,6 +3517,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -3463,6 +3561,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
     assert!(!vt.screen_contains(80, "grep foo"));
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
@@ -4143,6 +4242,8 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     assert!(status_row.ends_with("@1 %0/1 #12k/200k -/-"));
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "delegate-call".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
@@ -4272,6 +4373,7 @@ fn provider_tool_error_before_tool_started_is_ignored() {
     );
 
     let provider_error = ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "bad-args".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
@@ -4347,6 +4449,7 @@ fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
     assert!(vt.screen_contains(80, "strict_tool 0s pending"));
     renderer.handle_recorded_at(
         &Event::ProviderToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "bad-args".into(),
             tool_name: tau_proto::ToolName::new("strict_tool"),
@@ -4386,6 +4489,7 @@ fn incomplete_dummy_tool_replay_is_repaired_honestly_and_not_active() {
         })],
     )));
     renderer.handle(&Event::ToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "opud-incomplete".into(),
         tool_name: tau_proto::ToolName::new("restart_test_dummy"),
@@ -4453,6 +4557,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
     assert!(vt.screen_contains(80, "read src/main.rs"));
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("read"),
@@ -4630,6 +4735,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
     );
     renderer.handle_recorded_at(
         &Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
@@ -4667,6 +4773,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
 
     renderer.handle_recorded_at(
         &Event::ToolBackgroundResult(ToolBackgroundResult {
+            captured_output: None,
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -4716,6 +4823,7 @@ fn finished_tool_result_preserves_message_and_tool_item_order() {
         ],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -4896,6 +5004,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("read"),
@@ -5040,6 +5149,7 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
     }
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-ok".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -5056,6 +5166,7 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         originator: tau_proto::PromptOriginator::User,
     }));
     renderer.handle(&Event::ToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-error".into(),
         tool_name: tau_proto::ToolName::new("search"),
@@ -5066,6 +5177,8 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         originator: tau_proto::PromptOriginator::User,
     }));
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        output: None,
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-cancel".into(),
         tool_name: tau_proto::ToolName::new("write"),
@@ -5073,6 +5186,7 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         display: None,
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-wait".into(),
         tool_name: tau_proto::ToolName::new("wait"),
@@ -5159,6 +5273,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
     assert!(!vt.screen_contains(80, "read src/main.rs"));
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -5180,6 +5295,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
         originator: tau_proto::PromptOriginator::User,
     }));
     renderer.handle(&Event::ToolError(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
@@ -5240,6 +5356,7 @@ fn show_tools_compact_hides_payload_body() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("read"),
@@ -5314,6 +5431,7 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
@@ -5374,6 +5492,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
     );
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-web".into(),
         tool_name: tau_proto::ToolName::new("websearch_exa"),
@@ -6065,6 +6184,7 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     );
     renderer.handle_recorded_at(
         &Event::ToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "overlap-edit".into(),
             tool_name: tau_proto::ToolName::new("edit"),
@@ -6079,6 +6199,7 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     );
     renderer.handle_recorded_at(
         &Event::ProviderToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "overlap-edit".into(),
             tool_name: tau_proto::ToolName::new("edit"),
@@ -6120,6 +6241,7 @@ fn completed_dummy_tool_replay_is_terminal_idle_and_stays_terminal() {
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "opud-call".into(),
         tool_name: tau_proto::ToolName::new("restart_test_dummy"),
@@ -6179,6 +6301,7 @@ fn status_descriptor_survives_terminal_tool_result() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "status-call".into(),
             tool_name: tau_proto::ToolName::new("status"),
@@ -6303,6 +6426,7 @@ fn provider_tool_alias_labels_lifecycle_while_stray_starts_fall_back_to_internal
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "image-call".into(),
             tool_name: tau_proto::ToolName::new("codex_image_1"),
@@ -6402,6 +6526,7 @@ fn image_request_metadata_renders_compact_and_expanded_without_tool_special_case
         display.status_text = "ok".into();
         renderer.handle_recorded_at(
             &Event::ToolResult(ToolResult {
+                captured_output: None,
                 call_id: "image-call".into(),
                 tool_name: tau_proto::ToolName::new("generate_image"),
                 tool_type: tau_proto::ToolType::Function,
@@ -6463,6 +6588,7 @@ fn late_provider_tool_alias_relabels_running_tool() {
     renderer.apply_setting("show-tools", "summarize-turn");
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "late-image-call".into(),
             tool_name: tau_proto::ToolName::new("codex_image_3"),
@@ -6507,6 +6633,7 @@ fn aliased_delegate_error_uses_internal_classification_and_public_label() {
         CborValue::Map(Vec::new()),
     ));
     renderer.handle(&Event::ToolError(ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "delegate-call".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
@@ -6608,6 +6735,7 @@ fn show_tools_off_hides_tool_blocks() {
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -6846,6 +6974,7 @@ fn apply_patch_status_row_uses_changed_file_summary() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-patch".into(),
             tool_name: tau_proto::ToolName::new("apply_patch"),
@@ -7646,6 +7775,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
         };
         renderer.handle_recorded_at(
             &Event::ToolError(ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: call_id.into(),
                 tool_name: tau_proto::ToolName::new("compact"),
@@ -7660,6 +7790,8 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
     }
     renderer.handle_recorded_at(
         &Event::ToolCancelled(ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-cancelled".into(),
             tool_name: tau_proto::ToolName::new("compact"),
@@ -7696,6 +7828,7 @@ fn message_tool_completion_renders_recipient_and_body_stats() {
         );
         renderer.handle_recorded_at(
             &Event::ToolResult(ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "message-call".into(),
                 tool_name: tau_proto::ToolName::new("message"),
@@ -7740,6 +7873,7 @@ fn message_tool_receiver_rejection_renders_actionable_detail() {
     );
     renderer.handle_recorded_at(
         &Event::ToolError(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "message-no-receiver".into(),
             tool_name: tau_proto::ToolName::new("message"),

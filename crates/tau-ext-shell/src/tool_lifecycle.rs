@@ -208,6 +208,8 @@ impl ToolLifecycleRegistry {
             && entry
                 .tx
                 .report_tool_terminal(Event::ToolCancelled(ToolCancelled {
+                    output: None,
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: entry.call_id.clone(),
                     tool_name: entry.tool_name.clone(),
@@ -309,6 +311,8 @@ impl ToolLifecycle {
                 .entry
                 .tx
                 .report_tool_terminal(Event::ToolCancelled(ToolCancelled {
+                    output: None,
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: self.entry.call_id.clone(),
                     tool_name: self.entry.tool_name.clone(),

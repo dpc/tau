@@ -286,6 +286,7 @@ impl Harness {
         let response = ProviderResponseFinished {
             compaction_input_bytes: None,
             interrupted_retry: true,
+            streamed_tool_items: Vec::new(),
             final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
             agent_prompt_id: checkpoint.agent_prompt_id.clone(),
             agent_id: checkpoint.agent_id.clone(),
@@ -1303,6 +1304,7 @@ impl Harness {
                         ..Default::default()
                     });
                 let error = ToolError {
+                    captured_output: None,
                     presentation: Default::default(),
                     call_id: call.call_id.clone(),
                     tool_name: call.name,
@@ -1387,20 +1389,13 @@ impl Harness {
                     self.record_wait_tool_call_ref(call_id.clone(), call_ref);
                 }
                 let terminal = state.terminal_observation;
-                let error_outcome = if matches!(
-                    state.terminal_cause,
-                    Some(tau_proto::ToolTerminalCause::Cancellation { .. })
-                ) {
-                    BackgroundErrorOutcome::Cancelled
-                } else {
-                    BackgroundErrorOutcome::Error
-                };
                 match state.completion {
                     Some(tau_core::BackgroundToolCompletion::Result(result)) => {
                         self.record_wait_background_result(result, terminal);
                         self.clear_tool_call_tracking(call_id.as_str());
                     }
                     Some(tau_core::BackgroundToolCompletion::Error(error)) => {
+                        let error_outcome = error.outcome;
                         self.record_wait_background_error(error, terminal, error_outcome);
                         self.clear_tool_call_tracking(call_id.as_str());
                     }
@@ -1492,6 +1487,8 @@ impl Harness {
                     None
                 };
                 let error = ToolBackgroundError {
+                    outcome: Default::default(),
+                    captured_output: None,
                     call_id: call.call_id.clone(),
                     tool_name: call.tool_name,
                     tool_type: call.tool_type,
@@ -1525,6 +1522,7 @@ impl Harness {
     }
 
     pub(super) fn repair_restored_session_tool_state(&mut self, session_id: &SessionId) {
+        self.restore_tool_output_residencies(session_id);
         self.repair_restored_foreground_tool_calls(session_id);
         self.repair_restored_background_tool_calls(session_id);
         self.seed_restored_wait_background_completions(session_id);
@@ -2235,6 +2233,14 @@ impl Harness {
             .iter()
             .filter_map(|record| {
                 let source = match &record.event {
+                    Event::ToolOutputUpdated(_) => Some(PendingMessageWakeSource::ToolOutput {
+                        durable_event_seq: record.seq,
+                        terminal: false,
+                    }),
+                    // Final output is context, not a new activation authority.
+                    // Existing native continuation, correlated completion
+                    // notices and dedicated compaction delivery retain their
+                    // active/passive/retry rules across restart.
                     // Retained main reviews remain explicit approval sources;
                     // restart must not rerun a review decision automatically.
                     Event::AgentMessageReceived(message)

@@ -716,6 +716,12 @@ pub fn write_provider_tool_header_text(input: &str, output: &mut impl fmt::Write
     write_sanitized_provider_text(input, ProviderTextMode::Header, output)
 }
 
+/// Stream tool-origin body text with the same control-character escaping as a
+/// native tool response, preserving ordinary line breaks.
+pub fn write_provider_tool_body_text(input: &str, output: &mut impl fmt::Write) -> fmt::Result {
+    write_sanitized_provider_text(input, ProviderTextMode::Body, output)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct ProviderTextShape {
     /// Bytes in the raw canonical rendering.

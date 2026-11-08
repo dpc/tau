@@ -48,6 +48,7 @@ impl Harness {
     ) -> Result<Option<DeliverySchedule>, String> {
         let policies = self.config.accepted_harness_settings.notification_delivery;
         let policy = match source {
+            PendingMessageWakeSource::ToolOutput { .. } => return Ok(None),
             PendingMessageWakeSource::AgentMessageReceived {
                 activation_class: AgentMessageActivationClass::OrdinaryAgentInput,
                 ..

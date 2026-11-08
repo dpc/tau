@@ -242,6 +242,11 @@ impl EventName {
         Self::from_static(EventCategory::Tool, "progress_reported");
     /// Harness-validated canonical tool progress.
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
+    /// Producer-owned nonterminal output observation.
+    pub const TOOL_OUTPUT_REPORTED: Self =
+        Self::from_static(EventCategory::Tool, "output_reported");
+    /// Harness-owned accepted nonterminal output.
+    pub const TOOL_OUTPUT_UPDATED: Self = Self::from_static(EventCategory::Tool, "output_updated");
     pub const TOOL_CANCEL_REQUEST: Self = Self::from_static(EventCategory::Tool, "cancel_request");
     /// Tool-provider cancellation observation submitted for downstream
     /// validation.

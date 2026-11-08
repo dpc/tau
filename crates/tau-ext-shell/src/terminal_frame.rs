@@ -73,6 +73,7 @@ fn frame_fits(event: &Event) -> tau_client::ClientResult<bool> {
 /// Convert an unreportable typed-image success into a byte-free local error.
 fn image_too_large_error(result: ToolResult) -> ToolError {
     let ToolResult {
+        captured_output: _,
         presentation,
         call_id,
         tool_name,
@@ -89,6 +90,7 @@ fn image_too_large_error(result: ToolResult) -> ToolError {
         display.payload = None;
     }
     ToolError {
+        captured_output: None,
         presentation,
         call_id,
         tool_name,

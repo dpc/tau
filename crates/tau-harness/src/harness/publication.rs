@@ -121,6 +121,16 @@ impl Harness {
     /// modified) value, which is what gets folded into the tree and
     /// what the LLM sees on the next turn.
     pub(super) fn dedup_tool_result(&mut self, cid: &AgentId, result: &mut tau_proto::ToolResult) {
+        // Stream terminals contain only the new tail, not a repeatable
+        // aggregate.
+        if self
+            .tool_routing
+            .tool_runtime
+            .output_lanes
+            .contains_key(&result.call_id)
+        {
+            return;
+        }
         if self.ensure_dedup_built_for_branch(cid).is_none() {
             return;
         }
@@ -187,6 +197,14 @@ impl Harness {
     /// message, same `details`) into a pointer back to the first
     /// occurrence on this branch.
     pub(super) fn dedup_tool_error(&mut self, cid: &AgentId, error: &mut tau_proto::ToolError) {
+        if self
+            .tool_routing
+            .tool_runtime
+            .output_lanes
+            .contains_key(&error.call_id)
+        {
+            return;
+        }
         if self.ensure_dedup_built_for_branch(cid).is_none() {
             return;
         }
@@ -812,10 +830,14 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         source: Option<&tau_proto::ConnectionId>,
-        event: Event,
+        mut event: Event,
         completion: Option<AgentPublishCompletion>,
         notify_watchers: bool,
     ) {
+        if self.prepare_tool_output_terminal(cid, source, &mut event, &completion, notify_watchers)
+        {
+            return;
+        }
         self.publish_event_for_agent_inner(
             cid,
             source,

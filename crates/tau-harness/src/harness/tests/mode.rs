@@ -570,6 +570,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     h.handle_extension_event_inner(&crate::test_connection_id(progress_owner), progress_report)
         .expect("commit ephemeral tool progress report");
     let terminal_report = Event::ToolResultReported(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: tool_call_id,
         tool_name: ToolName::new("debug_secret_tool"),
@@ -748,6 +749,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     h.handle_extension_event_inner(&crate::test_connection_id(provider), retry_result)
         .expect("commit duplicate ephemeral retry report");
     let duplicate_terminal_report = Event::ToolResultReported(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: ToolCallId::from("ephemeral-debug-tool-call"),
         tool_name: ToolName::new("debug_secret_tool"),
@@ -942,6 +944,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
 
     for event in [
         Event::ToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: ToolCallId::from("cleared-before-commit-tool"),
             tool_name: ToolName::new("debug_secret_tool"),
@@ -953,6 +956,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
             originator: tau_proto::PromptOriginator::User,
         }),
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: ToolCallId::from("cleared-before-commit"),
             tool_name: ToolName::new("debug_secret_tool"),

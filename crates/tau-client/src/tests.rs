@@ -318,6 +318,7 @@ impl TauExtension for CorrelatedTerminalReportsExtension {
                 query_id: "wrong-query".to_owned(),
             };
             cx.report_result(tau_proto::ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "wrong-result-call".into(),
                 tool_name: ToolName::new("wrong_result_tool"),
@@ -329,6 +330,7 @@ impl TauExtension for CorrelatedTerminalReportsExtension {
                 originator: wrong_originator.clone(),
             })?;
             cx.report_error(tau_proto::ToolError {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "wrong-error-call".into(),
                 tool_name: ToolName::new("wrong_error_tool"),
@@ -339,6 +341,8 @@ impl TauExtension for CorrelatedTerminalReportsExtension {
                 originator: wrong_originator,
             })?;
             cx.report_cancelled(tau_proto::ToolCancelled {
+                output: None,
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: "wrong-cancelled-call".into(),
                 tool_name: ToolName::new("wrong_cancelled_tool"),
@@ -4487,6 +4491,7 @@ fn client_handle_submits_transient_terminal_tool_reports() {
     handle.finish_startup().expect("finish test startup");
     handle
         .report_tool_result(tau_proto::ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "result-call".into(),
             tool_name: ToolName::new("owned_tool"),
@@ -4500,6 +4505,7 @@ fn client_handle_submits_transient_terminal_tool_reports() {
         .expect("submit result report");
     handle
         .report_tool_error(tau_proto::ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "error-call".into(),
             tool_name: ToolName::new("owned_tool"),
@@ -4512,6 +4518,8 @@ fn client_handle_submits_transient_terminal_tool_reports() {
         .expect("submit error report");
     handle
         .report_tool_cancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: "cancelled-call".into(),
             tool_name: ToolName::new("owned_tool"),

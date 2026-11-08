@@ -35,6 +35,7 @@ pub(crate) fn should_persist_event(event: &Event, persist: bool) -> bool {
                 | Event::ToolRegister(_)
                 | Event::ToolUnregister(_)
                 | Event::ToolProgressReported(_)
+                | Event::ToolOutputReported(_)
                 | Event::ToolProgress(_)
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)

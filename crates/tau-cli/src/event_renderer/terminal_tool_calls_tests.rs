@@ -60,6 +60,7 @@ pub(super) fn finished(
         failure_kind: None,
         context_limit_telemetry: None,
         interrupted_retry: false,
+        streamed_tool_items: Vec::new(),
         final_status_disposition: tau_proto::FinalStatusDisposition::Accepted,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,

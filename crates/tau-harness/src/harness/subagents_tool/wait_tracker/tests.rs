@@ -3,7 +3,6 @@ use std::path::Path;
 use tau_config::settings::WaitTimeoutMinutes;
 
 use super::*;
-use crate::background_completion_preview::BackgroundPreviewBudget;
 use crate::harness::subagents_tool::wait_tool_spec;
 
 fn conv(id: &str) -> AgentId {
@@ -54,6 +53,7 @@ fn slow_tool_name() -> ToolName {
 
 fn background_placeholder(call_id: &str) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: slow_tool_name(),
@@ -68,6 +68,7 @@ fn background_placeholder(call_id: &str) -> ToolResult {
 
 fn foreground_result(call_id: &str, payload: &str) -> ToolResult {
     ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: slow_tool_name(),
@@ -90,6 +91,7 @@ fn foreground_result(call_id: &str, payload: &str) -> ToolResult {
 
 fn foreground_error(call_id: &str, payload: &str) -> ToolError {
     ToolError {
+        captured_output: None,
         call_id: call_id.into(),
         tool_name: slow_tool_name(),
         tool_type: ToolType::Function,
@@ -103,6 +105,7 @@ fn foreground_error(call_id: &str, payload: &str) -> ToolError {
 
 fn background_result(call_id: &str, text: &str) -> ToolBackgroundResult {
     ToolBackgroundResult {
+        captured_output: None,
         call_id: call_id.into(),
         tool_name: slow_tool_name(),
         tool_type: ToolType::Function,
@@ -118,6 +121,8 @@ fn background_error(
     details: Option<CborValue>,
 ) -> ToolBackgroundError {
     ToolBackgroundError {
+        outcome: Default::default(),
+        captured_output: None,
         call_id: call_id.into(),
         tool_name: slow_tool_name(),
         tool_type: ToolType::Function,
@@ -275,9 +280,9 @@ fn compaction_claim_rollback_preserves_first_exact_completion_winner() {
     assert!(matches!(
         &replies[0].kind,
         WaitReplyKind::Result {
-            result: CborValue::Text(text),
+            result,
             display: _,
-        } if text == "completed first"
+        } if *result == expected_receipt(target.as_str(), "completed")
     ));
 }
 
@@ -573,6 +578,7 @@ fn discarded_owner_retires_source_exact_bare_and_input_wait_state() {
         call_ref: Some(call_ref(1, 0)),
         wait_observation: observation(),
         registration: observation(),
+        complete_only: false,
     };
     tracker
         .waiters
@@ -788,6 +794,19 @@ fn reply_result(reply: WaitReply) -> CborValue {
     }
 }
 
+fn expected_receipt(call_id: &str, outcome: &str) -> CborValue {
+    CborValue::Map(vec![
+        (
+            CborValue::Text("original_tool_call_id".to_owned()),
+            CborValue::Text(call_id.to_owned()),
+        ),
+        (
+            CborValue::Text("target_outcome".to_owned()),
+            CborValue::Text(outcome.to_owned()),
+        ),
+    ])
+}
+
 fn reply_result_with_display(reply: WaitReply) -> (CborValue, Option<ToolUseState>) {
     match reply.kind {
         WaitReplyKind::Result { result, display } => (result, display),
@@ -872,6 +891,7 @@ fn wait_result_display_uses_wait_descriptor_with_source_tool_name() {
         tracker
             .record_background_result(
                 ToolBackgroundResult {
+                    captured_output: None,
                     call_id: "bg-shell".into(),
                     tool_name: ToolName::new("shell"),
                     tool_type: ToolType::Function,
@@ -894,12 +914,12 @@ fn wait_result_display_uses_wait_descriptor_with_source_tool_name() {
         cbor_map_text(&result, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("bg-shell")
     );
-    assert_eq!(cbor_map_text(&result, "output"), Some("done"));
+    assert_eq!(result, expected_receipt("bg-shell", "completed"));
 
     let display = display.expect("wait display");
     assert_eq!(display.args, "shell");
-    assert_eq!(display.status, ToolUseStatus::Error);
-    assert_eq!(display.status_text, "1");
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "completed");
     assert!(display.stats.is_empty());
     assert!(display.payload.is_none());
 }
@@ -1037,7 +1057,7 @@ fn invalid_wait_arguments_do_not_consume_queued_completion() {
         cbor_map_text(&result, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("build")
     );
-    assert_eq!(cbor_map_text(&result, "output"), Some("done"));
+    assert_eq!(result, expected_receipt("build", "completed"));
 }
 
 /// Input waits accept positive whole minutes, clamp to the default one through
@@ -1728,10 +1748,7 @@ fn no_arg_wait_consumes_oldest_completed_background_result_for_owner() {
         cbor_map_text(&first_result, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("bg-b")
     );
-    assert_eq!(
-        cbor_map_text(&first_result, "output"),
-        Some("first finished")
-    );
+    assert_eq!(first_result, expected_receipt("bg-b", "completed"));
 
     let second = start_wait_any(&mut tracker, &owner, "wait-second");
     assert_eq!(
@@ -1743,10 +1760,7 @@ fn no_arg_wait_consumes_oldest_completed_background_result_for_owner() {
         cbor_map_text(&second_result, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("bg-a")
     );
-    assert_eq!(
-        cbor_map_text(&second_result, "output"),
-        Some("second finished")
-    );
+    assert_eq!(second_result, expected_receipt("bg-a", "completed"));
 }
 
 /// Owner-local completion FIFOs must match a simple reference model across a
@@ -1805,7 +1819,10 @@ fn large_owner_local_completion_queues_match_reference_with_linear_retirement() 
                 &format!("exact-{index:04}"),
                 call_id.as_str(),
             ));
-            assert_eq!(reply_result(reply), CborValue::Text(call_id.to_string()));
+            assert_eq!(
+                reply_result(reply),
+                expected_receipt(call_id.as_str(), "completed")
+            );
             expected[index % OWNERS].retain(|candidate| candidate != &call_id);
         }
     }
@@ -2003,7 +2020,7 @@ fn no_arg_wait_blocks_on_running_background_call_and_resolves() {
         cbor_map_text(&result, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("bg-run")
     );
-    assert_eq!(cbor_map_text(&result, "output"), Some("done"));
+    assert_eq!(result, expected_receipt("bg-run", "completed"));
 }
 
 /// If a no-arg wait is active while its only background call is canceled, the
@@ -2040,22 +2057,22 @@ fn no_arg_wait_resolves_when_running_background_call_is_cancelled() {
         vec!["bg-cancel-any"]
     );
     assert_eq!(cancelled.replies.len(), 1);
-    let (message, details, display) =
-        reply_error_with_display(cancelled.replies.into_iter().next().expect("wait reply"));
-    assert_eq!(message, "Tool call canceled");
-    let details = details.expect("original call id details");
+    let (receipt, display) =
+        reply_result_with_display(cancelled.replies.into_iter().next().expect("wait reply"));
     assert_eq!(
-        cbor_map_text(&details, ORIGINAL_TOOL_CALL_ID_HEADER),
+        cbor_map_text(&receipt, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("bg-cancel-any")
     );
+    assert_eq!(cbor_map_text(&receipt, "target_outcome"), Some("cancelled"));
     let display = display.expect("wait cancellation display");
     assert_eq!(display.args, "slow");
-    assert_eq!(display.status, ToolUseStatus::Error);
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "cancelled");
 }
 
 /// Background errors are completions too. A no-arg wait must return the
-/// error and include the original background id in provider-visible
-/// details.
+/// typed failure outcome and original background id, without returning source
+/// diagnostics a second time.
 #[test]
 fn no_arg_wait_returns_background_error_with_original_id_details() {
     let owner = conv("main");
@@ -2076,14 +2093,7 @@ fn no_arg_wait_returns_background_error_with_original_id_details() {
     );
 
     let reply = start_reply(start_wait_any(&mut tracker, &owner, "wait-error"));
-    let (message, details) = reply_error(reply);
-    assert_eq!(message, "boom");
-    let details = details.expect("details");
-    assert_eq!(
-        cbor_map_text(&details, ORIGINAL_TOOL_CALL_ID_HEADER),
-        Some("bg-fail")
-    );
-    assert_eq!(cbor_map_text(&details, "hint"), Some("bad input"));
+    assert_eq!(reply_result(reply), expected_receipt("bg-fail", "error"));
 }
 
 /// When an exact waiter and an any-waiter can both see the same completion,
@@ -2177,9 +2187,8 @@ fn explicit_waiter_wins_over_any_waiter_for_same_cancelled_completion() {
         reply.wait_call_id.as_str() == "wait-exact-cancel"
             && matches!(
                 &reply.kind,
-                WaitReplyKind::Error { message, details, .. }
-                    if message == "Tool call `bg-cancel-race` was cancelled"
-                        && details.is_none()
+                WaitReplyKind::Result { result, .. }
+                    if *result == expected_receipt("bg-cancel-race", "cancelled")
             )
     }));
     assert!(cancelled.replies.iter().any(|reply| matches!(
@@ -2244,7 +2253,7 @@ fn any_wait_cancellation_settlement_keeps_source_terminal() {
                 source_call,
                 source_terminal,
                 source_phase: tau_proto::ToolSourcePhase::Background,
-                envelope: tau_proto::ToolOutputEnvelope::OriginalToolCallIdHeader,
+                envelope: tau_proto::ToolOutputEnvelope::Identity,
             },
             ..
         }) if *wait_call == call_ref(2, 0)
@@ -2389,7 +2398,7 @@ fn exact_wait_does_not_consume_completed_background_result_from_other_conversati
             "wait-side",
             "side-bg",
         ))),
-        CborValue::Text("side done".to_owned())
+        expected_receipt("side-bg", "completed")
     );
 }
 
@@ -2431,7 +2440,7 @@ fn exact_wait_does_not_attach_to_running_background_call_from_other_conversation
     assert_eq!(replies.len(), 1);
     assert_eq!(
         reply_result(replies.into_iter().next().expect("side wait reply")),
-        CborValue::Text("side done".to_owned())
+        expected_receipt("side-bg", "completed")
     );
 }
 
@@ -2490,7 +2499,7 @@ fn retired_background_owner_cannot_be_consumed_by_parent_no_arg_wait() {
 /// A canceled background call remains waitable once. It should not be marked
 /// consumed before the caller has a chance to retrieve the cancellation result.
 #[test]
-fn exact_wait_after_background_cancel_returns_cancel_error_once() {
+fn exact_wait_after_background_cancel_returns_cancelled_receipt_once() {
     let owner = conv("main");
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke("bg-cancel".into(), slow_tool_name(), owner.clone());
@@ -2514,9 +2523,12 @@ fn exact_wait_after_background_cancel_returns_cancel_error_once() {
         "wait-cancel",
         "bg-cancel",
     ));
-    let (message, details) = reply_error(reply);
-    assert_eq!(message, "Tool call canceled");
-    assert!(details.is_none());
+    let receipt = reply_result(reply);
+    assert_eq!(
+        cbor_map_text(&receipt, ORIGINAL_TOOL_CALL_ID_HEADER),
+        Some("bg-cancel")
+    );
+    assert_eq!(cbor_map_text(&receipt, "target_outcome"), Some("cancelled"));
 
     let reply = start_reply(start_wait_exact(
         &mut tracker,
@@ -2698,29 +2710,8 @@ fn wait_all_complete_results_are_ordered_typed_and_commit_atomically() {
     let expected = CborValue::Map(vec![(
         CborValue::Text("results".to_owned()),
         CborValue::Array(vec![
-            CborValue::Map(vec![
-                original_tool_call_id_entry(&ToolCallId::from("b")),
-                (
-                    CborValue::Text("outcome".to_owned()),
-                    CborValue::Text("error".to_owned()),
-                ),
-                (
-                    CborValue::Text("message".to_owned()),
-                    CborValue::Text("failed".to_owned()),
-                ),
-                (
-                    CborValue::Text("details".to_owned()),
-                    CborValue::Array(vec![CborValue::Text("detail".to_owned())]),
-                ),
-            ]),
-            CborValue::Map(vec![
-                original_tool_call_id_entry(&ToolCallId::from("a")),
-                (
-                    CborValue::Text("outcome".to_owned()),
-                    CborValue::Text("result".to_owned()),
-                ),
-                (CborValue::Text("output".to_owned()), typed_output.clone()),
-            ]),
+            expected_receipt("b", "error"),
+            expected_receipt("a", "completed"),
         ]),
     )]);
     assert_eq!(result, expected);
@@ -2734,16 +2725,19 @@ fn wait_all_complete_results_are_ordered_typed_and_commit_atomically() {
         cbor_map_text(&members[0], "original_tool_call_id"),
         Some("b")
     );
-    assert_eq!(cbor_map_text(&members[0], "outcome"), Some("error"));
+    assert_eq!(cbor_map_text(&members[0], "target_outcome"), Some("error"));
     assert_eq!(
         cbor_map_text(&members[1], "original_tool_call_id"),
         Some("a")
     );
-    assert_eq!(cbor_map_text(&members[1], "outcome"), Some("result"));
+    assert_eq!(
+        cbor_map_text(&members[1], "target_outcome"),
+        Some("completed")
+    );
     let CborValue::Map(a_member) = &members[1] else {
         panic!("result member must be a map");
     };
-    assert_eq!(a_member[2].1, typed_output);
+    assert_eq!(a_member.len(), 2, "source output is not repeated");
     assert!(tracker.is_completed(&ToolCallId::from("a")));
     assert!(tracker.is_completed(&ToolCallId::from("b")));
 
@@ -3223,20 +3217,21 @@ fn wait_all_binds_members_to_stable_call_generations() {
         owner,
         observation(),
     );
-    let result = reply_result(replies.into_iter().next().expect("plural reply"));
+    let reply = replies.into_iter().next().expect("plural reply");
+    assert!(matches!(
+        &reply.settlement,
+        Some(PendingWaitSettlement {
+            outcome: tau_proto::ToolWaitOutcome::CompletionsDelivered { sources }, ..
+        }) if sources[0].source_call == call_ref(1, 0)
+    ));
+    let result = reply_result(reply);
     let CborValue::Map(root) = result else {
         panic!("plural result must be a map");
     };
     let CborValue::Array(members) = &root[0].1 else {
         panic!("plural results must be an array");
     };
-    let CborValue::Map(reused_member) = &members[0] else {
-        panic!("plural member must be a map");
-    };
-    assert_eq!(
-        reused_member[2].1,
-        CborValue::Text("old generation".to_owned())
-    );
+    assert_eq!(members[0], expected_receipt("reused", "completed"));
 
     let (consumed, replies) = tracker.commit_exact_all_wait(&ToolCallId::from("wait-all"));
     assert_eq!(
@@ -3327,16 +3322,7 @@ fn wait_all_reuse_then_interruption_restores_old_generation() {
         cbor_map_text(&reply_result(reply.clone()), ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("reused")
     );
-    let CborValue::Map(result) = reply_result(reply) else {
-        panic!("released generation result must be wrapped");
-    };
-    assert_eq!(
-        result
-            .iter()
-            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
-            .map(|(_, value)| value),
-        Some(&CborValue::Text("old generation".to_owned()))
-    );
+    assert_eq!(reply_result(reply), expected_receipt("reused", "completed"));
     assert_eq!(
         tracker.call_ref(&ToolCallId::from("reused")),
         Some(call_ref(9, 0))
@@ -3414,7 +3400,7 @@ fn stale_pruning_preserves_older_plural_reservation_before_later_completion() {
 /// Reused display IDs cannot rewrite a released old generation's typed
 /// cancellation outcome during plural-wait rollback.
 #[test]
-fn wait_all_reuse_then_interruption_preserves_old_cancellation_preview() {
+fn wait_all_reuse_then_interruption_preserves_old_cancellation_receipt() {
     let owner = conv("main");
     let mut tracker = WaitTracker::default();
     track_call(&mut tracker, &owner, "reused", call_ref(1, 0));
@@ -3454,16 +3440,13 @@ fn wait_all_reuse_then_interruption_preserves_old_cancellation_preview() {
         tracker.activate_waits_for(&owner, observation().expect("activation observation"));
     assert_eq!(interruption.len(), 1);
 
-    let mut budget = BackgroundPreviewBudget::default();
-    let preview = tracker
-        .render_background_completion_preview(
-            &ToolCallId::from("reused"),
-            old_terminal,
-            &mut budget,
-        )
-        .expect("released generation preview");
-    assert!(preview.contains("tool_outcome=\"cancelled\""), "{preview}");
-    assert!(!preview.contains("tool_outcome=\"error\""), "{preview}");
+    let receipt = reply_result(start_reply(start_wait_any(
+        &mut tracker,
+        &owner,
+        "wait-old",
+    )));
+    assert_eq!(cbor_map_text(&receipt, "target_outcome"), Some("cancelled"));
+    assert!(!format!("{receipt:?}").contains("producer wording"));
     assert_eq!(
         tracker.call_ref(&ToolCallId::from("reused")),
         Some(call_ref(9, 0))
@@ -3492,10 +3475,11 @@ fn wait_all_old_reservation_does_not_capture_reused_foreground_generation() {
         owner.clone(),
         observation(),
     );
+    let old_terminal = observation();
     tracker.record_background_result(
         background_result("reused", "old generation"),
         owner.clone(),
-        observation(),
+        old_terminal,
     );
     tracker.retain_call_ref("wait-all".into(), call_ref(3, 0));
     assert!(
@@ -3521,7 +3505,7 @@ fn wait_all_old_reservation_does_not_capture_reused_foreground_generation() {
     assert_eq!(replies.len(), 1);
     assert_eq!(
         reply_result(replies.into_iter().next().expect("new exact reply")),
-        CborValue::Text("new foreground".to_owned())
+        expected_receipt("reused", "completed")
     );
     assert!(
         tracker
@@ -3530,8 +3514,8 @@ fn wait_all_old_reservation_does_not_capture_reused_foreground_generation() {
             .is_some_and(|wait| {
                 matches!(
                     &wait.members[0].completion,
-                    Some(ExactAllCompletion::Result { output, .. })
-                        if output == &CborValue::Text("old generation".to_owned())
+                    Some(ExactAllCompletion::Result { terminal, output, .. })
+                        if Some(*terminal) == old_terminal && output == &CborValue::Null
                 )
             })
     );
@@ -3602,28 +3586,22 @@ fn wait_all_old_reservation_does_not_capture_reused_background_generation() {
         0,
         "a generation without a notice obligation removes no notice"
     );
-    let CborValue::Map(old_result) = reply_result(old) else {
-        panic!("old result wrapper");
-    };
-    assert_eq!(
-        old_result
-            .iter()
-            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
-            .map(|(_, value)| value),
-        Some(&CborValue::Text("old generation".to_owned()))
-    );
+    assert!(matches!(
+        &old.settlement,
+        Some(PendingWaitSettlement {
+            outcome: tau_proto::ToolWaitOutcome::CompletionDelivered { source_call, .. }, ..
+        }) if *source_call == call_ref(1, 0)
+    ));
+    assert_eq!(reply_result(old), expected_receipt("reused", "completed"));
     tracker.retain_call_ref("wait-new".into(), call_ref(11, 0));
     let new = start_reply(start_wait_any(&mut tracker, &owner, "wait-new"));
-    let CborValue::Map(new_result) = reply_result(new) else {
-        panic!("new result wrapper");
-    };
-    assert_eq!(
-        new_result
-            .iter()
-            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
-            .map(|(_, value)| value),
-        Some(&CborValue::Text("new generation".to_owned()))
-    );
+    assert!(matches!(
+        &new.settlement,
+        Some(PendingWaitSettlement {
+            outcome: tau_proto::ToolWaitOutcome::CompletionDelivered { source_call, .. }, ..
+        }) if *source_call == call_ref(9, 0)
+    ));
+    assert_eq!(reply_result(new), expected_receipt("reused", "completed"));
 }
 
 /// Consuming the current generation through an exact wait leaves the older
@@ -3966,32 +3944,8 @@ fn wait_all_cancellation_preserves_member_and_group_atomicity() {
     let CborValue::Array(members) = &root[0].1 else {
         panic!("plural results must be an array");
     };
-    assert_eq!(cbor_map_text(&members[0], "outcome"), Some("error"));
-    assert_eq!(
-        cbor_map_text(&members[0], "message"),
-        Some("Tool call `a` was cancelled")
-    );
-    let CborValue::Map(cancelled_member) = &members[0] else {
-        panic!("cancelled member must be a map");
-    };
-    assert_eq!(
-        cancelled_member
-            .iter()
-            .find(|(key, _)| key == &CborValue::Text("details".to_owned()))
-            .map(|(_, value)| value),
-        Some(&CborValue::Null)
-    );
-    assert_eq!(cbor_map_text(&members[1], "outcome"), Some("result"));
-    let CborValue::Map(ok_member) = &members[1] else {
-        panic!("successful member must be a map");
-    };
-    assert_eq!(
-        ok_member
-            .iter()
-            .find(|(key, _)| key == &CborValue::Text("output".to_owned()))
-            .map(|(_, value)| value),
-        Some(&CborValue::Text("ok".to_owned()))
-    );
+    assert_eq!(members[0], expected_receipt("a", "cancelled"));
+    assert_eq!(members[1], expected_receipt("b", "completed"));
 
     let mut tracker = WaitTracker::default();
     track_call(&mut tracker, &owner, "source", call_ref(5, 0));

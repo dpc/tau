@@ -269,6 +269,7 @@ impl ImageTools {
         if let Some(descriptor) = upload.descriptor() {
             let display = request_display(&call.started, tau_proto::ToolUseStatus::Success, "ok");
             return handle.report_tool_result(tau_proto::ToolResult {
+                captured_output: None,
                 call_id: call.started.call_id,
                 tool_name: call.started.tool_name,
                 tool_type: tau_proto::ToolType::Function,
@@ -315,6 +316,8 @@ impl ImageTools {
             "cancelled",
         );
         handle.report_tool_cancelled(tau_proto::ToolCancelled {
+            output: None,
+            captured_output: None,
             call_id: call.started.call_id,
             tool_name: call.started.tool_name,
             tool_type: tau_proto::ToolType::Function,
@@ -690,6 +693,7 @@ fn close_read(session: &SessionId, op: ArtifactOp, handle: &ClientHandle) {
 }
 fn report_error(started: &ToolStarted, message: &str, handle: &ClientHandle) -> ClientResult<()> {
     handle.report_tool_error(tau_proto::ToolError {
+        captured_output: None,
         call_id: started.call_id.clone(),
         tool_name: started.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,

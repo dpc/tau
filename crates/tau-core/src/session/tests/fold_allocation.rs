@@ -159,6 +159,7 @@ fn deferred_terminal_charge_tracks_materialization_not_queued_payload_bytes() {
 /// and provider-facing retained output before the round closes.
 fn allocation_tool_result(call_id: &str, result: tau_proto::CborValue) -> Event {
     Event::ProviderToolResult(tau_proto::ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: ToolCallId::from(call_id),
         tool_name: ToolName::new("tool"),

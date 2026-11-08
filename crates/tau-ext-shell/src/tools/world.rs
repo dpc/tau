@@ -134,6 +134,35 @@ impl ShellWorld {
         &self.cwd
     }
 
+    /// Whether live shell effects should retain their bounded VCR observations.
+    pub(crate) fn is_recording(&self) -> bool {
+        matches!(self.mode, WorldMode::Recording { .. })
+    }
+
+    /// Stream batches precede the terminal in the cassette just as they do on
+    /// the live wire. They contain no invocation identity or ephemeral path.
+    pub(crate) fn record_shell_updates(&mut self, updates: Vec<RecordedShellUpdate>) {
+        if !updates.is_empty()
+            && let WorldMode::Recording { cassette, .. } = &mut self.mode
+        {
+            cassette.ops.push(WorldOp::ShellUpdates { updates });
+        }
+    }
+
+    /// Consume the optional stream batch record immediately before its
+    /// terminal.
+    pub(crate) fn replay_shell_updates(&mut self) -> Vec<RecordedShellUpdate> {
+        if let WorldMode::Replay {
+            cassette, next_op, ..
+        } = &mut self.mode
+            && let Some(WorldOp::ShellUpdates { updates }) = cassette.ops.get(*next_op)
+        {
+            *next_op += 1;
+            return updates.clone();
+        }
+        Vec::new()
+    }
+
     pub(crate) fn finish(self) -> Result<(), ToolFailure> {
         match self.mode {
             WorldMode::Real => Ok(()),
@@ -564,7 +593,23 @@ pub(crate) enum WorldShellOutcome {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         saved_output: Option<RecordedSavedOutput>,
     },
-    Cancelled,
+    Cancelled {
+        /// Available final text, excluding accepted batches recorded
+        /// separately.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+}
+
+/// One bounded live batch, replayed with the new invocation's identity.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RecordedShellUpdate {
+    /// Accepted normalized output, excluding invocation-specific identity.
+    pub(crate) text: String,
+    /// Rendered bytes omitted before this retained batch.
+    pub(crate) omitted_bytes: u64,
+    /// Time since command start when live publication accepted this batch.
+    pub(crate) elapsed_ms: u64,
 }
 
 /// Bounded rendering used to regenerate an ephemeral artifact during replay.
@@ -985,6 +1030,9 @@ enum WorldOp {
     },
     Shell {
         outcome: WorldShellOutcome,
+    },
+    ShellUpdates {
+        updates: Vec<RecordedShellUpdate>,
     },
 }
 

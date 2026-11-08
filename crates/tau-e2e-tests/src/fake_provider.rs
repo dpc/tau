@@ -28,7 +28,7 @@ use validation::{validate_v1, validate_v2};
 use crate::scenario::{
     AgentWatchResultExpectationV2, CANONICAL_OPAQUE_COMPACTION_JSON, FAKE_MODEL_ID,
     InitialStatusOutcome, ScenarioActionV2, ScenarioTurnV1, ScenarioV1, ScenarioV2,
-    StatusTerminalPhase, StatusToolOrder, WatchNotificationV2,
+    ShellStreamStep, StatusTerminalPhase, StatusToolOrder, WatchNotificationV2,
 };
 
 const MAX_TURNS: usize = 8;
@@ -2053,6 +2053,11 @@ impl FakeState {
                     &format!("before:{nonce}"),
                 ),
             ),
+            ScenarioActionV2::CoreShellStream {
+                step,
+                probe_executable,
+                ..
+            } => emit_shell_stream_step(prompt, handle, step, &probe_executable),
             ScenarioActionV2::CoreShellParallelCalls {
                 call_ids,
                 probe_executable,
@@ -2530,6 +2535,10 @@ impl FakeState {
             | ScenarioActionV2::CoreShellResumeEditResult { .. }
             | ScenarioActionV2::CoreShellParallelResult { .. } => {
                 self.validate_v2_core_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::CoreShellStream { step, .. } => {
+                validate_shell_stream_prompt(prompt, *step)
+                    .map_err(|detail| self.mismatch(cursor, detail))
             }
             ScenarioActionV2::WaitAllMixedCalls { .. }
             | ScenarioActionV2::WaitAllMixedResult { .. } => {
@@ -3888,6 +3897,132 @@ fn emit_parallel_dummy_tool_calls(
 
 /// Publishes one tool-calling response containing four sibling production shell
 /// commands whose identity-tagged intervals can be checked for overlap.
+fn emit_shell_stream_step(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    step: ShellStreamStep,
+    probe: &std::path::Path,
+) -> ClientResult<()> {
+    let target = || ("tool_call_id", CborValue::Text("stream-child".to_owned()));
+    let (id, tool, arguments) = match step {
+        ShellStreamStep::Start => (
+            "stream-child",
+            "shell",
+            vec![
+                (
+                    "command",
+                    CborValue::Text(format!(
+                        "{} stream-until-cancel",
+                        shell_quote(
+                            probe
+                                .to_str()
+                                .ok_or_else(|| ClientError::handler("non-UTF8 probe"))?
+                        )
+                    )),
+                ),
+                ("timeout", CborValue::Integer(90.into())),
+            ],
+        ),
+        ShellStreamStep::Wait => ("stream-input-wait", "wait", vec![target()]),
+        ShellStreamStep::Cancel => ("stream-cancel", "cancel", vec![target()]),
+        ShellStreamStep::Receipt => (
+            "stream-terminal-wait",
+            "wait",
+            vec![target(), ("complete_only", CborValue::Bool(true))],
+        ),
+        ShellStreamStep::Finished => {
+            return emit_text_response(prompt, handle, "stream observed and cancelled".to_owned());
+        }
+    };
+    emit_tool_call(
+        handle,
+        prompt,
+        ToolCallId::new(id),
+        tool,
+        cbor_map(arguments),
+    )
+}
+
+fn validate_shell_stream_prompt(
+    prompt: &tau_proto::AgentPromptCreated,
+    step: ShellStreamStep,
+) -> Result<(), &'static str> {
+    let mut names = prompt
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    if names != ["cancel", "shell", "wait"] {
+        return Err("stream fixture tool surface mismatch");
+    }
+    let items = prompt.context.flatten();
+    let result = |id: &str| {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::ToolResult(result) if result.call_id.as_str() == id => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    if step == ShellStreamStep::Wait {
+        let results = result("stream-child");
+        if results.len() != 1 || !results[0].output.body.contains("background") {
+            return Err("stream child must background before incremental wake");
+        }
+    }
+    if matches!(
+        step,
+        ShellStreamStep::Cancel | ShellStreamStep::Receipt | ShellStreamStep::Finished
+    ) {
+        let sources = items
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::Message(message) if message.role == ContextRole::User => Some(
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            ContentPart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .filter(|text| tau_proto::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(text))
+            .collect::<Vec<_>>();
+        if sources
+            .iter()
+            .filter(|text| text.contains("tau-stream-live-sentinel"))
+            .count()
+            != 1
+        {
+            return Err("stream sentinel must occur in exactly one canonical source");
+        }
+        if step == ShellStreamStep::Cancel
+            && (sources.len() != 1 || sources[0].contains("terminal=\"true\""))
+        {
+            return Err("model must see incremental output before the child terminal");
+        }
+    }
+    if step == ShellStreamStep::Finished {
+        let results = result("stream-terminal-wait");
+        if results.len() != 1
+            || results[0].status != tau_proto::ToolResultStatus::Success
+            || results[0].output
+                != tau_proto::ToolResponse::from_cbor(&tau_proto::tool_completion_receipt(
+                    &ToolCallId::new("stream-child"),
+                    tau_proto::ToolCompletionOutcome::Cancelled,
+                ))
+        {
+            return Err("stream cancellation must close with one payload-free receipt");
+        }
+    }
+    Ok(())
+}
+
 fn emit_parallel_shell_calls(
     prompt: &tau_proto::AgentPromptCreated,
     handle: &tau_client::ClientHandle,
@@ -4267,6 +4402,7 @@ impl ScenarioActionV2 {
             | Self::CoreShellParallelCalls { user_text, .. }
             | Self::CoreShellParallelWaits { user_text, .. }
             | Self::CoreShellParallelResult { user_text, .. }
+            | Self::CoreShellStream { user_text, .. }
             | Self::WaitAllMixedCalls { user_text, .. }
             | Self::WaitAllMixedResult { user_text, .. }
             | Self::Error { user_text, .. }
@@ -4437,16 +4573,56 @@ fn validate_complete_parallel_wait_round(
         .all(|result| result.status == tau_proto::ToolResultStatus::Success);
     let wait_payloads_match = wait_result.is_some_and(|result| {
         result.status == tau_proto::ToolResultStatus::Success
-            && expected_shell_call_ids
-                .iter()
-                .all(|call_id| result.output.body.contains(call_id.as_str()))
-            && (0..4).all(|index| {
-                result
-                    .output
-                    .body
-                    .contains(&format!("id=parallel-{}", index + 1))
-            })
+            && result.output
+                == tau_proto::ToolResponse::from_cbor(&cbor_map(vec![(
+                    "results",
+                    CborValue::Array(
+                        expected_shell_call_ids
+                            .iter()
+                            .map(|call_id| {
+                                tau_proto::tool_completion_receipt(
+                                    call_id,
+                                    tau_proto::ToolCompletionOutcome::Completed,
+                                )
+                            })
+                            .collect(),
+                    ),
+                )]))
     });
+    // The wait synchronizes only. Real output belongs once to each canonical
+    // source occurrence, outside the native receipt.
+    let source_payloads = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::Message(message) if message.role == ContextRole::User => Some(
+                message
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .filter(|text| tau_proto::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(text))
+        .collect::<Vec<_>>();
+    if source_payloads.len() != 4
+        || !(0..4).all(|index| {
+            source_payloads
+                .iter()
+                .filter(|text| {
+                    text.contains(&format!("id=parallel-{}", index + 1))
+                        && text.contains(&format!("call_id=\"{}\"", expected_shell_call_ids[index]))
+                        && text.contains("terminal=\"true\"")
+                })
+                .count()
+                == 1
+        })
+    {
+        return Err("parallel shell canonical source continuity mismatch");
+    }
     if shell_calls != expected_shell_call_ids.iter().collect::<Vec<_>>() {
         return Err("parallel shell call identity/order mismatch");
     }
@@ -4542,12 +4718,20 @@ fn validate_wait_all_mixed_round(
     {
         return Err("mixed wait-all terminal status mismatch");
     }
-    let aggregate = &results[2].output.body;
-    if !aggregate.contains(expected_success_call_id.as_str())
-        || !aggregate.contains(expected_error_call_id.as_str())
-        || !aggregate.contains("result")
-        || !aggregate.contains("error")
-    {
+    let expected = cbor_map(vec![(
+        "results",
+        CborValue::Array(vec![
+            tau_proto::tool_completion_receipt(
+                expected_success_call_id,
+                tau_proto::ToolCompletionOutcome::Completed,
+            ),
+            tau_proto::tool_completion_receipt(
+                expected_error_call_id,
+                tau_proto::ToolCompletionOutcome::Error,
+            ),
+        ]),
+    )]);
+    if results[2].output != tau_proto::ToolResponse::from_cbor(&expected) {
         return Err("mixed wait-all aggregate payload mismatch");
     }
     Ok(())
@@ -4599,6 +4783,7 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
         // Closed fixtures match task text separately from the harness's lazy
         // discovery messages. This is not runtime provenance or authority.
         .filter(|text| !tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
+        .filter(|text| !tau_proto::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(text))
         .collect()
 }
 

@@ -594,6 +594,21 @@ tags. Calls without one of these tags conservatively classify as manipulator.
 - **`tool.rejected`** *(harness)* — The harness rejected a tool request
   before any tool provider was asked to run it. UIs can display this as a tool
   call rejection.
+- **`tool.output_reported`** *(Tool/Core/Provider extension)* — Transient ordered text
+  observation from an opted-in routed tool. The harness validates the configured
+  generation, exact owner, frozen stream policy, contiguous sequence, and finite
+  capture budgets before accepting it as source. Local writer admission and a
+  committed report do not acknowledge canonical acceptance.
+- **`tool.output_updated`** *(harness)* — Protected durable accepted text tied to
+  an exact tool declaration occurrence and sequence. The harness places each
+  accepted frame in model context once through `tau_tool_output` and preserves it
+  through ordinary replay and compaction recovery. Generic live UI payloads can replace earlier previews
+  without replacing or dropping canonical source frames. An incremental frame
+  can wake an idle agent but cannot interrupt live inference; owner-wide
+  `wait.complete_only` masks those wakes, not capture or context inclusion.
+  The canonical terminal owns the bounded final tail; it is not another update
+  event.
+  See [SPEC-streamed-tool-output](../specs/SPEC-streamed-tool-output.md).
 - **`tool.result_reported`** *(Tool/Core/Provider extension)* — Transient peer
   observation of successful completion. It commits through ordinary
   interception before the harness validates the captured configured generation,
@@ -606,12 +621,14 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   renderer-facing successful completion. It carries call/tool identity, result
   kind, optional generic `display` metadata, and originator, but no raw result or
   provider content. The protected `provider.tool_result` transcript fact retains
-  the full validated result. Live publication follows the canonical provider
-  commit, and UI replay derives the same display shape from that durable fact.
+  the validated result, or bounded captured source for an opted-in stream. Live
+  publication follows the canonical provider commit, and UI replay derives the
+  same display shape from that durable fact.
 - **`tool.result`** *(harness)* — Protected transient full-result projection for
-  non-UI generic consumers. It retains the tool-owned raw result while clearing
-  provider content. Interactive UIs subscribe to `tool.result_display` instead;
-  the durable transcript authority remains `provider.tool_result`.
+  non-UI generic consumers. It retains the validated result or bounded captured
+  stream source while clearing provider content. Interactive UIs subscribe to
+  `tool.result_display` instead; the durable transcript authority remains
+  `provider.tool_result`.
 - **`tool.error_reported`** *(Tool/Core/Provider extension)* — Transient peer
   observation of logical failure. It has the same generic commit and downstream
   route/generation validation boundary as `tool.result_reported`.
@@ -620,9 +637,19 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   use `provider.tool_error`. The raw renderer fact remains outside semantic
   history.
 - **`tool.background_result`** / **`tool.background_error`** *(harness)* —
-  Protected full-result notification for non-UI consumers when a backgrounded
-  tool later completes for real. UI clients receive the separate display
-  projection below. The earlier synthetic provider placeholder also produces
+  Background errors carry a typed `outcome` that distinguishes error from
+  cancellation. This outcome survives replay independently of optional
+  request-cause evidence. An accepted unsolicited cancellation still yields a
+  cancelled wait receipt.
+  Protected canonical terminal for non-UI consumers when a backgrounded tool
+  finishes. Opted-in streams retain bounded captured final text and process
+  metadata instead of an unbounded raw body. Other tools retain their
+  ordinary terminal payload, from which the harness derives a bounded final
+  source occurrence. Waits return successful receipts whose `target_outcome` is
+  `completed`, `error`, or `cancelled`, with no source body. Completion notices
+  carry control receipts without payload copies. Callers can explicitly recover
+  accepted source through bounded `tool_output` pages. UI clients receive the
+  separate display projection below. The earlier synthetic provider placeholder also produces
   `tool.result` and `tool.result_display` projections after its canonical
   `provider.tool_result` commit. Once a call has emitted a background placeholder,
   harness-forced cancellation or teardown also completes it through
@@ -650,15 +677,17 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   in-flight call.
 - **`tool.cancelled_reported`** *(Tool/Core/Provider extension)* — Transient peer
   cancellation observation. It commits before downstream generation, route, and
-   call-state validation.
+  call-state validation. The harness captures and bounds any available final text
+  independently of the cancelled outcome. Missing text means unavailable; it does
+  not remove previously accepted frames.
 - **`tool.cancelled`** *(harness)* — Protected canonical fact that a
   non-backgrounded call was cancelled and its foreground transcript tool round
   is terminal. Backgrounded calls that already emitted a placeholder instead
-   derive `tool.background_error`. The canonical event uses the harness source
-   and cannot be rewritten or dropped. It carries the same defaulted
-   `ToolResultPresentation` discriminator as result and error terminals and an
-   optional complete-replacement generic `ToolUseState` display. Background
-   cancellation preserves that display on its derived background error.
+  derive `tool.background_error`. The canonical event uses the harness source
+  and cannot be rewritten or dropped. It carries the same defaulted
+  `ToolResultPresentation` discriminator as result and error terminals and an
+  optional complete-replacement generic `ToolUseState` display. Background
+  cancellation preserves that display on its derived background error.
 
 ## Actions
 

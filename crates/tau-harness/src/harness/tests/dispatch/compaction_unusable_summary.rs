@@ -257,6 +257,7 @@ fn unusable_summary_retreat_preserves_closed_tool_round_suffix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: "call-kept".into(),
             tool_name: ToolName::new("kept_tool"),

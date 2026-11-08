@@ -2542,6 +2542,7 @@ fn error_tool_result(call_id: &str, diagnostic: &str) -> tau_proto::ToolResultIt
 
 fn tool_error(call_id: &str, diagnostic: &str) -> Event {
     Event::ToolError(tau_proto::ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME),

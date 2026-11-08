@@ -1800,6 +1800,7 @@ fn report_timer_tool(
     let display_args = timer_display_args(&invoke.arguments, invoke.call_id.as_str());
     match result {
         Ok(completion) => handle.report_tool_result(ToolResult {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -1811,6 +1812,7 @@ fn report_timer_tool(
             originator: invoke.originator.clone(),
         }),
         Err(message) => handle.report_tool_error(ToolError {
+            captured_output: None,
             presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -1829,6 +1831,7 @@ fn report_papercut_tool(
     invoke: &ToolStarted,
 ) -> ClientResult<()> {
     handle.report_tool_result(ToolResult {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
@@ -1910,6 +1913,7 @@ fn papercut_history_terminal(
     match result {
         Ok(text) => {
             let result = ToolResult {
+                captured_output: None,
                 presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
@@ -1945,6 +1949,7 @@ fn papercut_history_result_fits(result: &ToolResult) -> bool {
 /// Construct a compact failure for ordinary terminal reporting.
 fn papercut_history_error(invoke: &ToolStarted, message: String) -> ToolError {
     ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),

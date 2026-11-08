@@ -350,6 +350,8 @@ impl Harness {
             .get(call_id)
             .expect("current call");
         let cancelled = ToolCancelled {
+            output: None,
+            captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: tool.name.clone(),
@@ -413,6 +415,7 @@ impl Harness {
 /// paths.
 fn image_admission_error(result: &ToolResult, message: &str) -> ToolError {
     ToolError {
+        captured_output: None,
         presentation: Default::default(),
         call_id: result.call_id.clone(),
         tool_name: result.tool_name.clone(),

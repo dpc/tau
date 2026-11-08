@@ -2761,6 +2761,120 @@ fn repeated_release_reuses_capacity_and_rejects_stale_generation() {
     ));
 }
 
+/// Incremental frames cannot exhaust the slots ordinary terminal and control
+/// facts need to close a round; disposal restores normal output admission.
+#[test]
+fn incremental_tool_output_leaves_frame_headroom_for_terminal_control() {
+    let root = tempfile::tempdir().expect("root");
+    let owner = Arc::new(
+        SemanticPersistenceOwner::new(PersistenceCapacity {
+            max_frames: 8,
+            ..Default::default()
+        })
+        .expect("owner"),
+    );
+    let mut store = SessionStore::open_managed(root.path(), owner.clone()).expect("store");
+    store
+        .prepare_session("output-headroom", SessionPreparationMode::New)
+        .expect("prepare");
+    let leases = store.managed_persistence_leases("output-headroom");
+    let lease = &leases[0];
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(lease.try_reserve_tool_output_frame().expect("output frame"));
+    }
+    assert!(matches!(
+        lease.try_reserve_tool_output_frame(),
+        Err(super::PersistenceAdmissionError::Full)
+    ));
+    for _ in 0..4 {
+        held.push(lease.try_reserve_frame().expect("terminal/control frame"));
+    }
+    assert!(matches!(
+        lease.try_reserve_frame(),
+        Err(super::PersistenceAdmissionError::Full)
+    ));
+    drop(held);
+    drop(
+        lease
+            .try_reserve_tool_output_frame()
+            .expect("output resumes after disposal"),
+    );
+    owner
+        .release(&leases, Duration::from_secs(2))
+        .expect("release");
+}
+
+/// Both sizing admission and measured-charge extension obey the same reduced
+/// byte ceiling, while ordinary terminal/control facts can use the reserve.
+#[test]
+fn incremental_tool_output_leaves_byte_headroom_through_staging_extension() {
+    let root = tempfile::tempdir().expect("root");
+    let owner = Arc::new(SemanticPersistenceOwner::new(Default::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(root.path(), owner.clone()).expect("store");
+    store
+        .prepare_session("output-byte-headroom", SessionPreparationMode::New)
+        .expect("prepare");
+    let leases = store.managed_persistence_leases("output-byte-headroom");
+    let lease = &leases[0];
+    let scratch = lease
+        .try_reserve_tool_output_frame()
+        .expect("output frame")
+        .reserve_bytes(RetentionCharge {
+            replacement: 1024,
+            ..Default::default()
+        })
+        .expect("initial scratch");
+    let blocker = lease
+        .try_reserve_frame()
+        .expect("ordinary frame")
+        .reserve_bytes(RetentionCharge {
+            replacement: 225 * 1024 * 1024,
+            ..Default::default()
+        })
+        .expect("ordinary work may enter reserved capacity");
+    assert!(matches!(
+        scratch.extend_to(RetentionCharge {
+            replacement: 2048,
+            ..Default::default()
+        }),
+        Err(super::PersistenceAdmissionError::Full),
+    ));
+    assert!(matches!(
+        lease
+            .try_reserve_tool_output_frame()
+            .expect("frame available")
+            .reserve_bytes(RetentionCharge {
+                replacement: 1024,
+                ..Default::default()
+            }),
+        Err(super::PersistenceAdmissionError::Full),
+    ));
+    let control = lease
+        .try_reserve_frame()
+        .expect("control frame")
+        .reserve_bytes(RetentionCharge {
+            replacement: 128 * 1024,
+            ..Default::default()
+        })
+        .expect("control work retains headroom");
+    drop(control);
+    drop(blocker);
+    drop(
+        lease
+            .try_reserve_tool_output_frame()
+            .expect("recovered frame")
+            .reserve_bytes(RetentionCharge {
+                replacement: 128 * 1024,
+                ..Default::default()
+            })
+            .expect("output resumes"),
+    );
+    owner
+        .release(&leases, Duration::from_secs(2))
+        .expect("release");
+}
+
 /// Failed byte extension must restore its provisional ledger without reporting
 /// recovery from its own rollback; independent reservation disposal still
 /// wakes.
