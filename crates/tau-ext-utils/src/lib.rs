@@ -2171,7 +2171,7 @@ fn read_image_tool_spec() -> ToolSpec {
         provider_scope: None,
         name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Read one tau-artifact reference for visual inspection.".to_owned()),
+        description: Some("Read one tau-artifact reference for visual inspection. Result size is the delivered raster; source_size, when present, is the full EXIF-oriented source before cropping or resizing.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -2189,7 +2189,7 @@ fn read_image_tool_spec() -> ToolSpec {
                 },
                 "region": {
                     "type": "object",
-                    "description": "Optional crop in pixels. Uses a top-left origin and half-open extents.",
+                    "description": "Optional crop in full-source pixels after EXIF orientation and before resizing. Uses a top-left origin and half-open extents.",
                     "properties": {
                         "x": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
                         "y": {"type": "integer", "minimum": 0, "maximum": u32::MAX},

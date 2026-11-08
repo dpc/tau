@@ -180,28 +180,6 @@ impl ImageRegion {
         }
         Ok(())
     }
-
-    /// Encode safe region metadata for generic result surfaces.
-    fn into_value(self) -> CborValue {
-        CborValue::Map(vec![
-            (
-                CborValue::Text("x".to_owned()),
-                CborValue::Integer(i64::from(self.x).into()),
-            ),
-            (
-                CborValue::Text("y".to_owned()),
-                CborValue::Integer(i64::from(self.y).into()),
-            ),
-            (
-                CborValue::Text("width".to_owned()),
-                CborValue::Integer(i64::from(self.width).into()),
-            ),
-            (
-                CborValue::Text("height".to_owned()),
-                CborValue::Integer(i64::from(self.height).into()),
-            ),
-        ])
-    }
 }
 
 /// Canonical image plus source-transform metadata safe for generic surfaces.
@@ -271,11 +249,7 @@ impl ReadImageRequest {
     }
 
     /// Decode and normalize verified original bytes into one typed tool result.
-    pub(crate) fn prepare(
-        self,
-        bytes: &[u8],
-        original_size: u64,
-    ) -> Result<ReadImageOutput, String> {
+    pub(crate) fn prepare(self, bytes: &[u8]) -> Result<ReadImageOutput, String> {
         if MAX_SOURCE_BYTES < bytes.len() {
             return Err(format!(
                 "image source exceeds the {} byte inspection limit",
@@ -292,74 +266,22 @@ impl ReadImageRequest {
         let format = image.media_type.mime_type();
         let byte_count = image.data.len();
         let patches = patch_count(image.width, image.height);
-        let summary = format!(
-            "{format} image, {}x{}, {patches} patches, {byte_count} bytes, {} mode",
-            image.width,
-            image.height,
-            mode.as_str()
-        );
-        let result = CborValue::Map(vec![
-            (
-                CborValue::Text("artifact".to_owned()),
-                CborValue::Text(display_reference.clone()),
-            ),
-            (
-                CborValue::Text("original_bytes".to_owned()),
-                CborValue::Integer(i64::try_from(original_size).unwrap_or(i64::MAX).into()),
-            ),
-            (
-                CborValue::Text("output".to_owned()),
-                CborValue::Text(summary),
-            ),
-            (
-                CborValue::Text("media_type".to_owned()),
-                CborValue::Text(format.to_owned()),
-            ),
-            (
-                CborValue::Text("width".to_owned()),
-                CborValue::Integer(i64::from(image.width).into()),
-            ),
-            (
-                CborValue::Text("height".to_owned()),
-                CborValue::Integer(i64::from(image.height).into()),
-            ),
-            (
-                CborValue::Text("bytes".to_owned()),
-                CborValue::Integer(i64::try_from(byte_count).unwrap_or(i64::MAX).into()),
-            ),
-            (
-                CborValue::Text("patches".to_owned()),
-                CborValue::Integer(i64::try_from(patches).unwrap_or(i64::MAX).into()),
-            ),
-            (
-                CborValue::Text("detail".to_owned()),
-                CborValue::Text("high".to_owned()),
-            ),
-            (
-                CborValue::Text("mode".to_owned()),
-                CborValue::Text(mode.as_str().to_owned()),
-            ),
-            (
-                CborValue::Text("source_width".to_owned()),
-                CborValue::Integer(i64::from(prepared.source_width).into()),
-            ),
-            (
-                CborValue::Text("source_height".to_owned()),
-                CborValue::Integer(i64::from(prepared.source_height).into()),
-            ),
-            (
-                CborValue::Text("oriented_width".to_owned()),
-                CborValue::Integer(i64::from(prepared.oriented_width).into()),
-            ),
-            (
-                CborValue::Text("oriented_height".to_owned()),
-                CborValue::Integer(i64::from(prepared.oriented_height).into()),
-            ),
-            (
-                CborValue::Text("region".to_owned()),
-                prepared.region.into_value(),
-            ),
-        ]);
+        let mut metadata = vec![(
+            CborValue::Text("size".to_owned()),
+            CborValue::Text(format!("{}x{}", image.width, image.height)),
+        )];
+        // Cropping and resizing preserve the full oriented source coordinate
+        // space.
+        if (image.width, image.height) != (prepared.oriented_width, prepared.oriented_height) {
+            metadata.push((
+                CborValue::Text("source_size".to_owned()),
+                CborValue::Text(format!(
+                    "{}x{}",
+                    prepared.oriented_width, prepared.oriented_height
+                )),
+            ));
+        }
+        let result = CborValue::Map(metadata);
         let details = format!(
             "{display_reference}\nformat: {format}\nmode: {}\nsource: {}x{}\noriented: {}x{}\n\
          region: {},{} {}x{}\noutput: {}x{}\npatches: {patches}",

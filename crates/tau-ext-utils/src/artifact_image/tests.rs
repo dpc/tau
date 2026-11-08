@@ -93,9 +93,7 @@ fn queued_cancellation_precedes_ready_decoder_completion() {
         originator: PromptOriginator::User,
     };
     let request = ReadImageRequest::from_arguments(&invoke.arguments).expect("read_image request");
-    let prepared = request
-        .prepare(&bytes, bytes.len() as u64)
-        .expect("prepare image");
+    let prepared = request.prepare(&bytes).expect("prepare image");
 
     let (harness, extension) = UnixStream::pair().expect("socket pair");
     let extension_reader = extension.try_clone().expect("clone extension socket");

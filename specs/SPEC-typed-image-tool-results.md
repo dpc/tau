@@ -103,10 +103,18 @@ Original detail, equality suppression, GIF, decoded-raster caches, thumbnails, a
 multiple images, and provider uploads are outside this version. Artifact reads
 do not renew original retention age.
 
-Safe result metadata reports pre-orientation source dimensions, full oriented
-dimensions, the selected oriented-source region, prepared dimensions, patch
-count, encoded byte count, and profile. Canonical transformed bytes and
-dimensions remain the sole authority for provider request and context
+The canonical text and typed-image ordering follow
+[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+Image results retain native tool-result headers and typed image payloads rather
+than using an injected user-role envelope. See the native/source lane distinction
+in [SPEC-streamed-tool-output](SPEC-streamed-tool-output.md#source-and-completion).
+
+Model-facing success text reports the delivered raster dimensions as `size: WxH`.
+If those dimensions differ from the full EXIF-oriented source before cropping or
+resizing, it also reports the source dimensions as `source_size: WxH`. The source
+is the coordinate space for subsequent region requests. Detailed preparation
+diagnostics remain in UI metadata rather than model-facing text. Canonical
+transformed bytes and dimensions remain the sole authority for provider request and context
 accounting. Overview remains experimental and must not become the bare default
 or normative general guidance until the opt-in live visual-fidelity oracle
 meets its [documented gates](../docs/read-image-fidelity-oracle.md).

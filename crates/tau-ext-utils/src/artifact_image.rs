@@ -112,8 +112,6 @@ struct DecodeJob {
     request: ReadImageRequest,
     /// Complete verified original bytes.
     bytes: Vec<u8>,
-    /// Descriptor size retained as safe result metadata.
-    original_size: u64,
     /// Cancellation shared with the main loop.
     cancelled: Arc<AtomicBool>,
 }
@@ -263,16 +261,10 @@ impl ArtifactImageManager {
                     invoke,
                     request,
                     download,
-                } => {
-                    let original_size = download
-                        .descriptor()
-                        .map(|descriptor| descriptor.size.get())
-                        .unwrap_or_default();
-                    match (*download).into_bytes() {
-                        Ok(bytes) => self.queue_decode(invoke, request, bytes, original_size),
-                        Err(error) => self.report_error(&invoke, artifact_error_message(error)),
-                    }
-                }
+                } => match (*download).into_bytes() {
+                    Ok(bytes) => self.queue_decode(invoke, request, bytes),
+                    Err(error) => self.report_error(&invoke, artifact_error_message(error)),
+                },
                 ActiveCall::Uploading { invoke, upload } => match (*upload).into_result() {
                     Ok(result) => self.report_prepared_result(result),
                     Err(error) => self.report_error(&invoke, artifact_error_message(error)),
@@ -492,13 +484,7 @@ impl ArtifactImageManager {
         }
     }
 
-    fn queue_decode(
-        &mut self,
-        invoke: ToolStarted,
-        request: ReadImageRequest,
-        bytes: Vec<u8>,
-        original_size: u64,
-    ) {
+    fn queue_decode(&mut self, invoke: ToolStarted, request: ReadImageRequest, bytes: Vec<u8>) {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.calls.insert(
             invoke.call_id.clone(),
@@ -511,7 +497,6 @@ impl ArtifactImageManager {
             invoke,
             request,
             bytes,
-            original_size,
             cancelled,
         });
         self.start_queued_decode();
@@ -530,7 +515,7 @@ impl ArtifactImageManager {
             let waker = self.waker.clone();
             std::thread::spawn(move || {
                 let call_id = job.invoke.call_id.clone();
-                let result = job.request.prepare(&job.bytes, job.original_size);
+                let result = job.request.prepare(&job.bytes);
                 completions
                     .lock()
                     .expect("read_image completion queue poisoned")

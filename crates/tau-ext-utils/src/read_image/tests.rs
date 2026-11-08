@@ -4,8 +4,8 @@ use std::path::Path;
 
 use super::*;
 
-/// Ensures the artifact-facing wrapper retains source identity and original
-/// size as safe metadata while placing pixels only in typed provider content.
+/// Ensures compact model text retains typed pixels and detailed UI diagnostics
+/// without echoing the artifact argument or preparation internals.
 #[test]
 fn artifact_request_prepares_typed_content_without_path_authority() {
     let source = DynamicImage::new_rgb8(4, 3);
@@ -20,22 +20,20 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
         CborValue::Text(reference.clone()),
     )]))
     .expect("request");
-    let output = request
-        .prepare(bytes.get_ref(), bytes.get_ref().len() as u64)
-        .expect("prepare");
+    let output = request.prepare(bytes.get_ref()).expect("prepare");
     assert_eq!(output.provider_content.len(), 1);
     assert!(matches!(
         output.provider_content.as_slice(),
         [ToolResultContentPart::Image(_)]
     ));
-    assert_eq!(
-        tau_proto::cbor_text_field(&output.result, "artifact"),
-        Some(reference.clone())
-    );
-    assert_eq!(
-        tau_proto::cbor_int_field(&output.result, "original_bytes"),
-        Some(bytes.get_ref().len() as i128)
-    );
+    assert_eq!(render_image_result(&output), "size: 4x3\n");
+    let [ToolResultContentPart::Image(image)] = output.provider_content.as_slice() else {
+        panic!("one typed image")
+    };
+    assert_eq!((image.width, image.height), (4, 3));
+    assert_eq!(image.media_type, ImageMediaType::Png);
+    assert_eq!(image.detail, ImageDetail::High);
+    assert!(!image.data.is_empty());
     assert_eq!(output.display.args, reference);
     assert_eq!(output.display.info_chips, ["4x3"]);
     assert!(!output.display.args.contains("patches"));
@@ -377,4 +375,113 @@ fn image_content_debug_redacts_bytes() {
     let debug = format!("{image:?}");
     assert!(debug.contains("<4 bytes>"));
     assert!(!debug.contains("[1, 2, 3, 4]"));
+}
+
+/// Render the exact canonical model text, including headers and any prose body.
+fn render_image_result(output: &ReadImageOutput) -> String {
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        &output.result,
+        tau_proto::ProviderToolResultStatus::Success,
+        &mut text,
+    )
+    .expect("render success");
+    text
+}
+
+/// Keeps source coordinates available only when crop or downsampling changes
+/// the delivered raster, without altering typed image detail or crop pixels.
+#[test]
+fn compact_metadata_tracks_delivered_and_full_source_sizes() {
+    let source = DynamicImage::new_rgb8(2560, 1440);
+    let mut bytes = Cursor::new(Vec::new());
+    source
+        .write_to(&mut bytes, ImageFormat::Png)
+        .expect("fixture");
+    for (mode, region, expected) in [
+        (
+            ImageMode::High,
+            None,
+            "size: 2048x1152\nsource_size: 2560x1440",
+        ),
+        (
+            ImageMode::Overview,
+            None,
+            "size: 1024x576\nsource_size: 2560x1440",
+        ),
+        (
+            ImageMode::High,
+            Some(ImageRegion {
+                x: 50,
+                y: 40,
+                width: 100,
+                height: 120,
+            }),
+            "size: 100x120\nsource_size: 2560x1440",
+        ),
+        (
+            ImageMode::Overview,
+            Some(ImageRegion {
+                x: 50,
+                y: 40,
+                width: 2000,
+                height: 1000,
+            }),
+            "size: 1024x512\nsource_size: 2560x1440",
+        ),
+    ] {
+        let key = ArtifactKey::from_digest(&"0".repeat(64)).expect("key");
+        let output = ReadImageRequest {
+            key,
+            mode,
+            requested_region: region,
+        }
+        .prepare(bytes.get_ref())
+        .expect("prepare");
+        assert_eq!(render_image_result(&output), format!("{expected}\n"));
+        let [ToolResultContentPart::Image(image)] = output.provider_content.as_slice() else {
+            panic!("typed image")
+        };
+        let prepared = prepare_image(bytes.get_ref(), mode, region).expect("reference preparation");
+        assert_eq!(image, &prepared.content);
+        assert_eq!(image.detail, ImageDetail::High);
+        assert_eq!(
+            tau_proto::cbor_text_field(&output.result, "size"),
+            Some(format!("{}x{}", image.width, image.height))
+        );
+    }
+}
+
+/// Reports oriented rather than raw source dimensions after a crop, and omits
+/// redundant source dimensions for uncropped and explicit full-image reads.
+#[test]
+fn compact_metadata_uses_oriented_source_coordinates() {
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::new_rgb8(4, 2)
+        .write_to(&mut bytes, ImageFormat::Jpeg)
+        .expect("fixture");
+    let bytes = jpeg_with_orientation(bytes.into_inner(), 6);
+    for (region, expected) in [
+        (None, "size: 2x4"),
+        (Some(ImageRegion::full(2, 4)), "size: 2x4"),
+        (
+            Some(ImageRegion {
+                x: 0,
+                y: 2,
+                width: 2,
+                height: 2,
+            }),
+            "size: 2x2\nsource_size: 2x4",
+        ),
+    ] {
+        let key = ArtifactKey::from_digest(&"0".repeat(64)).expect("key");
+        let output = ReadImageRequest {
+            key,
+            mode: ImageMode::High,
+            requested_region: region,
+        }
+        .prepare(&bytes)
+        .expect("prepare");
+        assert_eq!(render_image_result(&output), format!("{expected}\n"));
+    }
 }

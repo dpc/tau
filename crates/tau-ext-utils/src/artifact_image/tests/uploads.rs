@@ -90,7 +90,7 @@ fn prepared_fixture(
     };
     let output = ReadImageRequest::from_arguments(&invoke.arguments)
         .expect("request")
-        .prepare(&original, original.len() as u64)
+        .prepare(&original)
         .expect("prepare");
     let prepared = output.provider_content[0]
         .inline_image()
