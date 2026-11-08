@@ -1592,7 +1592,7 @@ fn selected_agent_empty_quota_state_renders_unknown() {
     ));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "Q?"));
+    assert!(vt.screen_contains(80, "?"));
 }
 /// Ensures standalone success and failure retire a watched side agent's
 /// prompt fallback without waiting for an agent-stats snapshot.

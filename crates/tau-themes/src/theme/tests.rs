@@ -382,12 +382,18 @@ fn builtin_themes_style_markdown_links_bold_red() {
 }
 
 /// Ensures every explicitly configured style in the conservative default theme
-/// stays within the allowed foreground color set and does not set backgrounds.
+/// stays within the allowed foreground color set and does not set backgrounds,
+/// except for the explicitly requested blue aligned-quota indicator.
 #[test]
 fn builtin_default_theme_styles_stay_palette_safe() {
     let theme = Theme::builtin();
 
     for (name, style) in &theme.styles {
+        if name.as_str() == crate::names::STATUS_QUOTA_ALIGNED {
+            assert_eq!(style.fg, Some(Color::Blue));
+            assert!(style.bg.is_none());
+            continue;
+        }
         assert!(
             matches!(
                 style.fg,
@@ -455,9 +461,10 @@ fn builtins_emphasize_under_quota_and_distinguish_danger() {
         let unknown = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_UNKNOWN));
         assert!(under.bold);
         assert!(under.fg.is_some());
-        assert!(aligned.fg.is_some());
-        assert!(over.fg.is_some());
-        assert!(danger.fg.is_some());
+        assert!(matches!(under.fg, Some(Color::Green | Color::DarkGreen)));
+        assert!(matches!(aligned.fg, Some(Color::Blue | Color::DarkBlue)));
+        assert!(matches!(over.fg, Some(Color::Yellow | Color::DarkYellow)));
+        assert!(matches!(danger.fg, Some(Color::Red | Color::DarkRed)));
         assert_ne!(over.fg, danger.fg);
         assert_ne!(unknown.fg, danger.fg);
     }

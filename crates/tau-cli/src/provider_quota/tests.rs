@@ -11,6 +11,92 @@ const WEEK_TOLERANCE_SECONDS: u64 = WEEK_SECONDS * 5 / 100;
 const SOFT_STALE_MS: u64 = 15 * 60 * 1_000;
 const HARD_STALE_MS: u64 = 60 * 60 * 1_000;
 
+/// Every bin boundary, exhaustion, and oversized input must stay a visible
+/// single terminal cell, with more remaining quota never producing less height.
+#[test]
+fn remaining_quota_glyph_bins_are_clamped_and_one_cell() {
+    for (remaining, expected) in [
+        (0, "▁"),
+        (1, "▁"),
+        (1_250, "▁"),
+        (1_251, "▂"),
+        (2_500, "▂"),
+        (2_501, "▃"),
+        (3_750, "▃"),
+        (3_751, "▄"),
+        (5_000, "▄"),
+        (5_001, "▅"),
+        (6_250, "▅"),
+        (6_251, "▆"),
+        (7_500, "▆"),
+        (7_501, "▇"),
+        (8_750, "▇"),
+        (8_751, "█"),
+        (10_000, "█"),
+        (u16::MAX, "█"),
+    ] {
+        let status = QuotaStatus {
+            pacing: QuotaPacing::Aligned,
+            remaining_basis_points: Some(remaining),
+        };
+        assert_eq!(status.glyph(), expected, "{remaining}");
+        assert_eq!(unicode_width::UnicodeWidthStr::width(status.glyph()), 1);
+    }
+}
+
+/// Presentation must use validated quota data and preserve schedule colors
+/// while fitting alongside identity in the smallest useful status line.
+#[test]
+fn quota_status_height_color_unknown_and_narrow_layout() {
+    use tau_cli_term::{PriorityLine, PriorityLineAlignment, PriorityLinePriority, Span};
+    use tau_themes::names;
+
+    for (used, elapsed, glyph, style) in [
+        (0, 5_000, "█", names::STATUS_QUOTA_UNDER),
+        (5_000, 5_000, "▄", names::STATUS_QUOTA_ALIGNED),
+        (6_000, 5_000, "▄", names::STATUS_QUOTA_OVER),
+        (10_000, 5_000, "▁", names::STATUS_QUOTA_DANGER),
+        (u16::MAX, 5_000, "▁", names::STATUS_QUOTA_DANGER),
+    ] {
+        let (mut state, model) = make_state(window(used, elapsed));
+        let status = state
+            .status(&model, UnixMillis::new(NOW))
+            .expect("capability");
+        assert_eq!(status.glyph(), glyph);
+        assert_eq!(status.style(), style);
+        let theme = crate::tests::cli_test_theme();
+        let mut line = PriorityLine::new();
+        line.push(
+            PriorityLinePriority::new(0),
+            PriorityLineAlignment::Left,
+            "A",
+        );
+        line.push(
+            PriorityLinePriority::new(50),
+            PriorityLineAlignment::Right,
+            Span::new(
+                status.glyph(),
+                tau_cli_term::resolve::resolve(&theme, status.style()),
+            ),
+        );
+        let text = |width| {
+            line.layout(width)
+                .iter()
+                .map(|cell| cell.ch)
+                .collect::<String>()
+        };
+        assert_eq!(text(3), format!("A {glyph}"));
+        assert_eq!(text(2), "A ");
+        assert_eq!(text(1), "A");
+        assert_eq!(text(0), "");
+        let unknown = state
+            .status(&model, UnixMillis::new(NOW + SOFT_STALE_MS + 1))
+            .expect("capability");
+        assert_eq!(unknown.glyph(), "?");
+        assert_eq!(unknown.style(), names::STATUS_QUOTA_UNKNOWN);
+    }
+}
+
 /// Builds a trusted weekly sample so each test varies only the behavior it
 /// intends to cover.
 fn window(used: u16, elapsed_basis_points: u16) -> ProviderQuotaWindow {
@@ -231,6 +317,13 @@ fn all_of_bindings_are_conservative() {
     current.bindings[0]
         .limit_ids
         .push(ProviderQuotaLimitId::parse("codex_fast").expect("valid quota test value"));
+    assert_eq!(
+        state
+            .status(&model, UnixMillis::new(NOW))
+            .expect("capability")
+            .glyph(),
+        "▂"
+    );
     assert_eq!(
         state.classify(&model, tau_proto::UnixMillis::new(NOW)),
         Some(QuotaPacing::Danger)

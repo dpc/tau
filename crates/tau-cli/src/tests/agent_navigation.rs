@@ -2099,18 +2099,18 @@ fn selected_agent_quota_repaints_for_both_event_orderings() {
         if quota_first {
             renderer.handle(&quota);
             sync(&handle);
-            assert!(!vt.screen_contains(80, "Q!"));
+            assert!(!vt.screen_contains(80, "▁"));
             renderer.handle(&started);
         } else {
             renderer.handle(&started);
             sync(&handle);
-            assert!(!vt.screen_contains(80, "Q!"));
+            assert!(!vt.screen_contains(80, "▁"));
             renderer.handle(&quota);
         }
         sync(&handle);
 
         assert!(
-            vt.screen_contains(80, "Q!"),
+            vt.screen_contains(80, "▁"),
             "selected-agent quota was not repainted when quota_first={quota_first}"
         );
     }

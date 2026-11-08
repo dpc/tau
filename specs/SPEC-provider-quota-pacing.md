@@ -86,16 +86,20 @@ either `d > +22` or `u >= 87%`. A verified new reset cycle clears hysteresis.
 Relative server remaining time is preferred. Absolute reset time requires a
 fresh server-offset calibration; absolute/relative disagreement beyond five
 minutes is untrusted. Usage, timing, and applicability are colored only through
-15 minutes. After that the chip is neutral `Q?`, including after hard staleness.
+15 minutes. After that, Tau shows neutral `?`, including after hard staleness.
 At or past reset, Tau shows neutral unknown and requests reconciliation; it never
 fabricates a local zero-use rollover.
 
 ## Presentation
 
-The compact accessible chip is bright-green `Q-` for far under, green `Q=` for
-aligned, orange/yellow `Q+` for over, red `Q!` for danger, and neutral `Q?` for
-stale or unknown state. Text carries the meaning in no-color and limited-color
-terminals. The status bar drops this optional chip before essential identity on
+The one-cell quota glyph uses `▁▂▃▄▅▆▇█` to show remaining quota: taller means
+more remains. Round remaining quota upward into eight equal 12.5-percent bins;
+keep exhausted quota visible as `▁`. With multiple applicable weekly constraints,
+use the smallest remaining quota to determine the height. Color shows pacing: green
+for far under, blue for aligned, yellow for over, and red for danger. Untrusted
+state is neutral `?`, never a quota-height claim. Without color, height
+shows remaining quota but does not convey schedule position.
+The status bar drops this optional glyph before essential identity on
 narrow displays; its status priority is `50`, below identity, context, activity,
 description, and watcher elements and above optional debug elements. No playful
 or “tokenmaxxing” copy is part of this design.

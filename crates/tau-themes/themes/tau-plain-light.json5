@@ -72,7 +72,7 @@
     "status.cost":          { fg: "dark_yellow" },
     "status.inner_turns":   { fg: "dark_yellow" },
     "status.quota.under":   { fg: "green", bold: true },
-    "status.quota.aligned": { fg: "dark_green" },
+    "status.quota.aligned": { fg: "dark_blue" },
     "status.quota.over":    { fg: "dark_yellow" },
     "status.quota.danger":  { fg: "dark_red" },
     "status.quota.unknown": { fg: "grey" },

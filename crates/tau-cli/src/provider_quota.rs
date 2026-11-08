@@ -33,15 +33,35 @@ pub(crate) enum QuotaPacing {
     Unknown,
 }
 
-impl QuotaPacing {
-    /// Compact accessible text that remains meaningful without color.
-    pub(crate) const fn chip(self) -> &'static str {
-        match self {
-            Self::FarUnder => "Q-",
-            Self::Aligned => "Q=",
-            Self::Over => "Q+",
-            Self::Danger => "Q!",
-            Self::Unknown => "Q?",
+/// Weekly quota height and pacing color from the same validated snapshot.
+pub(crate) struct QuotaStatus {
+    /// Worst pacing among all applicable weekly constraints.
+    pub(crate) pacing: QuotaPacing,
+    /// Smallest remaining quota across those constraints, or untrusted.
+    remaining_basis_points: Option<u16>,
+}
+
+impl QuotaStatus {
+    /// One-cell quota height; unknown stays distinct from exhausted quota.
+    pub(crate) fn glyph(&self) -> &'static str {
+        let Some(remaining) = self.remaining_basis_points else {
+            return "?";
+        };
+        // Eight equal bins, rounded upward so every positive remainder is
+        // visible. Zero shares the lowest glyph rather than disappearing.
+        let index = usize::from(remaining.min(10_000).div_ceil(1_250).saturating_sub(1));
+        ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][index]
+    }
+
+    /// Existing semantic theme token for the schedule position.
+    pub(crate) fn style(&self) -> &'static str {
+        use tau_themes::names;
+        match self.pacing {
+            QuotaPacing::FarUnder => names::STATUS_QUOTA_UNDER,
+            QuotaPacing::Aligned => names::STATUS_QUOTA_ALIGNED,
+            QuotaPacing::Over => names::STATUS_QUOTA_OVER,
+            QuotaPacing::Danger => names::STATUS_QUOTA_DANGER,
+            QuotaPacing::Unknown => names::STATUS_QUOTA_UNKNOWN,
         }
     }
 }
@@ -97,25 +117,43 @@ impl QuotaPacingState {
     /// `None` means the selected model's provider has published no quota
     /// current-state capability. Once that capability is known, incomplete,
     /// unbound, stale, expired, or timing-untrusted state is neutral unknown.
-    pub(crate) fn classify(
+    #[cfg(test)]
+    fn classify(&mut self, model: &ModelId, now_unix_ms: UnixMillis) -> Option<QuotaPacing> {
+        self.status(model, now_unix_ms).map(|status| status.pacing)
+    }
+
+    /// Returns quota height only when all schedule evidence is trustworthy.
+    pub(crate) fn status(
         &mut self,
         model: &ModelId,
         now_unix_ms: UnixMillis,
-    ) -> Option<QuotaPacing> {
+    ) -> Option<QuotaStatus> {
+        self.validated_status(model, now_unix_ms)
+            .map(|(pacing, remaining_basis_points)| QuotaStatus {
+                pacing,
+                remaining_basis_points,
+            })
+    }
+
+    fn validated_status(
+        &mut self,
+        model: &ModelId,
+        now_unix_ms: UnixMillis,
+    ) -> Option<(QuotaPacing, Option<u16>)> {
         let current = self.current.get(&model.provider)?.clone();
         let Some(binding) = current
             .bindings
             .iter()
             .find(|binding| binding.model == *model)
         else {
-            return Some(QuotaPacing::Unknown);
+            return Some((QuotaPacing::Unknown, None));
         };
         let binding_age = match age(binding.observed_at_unix_ms, now_unix_ms) {
             Some(age) => age,
-            None => return Some(QuotaPacing::Unknown),
+            None => return Some((QuotaPacing::Unknown, None)),
         };
         if HARD_STALE < binding_age {
-            return Some(QuotaPacing::Unknown);
+            return Some((QuotaPacing::Unknown, None));
         }
 
         let bound: HashSet<_> = binding.limit_ids.iter().collect();
@@ -135,23 +173,25 @@ impl QuotaPacingState {
             .cloned()
             .collect::<Vec<_>>();
         if weekly.is_empty() && !missing_pool {
-            return Some(QuotaPacing::Unknown);
+            return Some((QuotaPacing::Unknown, None));
         }
         if weekly
             .iter()
             .any(|window| window_hard_expired(window, now_unix_ms))
         {
-            return Some(QuotaPacing::Unknown);
+            return Some((QuotaPacing::Unknown, None));
         }
         if missing_pool || SOFT_STALE < binding_age {
-            return Some(QuotaPacing::Unknown);
+            return Some((QuotaPacing::Unknown, None));
         }
 
         let mut aggregate = QuotaPacing::FarUnder;
+        let mut remaining = 10_000;
         for window in weekly {
             let Some((used, elapsed)) = valid_fractions(&window, now_unix_ms) else {
-                return Some(QuotaPacing::Unknown);
+                return Some((QuotaPacing::Unknown, None));
             };
+            remaining = remaining.min(10_000u16.saturating_sub(window.used_basis_points));
             let key = HysteresisKey {
                 provider: model.provider.clone(),
                 epoch: current.profile_epoch.clone(),
@@ -177,7 +217,7 @@ impl QuotaPacingState {
             self.hysteresis.insert(key, pacing);
             aggregate = aggregate.max(pacing);
         }
-        Some(aggregate)
+        Some((aggregate, Some(remaining)))
     }
 }
 

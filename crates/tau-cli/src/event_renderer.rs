@@ -3789,20 +3789,13 @@ impl EventRenderer {
         let quota = quota_model.and_then(|model| {
             self.role
                 .quota_pacing
-                .classify(&model, tau_proto::UnixMillis::new(unix_time_millis()))
+                .status(&model, tau_proto::UnixMillis::new(unix_time_millis()))
         });
-        if let Some(quota) = quota {
-            let style = match quota {
-                path_crate_provider_quota::QuotaPacing::FarUnder => names::STATUS_QUOTA_UNDER,
-                path_crate_provider_quota::QuotaPacing::Aligned => names::STATUS_QUOTA_ALIGNED,
-                path_crate_provider_quota::QuotaPacing::Over => names::STATUS_QUOTA_OVER,
-                path_crate_provider_quota::QuotaPacing::Danger => names::STATUS_QUOTA_DANGER,
-                path_crate_provider_quota::QuotaPacing::Unknown => names::STATUS_QUOTA_UNKNOWN,
-            };
+        if let Some(quota) = &quota {
             line.push(
                 StatusElement::WeeklyQuota.priority(),
                 right,
-                status_chip(&self.resources.theme, style, quota.chip()),
+                status_chip(&self.resources.theme, quota.style(), quota.glyph()),
             );
         }
         if let Some(timer) = &self.activity.tool_timer {

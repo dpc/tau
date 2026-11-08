@@ -1743,9 +1743,9 @@ ChatGPT profiles fetch the bounded full account quota snapshot from `/wham/usage
 and merge sparse in-band WebSocket `codex.rate_limits` observations. Quota
 telemetry is best-effort, starts after provider `Ready` in incremental
 background rounds, and never delays inference or consumes prompt retry budget.
-The compact status
-chip is shown for a selected model when its provider publishes quota current
-state. Tau uses neutral `Q?` when weekly state is absent, unbound, stale, expired,
+The one-cell status glyph uses height for remaining weekly quota and color for
+schedule position when the selected model's provider publishes quota current
+state. Tau uses neutral `?` when weekly state is absent, unbound, stale, expired,
 or timing-untrusted. It never guesses a colored claim from a default or sole
 account pool: colored state requires a fresh in-band binding of the exact
 `ModelId` and trustworthy weekly timing, and expires rather than locally resetting

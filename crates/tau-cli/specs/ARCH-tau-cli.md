@@ -140,11 +140,11 @@ the fixed weekly pacing classifier from
 [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 It selects only an exact current/viewed `ModelId` binding, preserves provider
 timestamps during catch-up, keeps per-cycle hysteresis locally, and renders the
-accessible compact `Q-`, `Q=`, `Q+`, `Q!`, or `Q?` status chip.
+single-cell glyph whose height shows remaining quota and whose color shows pacing.
 The durable, content-free `agent.prompt_started` fact supplies the selected
 agent's model for live lifecycle tracking; the chat UI excludes it from its
 historical selectors.
-Provider quota current-state is capability evidence for neutral `Q?`;
+Provider quota current-state is capability evidence for neutral `?`;
 only a fresh exact binding and trustworthy weekly timing permit colored pacing.
 Capability lasts for the running harness: a replayed empty snapshot after
 provider clear keeps live and late clients converged on neutral unknown.

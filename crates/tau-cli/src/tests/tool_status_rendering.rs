@@ -670,10 +670,10 @@ fn new_session_preserves_role_status() {
     assert!(!vt.screen_contains(80, "no role selected"));
 }
 
-/// The compact quota status uses redundant ASCII text for every pacing state,
-/// so no-color and narrow terminal users do not have to infer meaning from hue.
+/// The compact quota status shows remaining quota as height and preserves a
+/// distinct unknown marker when freshness no longer supports a quota claim.
 #[test]
-fn quota_status_renders_all_accessible_compact_chips() {
+fn quota_status_renders_remaining_height_and_unknown() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -690,11 +690,11 @@ fn quota_status_renders_all_accessible_compact_chips() {
     }));
     let now = unix_time_millis();
     let cases = [
-        (1, 1_000, 5_000, 0, "Q-"),
-        (2, 5_000, 5_000, 0, "Q="),
-        (3, 6_000, 5_000, 0, "Q+"),
-        (4, 9_000, 5_000, 0, "Q!"),
-        (5, 5_000, 5_000, 16 * 60 * 1_000, "Q?"),
+        (1, 1_000, 5_000, 0, "█"),
+        (2, 5_000, 5_000, 0, "▄"),
+        (3, 6_000, 5_000, 0, "▄"),
+        (4, 9_000, 5_000, 0, "▁"),
+        (5, 5_000, 5_000, 16 * 60 * 1_000, "?"),
     ];
     for (epoch, used, elapsed, age, expected) in cases {
         let remaining = 604_800_u64 * (10_000 - elapsed) / 10_000;
@@ -797,10 +797,10 @@ fn quota_status_narrow_two_pool_state_uses_only_bound_default_pool() {
     let status_row = vt
         .screen_text(16)
         .into_iter()
-        .find(|row| row.contains("Q-"))
+        .find(|row| row.contains("█"))
         .expect("narrow status row");
-    assert!(status_row.ends_with("Q-"));
-    assert!(!vt.screen_contains(16, "Q!"));
+    assert!(status_row.ends_with("█"));
+    assert!(!vt.screen_contains(16, "▁"));
 }
 
 #[test]
@@ -1221,7 +1221,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .into_iter()
         .find(|row| row.contains("+engineer"))
         .expect("status row after side response");
-    assert!(status_row.ends_with("#12k/200k Q!"));
+    assert!(status_row.ends_with("#12k/200k ▁"));
     assert!(!status_row.contains('%'));
 
     let mut created = agent_prompt_created("main-sp", "s1");
@@ -1255,7 +1255,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .find(|row| row.contains("@main"))
         .expect("status row after main response");
     assert!(
-        status_row.ends_with("%0/2 #12k/200k -/- Q!"),
+        status_row.ends_with("%0/2 #12k/200k -/- ▁"),
         "unexpected status row: {status_row:?}"
     );
 
@@ -1295,7 +1295,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after tool result");
-    assert!(status_row.ends_with("%1/2 #12k/200k -/- Q!"));
+    assert!(status_row.ends_with("%1/2 #12k/200k -/- ▁"));
 
     // Regression coverage for turn visibility: once an extension/sub-agent
     // prompt becomes active, it must not steal the main transcript's tool chip;
@@ -1317,7 +1317,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .find(|row| row.contains("@main"))
         .expect("status row after side prompt starts");
     assert!(
-        status_row.ends_with("@1 %1/2 #12k/200k -/- Q!"),
+        status_row.ends_with("@1 %1/2 #12k/200k -/- ▁"),
         "unexpected status row: {status_row:?}"
     );
     assert!(status_row.contains('%'));
@@ -1341,7 +1341,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after second main tool result during side turn");
-    assert!(status_row.ends_with("@1 %2/2 #12k/200k -/- Q!"));
+    assert!(status_row.ends_with("@1 %2/2 #12k/200k -/- ▁"));
     assert!(status_row.contains('%'));
 
     // Main tool completions that arrive while a side conversation is active
@@ -1356,7 +1356,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after main prompt resumes");
-    assert!(status_row.ends_with("@1 %2/2 #12k/200k -/- Q!"));
+    assert!(status_row.ends_with("@1 %2/2 #12k/200k -/- ▁"));
 
     // The main agent's final no-tool response ends the tool-using turn and
     // hides the chip while preserving context stats.
@@ -1370,7 +1370,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after final main response");
-    assert!(status_row.ends_with("@1 #12k/200k -/- Q!"));
+    assert!(status_row.ends_with("@1 #12k/200k -/- ▁"));
     assert!(!status_row.contains('%'));
 
     // Starting a new user task in the same session also keeps the chip hidden
@@ -1390,7 +1390,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after next prompt");
-    assert!(status_row.ends_with("@1 #12k/200k -/- Q!"));
+    assert!(status_row.ends_with("@1 #12k/200k -/- ▁"));
     assert!(!status_row.contains('%'));
 
     renderer.apply_setting("show-ui-io", "true");
@@ -1410,7 +1410,7 @@ fn model_status_shows_active_agents_then_tools_context_and_quota() {
         .expect("status row with optional diagnostics");
     assert!(
         status_row.ends_with(&format!(
-            "@1 #12k/200k -/- io ↑1K ↓2K {full_render_count} Q!"
+            "@1 #12k/200k -/- io ↑1K ↓2K {full_render_count} ▁"
         )),
         "unexpected status row: {status_row:?}"
     );
