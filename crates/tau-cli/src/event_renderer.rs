@@ -1213,7 +1213,7 @@ fn content_part_text(part: &ContentPart) -> &str {
     match part {
         ContentPart::Text { text }
         | ContentPart::SyntheticCompactionSummary { text }
-        | ContentPart::HarnessInternalText { text } => text,
+        | ContentPart::HarnessInternalText { text, .. } => text,
         ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
     }
 }

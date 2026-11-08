@@ -24,13 +24,13 @@ const QUIESCENT_PROMPT: &str = "Complete the quiescent deterministic instruction
 const UNCERTAIN_PROMPT: &str = "Complete the dispatch-uncertain deterministic instruction.";
 const REPAIR_PROMPT: &str = "Begin the interrupted-tool deterministic instruction.";
 const QUIESCENT_PROVIDER_INITIAL: &str = concat!(
-    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
+    "<agent_context>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</agent_context>",
     "Complete the quiescent deterministic instruction."
 );
 const UNCERTAIN_PROVIDER_INITIAL: &str = concat!(
-    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
+    "<agent_context>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</agent_context>",
     "Complete the dispatch-uncertain deterministic instruction."
 );
 const REPAIR_MARKER: &str = "mixed-state interrupted tool repaired";
@@ -39,7 +39,7 @@ const TOOL_CALL_ID: &str = "s7-interrupted-tool";
 const BOOT_A_CURSORS: [usize; 4] = [5, 1, 1, 1];
 const RECOVERED_CURSORS: [usize; 4] = [5, 1, 2, 2];
 const RECOVERY_MARKER: &str = "mixed-state interrupted inference recovered";
-const SCENARIO_BYTES: usize = 2_478;
+const SCENARIO_BYTES: usize = 2_484;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// Decoded fake-provider checkpoint used to prove all four immutable lane

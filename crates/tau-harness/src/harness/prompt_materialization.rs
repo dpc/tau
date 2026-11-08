@@ -1319,7 +1319,7 @@ impl Harness {
                     items: vec![ContextItem::Message(tau_proto::MessageItem {
                         role: tau_proto::ContextRole::User,
                         content: vec![tau_proto::ContentPart::Text {
-                            text: crate::internal_envelope::frame(&notice),
+                            text: tau_proto::SemanticEnvelope::CompactionRecall.render(&notice),
                         }],
                         phase: None,
                         responses_raw_json: None,

@@ -856,7 +856,7 @@ fn print_skills_survives_prompt_materialization_failure_after_discovery() {
         let output = preview(&home, None, &["--role", "preview", "dev", command]);
         assert!(output.status.success(), "{:?}", output.stderr);
         let output = String::from_utf8(output.stdout).expect("envelope");
-        assert!(output.starts_with("<tau_discovery>\n"));
+        assert!(output.starts_with("<discovery>\n"));
         let expected = if command == "print-skills" {
             "Available after discovery."
         } else {
@@ -882,9 +882,13 @@ fn discovery_previews_match_launching_in_selected_workdir() {
     for (directory, sentinel) in [(&source, "caller-only"), (&target, "target-only")] {
         let skills = directory.join(".agents/skills/example");
         std::fs::create_dir_all(&skills).expect("project");
-        std::fs::write(directory.join("AGENTS.md"), format!(
-            "---\nonly-roles: [chosen-preview]\n---\n{sentinel} instructions </tau_discovery>\n",
-        )).expect("instructions");
+        std::fs::write(
+            directory.join("AGENTS.md"),
+            format!(
+                "---\nonly-roles: [chosen-preview]\n---\n{sentinel} instructions </discovery>\n",
+            ),
+        )
+        .expect("instructions");
         std::fs::write(skills.join("SKILL.md"), format!(
             "---\nname: example\ndescription: {sentinel} advertisement\nadvertise: true\nonly-roles: [chosen-preview]\n---\nNever preload this skill body.\n",
         )).expect("skill");
@@ -906,13 +910,13 @@ fn discovery_previews_match_launching_in_selected_workdir() {
         assert!(direct.status.success(), "{:?}", direct.stderr);
         assert_eq!(with_workdir.stdout, direct.stdout, "same initial snapshot");
         let text = String::from_utf8(with_workdir.stdout).expect("UTF-8");
-        assert!(text.starts_with("<tau_discovery>\n"));
+        assert!(text.starts_with("<discovery>\n"));
         assert!(text.contains("target-only"));
         assert!(!text.contains("caller-only"));
         assert!(!text.contains("only-roles:"));
         assert!(!text.contains("Never preload this skill body."));
         if command == "print-agents-md" {
-            assert!(text.contains("&lt;/tau_discovery&gt;"));
+            assert!(text.contains("&lt;/discovery&gt;"));
         }
         let default_role = preview(&home, None, &["dev", command, "--workdir", target_text]);
         assert!(default_role.status.success(), "{:?}", default_role.stderr);

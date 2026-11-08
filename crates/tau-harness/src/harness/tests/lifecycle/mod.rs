@@ -76,7 +76,7 @@ fn context_text(item: &ContextItem) -> Option<&str> {
         ContextItem::Message(message) => message.content.first().map(|part| match part {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text } => text.as_str(),
+            | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
             ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
         }),
         ContextItem::ToolResult(result) => match &result.output.raw {

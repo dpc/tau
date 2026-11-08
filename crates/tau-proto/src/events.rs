@@ -1462,6 +1462,8 @@ pub enum ToolResultKind {
 /// Tool and extension payloads always use [`Self::ToolPayload`]. The harness
 /// alone stamps [`Self::HarnessDedupPointer`] after it replaces an identical
 /// large terminal with a reference to its earlier result.
+/// Text presentation follows `SPEC-tau-proto-provider-data`; this typed tool
+/// channel is distinct from `SPEC-exact-sentinel-prompt-envelopes`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultPresentation {
@@ -4599,6 +4601,10 @@ pub struct TermBell {}
 /// internal envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TrustedInternalSpan {
+    /// Semantic presentation selected by the harness. Old records retain their
+    /// historical generic internal projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<crate::SemanticEnvelope>,
     /// Inclusive byte offset in the owning prompt text.
     pub start: u32,
     /// Exclusive byte offset in the owning prompt text.

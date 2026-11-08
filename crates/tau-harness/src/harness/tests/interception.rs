@@ -4537,12 +4537,18 @@ fn assert_interception_preserves_internal_prompt_kind_and_text(
     }
     match &mut rewritten_spans {
         Event::AgentPromptSubmitted(prompt) => {
-            prompt.trusted_internal_spans =
-                vec![tau_proto::TrustedInternalSpan { start: 0, end: 1 }];
+            prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan {
+                envelope: None,
+                start: 0,
+                end: 1,
+            }];
         }
         Event::AgentPromptSteered(prompt) => {
-            prompt.trusted_internal_spans =
-                vec![tau_proto::TrustedInternalSpan { start: 0, end: 1 }];
+            prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan {
+                envelope: None,
+                start: 0,
+                end: 1,
+            }];
         }
         _ => unreachable!(),
     }
@@ -7797,7 +7803,7 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
                         part,
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
-                        | ContentPart::HarnessInternalText { text }
+                        | ContentPart::HarnessInternalText { text, .. }
                             if text == "final steer after compaction"
                     ))
             ))

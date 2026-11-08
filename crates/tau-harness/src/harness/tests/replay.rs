@@ -1136,7 +1136,7 @@ fn assert_message_fact_replay_rebuilds_uncovered_wake(
     };
     let (tau_proto::ContentPart::Text { text }
     | tau_proto::ContentPart::SyntheticCompactionSummary { text }
-    | tau_proto::ContentPart::HarnessInternalText { text }) = &item.content[0]
+    | tau_proto::ContentPart::HarnessInternalText { text, .. }) = &item.content[0]
     else {
         panic!("expected narrative text")
     };
@@ -1277,7 +1277,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
                 if matches!(
                     content.first(),
                     Some(tau_proto::ContentPart::Text { text })
-                        if text == "<tau_internal>You have received a message from manager\n\n<message>\npersisted <message>& body\n</message></tau_internal>"
+                        if text == "<agent_message>\nsender: manager\n\npersisted <message>& body</agent_message>"
                 )
         )
     }));
@@ -3964,9 +3964,7 @@ fn resumed_peer_messages_use_persisted_notice_snapshots() {
             _ => None,
         })
         .filter_map(|part| match part {
-            tau_proto::ContentPart::Text { text }
-                if text.contains("Authenticated peer message") =>
-            {
+            tau_proto::ContentPart::Text { text } if text.starts_with("<peer_message>") => {
                 Some(text.as_str())
             }
             _ => None,
@@ -3975,8 +3973,8 @@ fn resumed_peer_messages_use_persisted_notice_snapshots() {
     assert_eq!(
         peer_messages,
         [
-            "<tau_internal>Authenticated peer message\n\n<tau_peer_message sender_session=\"sender-session\" sender_agent=\"sender-agent\">\n<notice origin=\"sender_config\" authority=\"advisory\">\npersisted sender guidance\n</notice>\n<message>\nnotice body\n</message>\n<notice origin=\"recipient_config\" authority=\"advisory\">\npersisted recipient guidance\n</notice>\n</tau_peer_message></tau_internal>",
-            "<tau_internal>Authenticated peer message\n\n<tau_peer_message sender_session=\"sender-session\" sender_agent=\"sender-agent\">\nlegacy body\n</tau_peer_message></tau_internal>",
+            "<peer_message>\nsender_session: sender-session\nsender_agent: sender-agent\n\n<notice origin=\"sender_config\" authority=\"advisory\">\npersisted sender guidance\n</notice>\n<message>\nnotice body\n</message>\n<notice origin=\"recipient_config\" authority=\"advisory\">\npersisted recipient guidance\n</notice></peer_message>",
+            "<peer_message>\nsender_session: sender-session\nsender_agent: sender-agent\n\nlegacy body</peer_message>",
         ]
     );
     assert!(

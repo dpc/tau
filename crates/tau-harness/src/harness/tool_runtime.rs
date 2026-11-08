@@ -463,20 +463,29 @@ impl Harness {
         else {
             return;
         };
-        let agent_id_headers = agent_ids
-            .map(|(self_agent_id, sub_agent_id)| {
-                format!("self_agent_id: {self_agent_id}\nsub_agent_id: {sub_agent_id}\n\n")
-            })
-            .unwrap_or_default();
-        let content =
-            format!("{agent_id_headers}Tool call `{call_id}` is running in the background.");
+        let mut headers = vec![(
+            CborValue::Text("status".to_owned()),
+            CborValue::Text("backgrounded".to_owned()),
+        )];
+        if let Some((self_agent_id, sub_agent_id)) = agent_ids {
+            headers.extend([
+                (
+                    CborValue::Text("self_agent_id".to_owned()),
+                    CborValue::Text(self_agent_id.to_owned()),
+                ),
+                (
+                    CborValue::Text("sub_agent_id".to_owned()),
+                    CborValue::Text(sub_agent_id.to_owned()),
+                ),
+            ]);
+        }
         let result = ToolResult {
             captured_output: None,
             presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: tool.name,
             tool_type: tool.tool_type,
-            result: CborValue::Text(content),
+            result: CborValue::Map(headers),
             provider_content: Vec::new(),
             kind: ToolResultKind::BackgroundPlaceholder,
             originator: PromptOriginator::User,
@@ -1416,7 +1425,10 @@ impl Harness {
         agent
             .dispatch
             .pending_prompts
-            .push_back(PendingPrompt::internal(STATUS_REMINDER.to_owned()));
+            .push_back(PendingPrompt::semantic(
+                STATUS_REMINDER.to_owned(),
+                tau_proto::SemanticEnvelope::StatusReminder,
+            ));
     }
 
     pub(super) fn publish_prompts_as_steered(

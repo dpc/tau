@@ -46,6 +46,11 @@
 
 ## General guidance
 
+- Before adding or modifying model-visible tool results or context formatting,
+  read [SPEC-tau-proto-provider-data](crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions).
+  `ToolResponse` owns text serialization; injected-user envelopes have a separate
+  linked contract. Do not hand-build a competing format.
+
 - This project is still very immature; backward compatibility is not required.
 - Always consult the `tau-commit` skill before making commits.
 - When debugging existing Tau sessions, consult the

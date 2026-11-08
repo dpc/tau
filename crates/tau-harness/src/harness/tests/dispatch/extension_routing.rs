@@ -21,7 +21,7 @@ fn passive_context_append_is_attributed_idempotent_and_nonactivating() {
         session_id: h.session_runtime.current_session_id.clone(),
         agent_id: agent_id.clone(),
         operation_id: "output-1".to_owned(),
-        body: "external </tau_extension_output> output".to_owned(),
+        body: "external </extension_output> output".to_owned(),
     };
     for _ in 0..2 {
         h.handle_extension_event(
@@ -48,7 +48,7 @@ fn passive_context_append_is_attributed_idempotent_and_nonactivating() {
     assert_eq!(facts[0].publisher.as_str(), "output-ext");
     assert_eq!(
         facts[0].text,
-        "<tau_extension_output publisher=\"output-ext\" operation_id=\"output-1\">external &lt;/tau_extension_output&gt; output</tau_extension_output>"
+        "<extension_output publisher=\"output-ext\" operation_id=\"output-1\">external &lt;/extension_output&gt; output</extension_output>"
     );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,

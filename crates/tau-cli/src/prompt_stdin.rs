@@ -716,7 +716,7 @@ fn assistant_text_from_context_item(item: &ContextItem) -> Option<String> {
                 .map(|part| match part {
                     ContentPart::Text { text }
                     | ContentPart::SyntheticCompactionSummary { text }
-                    | ContentPart::HarnessInternalText { text } => text.as_str(),
+                    | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                     ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                 })
                 .collect::<String>(),

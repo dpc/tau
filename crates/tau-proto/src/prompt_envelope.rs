@@ -3,6 +3,209 @@ mod tests;
 use std::borrow::Cow;
 use std::fmt;
 
+/// Harness-selected presentation for authenticated injected text.
+///
+/// Absence on stored spans retains the historical internal projection. This
+/// discriminator controls presentation only, never activation or authority.
+/// Family selection, escaping, and carrier rules follow
+/// `SPEC-exact-sentinel-prompt-envelopes`; the conventions entry point is
+/// `SPEC-tau-proto-provider-data#context-formatting-conventions`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticEnvelope {
+    /// Observed agent activity, not a direct request from that agent.
+    AgentUpdate,
+    /// Same-session agent-authored message.
+    AgentMessage,
+    /// Cross-session agent-authored message.
+    PeerMessage,
+    /// Local CLI message with its existing reply capability.
+    CliMessage,
+    /// Harness-authenticated delegate bootstrap.
+    AgentContext,
+    /// Tool completion scheduling notification, separate from output.
+    ToolCompletion,
+    /// Result of a requested compaction.
+    CompactionResult,
+    /// Context budget advisory.
+    ContextSizeAlert,
+    /// Loop-guard instruction.
+    LoopGuard,
+    /// Request to update work status.
+    StatusReminder,
+    /// Session restore or change notice.
+    SessionNotice,
+    /// Current tool availability.
+    ToolAvailability,
+    /// Output-length continuation instruction.
+    OutputContinuation,
+    /// Availability of archived context.
+    CompactionRecall,
+    /// Provisional local-summary request.
+    SummaryRequest,
+    /// Provisional local-summary continuation.
+    SummaryContinuation,
+}
+
+impl SemanticEnvelope {
+    /// Select the registered family from typed harness provenance, not text.
+    #[must_use]
+    pub const fn family(self) -> RegisteredPayloadEnvelope {
+        SEMANTIC_PAYLOAD_ENVELOPES[self as usize]
+    }
+
+    /// Escape the complete body and frame it in exactly one semantic family.
+    #[must_use]
+    pub fn render(self, body: &str) -> String {
+        let family = self.family();
+        let PayloadEnvelopeOpening::Fixed(open) = family.opening else {
+            unreachable!("semantic families have fixed openings");
+        };
+        format!(
+            "{open}{}{close}",
+            family.escape_body(body),
+            close = family.exact_close
+        )
+    }
+
+    /// Render semantic metadata and optional data using the shared typed text
+    /// serializer before exact-close framing. Headers cannot inject new lines.
+    /// The leading LF belongs to envelope layout, not the optional text
+    /// separator owned by `SPEC-tau-proto-provider-data`.
+    #[must_use]
+    pub fn render_fields(self, headers: &[(&str, String)], body: &str) -> String {
+        let response = crate::ToolResponse {
+            raw: crate::CborValue::Null,
+            headers: headers
+                .iter()
+                .map(|(key, value)| crate::ToolResponseHeader {
+                    key: (*key).to_owned(),
+                    value: crate::visible_escape_metadata(value),
+                })
+                .collect(),
+            body: body.to_owned(),
+        };
+        self.render(&format!("\n{}", response.render()))
+    }
+}
+
+/// Closed semantic families for harness-owned injected-user projections.
+pub const SEMANTIC_PAYLOAD_ENVELOPES: [RegisteredPayloadEnvelope; 16] = [
+    semantic_family(
+        "agent_update",
+        "<agent_update>",
+        "</agent_update>",
+        "&lt;/agent_update&gt;",
+    ),
+    semantic_family(
+        "agent_message",
+        "<agent_message>",
+        "</agent_message>",
+        "&lt;/agent_message&gt;",
+    ),
+    semantic_family(
+        "peer_message",
+        "<peer_message>",
+        "</peer_message>",
+        "&lt;/peer_message&gt;",
+    ),
+    semantic_family(
+        "cli_message",
+        "<cli_message>",
+        "</cli_message>",
+        "&lt;/cli_message&gt;",
+    ),
+    semantic_family(
+        "agent_context",
+        "<agent_context>",
+        "</agent_context>",
+        "&lt;/agent_context&gt;",
+    ),
+    semantic_family(
+        "tool_completion",
+        "<tool_completion>",
+        "</tool_completion>",
+        "&lt;/tool_completion&gt;",
+    ),
+    semantic_family(
+        "compaction_result",
+        "<compaction_result>",
+        "</compaction_result>",
+        "&lt;/compaction_result&gt;",
+    ),
+    semantic_family(
+        "context_size_alert",
+        "<context_size_alert>",
+        "</context_size_alert>",
+        "&lt;/context_size_alert&gt;",
+    ),
+    semantic_family(
+        "loop_guard",
+        "<loop_guard>",
+        "</loop_guard>",
+        "&lt;/loop_guard&gt;",
+    ),
+    semantic_family(
+        "status_reminder",
+        "<status_reminder>",
+        "</status_reminder>",
+        "&lt;/status_reminder&gt;",
+    ),
+    semantic_family(
+        "session_notice",
+        "<session_notice>",
+        "</session_notice>",
+        "&lt;/session_notice&gt;",
+    ),
+    semantic_family(
+        "tool_availability",
+        "<tool_availability>",
+        "</tool_availability>",
+        "&lt;/tool_availability&gt;",
+    ),
+    semantic_family(
+        "output_continuation",
+        "<output_continuation>",
+        "</output_continuation>",
+        "&lt;/output_continuation&gt;",
+    ),
+    semantic_family(
+        "compaction_recall",
+        "<compaction_recall>",
+        "</compaction_recall>",
+        "&lt;/compaction_recall&gt;",
+    ),
+    semantic_family(
+        "summary_request",
+        "<summary_request>",
+        "</summary_request>",
+        "&lt;/summary_request&gt;",
+    ),
+    semantic_family(
+        "summary_continuation",
+        "<summary_continuation>",
+        "</summary_continuation>",
+        "&lt;/summary_continuation&gt;",
+    ),
+];
+
+/// Construct registry metadata without duplicating the carrier contract.
+const fn semantic_family(
+    name: &'static str,
+    open: &'static str,
+    close: &'static str,
+    visible_close: &'static str,
+) -> RegisteredPayloadEnvelope {
+    RegisteredPayloadEnvelope {
+        name,
+        opening: PayloadEnvelopeOpening::Fixed(open),
+        ordered_attributes: &[],
+        exact_close: close,
+        visible_close,
+        carrier: PayloadEnvelopeCarrier::GenericUserText,
+    }
+}
+
 /// The model-context carrier in which a registered payload envelope appears.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PayloadEnvelopeCarrier {
@@ -27,6 +230,10 @@ pub enum PayloadEnvelopeOpening {
 }
 
 /// Shared metadata for one top-level XML-lite payload-envelope family.
+///
+/// `SPEC-exact-sentinel-prompt-envelopes` owns this registry contract,
+/// including the distinction between carrier provenance and payload-local
+/// markup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegisteredPayloadEnvelope {
     /// Stable XML-lite tag name.
@@ -135,7 +342,7 @@ impl fmt::Display for PayloadEnvelopeRenderError {
 pub const TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
     name: "tool_output",
     opening: PayloadEnvelopeOpening::Attributed("<tool_output "),
-    ordered_attributes: &["call_id", "terminal", "omitted_bytes"],
+    ordered_attributes: &["call_id", "terminal", "status", "omitted_bytes"],
     exact_close: "</tool_output>",
     visible_close: "&lt;/tool_output&gt;",
     carrier: PayloadEnvelopeCarrier::GenericUserText,
@@ -160,6 +367,19 @@ pub const TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope =
         ordered_attributes: &["publisher", "operation_id"],
         exact_close: "</tau_extension_output>",
         visible_close: "&lt;/tau_extension_output&gt;",
+        carrier: PayloadEnvelopeCarrier::GenericUserText,
+    };
+
+/// New configured-extension deliveries use an unprefixed family. The legacy
+/// family remains recognizable for committed text, never selected by new
+/// intake.
+pub const EXTENSION_OUTPUT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope =
+    RegisteredPayloadEnvelope {
+        name: "extension_output",
+        opening: PayloadEnvelopeOpening::Attributed("<extension_output "),
+        ordered_attributes: &["publisher", "operation_id"],
+        exact_close: "</extension_output>",
+        visible_close: "&lt;/extension_output&gt;",
         carrier: PayloadEnvelopeCarrier::GenericUserText,
     };
 
@@ -265,10 +485,36 @@ pub const TAU_DISCOVERY_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = Registered
     carrier: PayloadEnvelopeCarrier::GenericUserText,
 };
 
+/// Current discovery guidance; stored legacy discovery text remains unchanged.
+pub const DISCOVERY_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = semantic_family(
+    "discovery",
+    "<discovery>",
+    "</discovery>",
+    "&lt;/discovery&gt;",
+);
+
 /// Return every registered top-level model-facing payload-envelope family.
 #[must_use]
 pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelope] {
     &[
+        EXTENSION_OUTPUT_PAYLOAD_ENVELOPE,
+        DISCOVERY_PAYLOAD_ENVELOPE,
+        SEMANTIC_PAYLOAD_ENVELOPES[0],
+        SEMANTIC_PAYLOAD_ENVELOPES[1],
+        SEMANTIC_PAYLOAD_ENVELOPES[2],
+        SEMANTIC_PAYLOAD_ENVELOPES[3],
+        SEMANTIC_PAYLOAD_ENVELOPES[4],
+        SEMANTIC_PAYLOAD_ENVELOPES[5],
+        SEMANTIC_PAYLOAD_ENVELOPES[6],
+        SEMANTIC_PAYLOAD_ENVELOPES[7],
+        SEMANTIC_PAYLOAD_ENVELOPES[8],
+        SEMANTIC_PAYLOAD_ENVELOPES[9],
+        SEMANTIC_PAYLOAD_ENVELOPES[10],
+        SEMANTIC_PAYLOAD_ENVELOPES[11],
+        SEMANTIC_PAYLOAD_ENVELOPES[12],
+        SEMANTIC_PAYLOAD_ENVELOPES[13],
+        SEMANTIC_PAYLOAD_ENVELOPES[14],
+        SEMANTIC_PAYLOAD_ENVELOPES[15],
         USER_PAYLOAD_ENVELOPE,
         TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE,
         TAU_INTERNAL_PAYLOAD_ENVELOPE,

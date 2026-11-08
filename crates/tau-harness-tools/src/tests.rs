@@ -474,6 +474,7 @@ fn agent_start_request_omits_display_name_source() {
     assert_eq!(
         request.trusted_internal_spans,
         vec![tau_proto::TrustedInternalSpan {
+            envelope: Some(tau_proto::SemanticEnvelope::AgentContext),
             start: 0,
             end: u32::try_from(bootstrap.len()).expect("fixture prefix fits u32"),
         }]
@@ -598,19 +599,20 @@ fn agent_watch_display_args_falls_back_to_safe_fields() {
 /// the sanitized current snapshot exactly once and never model-input framing.
 #[test]
 fn agent_watch_enable_result_includes_safe_current_snapshot() {
-    let result = agent_watch_enabled_result(
+    let result = tau_proto::ToolResponse::from_cbor(&agent_watch_enabled_result(
         "agent-a",
         Some("retrying (throttle, attempt 50, next retry about 60s)"),
-    );
+    ))
+    .render();
     assert_eq!(
         result,
-        "Watching agent `agent-a`; current status: retrying (throttle, attempt 50, next retry about 60s)"
+        "watching: true\nprovider_status: retrying (throttle, attempt 50, next retry about 60s)\n"
     );
-    assert_eq!(result.matches("current status:").count(), 1);
+    assert_eq!(result.matches("provider_status:").count(), 1);
     assert!(!result.contains("[tau-internal]"));
     assert_eq!(
-        agent_watch_enabled_result("agent-a", None),
-        "Watching agent `agent-a`"
+        tau_proto::ToolResponse::from_cbor(&agent_watch_enabled_result("agent-a", None)).render(),
+        "watching: true\n"
     );
 }
 
@@ -702,7 +704,7 @@ fn finish_agent_watch_success_passes_informative_display() {
         ToolName::new(AGENT_WATCH_TOOL_NAME),
         ToolType::Function,
         &args,
-        "Watching agent `agent-a`".to_owned(),
+        agent_watch_enabled_result("agent-a", None),
     );
 
     let call = finisher.success.expect("finish call recorded");
@@ -711,10 +713,7 @@ fn finish_agent_watch_success_passes_informative_display() {
     assert_eq!(call.call_id.as_str(), "call-1");
     assert_eq!(call.tool_name.as_str(), AGENT_WATCH_TOOL_NAME);
     assert_eq!(call.tool_type, ToolType::Function);
-    assert_eq!(
-        call.result,
-        CborValue::Text("Watching agent `agent-a`".to_owned())
-    );
+    assert_eq!(call.result, agent_watch_enabled_result("agent-a", None));
     assert_eq!(display.args, "watch agent-a");
     assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");

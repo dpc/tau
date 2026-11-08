@@ -191,7 +191,7 @@ Avoid duplicate task copies, exhaustive logs, and unrelated completed history. P
 
 /// Registered internal envelope containing the cache-aligned summary request.
 pub static REQUEST: LazyLock<String> = LazyLock::new(|| {
-    let envelope = tau_proto::TAU_INTERNAL_PAYLOAD_ENVELOPE;
+    let envelope = tau_proto::SemanticEnvelope::SummaryRequest.family();
     let tau_proto::PayloadEnvelopeOpening::Fixed(open) = envelope.opening else {
         unreachable!("internal payload has a fixed opening");
     };

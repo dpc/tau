@@ -710,7 +710,8 @@ fn assert_literal_provider_projection(h: &Harness, agent_id: &AgentId, text: &st
     assert_eq!(
         provider_prompt.context.flatten().into_iter().filter(|item| !matches!(item,
             ContextItem::Message(message) if matches!(message.content.first(),
-                Some(ContentPart::Text { text }) if tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
+                Some(ContentPart::Text { text }) if tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                    || tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
         )).collect::<Vec<_>>(),
         vec![ContextItem::Message(MessageItem {
             role: ContextRole::User,

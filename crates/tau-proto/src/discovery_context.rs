@@ -72,8 +72,8 @@ impl DiscoveryContextDelivery {
             );
         }
         format!(
-            "<tau_discovery>\n{}</tau_discovery>",
-            crate::TAU_DISCOVERY_PAYLOAD_ENVELOPE.escape_body(&body)
+            "<discovery>\n{}</discovery>",
+            crate::DISCOVERY_PAYLOAD_ENVELOPE.escape_body(&body)
         )
     }
 }

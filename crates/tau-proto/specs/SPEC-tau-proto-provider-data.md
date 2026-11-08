@@ -8,6 +8,30 @@ of those implementation areas can coherently state the shared semantic
 authority, replay sidecars, escaping boundaries, and provider presentation
 rules described here.
 
+## Context formatting conventions
+
+This record is the entry point for model-context formatting. Producers supply
+semantic typed values, not hand-built transport wrappers. `ToolResponse` and
+`ToolResponseHeader` own canonical tool-text serialization below; protocol status
+and typed media remain separate. The bounded raw-CBOR writer and measurement path
+must produce the same bytes as that typed representation without requiring a
+full intermediate string.
+
+Injected user-role text instead follows the registered semantic families,
+typed provenance, exact-close escaping and replay rules in
+[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+Envelope layout does not change the optional tool-text separator rule.
+Neither apparent headers nor tag-shaped payload text grants authority.
+
+Message facts and provider replay sidecars follow the sections below.
+Direct UI requests follow
+[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
+Typed images follow
+[SPEC-typed-image-tool-results](../../../specs/SPEC-typed-image-tool-results.md);
+asynchronous delivery and source custody follow
+[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
+Those records own their specialized semantics rather than duplicating this grammar.
+
 ## Provider-visible tool responses
 
 Tool result events carry raw CBOR for non-provider consumers, but provider prompt construction must render tool outputs through `ToolResponse::render()`. That render path is the central defense-in-depth normalization boundary after tool-local semantic escaping.

@@ -3361,6 +3361,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
             && steer.message_class == tau_proto::PromptMessageClass::Internal
             && steer.trusted_internal_spans
                 == vec![tau_proto::TrustedInternalSpan {
+                    envelope: Some(tau_proto::SemanticEnvelope::OutputContinuation),
                     start: 0,
                     end: u32::try_from(steer.text.len()).expect("bounded instruction"),
                 }]
@@ -8996,7 +8997,12 @@ fn unregister_queues_unavailable_notice_for_next_user_prompt_only() {
         .flatten()
         .iter()
         .position(|item| {
-            context_text(item) == Some(crate::internal_envelope::frame(&notice).as_str())
+            context_text(item)
+                == Some(
+                    tau_proto::SemanticEnvelope::ToolAvailability
+                        .render(&notice)
+                        .as_str(),
+                )
         })
         .expect("availability notice in prompt");
     let user_pos = prompt
@@ -9058,7 +9064,7 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
     assert_eq!(
         context_text_count(
             &first_prompt,
-            &crate::internal_envelope::frame(&unavailable)
+            &tau_proto::SemanticEnvelope::ToolAvailability.render(&unavailable)
         ),
         1
     );
@@ -9079,7 +9085,12 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
         .flatten()
         .iter()
         .position(|item| {
-            context_text(item) == Some(crate::internal_envelope::frame(&available).as_str())
+            context_text(item)
+                == Some(
+                    tau_proto::SemanticEnvelope::ToolAvailability
+                        .render(&available)
+                        .as_str(),
+                )
         })
         .expect("available-again notice in prompt");
     let user_pos = second_prompt

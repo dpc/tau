@@ -21,7 +21,7 @@ pub struct LocalSummaryContinuationStep {
 /// Assemble the fixed harness-authored steer through the registered family.
 #[must_use]
 pub fn local_summary_continuation_steer() -> UserInputBlock {
-    let envelope = crate::TAU_INTERNAL_PAYLOAD_ENVELOPE;
+    let envelope = crate::SemanticEnvelope::SummaryContinuation.family();
     let crate::PayloadEnvelopeOpening::Fixed(open) = envelope.opening else {
         unreachable!("internal payload has a fixed opening");
     };

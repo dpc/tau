@@ -176,20 +176,6 @@ fn completed_special_watch_plans_order_cursor_trace_and_terminal() {
     }
 }
 
-/// Keeps deterministic watch expectations aligned with the production
-/// exact-close internal envelope when fixture content resembles its delimiter.
-#[test]
-fn tau_internal_fixture_envelope_escapes_its_exact_close() {
-    let rendered = tau_internal_envelope(
-        "watch payload <tau_internal>nested</tau_internal> then </tau_internal>",
-    );
-    assert_eq!(
-        rendered,
-        "<tau_internal>watch payload <tau_internal>nested&lt;/tau_internal&gt; then &lt;/tau_internal&gt;</tau_internal>"
-    );
-    assert_eq!(rendered.matches("</tau_internal>").count(), 1);
-}
-
 /// Proves the generic model metadata can express Anthropic's documented
 /// explicit-breakpoint cache modes and their discrete price break-even points
 /// while both fixtures stay absent from the dispatchable model snapshot.
@@ -1403,8 +1389,7 @@ fn v2_agent_watch_runtime_mismatches_leave_state_unconsumed() {
     );
     assert_eq!(state.lane_cursors, [1]);
 
-    latest_tool_results_mut(&mut result_prompt).items[0] =
-        tool_result("wrong-call", "Watching agent `child`");
+    latest_tool_results_mut(&mut result_prompt).items[0] = watch_result("wrong-call", None);
     assert!(
         state
             .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
@@ -1412,8 +1397,7 @@ fn v2_agent_watch_runtime_mismatches_leave_state_unconsumed() {
     );
     assert_eq!(state.lane_cursors, [1]);
 
-    latest_tool_results_mut(&mut result_prompt).items[0] =
-        tool_result("watch-call", "Watching agent `child`");
+    latest_tool_results_mut(&mut result_prompt).items[0] = watch_result("watch-call", None);
     latest_tool_results_mut(&mut result_prompt).items[0].status =
         tau_proto::ToolResultStatus::Error {
             message: "failed".to_owned(),
@@ -1469,7 +1453,7 @@ fn v2_agent_watch_dispatch_uncertain_result_is_exact() {
         .blocks
         .push(tau_proto::ContextBlock::ToolResults(
             tau_proto::ToolResultsBlock {
-                items: vec![tool_result("watch-call", "Watching agent `child`")],
+                items: vec![watch_result("watch-call", None)],
             },
         ));
     assert!(
@@ -1479,10 +1463,8 @@ fn v2_agent_watch_dispatch_uncertain_result_is_exact() {
     );
     assert_eq!(state.lane_cursors, [1]);
 
-    latest_tool_results_mut(&mut prompt).items[0] = tool_result(
-        "watch-call",
-        "Watching agent `child`; current status: dispatch uncertain (unknown)",
-    );
+    latest_tool_results_mut(&mut prompt).items[0] =
+        watch_result("watch-call", Some("dispatch uncertain (unknown)"));
     state
         .validate_and_commit_v2_action(0, 1, &prompt, &result)
         .expect("exact dispatch-uncertain watch result commits");
@@ -2530,6 +2512,19 @@ fn tool_result(call_id: &str, text: &str) -> tau_proto::ToolResultItem {
         output: tau_proto::ToolResponse::from_cbor(&CborValue::Text(text.to_owned())),
         provider_content: Vec::new(),
     }
+}
+
+fn watch_result(call_id: &str, provider_status: Option<&str>) -> tau_proto::ToolResultItem {
+    let mut fields = vec![(CborValue::Text("watching".into()), CborValue::Bool(true))];
+    if let Some(status) = provider_status {
+        fields.push((
+            CborValue::Text("provider_status".into()),
+            CborValue::Text(status.into()),
+        ));
+    }
+    let mut result = tool_result(call_id, "");
+    result.output = tau_proto::ToolResponse::from_cbor(&CborValue::Map(fields));
+    result
 }
 
 fn error_tool_result(call_id: &str, diagnostic: &str) -> tau_proto::ToolResultItem {

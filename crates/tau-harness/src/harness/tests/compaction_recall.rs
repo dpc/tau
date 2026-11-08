@@ -108,7 +108,7 @@ fn recall_precedes_resumed_inference_and_completion_is_exactly_once() {
                     .filter_map(|part| match part {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
-                        | ContentPart::HarnessInternalText { text } => Some(text.as_str()),
+                        | ContentPart::HarnessInternalText { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -122,8 +122,11 @@ fn recall_precedes_resumed_inference_and_completion_is_exactly_once() {
         .iter()
         .find(|text| text.contains(&descriptor.key.to_string()))
         .expect("recall notice");
-    assert!(notice.starts_with("<tau_internal>"));
-    assert!(notice.ends_with(tau_proto::TAU_INTERNAL_CLOSE));
+    assert!(
+        tau_proto::SemanticEnvelope::CompactionRecall
+            .family()
+            .matches_whole(notice)
+    );
     assert_eq!(notice.matches("<tau-artifact:").count(), 1);
     assert!(h.send_prompt_to_agent_for(&cid).is_none());
     assert_eq!(

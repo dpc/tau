@@ -58,6 +58,9 @@ pub enum ContentPart {
     /// Harness-authenticated internal text. Provider projection alone frames
     /// this variant; text spelling never establishes this authority.
     HarnessInternalText {
+        /// Typed presentation; absent only for historical internal payloads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        envelope: Option<crate::SemanticEnvelope>,
         /// Raw harness-authored body.
         text: String,
     },
@@ -509,6 +512,9 @@ impl ToolResultContentPart {
 }
 
 /// One rendered header in the text sent to a provider for a tool response.
+///
+/// Single-line metadata and escaping follow
+/// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolResponseHeader {
     /// Header key rendered before the `: ` separator.
@@ -519,8 +525,10 @@ pub struct ToolResponseHeader {
 
 /// Provider-facing text form of a tool response.
 ///
-/// The canonical rendering is header lines in `<key>: <value>` form, followed
-/// by an empty line and then the tool-specific body. [`Self::render`] applies a
+/// This semantic text representation owns the optional headers/payload grammar
+/// in `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
+/// Headers use `<key>: <value>` lines; one empty separator appears only when
+/// both headers and a nonempty body exist. [`Self::render`] applies a
 /// final provider-visible safety pass: headers are forced to single lines,
 /// controls and Unicode line/paragraph separators are escaped, and body ASCII
 /// line feeds are preserved as record separators while other controls and
@@ -534,7 +542,7 @@ pub struct ToolResponse {
     pub raw: CborValue,
     /// Structured headers rendered before the response body.
     pub headers: Vec<ToolResponseHeader>,
-    /// Tool-specific response text rendered after the blank separator.
+    /// Optional payload, with a separator only when headers also exist.
     pub body: String,
 }
 
@@ -553,7 +561,9 @@ impl ToolResponse {
         }
     }
 
-    /// Renders this response as header lines, a blank line, then body text.
+    /// Serialize optional headers and payload under
+    /// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
+    /// Empty, header-only, and payload-only responses need no blank separator.
     ///
     /// This is the last provider-visible defense-in-depth boundary. It escapes
     /// header controls and Unicode line/paragraph separators, escapes body
@@ -674,6 +684,8 @@ pub struct ProviderToolResultTextMeasurement {
 
 /// Measure canonical provider-facing tool text in linear time without
 /// materializing it or retaining source-sized rendering state.
+/// Must agree with `ToolResponse` serialization under
+/// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
 #[must_use]
 pub fn measure_provider_tool_result_text(
     value: &CborValue,
@@ -687,6 +699,9 @@ pub fn measure_provider_tool_result_text(
 
 /// Stream the same canonical provider-facing text as
 /// [`ToolResultItem::render_provider_text`] directly from raw CBOR.
+/// `ToolResponse` owns the grammar in
+/// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`; this bounded
+/// writer is an equivalent serialization path, not another format.
 ///
 /// Classification is cached once per rendered CBOR node, so nested maps remain
 /// linear rather than recursively rescanning their descendants. Callers that
@@ -1808,6 +1823,9 @@ impl fmt::Write for TrailingNewlineTrimmer<'_> {
 }
 
 /// One tool result item in the prompt timeline.
+///
+/// This self-identifying carrier needs no injected-user envelope. Status,
+/// optional text and typed media follow `SPEC-tau-proto-provider-data`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultItem {
     /// Tool call this result answers.

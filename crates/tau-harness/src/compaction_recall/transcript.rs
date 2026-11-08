@@ -267,7 +267,7 @@ impl Transcript<'_> {
                 ContentPart::SyntheticCompactionSummary { text } => {
                     self.payload("generated-summary", text, 8192)?
                 }
-                ContentPart::HarnessInternalText { text } => {
+                ContentPart::HarnessInternalText { text, .. } => {
                     self.payload("historical-harness-internal", text, 8192)?
                 }
                 ContentPart::UrlCitation { citation } => {

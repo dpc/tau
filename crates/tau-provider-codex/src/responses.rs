@@ -3530,7 +3530,7 @@ fn convert_user_message(msg: &MessageItem, out: &mut Vec<ResponsesInputItem>) {
         .filter_map(|block| match block {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text } => Some(serde_json::json!({
+            | ContentPart::HarnessInternalText { text, .. } => Some(serde_json::json!({
                 "type": "input_text",
                 "text": text,
             })),
@@ -3577,7 +3577,7 @@ fn assistant_message_text_parts(msg: &MessageItem) -> Vec<&str> {
         .filter_map(|block| match block {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text } => Some(text.as_str()),
+            | ContentPart::HarnessInternalText { text, .. } => Some(text.as_str()),
             ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => None,
         })
         .collect()

@@ -2,6 +2,9 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-proto instructions
 
+- Tool/context formatting starts at [SPEC-tau-proto-provider-data](specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions);
+  keep semantic types, serializers, bounded writers, and measurements consistent.
+
 - Read `specs/ARCH-tau-proto.md` before changing protocol DTOs, event names, message facts, serde/CBOR codec helpers, or validated wire identifiers.
 - Read the applicable Linked Specs under `specs/` before changing protocol verification strategy, event-name synchronization tests, compatibility fixtures, or fixture organization.
 - Keep DTO wire-contract tests near their definitions. Event-name tests must keep

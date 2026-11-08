@@ -1,5 +1,15 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Injected-user presentation uses a harness-selected optional `SemanticEnvelope`
+on trusted spans and their context parts. Missing fields retain historical
+internal framing; configured extensions cannot assert span authority. Optional
+terminal-capture outcomes add presentation status without changing durable
+completion enums. These additive fields do not rewrite journals, change routing
+or activation, or reinterpret opaque provider items. Typed agent-message facts
+render through current semantic families on live append and cold replay.
+See [SPEC-tau-proto-provider-data](SPEC-tau-proto-provider-data.md#context-formatting-conventions)
+and [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+
 Protocol 22.0 adds metadata-bound artifact identities and metadata-only UI listing.
 The shared identity type owns bounded filename/MIME fields and streaming hash
 framing. Missing historical descriptor identity means payload-only verification;

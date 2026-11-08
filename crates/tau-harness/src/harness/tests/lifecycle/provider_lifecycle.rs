@@ -1481,7 +1481,10 @@ fn duplicate_provider_is_rejected_without_ambiguous_fallback() {
 
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(
-        context_text_count(&prompt, &crate::internal_envelope::frame(&notice)),
+        context_text_count(
+            &prompt,
+            &tau_proto::SemanticEnvelope::ToolAvailability.render(&notice)
+        ),
         1
     );
     assert_eq!(agent_prompt_text_count(&h, &notice), 1);

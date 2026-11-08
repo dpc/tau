@@ -364,7 +364,7 @@ Harness-owned agent-message facts use the analogous placement/checkpoint
 mechanics but remain a distinct typed domain. Each directional durable
 occurrence remains its only payload authority. Ordinary outbound `Message`
 occurrences are omitted from sender provider context; local inbound messages
-render the escaped stable-sender `<tau_internal>` envelope from the typed fact,
+render the escaped stable-sender `agent_message` envelope from the typed fact,
 and live activation uses only a sequence-keyed payload-free wake. Replay
 reassembles context and rebuilds one uncovered payload-free wake per activating
 occurrence. See

@@ -4097,7 +4097,9 @@ fn message_route_context_omits_outbound_body_from_assistant_wire_content() {
                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                     role: ContextRole::User,
                     content: vec![ContentPart::Text {
-                        text: format!("<tau_internal>received {BODY}&lt;/tau_internal&gt;"),
+                        text: format!(
+                            "<agent_message>\nsender: worker\n\nreceived {BODY} <tau_internal>historical&lt;/tau_internal&gt;</agent_message>"
+                        ),
                     }],
                     phase: None,
                     responses_raw_json: None,
@@ -4123,9 +4125,7 @@ fn message_route_context_omits_outbound_body_from_assistant_wire_content() {
     );
     assert!(messages.iter().any(|message| {
         message["role"] == "user"
-            && message["content"]
-                .as_str()
-                .is_some_and(|text| text.contains(BODY))
+            && message["content"] == format!("<agent_message>\nsender: worker\n\nreceived {BODY} <tau_internal>historical&lt;/tau_internal&gt;</agent_message>")
     }));
     assert!(
         !messages.iter().any(|message| {

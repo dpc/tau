@@ -1215,7 +1215,7 @@ fn daemon_mode_accepts_later_clients() {
                     message.content.first().map(|part| match part {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
-                        | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                         ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {
                             ""
                         }

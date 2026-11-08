@@ -1026,11 +1026,7 @@ pub(crate) fn watch_work_status_text(
     if status.initial {
         return None;
     }
-    let title = status
-        .title
-        .as_deref()
-        .map(tau_proto::visible_escape_metadata)
-        .unwrap_or_default();
+    let title = status.title.clone().unwrap_or_default();
     let state = match status.phase {
         tau_proto::AgentWorkStatusPhase::Unreported => return None,
         tau_proto::AgentWorkStatusPhase::Working => "working",
@@ -1039,9 +1035,15 @@ pub(crate) fn watch_work_status_text(
         tau_proto::AgentWorkStatusPhase::Waiting => "waiting",
         tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
     };
-    Some(crate::internal_envelope::frame(&format!(
-        "Watched agent {sender_label} status: {state} on {title}"
-    )))
+    Some(tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
+        &[
+            ("agent", sender_label.to_owned()),
+            ("kind", "work_status".to_owned()),
+            ("status", state.to_owned()),
+            ("task", title),
+        ],
+        "",
+    ))
 }
 
 /// Render only closed structured provider categories; no provider-authored text
@@ -1050,49 +1052,55 @@ pub(crate) fn watch_provider_status_text(
     sender_label: &str,
     status: &tau_proto::AgentWatchProviderStatusNotification,
 ) -> String {
+    let mut headers = vec![
+        ("agent", sender_label.to_owned()),
+        ("kind", "provider_status".to_owned()),
+    ];
     match status.state {
         tau_proto::AgentWatchProviderState::Retrying {
             category,
             attempt,
             next_retry_delay_secs,
         } => {
-            let delay =
-                tau_proto::format_approximate_duration_secs(u64::from(next_retry_delay_secs));
-            crate::internal_envelope::frame(&format!(
-                "Watched agent {sender_label} provider status: retrying ({category}, attempt {attempt}, next retry about {delay})",
-                category = category.as_str(),
-            ))
+            headers.extend([
+                ("status", "retrying".to_owned()),
+                ("category", category.as_str().to_owned()),
+                ("attempt", attempt.to_string()),
+                ("next_retry_delay_secs", next_retry_delay_secs.to_string()),
+            ]);
         }
         tau_proto::AgentWatchProviderState::RecoveringContext { .. } => {
-            crate::internal_envelope::frame(&format!(
-                "Watched agent {sender_label} provider status: recovering_context (context_window)"
-            ))
+            headers.extend([
+                ("status", "recovering_context".to_owned()),
+                ("category", "context_window".to_owned()),
+            ]);
         }
         tau_proto::AgentWatchProviderState::Blocked { category } => {
-            crate::internal_envelope::frame(&format!(
-                "Watched agent {sender_label} provider status: blocked ({})",
-                category.as_str()
-            ))
+            headers.extend([
+                ("status", "blocked".to_owned()),
+                ("category", category.as_str().to_owned()),
+            ]);
         }
         tau_proto::AgentWatchProviderState::DispatchUncertain { category } => {
-            crate::internal_envelope::frame(&format!(
-                "Watched agent {sender_label} provider status: dispatch_uncertain ({})",
-                category.as_str()
-            ))
+            headers.extend([
+                ("status", "dispatch_uncertain".to_owned()),
+                ("category", category.as_str().to_owned()),
+            ]);
         }
         tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
-            crate::internal_envelope::frame(&format!(
-                "Watched agent {sender_label} provider operation ended with an error ({}); this does not establish that the agent stopped.",
-                failure_kind.as_str()
-            ))
+            headers.extend([
+                ("status", "terminal_error".to_owned()),
+                ("category", failure_kind.as_str().to_owned()),
+            ]);
         }
         tau_proto::AgentWatchProviderState::TerminalIncomplete { category, .. } => {
-            crate::internal_envelope::frame(&format!(
-                "Watched agent {sender_label} provider status: terminal incomplete ({})",
-                category.as_str()
-            ))
+            headers.extend([
+                ("status", "terminal_incomplete".to_owned()),
+                ("category", category.as_str().to_owned()),
+            ]);
         }
     }
+    tau_proto::SemanticEnvelope::AgentUpdate.render_fields(&headers, "")
 }
 
 /// Render a concise provider snapshot for an `agent_watch` tool result.
@@ -1346,7 +1354,7 @@ fn context_items_contain_payload_envelope_provenance_projection(items: &[Context
         ContextItem::Message(message) => message.content.iter().any(|part| match part {
             tau_proto::ContentPart::SyntheticCompactionSummary { .. } => true,
             tau_proto::ContentPart::Text { text }
-            | tau_proto::ContentPart::HarnessInternalText { text } => {
+            | tau_proto::ContentPart::HarnessInternalText { text, .. } => {
                 is_payload_envelope_provenance_projection(text)
             }
             tau_proto::ContentPart::UrlCitation { .. }
@@ -1584,12 +1592,13 @@ fn render_peer_agent_message(
             PEER_MESSAGE_CLOSE,
             PEER_MESSAGE_CLOSE_VISIBLE,
         );
-        return crate::internal_envelope::frame(&format!(
-            "Authenticated peer message\n{review_annotation}\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
-            xml_escape(sender_session_id.as_str()),
-            xml_escape(sender_id.as_str()),
-            body
-        ));
+        return tau_proto::SemanticEnvelope::PeerMessage.render_fields(
+            &[
+                ("sender_session", sender_session_id.to_string()),
+                ("sender_agent", sender_id.to_string()),
+            ],
+            &format!("{review_annotation}{body}"),
+        );
     }
 
     let sender_notice = sender_notice.map(|notice| {
@@ -1616,12 +1625,13 @@ fn render_peer_agent_message(
         PEER_MESSAGE_CLOSE,
         PEER_MESSAGE_CLOSE_VISIBLE,
     );
-    crate::internal_envelope::frame(&format!(
-        "Authenticated peer message\n{review_annotation}\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
-        xml_escape(sender_session_id.as_str()),
-        xml_escape(sender_id.as_str()),
-        body
-    ))
+    tau_proto::SemanticEnvelope::PeerMessage.render_fields(
+        &[
+            ("sender_session", sender_session_id.to_string()),
+            ("sender_agent", sender_id.to_string()),
+        ],
+        &format!("{review_annotation}{body}"),
+    )
 }
 
 fn assemble_prompt_context_window(
@@ -1838,9 +1848,20 @@ fn assemble_prompt_context_window(
                                 "This CLI sender is waiting for exactly one final response. Use the message tool with recipient_id `{recipient}` once, for your final response only. Do not send acknowledgements or progress. This address is local to this harness and expires when the caller disconnects; it is not an agent or session."
                             ),
                         };
-                        crate::internal_envelope::frame(&format!(
-                            "You have received a message from a local CLI caller (not an agent).\n{policy}\n\n{message}"
-                        ))
+                        let mut headers = vec![(
+                            "reply_mode",
+                            match origin {
+                                tau_proto::CliMessageOrigin::OneWay => "one_way".to_owned(),
+                                tau_proto::CliMessageOrigin::FinalResponse { .. } => {
+                                    "final_response".to_owned()
+                                }
+                            },
+                        )];
+                        if let tau_proto::CliMessageOrigin::FinalResponse { recipient } = origin {
+                            headers.push(("recipient", recipient.to_string()));
+                        }
+                        tau_proto::SemanticEnvelope::CliMessage
+                            .render_fields(&headers, &format!("{policy}\n\n{message}"))
                     } else {
                         match sender_session_id {
                             Some(sender_session_id) => render_peer_agent_message(
@@ -1857,9 +1878,8 @@ fn assemble_prompt_context_window(
                                     MESSAGE_CLOSE,
                                     MESSAGE_CLOSE_VISIBLE,
                                 );
-                                crate::internal_envelope::frame(&format!(
-                                    "You have received a message from {sender_id}\n\n<message>\n{body}\n</message>"
-                                ))
+                                tau_proto::SemanticEnvelope::AgentMessage
+                                    .render_fields(&[("sender", sender_id.to_string())], &body)
                             }
                         }
                     };
@@ -1887,15 +1907,18 @@ fn assemble_prompt_context_window(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: {
-                                            let body =
-                                                tau_proto::escape_exact_sentinel_close(
-                                                    message,
-                                                    WATCH_RESPONSE_CLOSE,
-                                                    WATCH_RESPONSE_CLOSE_VISIBLE,
-                                                );
-                                            crate::internal_envelope::frame(&format!(
-                                                "Watched agent {sender_label} emitted a response\n\n<response>\n{body}\n</response>"
-                                            ))
+                                            let body = tau_proto::escape_exact_sentinel_close(
+                                                message,
+                                                WATCH_RESPONSE_CLOSE,
+                                                WATCH_RESPONSE_CLOSE_VISIBLE,
+                                            );
+                                            tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
+                                                &[
+                                                    ("agent", sender_label),
+                                                    ("kind", "response".to_owned()),
+                                                ],
+                                                &body,
+                                            )
                                         },
                                     }],
                                     phase: None,
@@ -1918,15 +1941,18 @@ fn assemble_prompt_context_window(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: {
-                                            let body =
-                                                tau_proto::escape_exact_sentinel_close(
-                                                    message,
-                                                    WATCH_PROMPT_CLOSE,
-                                                    WATCH_PROMPT_CLOSE_VISIBLE,
-                                                );
-                                            crate::internal_envelope::frame(&format!(
-                                                "Watched agent {sender_label} received a user prompt\n\n<prompt>\n{body}\n</prompt>"
-                                            ))
+                                            let body = tau_proto::escape_exact_sentinel_close(
+                                                message,
+                                                WATCH_PROMPT_CLOSE,
+                                                WATCH_PROMPT_CLOSE_VISIBLE,
+                                            );
+                                            tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
+                                                &[
+                                                    ("agent", sender_label),
+                                                    ("kind", "prompt".to_owned()),
+                                                ],
+                                                &body,
+                                            )
                                         },
                                     }],
                                     phase: None,
@@ -1985,10 +2011,11 @@ fn assemble_prompt_context_window(
                                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
-                                        text: crate::internal_envelope::frame(&format!(
-                                            "Watched agent {sender_id} has accumulated over {} minutes across waits in its current Working period; this is not the runtime of its current tool.",
-                                            wait.threshold_minutes
-                                        )),
+                                        text: tau_proto::SemanticEnvelope::AgentUpdate.render_fields(&[
+                                            ("agent", sender_id.to_string()),
+                                            ("kind", "long_wait".to_owned()),
+                                            ("threshold_minutes", wait.threshold_minutes.to_string()),
+                                        ], "Cumulative waits in the current Working period, not the runtime of the current tool."),
                                     }],
                                     phase: None,
                                     responses_raw_json: None,
@@ -2014,9 +2041,16 @@ fn assemble_prompt_context_window(
                                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
-                                        text: crate::internal_envelope::frame(&format!(
-                                            "Watched agent {sender_id} stopped: {reason}"
-                                        )),
+                                        text: tau_proto::SemanticEnvelope::AgentUpdate
+                                            .render_fields(
+                                                &[
+                                                    ("agent", sender_id.to_string()),
+                                                    ("kind", "lifecycle".to_owned()),
+                                                    ("status", "stopped".to_owned()),
+                                                    ("reason", reason.to_owned()),
+                                                ],
+                                                "",
+                                            ),
                                     }],
                                     phase: None,
                                     responses_raw_json: None,
@@ -2163,9 +2197,12 @@ fn project_user_prompt_items(
         if let ContextItem::Message(message) = item {
             for part in &mut message.content {
                 match part {
-                    tau_proto::ContentPart::HarnessInternalText { text } => {
+                    tau_proto::ContentPart::HarnessInternalText { text, envelope } => {
                         *part = tau_proto::ContentPart::Text {
-                            text: crate::internal_envelope::frame(text),
+                            text: envelope.map_or_else(
+                                || crate::internal_envelope::frame(text),
+                                |kind| kind.render(text),
+                            ),
                         };
                     }
                     tau_proto::ContentPart::SyntheticCompactionSummary { .. } => {}
@@ -2177,11 +2214,7 @@ fn project_user_prompt_items(
                         }
                         let body =
                             tau_proto::TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE.escape_body(text);
-                        let body = tau_proto::escape_exact_sentinel_close(
-                            &body,
-                            crate::internal_envelope::TAU_INTERNAL_CLOSE,
-                            crate::internal_envelope::TAU_INTERNAL_CLOSE_VISIBLE,
-                        );
+                        let body = crate::internal_envelope::escape_untrusted_close(&body);
                         if human_ui {
                             let mut attributes = vec![("source", "ui".to_owned())];
                             if delayed {
@@ -2238,9 +2271,9 @@ fn is_canonical_background_completion_prompt(
 }
 
 /// Project durable tool terminals without treating producer-controlled text as
-/// presentation authority. Only the harness-stamped dedup discriminator gets
-/// the internal envelope; every ordinary tool payload has an exact close
-/// neutralized before it reaches a provider.
+/// presentation authority. The harness-stamped dedup discriminator adds a
+/// canonical receipt header, not an injected-user envelope. Ordinary payloads
+/// cannot close a harness-selected semantic envelope.
 pub(crate) fn project_tool_result_items(
     items: &[tau_proto::ToolResultItem],
 ) -> Vec<tau_proto::ToolResultItem> {
@@ -2254,7 +2287,11 @@ pub(crate) fn project_tool_result_items(
                     crate::internal_envelope::escape_untrusted_close(&item.output.body).into_owned()
                 }
                 tau_proto::ToolResultPresentation::HarnessDedupPointer => {
-                    crate::internal_envelope::frame(&item.output.body)
+                    item.output.headers.push(tau_proto::ToolResponseHeader {
+                        key: "status".to_owned(),
+                        value: "duplicate".to_owned(),
+                    });
+                    std::mem::take(&mut item.output.body)
                 }
             };
             match &mut item.status {
@@ -2264,9 +2301,7 @@ pub(crate) fn project_tool_result_items(
                         | tau_proto::ToolResultPresentation::ToolStreamReceipt => {
                             crate::internal_envelope::escape_untrusted_close(message).into_owned()
                         }
-                        tau_proto::ToolResultPresentation::HarnessDedupPointer => {
-                            crate::internal_envelope::frame(message)
-                        }
+                        tau_proto::ToolResultPresentation::HarnessDedupPointer => message.clone(),
                     };
                 }
                 tau_proto::ToolResultStatus::Cancelled { reason } => {

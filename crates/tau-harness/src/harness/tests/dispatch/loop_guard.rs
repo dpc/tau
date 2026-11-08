@@ -1387,7 +1387,7 @@ fn loop_guard_preserves_blocked_breaker_after_background_cancellation() {
     assert!(
         pending
             .iter()
-            .any(|prompt| prompt.text.contains("completion receipt")),
+            .any(|prompt| prompt.text.contains("status: terminal")),
         "cancellation must retain its existing notification disposition"
     );
 }

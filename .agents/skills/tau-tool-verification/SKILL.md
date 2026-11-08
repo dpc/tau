@@ -78,7 +78,7 @@ project AGENTS/skill catalog available before a dependent turn; a getter and
 call-local override must not change discovery. A same-path setter must rescan
 edited or deleted project files. Do not run dependent calls as sibling tools.
 Inspect the provider continuation: changed discovery belongs in a separate
-`tau_discovery` user message after the complete tool-results block, in the same
+`discovery` user message after the complete tool-results block, in the same
 request. The typed workdir result stays unchanged, with no extra turn or provider
 call. Verify that A→B→A and content reversion reference exact versions with surviving
 context receipts rather than repeat their bodies. Compaction may remove those
@@ -92,6 +92,11 @@ selected-agent `:skill` expansion must wait for the installed replacement.
 Restore the original workdir with a separate setter when the probe finishes.
 
 ### Tool result output structure
+
+The normative entry point is
+[SPEC-tau-proto-provider-data](../../../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions).
+`ToolResponse` owns optional headers/payload serialization. Injected user-role
+source has a separate registered semantic envelope; native typed results do not.
 
 For model shell output, test both the native 15 KiB body budget and the separate
 8 KiB harness final capture. If either drops rendered bytes, the final header

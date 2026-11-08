@@ -2,6 +2,10 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-ext-utils guidance
 
+Before changing tool-result presentation, read
+[SPEC-tau-proto-provider-data](../tau-proto/specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions).
+Typed tool results and injected-user text are distinct carriers.
+
 Read `specs/ARCH-tau-ext-utils.md` before changing timer restore, firing, or display behavior.
 Timer state is intentionally active-only and reconstructed from replayed session
 execution facts; do not add a separate timer store without an explicit design

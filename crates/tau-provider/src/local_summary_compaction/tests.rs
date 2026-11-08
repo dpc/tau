@@ -69,7 +69,9 @@ fn defaults_publish_no_cross_unit_limits() {
 fn request_is_the_cache_aligned_trailing_user_instruction() {
     let request = REQUEST.as_str();
     assert!(
-        tau_proto::TAU_INTERNAL_PAYLOAD_ENVELOPE.matches_whole(request),
+        tau_proto::SemanticEnvelope::SummaryRequest
+            .family()
+            .matches_whole(request),
         "the request must be exactly one registered internal envelope"
     );
     assert!(request.contains("Do not make or request tool calls."));

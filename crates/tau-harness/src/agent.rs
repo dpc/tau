@@ -543,7 +543,11 @@ impl PendingPrompt {
         let end = u32::try_from(text.len()).expect("prompt length fits u32");
         Self {
             text,
-            trusted_internal_spans: vec![tau_proto::TrustedInternalSpan { start: 0, end }],
+            trusted_internal_spans: vec![tau_proto::TrustedInternalSpan {
+                envelope: None,
+                start: 0,
+                end,
+            }],
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -559,6 +563,13 @@ impl PendingPrompt {
         }
     }
 
+    /// Select semantic framing without changing this prompt's scheduling class.
+    pub(crate) fn semantic(text: String, envelope: tau_proto::SemanticEnvelope) -> Self {
+        let mut prompt = Self::internal(text);
+        prompt.trusted_internal_spans[0].envelope = Some(envelope);
+        prompt
+    }
+
     /// Create an internal-class prompt whose bytes came from an authenticated
     /// UI or configured extension. Its class affects lifecycle only; it has no
     /// provider-presentation authority.
@@ -570,14 +581,14 @@ impl PendingPrompt {
 
     /// Create an internal advisory prompt from a named context-size alert.
     pub(crate) fn context_size_alert(text: String) -> Self {
-        let mut prompt = Self::internal(text);
+        let mut prompt = Self::semantic(text, tau_proto::SemanticEnvelope::ContextSizeAlert);
         prompt.source = PendingPromptSource::ContextSizeAlert;
         prompt
     }
 
     /// Create an internal loop-guard pivot prompt.
     pub(crate) fn loop_guard(text: String) -> Self {
-        let mut prompt = Self::internal(text);
+        let mut prompt = Self::semantic(text, tau_proto::SemanticEnvelope::LoopGuard);
         prompt.source = PendingPromptSource::LoopGuard;
         prompt
     }
@@ -585,29 +596,31 @@ impl PendingPrompt {
     /// Create a hidden background-completion notice that waits for the next
     /// user-driven continuation instead of starting a standalone agent turn.
     pub(crate) fn passive_background_completion(text: String) -> Self {
-        let mut prompt = Self::internal(text);
+        let mut prompt = Self::semantic(text, tau_proto::SemanticEnvelope::ToolCompletion);
         prompt.source = PendingPromptSource::PassiveBackgroundCompletion;
         prompt
     }
 
     /// Create an inference-activating background-completion notice.
     pub(crate) fn activating_background_completion(text: String) -> Self {
-        let mut prompt = Self::internal(text);
+        let mut prompt = Self::semantic(text, tau_proto::SemanticEnvelope::ToolCompletion);
         prompt.source = PendingPromptSource::ActivatingBackgroundCompletion;
         prompt
     }
 
     /// Create a hidden restore notice that waits for a separate activation.
     pub(crate) fn passive_restore_notice(text: String) -> Self {
-        let mut prompt = Self::internal(text);
+        let mut prompt = Self::semantic(text, tau_proto::SemanticEnvelope::SessionNotice);
         prompt.source = PendingPromptSource::PassiveRestoreNotice;
         prompt
     }
 
     /// Create the exact inference-activating output-length instruction.
     pub(crate) fn output_length_continuation() -> Self {
-        let mut prompt =
-            Self::internal(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned());
+        let mut prompt = Self::semantic(
+            tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned(),
+            tau_proto::SemanticEnvelope::OutputContinuation,
+        );
         prompt.source = PendingPromptSource::OutputLengthContinuation;
         prompt
     }
@@ -631,6 +644,9 @@ impl PendingPrompt {
         terminal: tau_proto::SelfCompactionTerminal,
     ) -> Self {
         self.self_compaction_terminal = Some(terminal);
+        for span in &mut self.trusted_internal_spans {
+            span.envelope = Some(tau_proto::SemanticEnvelope::CompactionResult);
+        }
         self
     }
 

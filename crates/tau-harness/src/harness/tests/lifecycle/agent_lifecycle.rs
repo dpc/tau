@@ -76,7 +76,7 @@ fn agents_context_is_injected_when_agent_is_created() {
             _ => None,
         })
         .expect("expected AGENTS.md initialization context");
-    assert!(bootstrap.contains("<tau_discovery>"));
+    assert!(bootstrap.contains("<discovery>"));
     assert!(bootstrap.contains("agents:/repo/pkg/AGENTS.md"));
     assert!(bootstrap.contains("agents:/repo/AGENTS.md"));
     let root_pos = bootstrap.find("root rule").expect("root rule");
@@ -271,6 +271,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
                             == tau_proto::PromptSubmissionSource::HarnessInternal
                         && steered.trusted_internal_spans
                             == vec![tau_proto::TrustedInternalSpan {
+                                envelope: Some(tau_proto::SemanticEnvelope::OutputContinuation),
                                 start: 0,
                                 end: u32::try_from(
                                     tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.len()

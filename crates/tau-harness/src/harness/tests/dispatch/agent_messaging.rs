@@ -2258,7 +2258,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
                     part,
                     ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text }
+            | ContentPart::HarnessInternalText { text, .. }
                         if text.contains(BODY)
                 ))
             )
@@ -2271,9 +2271,8 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
             .iter()
             .filter(|item| {
                 text_part(item).is_some_and(|text| {
-                    text.contains(&format!(
-                        "<tau_internal>You have received a message from {sender_id}"
-                    )) && text.contains(BODY)
+                    text.contains(&format!("<agent_message>\nsender: {sender_id}"))
+                        && text.contains(BODY)
                 })
             })
             .count(),
@@ -3053,12 +3052,12 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     let text = context
         .iter()
         .filter_map(text_part)
-        .find(|text| text.contains("Watched agent"))
+        .find(|text| text.contains("kind: response"))
         .expect("canonical watch response");
     assert!(text.contains(&format!(
-        "<tau_internal>Watched agent {recipient_id} emitted a response"
+        "<agent_update>\nagent: {recipient_id}\nkind: response"
     )));
-    assert!(text.contains("<response>\ndone <response>&&lt;/response&gt; payload >\n</response>"));
+    assert!(text.contains("\n\ndone <response>&&lt;/response&gt; payload ></agent_update>"));
     assert!(!text.contains("You have received a message"));
     assert!(!text.contains("<message>"));
 
@@ -3260,12 +3259,12 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     let text = context
         .iter()
         .filter_map(text_part)
-        .find(|text| text.contains("received a user prompt"))
+        .find(|text| text.contains("kind: prompt"))
         .expect("canonical prompt notification");
     assert!(text.contains(&format!(
-        "<tau_internal>Watched agent {watched_id} received a user prompt"
+        "<agent_update>\nagent: {watched_id}\nkind: prompt"
     )));
-    assert!(text.contains("<prompt>\nplease continue <now>&</now> >\n</prompt>"));
+    assert!(text.contains("\n\nplease continue <now>&</now> ></agent_update>"));
     assert!(!text.contains("finished its turn"));
     assert!(!text.contains("<response>"));
 
@@ -3631,14 +3630,11 @@ fn rendered_prompt_with_seeded_agents_md_includes_discovery_preview_without_infe
     let delivery = result.discovery_context.expect("initial discovery preview");
     assert!(prompt.contains(&delivery.render()));
     assert!(
-        prompt.contains("`<tau_discovery>`"),
+        prompt.contains("`<discovery>`"),
         "preview includes provenance guidance"
     );
     assert_eq!(
-        prompt
-            .lines()
-            .filter(|line| *line == "<tau_discovery>")
-            .count(),
+        prompt.lines().filter(|line| *line == "<discovery>").count(),
         1
     );
     assert!(prompt.contains("seeded AGENTS instructions"));
@@ -4649,7 +4645,7 @@ fn external_agent_message_request_publishes_received_projection() {
     assert!(context.iter().any(|item| {
         text_part(item).is_some_and(|text| {
             text.contains(
-                "<tau_peer_message sender_session=\"other-session\" sender_agent=\"sender_agent\">",
+                "<peer_message>\nsender_session: other-session\nsender_agent: sender_agent",
             ) && text.contains("hello from outside")
         })
     }));
@@ -5218,7 +5214,7 @@ fn agent_message_interrupts_recipient_active_wait() {
         .expect("message wake prompt");
     assert!(prompt.context.flatten().iter().any(|item| {
         text_part(item).is_some_and(|text| {
-            text.contains("You have received a message from manager")
+            text.contains("<agent_message>\nsender: manager")
                 && text.contains("please stop waiting")
         })
     }));

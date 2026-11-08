@@ -74,8 +74,16 @@ receive hidden typed context projections containing the watched agent's final re
 text or the text of a user prompt accepted by the watched agent. These notifications must be
 clearly labeled as watch notifications, not as explicit `message` tool deliveries:
 
-- `<tau_internal>Watched agent <agent-id> emitted a response …</tau_internal>`
-- `<tau_internal>Watched agent <agent-id> received a user prompt …</tau_internal>`
+The registered `agent_update` family carries an `agent` header and a closed
+`kind` (`response`, `prompt`, `work_status`, `provider_status`, `long_wait`, or
+`lifecycle`). Observed response/prompt text is payload, not a direct user request.
+Headers and payload use the canonical text serializer before exact-close framing.
+See [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md)
+and [SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+
+The `agent_watch` tool returns `watching: true` or `watching: false`, without
+repeating its argument. Enabling retains any useful current provider snapshot in
+`provider_status`. The acknowledgement is a typed tool result, not an envelope.
 
 Self-reported work status uses a closed phase (`unreported`, `working`, `waiting`,
 `done`, `blocked`, or `unknown`), a runtime-local epoch, and a canonical model-authored
@@ -83,9 +91,9 @@ title of at most 160 UTF-8 bytes. The title is nonempty, trimmed, single-line,
 and contains no control characters. An `unreported` notification carries no
 title. Initial snapshots do not activate the watcher. Later status transitions
 are durable typed, isolated notifications. Prompt presentation escapes the title
-as untrusted visible metadata and uses the generic shape
-`<tau_internal>Watched agent <agent-id> status: <state> on <title></tau_internal>` without
-inferring start/update sequencing.
+as untrusted visible metadata and uses `status` and `task` headers without
+inferring start/update sequencing. Provider terminal errors remain provider
+status, not lifecycle-stopped notifications.
 Watch-status protocol and journal decoding applies this phase/title grammar
 through `SessionAgentWorkStatus`. A malformed live or historical notification
 fails closed with one bounded diagnostic and never reaches a consumer through a

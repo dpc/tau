@@ -1731,10 +1731,8 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
         .flatten();
     assert!(context.iter().any(|item| {
         text_part(item).is_some_and(|text| {
-            text.contains(&format!(
-                "<tau_internal>You have received a message from {recipient_id}"
-            )) && text
-                .contains("<message>\nsecret <message>&&lt;/message&gt; payload >\n</message>")
+            text.contains(&format!("<agent_message>\nsender: {recipient_id}"))
+                && text.contains("\n\nsecret <message>&&lt;/message&gt; payload ></agent_message>")
         })
     }));
     assert!(!event_log_contains_any_source(&h, |event| matches!(

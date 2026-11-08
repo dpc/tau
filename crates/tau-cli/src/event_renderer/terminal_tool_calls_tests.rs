@@ -132,6 +132,7 @@ fn projection_matches_legacy_selection_for_zero_one_and_many_calls() {
                 ContextItem::Message(MessageItem {
                     role: ContextRole::Assistant,
                     content: vec![ContentPart::HarnessInternalText {
+                        envelope: None,
                         text: "between".to_owned(),
                     }],
                     phase: None,

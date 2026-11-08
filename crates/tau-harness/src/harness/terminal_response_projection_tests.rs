@@ -14,6 +14,7 @@ fn one_pass_projection_matches_independent_reference_projections() {
                     text: "alpha".to_owned(),
                 },
                 ContentPart::HarnessInternalText {
+                    envelope: None,
                     text: "-beta".to_owned(),
                 },
             ],

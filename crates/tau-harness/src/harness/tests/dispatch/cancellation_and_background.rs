@@ -61,6 +61,7 @@ fn unsolicited_cancellation_preserves_live_and_restored_wait_outcome() {
                         .into(),
                     ),
                     captured_output: Some(tau_proto::ToolFinalOutput {
+                        outcome: None,
                         text: "forged capture".into(),
                         omitted_bytes: 0,
                     }),
@@ -93,9 +94,17 @@ fn unsolicited_cancellation_preserves_live_and_restored_wait_outcome() {
                 tau_proto::ToolBackgroundErrorOutcome::Cancelled
             );
             let capture = error.captured_output.as_ref().expect("available capture");
-            assert!(capture.text.contains("cancelled: tool cancelled"));
+            assert_eq!(
+                capture.outcome,
+                Some(tau_proto::ToolCompletionOutcome::Cancelled)
+            );
             if plural {
                 assert!(capture.text.contains("available cancellation diagnostic"));
+            } else {
+                assert!(
+                    capture.text.is_empty(),
+                    "available empty output stays empty"
+                );
             }
             assert!(!capture.text.contains("forged capture"));
             assert!(
@@ -117,12 +126,12 @@ fn unsolicited_cancellation_preserves_live_and_restored_wait_outcome() {
                 })
                 .expect("completion followup context");
             assert!(
-                live_context.contains("cancelled: tool cancelled"),
+                live_context.contains("status=\\\"canceled\\\""),
                 "status must reach the model without wait"
             );
             let replayed = tau_core::AgentTree::try_from_events(agent.clone(), &records)
                 .expect("replay final source");
-            assert!(materialized_source_text(&replayed).contains("cancelled: tool cancelled"));
+            assert!(materialized_source_text(&replayed).contains("status=\"canceled\""));
             h.handle_provider_response_finished(provider_text_response(
                 &prompt,
                 agent.clone(),
@@ -242,7 +251,7 @@ fn unread_background_completion_allows_idle_shutdown_and_cold_wait() {
                 event,
                 Event::AgentPromptSubmitted(prompt)
                     if prompt.internal_kind == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
-                        && prompt.text.contains("completion receipt")
+                        && prompt.text.contains("status: terminal")
                         && !prompt.text.contains(&output)
             )));
             assert!(
@@ -1493,7 +1502,14 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         .context
         .flatten()
         .iter()
-        .position(|item| text_part(item) == Some(crate::internal_envelope::frame(&notice).as_str()))
+        .position(|item| {
+            text_part(item)
+                == Some(
+                    tau_proto::SemanticEnvelope::SessionNotice
+                        .render(&notice)
+                        .as_str(),
+                )
+        })
         .expect("background interruption notice in first prompt");
     let user_pos = first_prompt
         .context
@@ -2491,8 +2507,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     let completion_prompt = background_completion_prompt(&call_id);
     assert_eq!(
         completion_prompt,
-        "Tool call `bg-any-after` completed. Its output is recorded separately. Call `wait` for a \
-         completion receipt."
+        "call_id: bg-any-after\nstatus: terminal\n"
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
@@ -2657,7 +2672,7 @@ fn passive_completion_notices_do_not_copy_payload_into_provider_context() {
     assert!(
         committed
             .iter()
-            .all(|text| text.contains("completion receipt"))
+            .all(|text| text.contains("status: terminal"))
     );
     assert!(
         !committed.iter().any(
@@ -5009,7 +5024,7 @@ fn background_cancel_clears_actual_running_call() {
     assert!(
         pending.iter().any(|prompt| {
             prompt.text.contains("bg-exclusive-cancel-running")
-                && prompt.text.contains("completion receipt")
+                && prompt.text.contains("status: terminal")
                 && !prompt.trusted_internal_spans.is_empty()
         }),
         "pending: {pending:?}"

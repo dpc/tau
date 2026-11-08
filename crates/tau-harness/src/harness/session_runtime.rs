@@ -1137,7 +1137,10 @@ impl Harness {
                         .remove(&internal_name);
                 }
             }
-            prompts.push(PendingPrompt::internal(notice.prompt_text()));
+            prompts.push(PendingPrompt::semantic(
+                notice.prompt_text(),
+                tau_proto::SemanticEnvelope::ToolAvailability,
+            ));
         }
         prompts
     }
@@ -1203,7 +1206,10 @@ impl Harness {
             .changed_session_agents
             .remove(&(session_id, agent_id))
         {
-            prompts.push(PendingPrompt::internal(changed_session_notice_prompt()));
+            prompts.push(PendingPrompt::semantic(
+                changed_session_notice_prompt(),
+                tau_proto::SemanticEnvelope::SessionNotice,
+            ));
         }
         prompts.extend(self.take_pending_tool_availability_prompts_for_user_prompt());
         prompts

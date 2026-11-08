@@ -1326,7 +1326,11 @@ fn trusted_internal_prompt_spans_are_typed_utf8_ranges() {
         unreachable!()
     };
     prompt.text = text.to_owned();
-    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 0, end: 11 }];
+    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan {
+        envelope: Some(tau_proto::SemanticEnvelope::AgentContext),
+        start: 0,
+        end: 11,
+    }];
 
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     tree.validate_event(&event).expect("valid span");
@@ -1340,7 +1344,7 @@ fn trusted_internal_prompt_spans_are_typed_utf8_ranges() {
                     if matches!(
                         content.as_slice(),
                         [
-                            ContentPart::HarnessInternalText { text: prefix },
+                            ContentPart::HarnessInternalText { text: prefix, envelope: Some(tau_proto::SemanticEnvelope::AgentContext) },
                             ContentPart::Text { text: task },
                         ] if prefix == "bootstrap\n\n" && task == "雪 user task"
                     )
@@ -1351,7 +1355,11 @@ fn trusted_internal_prompt_spans_are_typed_utf8_ranges() {
     let Event::AgentPromptSubmitted(prompt) = &mut invalid else {
         unreachable!()
     };
-    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 12, end: 13 }];
+    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan {
+        envelope: None,
+        start: 12,
+        end: 13,
+    }];
     assert!(
         validation_error(&tree, invalid).contains("trusted internal prompt spans"),
         "ranges must begin and end on UTF-8 boundaries"
@@ -6926,6 +6934,7 @@ fn output_length_steer(agent_id: tau_proto::AgentId) -> tau_proto::AgentPromptSt
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned(),
         trusted_internal_spans: vec![tau_proto::TrustedInternalSpan {
+            envelope: None,
             start: 0,
             end: u32::try_from(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.len())
                 .expect("bounded instruction"),
@@ -7196,6 +7205,17 @@ fn output_length_recovery_accepts_new_exact_steer_only() {
     tree.validate_event(&Event::AgentPromptSteered(steer.clone()))
         .expect("new exact steer");
 
+    steer.trusted_internal_spans[0].envelope =
+        Some(tau_proto::SemanticEnvelope::OutputContinuation);
+    tree.validate_event(&Event::AgentPromptSteered(steer.clone()))
+        .expect("semantic exact steer");
+    steer.trusted_internal_spans[0].envelope = Some(tau_proto::SemanticEnvelope::AgentContext);
+    assert!(
+        tree.validate_event(&Event::AgentPromptSteered(steer.clone()))
+            .is_err()
+    );
+    steer.trusted_internal_spans[0].envelope =
+        Some(tau_proto::SemanticEnvelope::OutputContinuation);
     steer.text.push('!');
     steer.trusted_internal_spans[0].end =
         u32::try_from(steer.text.len()).expect("bounded malformed instruction");

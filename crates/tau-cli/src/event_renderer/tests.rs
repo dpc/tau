@@ -503,6 +503,7 @@ fn final_text_projection_matches_eager_reference_and_observes_real_allocations()
         message(
             ContextRole::Assistant,
             vec![ContentPart::HarnessInternalText {
+                envelope: None,
                 text: "single 🦀".to_owned(),
             }],
         ),
@@ -3677,6 +3678,7 @@ fn deferred_large_tool_terminal_reuses_one_lightweight_projection() {
             ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::HarnessInternalText {
+                    envelope: None,
                     text: "mixed-item".to_owned(),
                 }],
                 phase: None,

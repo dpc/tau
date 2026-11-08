@@ -22,10 +22,11 @@ the captured configured generation and current target, then publishes a separate
 append. Peers cannot publish canonical facts or result events.
 
 The canonical fact records the authenticated configured publisher, operation ID,
-target, and rendered text. The shared `tau_extension_output` family has ordered
+target, and rendered text. The shared `extension_output` family has ordered
 `publisher` and `operation_id` attributes, escaped with the shared attribute
-renderer. Its exact close is `</tau_extension_output>`; body collisions become
-`&lt;/tau_extension_output&gt;`. Nested tags do not establish another provenance
+renderer. Its exact close is `</extension_output>`; body collisions become
+`&lt;/extension_output&gt;`. Committed historical `tau_extension_output` bytes remain
+unchanged and recognizable. Nested tags do not establish another provenance
 boundary. This is extension output, not direct human input or trusted harness
 instructions. Canonical facts are immutable under interception; Drop rejects
 the append. Original target privacy classification survives interception.

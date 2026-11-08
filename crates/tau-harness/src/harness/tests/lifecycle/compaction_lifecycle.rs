@@ -1202,6 +1202,7 @@ fn output_length_continuation_delivers_exactly_one_captured_successor() {
     assert_eq!(
         steer_record.trusted_internal_spans,
         vec![tau_proto::TrustedInternalSpan {
+            envelope: Some(tau_proto::SemanticEnvelope::OutputContinuation),
             start: 0,
             end: u32::try_from(steer_record.text.len()).expect("bounded instruction"),
         }]

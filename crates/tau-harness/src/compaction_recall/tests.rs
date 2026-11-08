@@ -232,6 +232,7 @@ fn accepted_streamed_source_survives_compaction_archive_import() {
         tool_type: tau_proto::ToolType::Function,
         result: tau_proto::CborValue::Null,
         captured_output: Some(tau_proto::ToolFinalOutput {
+            outcome: None,
             text: "accepted final diagnostic".into(),
             omitted_bytes: 37,
         }),

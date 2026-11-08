@@ -139,7 +139,10 @@ fn builtin_cancel_terminals_retain_target_without_claiming_termination()
     };
     assert_eq!(
         result.result,
-        CborValue::Text("Tool cancellation requested".to_owned())
+        CborValue::Map(vec![(
+            CborValue::Text("status".to_owned()),
+            CborValue::Text("ok".to_owned()),
+        )])
     );
     let display = result.display.as_ref().expect("accepted display");
     assert_eq!(display.args, "cancel-display-target");

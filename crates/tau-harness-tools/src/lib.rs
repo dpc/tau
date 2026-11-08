@@ -646,7 +646,7 @@ fn agent_watch_tool_result(
     self_agent_id: &str,
     parsed: &AgentWatchArgs,
     mut try_set: impl FnMut(&str, &str, bool) -> Result<Option<String>, String>,
-) -> Result<String, String> {
+) -> Result<CborValue, String> {
     let snapshot = try_set(self_agent_id, &parsed.agent_id, parsed.enable)?;
     if parsed.enable {
         Ok(agent_watch_enabled_result(
@@ -654,15 +654,25 @@ fn agent_watch_tool_result(
             snapshot.as_deref(),
         ))
     } else {
-        Ok(format!("Stopped watching agent `{}`", parsed.agent_id))
+        Ok(CborValue::Map(vec![(
+            CborValue::Text("watching".to_owned()),
+            CborValue::Bool(false),
+        )]))
     }
 }
 
-fn agent_watch_enabled_result(agent_id: &str, current_status: Option<&str>) -> String {
-    match current_status {
-        Some(status) => format!("Watching agent `{agent_id}`; current status: {status}"),
-        None => format!("Watching agent `{agent_id}`"),
+fn agent_watch_enabled_result(_agent_id: &str, current_status: Option<&str>) -> CborValue {
+    let mut headers = vec![(
+        CborValue::Text("watching".to_owned()),
+        CborValue::Bool(true),
+    )];
+    if let Some(status) = current_status {
+        headers.push((
+            CborValue::Text("provider_status".to_owned()),
+            CborValue::Text(status.to_owned()),
+        ));
     }
+    CborValue::Map(headers)
 }
 
 trait AgentWatchFinisher {
@@ -739,14 +749,14 @@ fn finish_agent_watch_success(
     tool_name: ToolName,
     tool_type: ToolType,
     arguments: &CborValue,
-    message: String,
+    result: CborValue,
 ) {
     finisher.finish_agent_watch_success(
         conversation_id,
         call_id,
         tool_name,
         tool_type,
-        CborValue::Text(message),
+        result,
         Some(agent_watch_success_display(arguments)),
     );
 }
@@ -1559,7 +1569,10 @@ impl BuiltinTools {
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                CborValue::Text("Tool cancellation requested".to_owned()),
+                CborValue::Map(vec![(
+                    CborValue::Text("status".to_owned()),
+                    CborValue::Text("ok".to_owned()),
+                )]),
                 Some(cancel_display(
                     &call.arguments,
                     ToolUseStatus::Success,
@@ -2046,6 +2059,7 @@ fn delegate_start_request(
         parent_agent: None,
         query_id,
         trusted_internal_spans: vec![tau_proto::TrustedInternalSpan {
+            envelope: Some(tau_proto::SemanticEnvelope::AgentContext),
             start: 0,
             end: u32::try_from(prefix.len()).expect("delegate bootstrap prefix fits u32"),
         }],

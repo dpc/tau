@@ -1898,7 +1898,7 @@ impl AgentTree {
                                     part,
                                     ContentPart::Text { text: item_text }
                                         | ContentPart::SyntheticCompactionSummary { text: item_text }
-                                        | ContentPart::HarnessInternalText { text: item_text }
+                                        | ContentPart::HarnessInternalText { text: item_text, .. }
                                         if item_text == text
                                 ))
                         ))
@@ -4166,6 +4166,7 @@ impl AgentTree {
                     tool_name,
                     sequence,
                     true,
+                    output.outcome,
                     output.omitted_bytes,
                     &output.text,
                 ),
@@ -4203,6 +4204,7 @@ impl AgentTree {
             }
             if start < end {
                 parts.push(ContentPart::HarnessInternalText {
+                    envelope: span.envelope,
                     text: text[start..end].to_owned(),
                 });
             }
@@ -4931,8 +4933,9 @@ impl AgentTree {
                     ))
                 } else if appended.operation_id.is_empty()
                     || appended.operation_id.len() > 256
-                    || !tau_proto::TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE
-                        .matches_whole(&appended.text)
+                    || !(tau_proto::EXTENSION_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(&appended.text)
+                        || tau_proto::TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE
+                            .matches_whole(&appended.text))
                 {
                     Err(AgentEventValidationError::new(
                         "invalid passive context output",
@@ -6417,7 +6420,16 @@ impl AgentTree {
         let exact_span = (steered.text == tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION)
             .then_some(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION)
             .and_then(|instruction| u32::try_from(instruction.len()).ok())
-            .map(|end| vec![tau_proto::TrustedInternalSpan { start: 0, end }]);
+            .map(|end| {
+                vec![tau_proto::TrustedInternalSpan {
+                    envelope: steered
+                        .trusted_internal_spans
+                        .first()
+                        .and_then(|span| span.envelope),
+                    start: 0,
+                    end,
+                }]
+            });
         if self
             .active_output_length_plan()
             .filter(|(_, dispatch)| dispatch.output_length_plan_node == head)
@@ -6426,6 +6438,10 @@ impl AgentTree {
             || steered.message_class != tau_proto::PromptMessageClass::Internal
             || steered.submission_source != tau_proto::PromptSubmissionSource::HarnessInternal
             || exact_span.is_none()
+            || steered.trusted_internal_spans.first().is_some_and(|span| {
+                span.envelope
+                    .is_some_and(|kind| kind != tau_proto::SemanticEnvelope::OutputContinuation)
+            })
             || Some(&steered.trusted_internal_spans) != exact_span.as_ref()
             || steered.self_compaction_terminal.is_some()
             || steered.ctx_id.is_some()

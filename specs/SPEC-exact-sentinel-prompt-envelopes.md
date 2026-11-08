@@ -31,14 +31,26 @@ model-facing payload families:
 | Family | Carrier | Opening schema |
 | --- | --- | --- |
 | `user` | Generic user-role text | Fixed `source="ui"`, then optional `delayed="true"`; direct Tau user-channel input |
-| `tau_extension_output` | Generic user-role text | `publisher`, `operation_id`; passive configured-extension output |
-| `tau_internal` | Generic user-role text | Fieldless; typed harness-internal projection |
-| `tau_discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
+| `extension_output` | Generic user-role text | `publisher`, `operation_id`; passive configured-extension output |
+| `discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
+| `agent_update` | Generic user-role text | Fieldless; typed agent, kind, status/task or observed prompt/response |
+| `agent_message`, `peer_message`, `cli_message` | Generic user-role text | Fieldless; source-specific identity, reply policy and body |
+| `agent_context`, `tool_completion`, `compaction_result` | Generic user-role text | Fieldless; bootstrap or typed lifecycle notice, never a second tool payload |
+| `context_size_alert`, `loop_guard`, `status_reminder`, `session_notice`, `tool_availability`, `output_continuation`, `compaction_recall` | Generic user-role text | Fieldless; meaning-specific harness instructions and notices |
+| `summary_request`, `summary_continuation` | Generic user-role text | Fieldless; provisional local-summary dialogue |
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher`, optional `sender_trust`, and optional descriptive JSON `mentions` before `content_trust` |
 | `quoted_message` | Generic user-role text attached to a canonical delivered/edited message | Optional descriptive reference, author, and excerpt metadata; `content_trust="external"` |
 | `tau_web_content` | Typed tool result | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Historical canonical background-preview attributes |
-| `tool_output` | Generic user-role text | `call_id`, `terminal`, then nonzero `omitted_bytes`; ordered canonical tool source |
+| `tool_output` | Generic user-role text | `call_id`, `terminal`, optional terminal `status`, then nonzero `omitted_bytes`; ordered canonical tool source |
+
+New injected-user projections use unprefixed, meaning-specific names.
+`tau_internal`, `tau_extension_output`, `tau_discovery`, and
+`tau_background_result` remain registered for historical recognition.
+The typed web adapter uses `tau_web_content` until its separate conversion to
+canonical tool-result headers and payload. It is not an injected-user producer.
+The shared `ToolResponse` serializer renders semantic headers before outer framing;
+header metadata also retains source-specific visible escaping.
 
 Each change that adds or reframes a generic-user family must register it and use
 the registry's shared metadata and exact-close helper. Family renderers own
@@ -95,12 +107,17 @@ Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry
 `HarnessInternalText`, while an absent list projects ordinary payload. The
 in-process `agent_start` path may attach equivalent transient spans, which the
 harness copies to the child prompt fact; configured extensions cannot assert them.
+New spans carry an optional typed `SemanticEnvelope` kind, propagated into the
+context part. Missing kinds retain the historical internal projection. No text
+parser guesses a kind. Internal lifecycle classification alone, including timer
+and configured UI content, never grants this presentation authority.
 
 Each durable provider-visible tool terminal carries `ToolResultPresentation`.
 Ordinary `tool_payload` remains in the typed result channel with an exact
-`tau_internal` close collision neutralized. Only a harness-stamped
-`harness_dedup_pointer` projects inside `tau_internal`; configured extensions submit
-the default presentation. Compaction retains both typed discriminators.
+semantic close collision neutralized. A harness-stamped `harness_dedup_pointer`
+projects as canonical tool text with a `status: duplicate` header, not XML;
+configured extensions submit the default presentation. Compaction retains the
+typed discriminators.
 
 Canonical message facts retain raw typed data and render through the shared
 `message` family. Optional typed native reply context adds relation metadata to
@@ -108,19 +125,18 @@ that part and, when text is available, one adjacent `quoted_message` text part i
 the same `MessageItem`. The quote adds descriptive context, not a second sender
 event or activation. Each part follows the one-outer-family rule; payload-local
 tags cannot produce either part.
-Provider adapters preserve assembled envelope bytes and never synthesize, remove,
-or reinterpret a family. Historical raw/default projections,
-provider replacement windows, and payload-local wrappers retain their existing
-replay behavior until a separately approved migration.
+Provider adapters preserve assembled envelope bytes and do not synthesize, remove,
+or reinterpret a family. Stored raw facts, committed text, provider replacement
+windows, and opaque replay bytes are not rewritten. On live append and cold replay,
+derived projections of typed agent-message facts use the current semantic families.
+Preserving stored bytes does not promise historical derived XML.
 Historical fieldless `<user>...</user>` replacement bytes remain recognizable
 for provenance-notice delivery only; recognition does not infer or reproject a
 typed source.
-Cross-session agent messages remain inside authenticated `tau_internal` framing
-with payload-local `tau_peer_message` structure. When either persisted
-configured notice exists, the renderer exact-close-frames sender- and
-recipient-origin advisory `<notice>` nodes separately from the original
-`<message>` body; absent notices preserve the prior peer projection
-byte-for-byte. Nested notice/message tags establish no generic envelope family
+Cross-session agent messages use authenticated `peer_message` framing with
+source identity in headers. When either persisted configured notice exists, the renderer exact-close-frames
+sender- and recipient-origin advisory `<notice>` nodes separately from the original
+`<message>` body. Nested notice/message tags establish no generic envelope family
 or authority. These notice snapshot, wire, rendering, bounds, mixed-version,
 and replay semantics were explicitly approved by the user on September 12,
 2026.
@@ -153,7 +169,7 @@ exact-close escaping for the untrusted body. See
 [SPEC-streamed-tool-output](SPEC-streamed-tool-output.md).
 
 The harness uses this envelope to frame injected context. The producer supplies
-ordinary tool text; its header/payload format belongs to
+ordinary tool text. Its header/payload format belongs to
 [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md);
 native typed tool results do not need this generic-user carrier.
 

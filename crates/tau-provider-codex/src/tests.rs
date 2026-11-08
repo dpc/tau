@@ -1466,7 +1466,8 @@ fn compact_mixed_prefix_context() -> tau_proto::PromptContext {
                     tau_proto::ContextItem::Message(tau_proto::MessageItem {
                         role: tau_proto::ContextRole::User,
                         content: vec![tau_proto::ContentPart::HarnessInternalText {
-                            text: "<tau_internal>Watched agent worker is working</tau_internal>"
+                            envelope: None,
+                            text: "<agent_update>\nagent: worker\nkind: work_status\nstatus: working\n</agent_update>"
                                 .to_owned(),
                         }],
                         phase: None,

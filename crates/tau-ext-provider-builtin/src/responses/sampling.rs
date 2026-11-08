@@ -336,7 +336,9 @@ impl ResponsesResponseSampler {
                         .map(|part| match part {
                             tau_proto::ContentPart::Text { text }
                             | tau_proto::ContentPart::SyntheticCompactionSummary { text }
-                            | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
+                            | tau_proto::ContentPart::HarnessInternalText { text, .. } => {
+                                text.as_str()
+                            }
                             tau_proto::ContentPart::UrlCitation { .. }
                             | tau_proto::ContentPart::CitationMetadataInvalid => "",
                         })

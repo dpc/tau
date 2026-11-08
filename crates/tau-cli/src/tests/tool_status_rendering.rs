@@ -119,6 +119,7 @@ fn terminal_only_tool_has_no_stream_count() {
     renderer.handle(&tool_started("plain", "custom_stream", CborValue::Null));
     renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
         captured_output: Some(tau_proto::ToolFinalOutput {
+            outcome: None,
             text: "only final source".to_owned(),
             omitted_bytes: 0,
         }),

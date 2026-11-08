@@ -3055,7 +3055,7 @@ fn message_text(message: &tau_proto::MessageItem) -> String {
         match part {
             ContentPart::Text { text: part }
             | ContentPart::SyntheticCompactionSummary { text: part }
-            | ContentPart::HarnessInternalText { text: part } => {
+            | ContentPart::HarnessInternalText { text: part, .. } => {
                 text.push_str(part);
             }
             ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {}

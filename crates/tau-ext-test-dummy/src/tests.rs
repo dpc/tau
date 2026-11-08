@@ -2336,7 +2336,11 @@ fn prompt_correction_preserves_letter_case() {
 fn prompt_correction_preserves_prompt_identity_fields() {
     let mut prompt = test_prompt("internal Tao");
     prompt.inference_activation = true;
-    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 0, end: 8 }];
+    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan {
+        envelope: None,
+        start: 0,
+        end: 8,
+    }];
     prompt.message_class = PromptMessageClass::Internal;
     prompt.internal_kind = Some(tau_proto::InternalPromptKind::ContextSizeAlert);
     prompt.originator = PromptOriginator::Extension {

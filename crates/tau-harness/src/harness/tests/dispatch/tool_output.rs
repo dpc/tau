@@ -279,6 +279,7 @@ fn streamed_terminal_capture_bounds_payload_and_preserves_process_outcome() {
             ),
         ]);
         let forged = Some(tau_proto::ToolFinalOutput {
+            outcome: None,
             text: "forged capture is ignored".into(),
             omitted_bytes: 0,
         });
@@ -368,6 +369,7 @@ fn streamed_cancellation_preserves_bounded_available_final_source() {
                 "x".repeat(1024 * 1024)
             )),
             captured_output: Some(tau_proto::ToolFinalOutput {
+                outcome: None,
                 text: "forged source".into(),
                 omitted_bytes: 0,
             }),

@@ -524,10 +524,17 @@ fn protocol_message_fits(message: &HarnessOutputMessage) -> bool {
 }
 
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
-    format!(
-        "Tool call `{call_id}` completed. Its output is recorded separately. Call `wait` for \
-         a completion receipt."
-    )
+    tau_proto::ToolResponse::from_cbor(&CborValue::Map(vec![
+        (
+            CborValue::Text("call_id".to_owned()),
+            CborValue::Text(call_id.to_string()),
+        ),
+        (
+            CborValue::Text("status".to_owned()),
+            CborValue::Text("terminal".to_owned()),
+        ),
+    ]))
+    .render()
 }
 
 /// Render the bounded typed self-compaction terminal as an internal model
@@ -1437,7 +1444,7 @@ pub(crate) fn assistant_text_from_output_items(output_items: &[ContextItem]) -> 
                     .map(|part| match part {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
-                        | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                         ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {
                             ""
                         }
@@ -2141,14 +2148,15 @@ where
                             // The fixture echoes the task, not lazy harness
                             // guidance.
                             if matches!(message.content.first(), Some(ContentPart::Text { text })
-                                if tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
+                                if tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                                    || tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
                             {
                                 return None;
                             }
                             message.content.first().map(|part| match part {
                                 ContentPart::Text { text }
                                 | ContentPart::SyntheticCompactionSummary { text }
-                                | ContentPart::HarnessInternalText { text } => text.clone(),
+                                | ContentPart::HarnessInternalText { text, .. } => text.clone(),
                                 ContentPart::UrlCitation { .. }
                                 | ContentPart::CitationMetadataInvalid => String::new(),
                             })

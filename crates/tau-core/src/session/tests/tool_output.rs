@@ -85,6 +85,7 @@ fn final_capture_is_bounded_and_charged_before_deferred_projection() {
         recorded_at: UnixMicros::default(),
         event: Event::ProviderToolResult(tau_proto::ToolResult {
             captured_output: Some(tau_proto::ToolFinalOutput {
+                outcome: None,
                 text,
                 omitted_bytes: 17,
             }),
@@ -368,6 +369,7 @@ fn failed_stream_terminals_omit_self_cause_without_losing_final_source() {
         );
         let call = tree.declared_call("stream");
         let capture = Some(tau_proto::ToolFinalOutput {
+            outcome: None,
             text: "terminal-source-unique".into(),
             omitted_bytes: 0,
         });

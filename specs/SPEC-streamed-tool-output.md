@@ -41,6 +41,11 @@ another update event.
 The harness projects every source occurrence exactly once through the registered
 `tool_output` generic user-role envelope. Its ordered attributes identify
 call and terminal status, followed by `omitted_bytes` only when nonzero.
+New terminal captures expose logical `status="completed"`, `"error"`, or
+`"canceled"`; incremental updates omit status. This presentation spelling does
+not change durable `cancelled` outcomes or wait receipts. Available cancellation
+output remains payload, including genuinely empty output; unavailable capture
+retains its useful diagnostic rather than pretending to be empty.
 Tool identity and sequence remain in canonical metadata and validation, not the
 model-facing header. The envelope body contains untrusted tool data. Final source
 precedes the native closure or background completion settlement. Opted-in
@@ -55,6 +60,15 @@ control and correlation. Successful waits carry `cause` (the source call ID) and
 or cancellation does not make synchronization itself fail. Plural waits keep
 request order and existing atomic consumption, ownership, generation, and
 rollback rules. Invalid waits still fail normally.
+
+Background placeholders are typed tool responses with `status: backgrounded`
+and any existing delegation metadata. `cancel` returns `status: ok` only to
+acknowledge acceptance of the request, not terminal completion. The injected
+`tool_completion` notice retains its existing scheduling role without duplicating
+source or telling the model to fetch output. Text grammar belongs to
+[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md);
+semantic carrier framing belongs to
+[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
 
 The canonical background-error terminal records error or cancellation as a typed
 outcome, separate from its causal observation. A routed producer's accepted

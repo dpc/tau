@@ -7,13 +7,13 @@ const BETA_ROLE: &str = "deterministic-worker-beta";
 const ALPHA_INSTRUCTION: &str = "Complete alpha instruction.";
 const BETA_INSTRUCTION: &str = "Complete beta instruction.";
 const ALPHA_PROVIDER_INITIAL: &str = concat!(
-    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
+    "<agent_context>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</agent_context>",
     "Complete alpha instruction."
 );
 const BETA_PROVIDER_INITIAL: &str = concat!(
-    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
+    "<agent_context>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</agent_context>",
     "Complete beta instruction."
 );
 
@@ -29,10 +29,10 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded_bytes = serde_json::to_vec(&scenario)?.len();
-    if action_counts != [6, 2, 2] || encoded_bytes != 1_730 {
+    if action_counts != [6, 2, 2] || encoded_bytes != 1_734 {
         return Err(format!(
             "S4 scenario no longer matches its three-lane [6, 2, 2]-action, \
-             1,730-byte budget: actions={action_counts:?}, bytes={encoded_bytes}"
+             1,734-byte budget: actions={action_counts:?}, bytes={encoded_bytes}"
         )
         .into());
     }

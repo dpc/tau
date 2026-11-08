@@ -148,7 +148,7 @@ fn output_text_ptr(items: &[ContextItem]) -> Option<AllocationIdentity> {
             message.content.first().map(|part| match part {
                 tau_proto::ContentPart::Text { text }
                 | tau_proto::ContentPart::SyntheticCompactionSummary { text }
-                | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
+                | tau_proto::ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                 tau_proto::ContentPart::UrlCitation { .. }
                 | tau_proto::ContentPart::CitationMetadataInvalid => "",
             })

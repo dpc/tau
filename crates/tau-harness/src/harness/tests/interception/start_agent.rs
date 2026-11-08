@@ -816,7 +816,7 @@ fn startup_prompt_replacement_reaches_provider_with_canonical_text_only() {
                                     text: candidate
                                 }
                                 | tau_proto::ContentPart::HarnessInternalText {
-                                    text: candidate
+                                    text: candidate, ..
                                 } if candidate == text
                         ))
                 )
@@ -1409,7 +1409,11 @@ fn configured_extension_cannot_assert_trusted_instruction_spans() {
         tau_proto::ClientKind::Tool,
     );
     let mut invalid = request("q-forged-span", "untrusted instruction");
-    invalid.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 0, end: 9 }];
+    invalid.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan {
+        envelope: None,
+        start: 0,
+        end: 9,
+    }];
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("requester"),

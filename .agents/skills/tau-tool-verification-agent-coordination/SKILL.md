@@ -11,6 +11,14 @@ Load `tau-tool-verification` first for the shared output structure, escaping,
 line handling, tool-description, availability, and reporting guidelines.
 This skill supplies the focused verification guidance for this tool group.
 
+`agent_watch` acknowledges with `watching: true` or `watching: false`, retaining
+an available current provider snapshot without repeating the agent argument.
+Observed changes use `agent_update` with typed `agent`, `kind`, and variant
+metadata (`status`/`task` for work status) or observed response/prompt payload.
+Verify header control escaping and exact `</agent_update>` neutralization.
+Ordinary messages use `agent_message`, peers `peer_message`, and local CLI
+messages `cli_message`; these presentations do not change sender or reply authority.
+
 ### Message tool verification plan
 
 Use this plan when asked to verify the `message` tool, especially in multi-agent

@@ -14,8 +14,9 @@
 //! conversation's branch with a short raw pointer
 //! (`<tool_name> tool output identical to previous tool call: <call_id>`).
 //! The first occurrence is kept verbatim — only the duplicates are collapsed.
-//! The durable pointer carries `HarnessDedupPointer` presentation and gains its
-//! `<tau_internal>` envelope only when the harness projects it to a Provider.
+//! The durable pointer carries `HarnessDedupPointer` presentation and projects
+//! through `ToolResponse` with a `status: duplicate` header, not an
+//! injected-user envelope. See `SPEC-tau-proto-provider-data`.
 //! The model can cross-reference the pointer to the original `call_id` which is
 //! still present earlier in its own context.
 //!

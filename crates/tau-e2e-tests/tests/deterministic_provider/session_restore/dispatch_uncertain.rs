@@ -16,7 +16,7 @@ use super::{
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
-const SCENARIO_BYTES: usize = 1_752;
+const SCENARIO_BYTES: usize = 1_756;
 const RECOVERY_MARKER: &str = "interrupted worker automatically recovered";
 /// Existing bounded hold deadline used only to keep the provider prompt in
 /// flight until the synchronized process-group kill.

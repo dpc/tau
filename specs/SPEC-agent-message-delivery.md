@@ -84,7 +84,7 @@ An exact-session admitted local CLI connection can publish one recipient-side
 receive fact without constructing a sender agent or session. Its optional typed
 CLI origin distinguishes a one-way message from a single final-response address;
 the sender label is not an agent identity. Core folding preserves that provenance
-on replay, and the shared `tau_internal` envelope explicitly states the reply
+on replay, and the registered `cli_message` envelope explicitly states the reply
 policy. Payload text cannot supply or change it.
 
 CLI receipt uses the ordinary recipient admission and durable commit path.
@@ -161,28 +161,17 @@ prompt text:
 
 - outbound ordinary `Message` projections are omitted from the sender's provider
   context;
-- local inbound `Message` uses user role and exactly this shape, with stable
-  sender ID and an exact-close-framed body:
-
-  ```text
-  <tau_internal>You have received a message from <stable-agent-id>
-
-  <message>
-  <body with exact </message> collisions replaced>
-  </message></tau_internal>
-  ```
-
-- cross-session inbound `Message` without notices preserves the established
-  byte shape: it frames the authenticated stable sender session/agent identity
-  and body in `<tau_peer_message>`, escapes that inner exact close, then frames
-  and escapes the complete projection in outer `<tau_internal>`;
+- local inbound `Message` uses user role and the registered `agent_message`
+  family, with a stable `sender` header and an exact-close-framed body;
+- cross-session inbound `Message` uses `peer_message`, with authenticated
+  `sender_session` and `sender_agent` headers;
 - when either configured notice is present, the same peer frame contains
   optional ordered `<notice origin="sender_config" authority="advisory">` and
   `<notice origin="recipient_config" authority="advisory">` nodes around one
   `<message>` body node. Each dynamic value escapes its own exact close before
-  the complete peer and internal frames receive their existing close handling;
-- `WatchResponse` and `WatchPrompt` retain separate sender-labelled typed
-  wrappers and replace only their own exact closing sentinel in each body;
+  the complete peer frame receives its exact-close handling;
+- `WatchResponse` and `WatchPrompt` use `agent_update` with distinct `kind`
+  headers and sender-labelled observed content, not new direct requests;
 - current provider and work-status kinds render wording reconstructed from their
   structured state; current long-wait kinds render their harness-derived
   threshold; and
@@ -199,12 +188,16 @@ tool, egress, or identity authority. Model-authored work titles receive trusted-
 escaping before interpolation. Initial and redundant structured watch snapshots render
 zero provider blocks.
 
-All body text other than the current envelope's own exact close remains literal,
-including ampersands, quotes, entity-like strings, nested tags, and other
-families' close tokens. The outer `<tau_internal>` frame additionally replaces
-every exact `</tau_internal>` collision after the inner body frame. Dynamic peer
-attributes retain separate attribute-safe escaping. See
+Semantic header/payload serialization uses `ToolResponse`; headers retain visible
+metadata escaping and body LF remains literal while provider controls are escaped.
+After normalization the selected outer exact close is neutralized. Nested notices
+retain their own exact-close handling; ordinary markup grants no authority. See
+[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md) and
 [SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+
+Raw typed message facts are not rewritten. Their current semantic projection is
+identical on live append and cold replay, including historical facts. Already
+committed replacement or opaque provider bytes are not reinterpreted.
 
 The omission affects provider context only. The sender-owned
 `AgentMessageSent` fact remains durable, ordered, replayed, and delivered to

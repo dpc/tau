@@ -51,8 +51,8 @@ const WORKER_INITIAL: &str = concat!(
     "Complete the deterministic worker instruction."
 );
 const WORKER_PROVIDER_INITIAL: &str = concat!(
-    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
+    "<agent_context>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</agent_context>",
     "Complete the deterministic worker instruction."
 );
 const RESTORE_NOTICE: &str = concat!(

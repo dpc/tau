@@ -879,7 +879,10 @@ impl Harness {
                         agent
                             .dispatch
                             .pending_prompts
-                            .push_back(PendingPrompt::internal(final_status_reminder(&challenge)));
+                            .push_back(PendingPrompt::semantic(
+                                final_status_reminder(&challenge),
+                                tau_proto::SemanticEnvelope::StatusReminder,
+                            ));
                     }
                     self.continue_after_gated_final_challenge(cid);
                 }

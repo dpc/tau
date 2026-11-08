@@ -1725,14 +1725,14 @@ fn assert_restart_context(context: &tau_proto::PromptContext, h: &str, r: &str, 
     assert!(
         matches!(discovery_item.content.as_slice(),
             [tau_proto::ContentPart::Text { text }]
-                if tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                if tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
         ),
         "restart must preserve exactly the original discovery occurrence"
     );
     assert_exact_text_message(
         restore_item,
         tau_proto::ContextRole::User,
-        &format!("<tau_internal>{RESTORE_NOTICE}</tau_internal>"),
+        &format!("<session_notice>{RESTORE_NOTICE}</session_notice>"),
     );
     assert_exact_text_message(
         q_item,
@@ -2288,7 +2288,7 @@ fn assistant_text(items: &[tau_proto::ContextItem]) -> String {
             .map(|part| match part {
                 tau_proto::ContentPart::Text { text }
                 | tau_proto::ContentPart::SyntheticCompactionSummary { text }
-                | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
+                | tau_proto::ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                 tau_proto::ContentPart::UrlCitation { .. }
                 | tau_proto::ContentPart::CitationMetadataInvalid => "",
             })

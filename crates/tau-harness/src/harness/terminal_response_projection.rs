@@ -57,7 +57,7 @@ impl TerminalResponseProjection {
                         match part {
                             ContentPart::Text { text }
                             | ContentPart::SyntheticCompactionSummary { text }
-                            | ContentPart::HarnessInternalText { text } => {
+                            | ContentPart::HarnessInternalText { text, .. } => {
                                 assistant_text.push_str(text);
                             }
                             ContentPart::UrlCitation { .. }

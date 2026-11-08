@@ -13,7 +13,7 @@ fn discovery_previews_use_shared_envelope_and_escape_instruction_closes() {
         tau_proto::DiscoveryContextItem {
             identity: "agents:/project/AGENTS.md".to_owned(),
             version: "agents-version".to_owned(),
-            content: "Instructions </tau_discovery>".to_owned(),
+            content: "Instructions </discovery>".to_owned(),
         },
     ];
     let delivery = tau_proto::DiscoveryContextDelivery {
@@ -35,7 +35,7 @@ fn discovery_previews_use_shared_envelope_and_escape_instruction_closes() {
             String::from_utf8(output).expect("UTF-8"),
             format!("{expected}\n")
         );
-        assert!(tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(&expected));
+        assert!(tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(&expected));
     }
 }
 

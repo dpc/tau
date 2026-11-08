@@ -16,9 +16,16 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Background tools and `wait`
 
+The initial typed placeholder has `status: backgrounded`; delegation fields remain
+when applicable. A successful `cancel` receipt has `status: ok`. It acknowledges request
+acceptance, not terminal completion. Terminal `tool_output` exposes
+`status="canceled"` while preserving available output or an unavailable-capture
+diagnostic. Its separate `tool_completion` notification retains scheduling and
+correlation, not another source copy or a retrieval instruction.
+
 Tool source and synchronization are separate. Accepted incremental updates and
 final output appear once in ordered `tool_output` context. `wait` returns a
-successful receipt with `original_tool_call_id` and `target_outcome` (`completed`,
+successful receipt with `cause` and `outcome` (`completed`,
 `error`, or `cancelled`), including when the target failed. It never copies the
 source body. There is no separate output lookup tool. Inspect shell overflow
 through its temporary-file path, or historical accepted text through an available
@@ -29,7 +36,7 @@ source after all accepted updates. When canonical events are available, also
 check their sequence numbers. A shell terminal can contain only a suffix; look for earlier
 content in prior updates rather than treating it as missing completion output.
 Pair these checks with the file-shell segment and bounded-retention probes. A receipt's
-`target_outcome: completed` means tool execution completed, not that the process
+`outcome: completed` means tool execution completed, not that the process
 exited zero: assert a nonzero status in source and a completed receipt. For
 plural waits, check receipts in request order without expecting copies of the
 source inside them.

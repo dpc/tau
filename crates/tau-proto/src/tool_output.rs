@@ -18,8 +18,14 @@ pub const MAX_TOOL_OUTPUT_FINAL_BYTES: usize = 8 * 1024;
 
 /// Harness-owned bounded rendering of an opted-in terminal, captured before
 /// publication custody. It is source text, never a second native tool payload.
+/// Text serialization follows `SPEC-tau-proto-provider-data`; capture and
+/// delivery follow `SPEC-streamed-tool-output`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolFinalOutput {
+    /// Logical terminal status for current source projections. Historical
+    /// captures omit it and retain their committed body unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ToolCompletionOutcome>,
     /// Already sanitized provider-facing text, before outer-envelope escaping.
     pub text: String,
     /// Rendered bytes omitted while retaining prefix and final diagnostics.
@@ -28,22 +34,26 @@ pub struct ToolFinalOutput {
 
 impl ToolFinalOutput {
     /// Capture a terminal without allocating its complete textual form.
-    /// Cancellation keeps its status prefix and any available diagnostic body.
+    /// Cancellation keeps available output, or the unavailable-capture reason.
+    /// Its logical status is separate from the payload.
     #[must_use]
     pub fn capture(value: &CborValue, status: crate::ProviderToolResultStatus<'_>) -> Self {
-        let mut output = BoundedToolOutput::render(value, status);
-        if matches!(status, crate::ProviderToolResultStatus::Cancelled { .. })
+        let outcome = match status {
+            crate::ProviderToolResultStatus::Success => ToolCompletionOutcome::Completed,
+            crate::ProviderToolResultStatus::Error { .. } => ToolCompletionOutcome::Error,
+            crate::ProviderToolResultStatus::Cancelled { .. } => ToolCompletionOutcome::Cancelled,
+        };
+        let body_status = if matches!(status, crate::ProviderToolResultStatus::Cancelled { .. })
             && !matches!(value, CborValue::Null)
         {
-            crate::write_provider_tool_result_text(
-                value,
-                crate::ProviderToolResultStatus::Success,
-                &mut output,
-            )
-            .expect("bounded output sink cannot reject canonical text");
-        }
+            crate::ProviderToolResultStatus::Success
+        } else {
+            status
+        };
+        let output = BoundedToolOutput::render(value, body_status);
         let (text, omitted_bytes) = output.finish();
         Self {
+            outcome: Some(outcome),
             text,
             omitted_bytes,
         }
@@ -87,6 +97,7 @@ impl ToolOutputUpdate {
             &self.output.tool_name,
             self.output.sequence,
             false,
+            None,
             self.output.omitted_bytes,
             &text,
         )
@@ -177,11 +188,14 @@ impl std::fmt::Write for BoundedToolOutput {
 /// Render one ordered tool-origin occurrence, without interpreting its payload.
 /// Tool identity and sequence remain canonical metadata; the model sees only
 /// call correlation, terminal status, and nonzero omission counts.
+/// Framing follows `SPEC-exact-sentinel-prompt-envelopes`; this does not
+/// replace the `ToolResponse` text contract in `SPEC-tau-proto-provider-data`.
 pub fn render_output(
     call_id: &ToolCallId,
     _tool_name: &ToolName,
     _sequence: u64,
     terminal: bool,
+    outcome: Option<ToolCompletionOutcome>,
     omitted_bytes: u64,
     text: &str,
 ) -> String {
@@ -189,6 +203,17 @@ pub fn render_output(
         ("call_id", call_id.to_string()),
         ("terminal", terminal.to_string()),
     ];
+    if terminal && let Some(outcome) = outcome {
+        attributes.push((
+            "status",
+            match outcome {
+                ToolCompletionOutcome::Completed => "completed",
+                ToolCompletionOutcome::Error => "error",
+                ToolCompletionOutcome::Cancelled => "canceled",
+            }
+            .to_owned(),
+        ));
+    }
     if omitted_bytes != 0 {
         attributes.push(("omitted_bytes", omitted_bytes.to_string()));
     }

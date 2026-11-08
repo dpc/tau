@@ -4072,7 +4072,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     assert_eq!(
         context_text_count(
             &live_inference_prompts[0],
-            &crate::internal_envelope::frame(&notification_text),
+            &tau_proto::SemanticEnvelope::CompactionResult.render(&notification_text),
         ),
         1
     );

@@ -1046,10 +1046,13 @@ impl FakeState {
                         "</response>",
                         "&lt;/response&gt;",
                     );
-                    tau_internal_envelope(&format!(
-                        "Watched agent {child_agent_id} emitted a response\n\n\
-                         <response>\n{body}\n</response>"
-                    ))
+                    tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
+                        &[
+                            ("agent", child_agent_id.to_string()),
+                            ("kind", "response".to_owned()),
+                        ],
+                        &body,
+                    )
                 }
                 WatchNotificationV2::Prompt { content } => {
                     let body = tau_proto::escape_exact_sentinel_close(
@@ -1057,10 +1060,13 @@ impl FakeState {
                         "</prompt>",
                         "&lt;/prompt&gt;",
                     );
-                    tau_internal_envelope(&format!(
-                        "Watched agent {child_agent_id} received a user prompt\n\n\
-                         <prompt>\n{body}\n</prompt>"
-                    ))
+                    tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
+                        &[
+                            ("agent", child_agent_id.to_string()),
+                            ("kind", "prompt".to_owned()),
+                        ],
+                        &body,
+                    )
                 }
             };
             expected_user_text.push(text);
@@ -2803,9 +2809,9 @@ impl FakeState {
                         )) || !prompt.context.flatten_iter().any(|item| {
                     matches!(item,
                         ContextItem::Message(item) if item.content.iter().any(|part| matches!(part,
-                            ContentPart::Text { text } if text.starts_with("<tau_internal>")
-                                && text.contains("local CLI caller")
-                                && text.ends_with("</tau_internal>")
+                            ContentPart::Text { text } if text.starts_with("<cli_message>")
+                                && text.contains("reply_mode:")
+                                && text.ends_with("</cli_message>")
                         ))
                     )
                 }) {
@@ -2912,7 +2918,7 @@ impl FakeState {
                                 if message_item.content.iter().any(|part| match part {
                                     ContentPart::Text { text }
                                     | ContentPart::SyntheticCompactionSummary { text }
-                                    | ContentPart::HarnessInternalText { text } => text.contains(message),
+                                    | ContentPart::HarnessInternalText { text, .. } => text.contains(message),
                                     ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => false,
                                 })
                         )
@@ -2977,9 +2983,8 @@ impl FakeState {
                     })
                     .or(restored_sender)
                     .ok_or_else(|| self.mismatch(cursor, "message worker was not selected"))?;
-                let expected = format!(
-                    "<tau_internal>You have received a message from {sender}\n\n<message>\n{message}\n</message></tau_internal>"
-                );
+                let expected = tau_proto::SemanticEnvelope::AgentMessage
+                    .render_fields(&[("sender", sender.to_string())], message);
                 let texts = provider_user_texts(prompt);
                 let exact = match action {
                     ScenarioActionV2::MessageInboundAfterHeld { held_user_text, .. } => {
@@ -3388,23 +3393,20 @@ impl FakeState {
                 expectation,
                 ..
             } => {
-                let Some(child_agent_id) = self.current_child_agent(&prompt.agent_id) else {
+                let Some(_) = self.current_child_agent(&prompt.agent_id) else {
                     return Err(self.mismatch(
                         cursor,
                         "agent_watch result has no validated agent_start child identity",
                     ));
                 };
-                let expected = match expectation {
-                    AgentWatchResultExpectationV2::Enabled => {
-                        format!("Watching agent `{child_agent_id}`")
-                    }
-                    AgentWatchResultExpectationV2::DispatchUncertainUnknown => {
-                        format!(
-                            "Watching agent `{child_agent_id}`; current status: \
-                     dispatch uncertain (unknown)"
-                        )
-                    }
-                };
+                let mut fields = vec![(CborValue::Text("watching".into()), CborValue::Bool(true))];
+                if *expectation == AgentWatchResultExpectationV2::DispatchUncertainUnknown {
+                    fields.push((
+                        CborValue::Text("provider_status".into()),
+                        CborValue::Text("dispatch uncertain (unknown)".into()),
+                    ));
+                }
+                let expected = tau_proto::ToolResponse::from_cbor(&CborValue::Map(fields));
                 let latest_results = prompt
                     .context
                     .blocks
@@ -3421,11 +3423,7 @@ impl FakeState {
                     || latest_results[0].call_id != *call_id
                     || latest_results[0].tool_type != ToolType::Function
                     || latest_results[0].status != tau_proto::ToolResultStatus::Success
-                    || !matches!(
-                        &latest_results[0].output.raw,
-                        CborValue::Text(text) if text == &expected
-                    )
-                    || latest_results[0].output.body != expected
+                    || latest_results[0].output != expected
                 {
                     return Err(self.mismatch(
                         cursor,
@@ -3960,7 +3958,13 @@ fn validate_shell_stream_prompt(
     };
     if step == ShellStreamStep::Wait {
         let results = result("stream-child");
-        if results.len() != 1 || !results[0].output.body.contains("background") {
+        if results.len() != 1
+            || !results[0]
+                .output
+                .headers
+                .iter()
+                .any(|header| header.key == "status" && header.value == "backgrounded")
+        {
             return Err("stream child must background before incremental wake");
         }
     }
@@ -4301,7 +4305,7 @@ fn prompt_text_occurrences(prompt: &tau_proto::AgentPromptCreated, expected: &st
                 .filter(|part| match part {
                     ContentPart::Text { text }
                     | ContentPart::SyntheticCompactionSummary { text }
-                    | ContentPart::HarnessInternalText { text } => text.contains(expected),
+                    | ContentPart::HarnessInternalText { text, .. } => text.contains(expected),
                     ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => false,
                 })
                 .count(),
@@ -4738,14 +4742,6 @@ fn scenario_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
     provider_user_texts(prompt)
 }
 
-/// Frame fixture-expected harness-owned internal prompt text exactly as
-/// production does.
-fn tau_internal_envelope(body: &str) -> String {
-    let body =
-        tau_proto::escape_exact_sentinel_close(body, "</tau_internal>", "&lt;/tau_internal&gt;");
-    format!("<tau_internal>{body}</tau_internal>")
-}
-
 fn latest_provider_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
     provider_user_texts(prompt).pop()
 }
@@ -4763,7 +4759,7 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
                     .map(|part| match part {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
-                        | ContentPart::HarnessInternalText { text } => text,
+                        | ContentPart::HarnessInternalText { text, .. } => text,
                         ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {
                             String::new()
                         }
@@ -4774,7 +4770,10 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
         })
         // Closed fixtures match task text separately from the harness's lazy
         // discovery messages. This is not runtime provenance or authority.
-        .filter(|text| !tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
+        .filter(|text| {
+            !tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                && !tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+        })
         .filter(|text| !tau_proto::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(text))
         .collect()
 }
@@ -4823,7 +4822,7 @@ fn validate_output_length_continuation_context(
                     && message.content.iter().map(|part| match part {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
-                        | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                         ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                     }).collect::<String>()
                         == project_fixture_human_ui_user_prompt(user_text)
@@ -4838,7 +4837,8 @@ fn validate_output_length_continuation_context(
             }) if text == reasoning
         )
     });
-    let instruction_text = tau_internal_envelope(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION);
+    let instruction_text = tau_proto::SemanticEnvelope::OutputContinuation
+        .render(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION);
     let instruction = items.iter().position(|item| {
         matches!(
             item,
@@ -4847,7 +4847,7 @@ fn validate_output_length_continuation_context(
                     && message.content.iter().map(|part| match part {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
-                        | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                         ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                     }).collect::<String>() == instruction_text
         )
@@ -4910,7 +4910,7 @@ fn context_has_text(
             .map(|part| match part {
                 ContentPart::Text { text }
                 | ContentPart::SyntheticCompactionSummary { text }
-                | ContentPart::HarnessInternalText { text } => text.as_str(),
+                | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                 ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
             })
             .collect::<String>();

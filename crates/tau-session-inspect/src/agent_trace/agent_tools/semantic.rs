@@ -156,7 +156,7 @@ pub(super) fn project_provider_item(
                 .map(|part| match part {
                     ContentPart::Text { text }
                     | ContentPart::SyntheticCompactionSummary { text }
-                    | ContentPart::HarnessInternalText { text } => text.as_str(),
+                    | ContentPart::HarnessInternalText { text, .. } => text.as_str(),
                     ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                 })
                 .collect::<String>();

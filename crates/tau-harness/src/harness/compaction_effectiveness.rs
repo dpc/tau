@@ -166,7 +166,7 @@ fn item_tokens(item: &ContextItem) -> Option<u64> {
                 let text = match part {
                     ContentPart::Text { text }
                     | ContentPart::SyntheticCompactionSummary { text }
-                    | ContentPart::HarnessInternalText { text } => text,
+                    | ContentPart::HarnessInternalText { text, .. } => text,
                     ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {
                         return Some(sum);
                     }

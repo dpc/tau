@@ -51,7 +51,7 @@ impl Harness {
             );
             return;
         }
-        appended.text = tau_proto::TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE
+        appended.text = tau_proto::EXTENSION_OUTPUT_PAYLOAD_ENVELOPE
             .render_attributed(
                 &[
                     ("publisher", appended.publisher.to_string()),

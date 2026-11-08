@@ -151,6 +151,7 @@ fn final_assistant_projection_is_demand_driven_and_preserves_editor_bytes() {
                 text: "first 🦀".to_owned(),
             },
             ContentPart::HarnessInternalText {
+                envelope: None,
                 text: String::new(),
             },
             ContentPart::SyntheticCompactionSummary {
@@ -197,6 +198,7 @@ fn multipart_final_terminal_projection_matches_prejoined_reference() {
                 text: "styled **bold 🦀**".to_owned(),
             },
             ContentPart::HarnessInternalText {
+                envelope: None,
                 text: "\nsecond `λ`".to_owned(),
             },
             ContentPart::SyntheticCompactionSummary {
