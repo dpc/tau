@@ -8,8 +8,7 @@ use std::fmt;
 /// Absence on stored spans retains the historical internal projection. This
 /// discriminator controls presentation only, never activation or authority.
 /// Family selection, escaping, and carrier rules follow
-/// `SPEC-exact-sentinel-prompt-envelopes`; the conventions entry point is
-/// `SPEC-tau-proto-provider-data#context-formatting-conventions`.
+/// `SPEC-context-output-formatting#registered-injected-context-envelopes`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticEnvelope {
@@ -71,7 +70,7 @@ impl SemanticEnvelope {
     /// Render semantic metadata and optional data using the shared typed text
     /// serializer before exact-close framing. Headers cannot inject new lines.
     /// The leading LF belongs to envelope layout, not the optional text
-    /// separator owned by `SPEC-tau-proto-provider-data`.
+    /// separator owned by `SPEC-context-output-formatting#canonical-tool-text`.
     #[must_use]
     pub fn render_fields(self, headers: &[(&str, String)], body: &str) -> String {
         let response = crate::ToolResponse {
@@ -231,7 +230,7 @@ pub enum PayloadEnvelopeOpening {
 
 /// Shared metadata for one top-level XML-lite payload-envelope family.
 ///
-/// `SPEC-exact-sentinel-prompt-envelopes` owns this registry contract,
+/// `SPEC-context-output-formatting` owns this registry contract,
 /// including the distinction between carrier provenance and payload-local
 /// markup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

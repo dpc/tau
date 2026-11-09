@@ -1462,8 +1462,8 @@ pub enum ToolResultKind {
 /// Tool and extension payloads always use [`Self::ToolPayload`]. The harness
 /// alone stamps [`Self::HarnessDedupPointer`] after it replaces an identical
 /// large terminal with a reference to its earlier result.
-/// Text presentation follows `SPEC-tau-proto-provider-data`; this typed tool
-/// channel is distinct from `SPEC-exact-sentinel-prompt-envelopes`.
+/// Text presentation and the distinction between typed tool results and
+/// injected envelopes follow `SPEC-context-output-formatting`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultPresentation {

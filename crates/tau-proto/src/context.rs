@@ -1,7 +1,7 @@
 //! Provider context and transcript item support types.
 //!
 //! Semantic fields and provider replay sidecars follow
-//! `SPEC-tau-proto-provider-data`.
+//! `SPEC-context-output-formatting`.
 
 mod arc_bytes;
 mod url_citation;
@@ -514,7 +514,7 @@ impl ToolResultContentPart {
 /// One rendered header in the text sent to a provider for a tool response.
 ///
 /// Single-line metadata and escaping follow
-/// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
+/// `SPEC-context-output-formatting#canonical-tool-text`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolResponseHeader {
     /// Header key rendered before the `: ` separator.
@@ -526,7 +526,7 @@ pub struct ToolResponseHeader {
 /// Provider-facing text form of a tool response.
 ///
 /// This semantic text representation owns the optional headers/payload grammar
-/// in `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
+/// in `SPEC-context-output-formatting#canonical-tool-text`.
 /// Headers use `<key>: <value>` lines; one empty separator appears only when
 /// both headers and a nonempty body exist. [`Self::render`] applies a
 /// final provider-visible safety pass: headers are forced to single lines,
@@ -562,7 +562,7 @@ impl ToolResponse {
     }
 
     /// Serialize optional headers and payload under
-    /// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
+    /// `SPEC-context-output-formatting#canonical-tool-text`.
     /// Header-only responses have no final LF. Empty and payload-only responses
     /// have no framing separators; payload whitespace is preserved.
     ///
@@ -690,7 +690,7 @@ pub struct ProviderToolResultTextMeasurement {
 /// Measure canonical provider-facing tool text in linear time without
 /// materializing it or retaining source-sized rendering state.
 /// Must agree with `ToolResponse` serialization under
-/// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
+/// `SPEC-context-output-formatting#canonical-tool-text`.
 #[must_use]
 pub fn measure_provider_tool_result_text(
     value: &CborValue,
@@ -705,7 +705,7 @@ pub fn measure_provider_tool_result_text(
 /// Stream the same canonical provider-facing text as
 /// [`ToolResultItem::render_provider_text`] directly from raw CBOR.
 /// `ToolResponse` owns the grammar in
-/// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`; this bounded
+/// `SPEC-context-output-formatting#canonical-tool-text`; this bounded
 /// writer is an equivalent serialization path, not another format.
 ///
 /// Classification is cached once per rendered CBOR node, so nested maps remain

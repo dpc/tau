@@ -9,9 +9,9 @@ use crate::{WebAdapter, WebOperation};
 /// A successful external result with locally selected provenance metadata.
 ///
 /// Serialization follows
-/// [SPEC-tau-proto-provider-data].
+/// [SPEC-context-output-formatting].
 ///
-/// [SPEC-tau-proto-provider-data]: ../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses
+/// [SPEC-context-output-formatting]: ../../tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text
 /// Only the body comes from the remote service; it cannot supply trusted
 /// headers.
 pub(crate) struct WebContent<'a> {

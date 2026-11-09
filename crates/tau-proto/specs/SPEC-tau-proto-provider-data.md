@@ -2,46 +2,17 @@
 
 ## Record justification
 
-Provider-visible data contracts span protocol DTOs, core transcript folding,
-harness prompt assembly, tool rendering, and backend-specific lowering. No one
-of those implementation areas can coherently state the shared semantic
-authority, replay sidecars, escaping boundaries, and provider presentation
-rules described here.
+Provider-visible protocol authority spans shared DTOs, core transcript/replay
+handling, harness assembly, and backend lowering, so no single implementation
+artifact can own the distinction between semantic fields, replay sidecars, and
+provider model metadata.
 
-## Context formatting conventions
+Model-context text, carrier selection, and envelope conventions follow
+[SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md).
+This record owns the semantic protocol fields, replay sidecars, and provider-model
+declarations used by those projections.
 
-This record is the entry point for model-context formatting. Producers supply
-semantic typed values, not hand-built transport wrappers. `ToolResponse` and
-`ToolResponseHeader` own canonical tool-text serialization below; protocol status
-and typed media remain separate. The bounded raw-CBOR writer and measurement path
-must produce the same bytes as that typed representation without requiring a
-full intermediate string.
-
-Injected user-role text instead follows the registered semantic families,
-typed provenance, exact-close escaping and replay rules in
-[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
-Envelope layout does not change the optional tool-text separator rule.
-Neither apparent headers nor tag-shaped payload text grants authority.
-
-Message facts and provider replay sidecars follow the sections below.
-Direct UI requests follow
-[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
-Typed images follow
-[SPEC-typed-image-tool-results](../../../specs/SPEC-typed-image-tool-results.md);
-asynchronous delivery and source custody follow
-[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
-Those records own their specialized semantics rather than duplicating this grammar.
-
-Harness-captured foreground results compose typed deferred batches with their
-bounded final capture through `ToolResponse`. Batch boundaries preserve partial
-lines and omission metadata without applying another cap to accepted source. The harness-owned
-native-capture presentation records that terminal status is already rendered;
-provider lowering must not add it again. Historical stream-receipt presentation
-retains its original meaning.
-
-## Provider-visible tool responses
-
-Tool result events carry raw CBOR for non-provider consumers, but provider prompt construction must render tool outputs through `ToolResponse::render()`. That render path is the central defense-in-depth normalization boundary after tool-local semantic escaping.
+## Typed tool-result protocol data
 
 A successful function-tool result may additionally carry typed
 `ToolResultContentPart::Image` values. Image bytes never pass through
@@ -54,27 +25,9 @@ remain text-only.
 `ToolResultContentPart::ImageReference` instead names exact prepared bytes through
 an artifact descriptor with the same typed media metadata. It does not grant tool
 authority or prove media validity. Generic projections remove that fetchable key
-and emit only the established empty inline image metadata shape. Source 14.0
-defines this representation but production emission remains disabled until
-verified admission and provider resolution are integrated.
-
-`ToolResponse::render()` must keep headers as safe single lines, preserve ASCII LF body separators for line-oriented records, escape other model-visible control and separator characters, and keep binary/fallback rendering bounded. This is not terminal/UI escaping; terminal renderers still need their own sanitization for display state and layout.
-
-Tool text uses optional headers and an optional payload. At the top level, join
-header records with LF. A header-only result has no final LF; when headers and
-a nonempty payload are both present, separate them with two LF. Payload-only
-and fully empty results have no framing separators. Preserve payload whitespace,
-including final newlines. Recursive CBOR projection retains its existing
-newlines and multiline classification; top-level framing does not remove
-newlines from nested payload text. This text format is independent of the
-context carrier. Native typed tool results need no generic-user envelope.
-When the harness injects source into generic user-role context, it wraps the
-tool text in the registered XML-like provenance envelope. Producers do not add the
-envelope. See
-[SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md)
-for source delivery and custody and
-[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md)
-for injected carrier framing.
+and emit only the established empty inline image metadata shape. Admission,
+artifact resolution, and provider representation follow
+[SPEC-typed-image-tool-results](../../../specs/SPEC-typed-image-tool-results.md).
 
 Bounded model-visible diagnostic text helpers that are shared by harness, core,
 and extensions may also live in `tau-proto` when they have no dependency on
@@ -192,8 +145,10 @@ as one `<user source="ui">...</user>` user-role item with only exact `</user>`
 collisions replaced; all other text, whitespace, and Unicode remain unchanged.
 The fixed source value identifies the Tau user-channel submission class, not a
 verified human or CLI executable.
-Trusted spans alone project as `<tau_internal>`; every other submission source,
-injected input, and delimiter-shaped payload remains ordinary text.
+Authenticated spans with a semantic envelope kind retain that kind; spans without
+one retain their historical projection. Lifecycle classification alone does not
+grant framing. Shared projection rules follow
+[SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md#projection-preservation-and-display).
 
 Provider-visible terminal tool results, errors, and cancellations carry
 serde-defaulted `ToolResultPresentation`. Configured extensions submit only the

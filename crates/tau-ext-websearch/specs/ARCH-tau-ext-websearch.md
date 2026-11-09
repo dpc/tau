@@ -25,7 +25,7 @@ starts before workers launch, so concurrent completion cannot change order.
 
 Every successful provider path serializes typed external web content with the
 shared `ToolResponse` header/payload contract in
-[SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses),
+[SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text),
 then submits the resulting text in an
 invocation-correlated `tool.result_reported`. The harness publishes the canonical
 terminal/provider projections, so existing transcript, replay, compaction,

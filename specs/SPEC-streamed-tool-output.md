@@ -8,11 +8,9 @@ presentation; no single implementation area can own it.
 
 ## Source and completion
 
-Tool text formatting belongs to
-[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md).
-Producers submit ordinary header/payload tool text. When the harness injects it
-into generic user-role context, it supplies the registered envelope, as governed by
-[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+Tool text and injected source framing follow
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md).
+This record owns source custody, ordering, and lifecycle behavior.
 
 Tools opt into ordered text output with the `tool:output-stream` declaration tag.
 The harness freezes the policy from the effective prompt tool snapshot and
@@ -77,7 +75,7 @@ acknowledge acceptance of the request, not terminal completion. The injected
 source or telling the model to fetch output. Text grammar belongs to
 [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md);
 semantic carrier framing belongs to
-[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
 
 The canonical background-error terminal records error or cancellation as a typed
 outcome, separate from its causal observation. A routed producer's accepted
@@ -184,4 +182,4 @@ relative timing without executing the command.
 This refines
 [SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md)
 and
-[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

@@ -163,4 +163,4 @@ not found before the limit, the skill is skipped with a diagnostic.
 
 Skill loading and content search read a separate bounded 64 KiB prefix of each skill file. If loading truncates after frontmatter was closed, Tau returns the available body prefix and marks the result as truncated. If truncation happens before the frontmatter closing fence, Tau errors instead of treating YAML frontmatter as skill body.
 
-Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.
+Model-facing generic user-payload framing follows [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); payload-local XML-like tags do not establish Tau provenance.

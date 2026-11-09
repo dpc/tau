@@ -274,7 +274,7 @@ text. A matching wait can remove the notice only while the runtime pending-promp
 queue still owns it. After ownership transfers to ordinary prompt publication,
 interception, publication retry, commit, or provider observation may coexist with
 a wait result. The envelope family and typed transcript provenance follow
-[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md);
+[SPEC-context-output-formatting](SPEC-context-output-formatting.md#registered-injected-context-envelopes);
 the source declaration and terminal identities follow
 [SPEC-durable-tool-observation-correlation](../../../specs/SPEC-durable-tool-observation-correlation.md).
 
@@ -392,7 +392,7 @@ projections. UI/history/tree anchors, activation, queueing, and wake behavior do
 not consume the provider wrapper. See
 [SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 Exact-sentinel framing and the conditional model-visible provenance rule follow
-[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+[SPEC-context-output-formatting](SPEC-context-output-formatting.md#registered-injected-context-envelopes).
 
 Prompt dispatch is blocked while the target agent has a pending discovery
 initialization. Prompt assembly reads model-visible skills and tool lookup from

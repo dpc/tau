@@ -7,8 +7,8 @@ terminal-capture outcomes add presentation status without changing durable
 completion enums. These additive fields do not rewrite journals, change routing
 or activation, or reinterpret opaque provider items. Typed agent-message facts
 render through current semantic families on live append and cold replay.
-See [SPEC-tau-proto-provider-data](SPEC-tau-proto-provider-data.md#context-formatting-conventions)
-and [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+See [SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md)
+and [SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
 
 Protocol 22.0 adds metadata-bound artifact identities and metadata-only UI listing.
 The shared identity type owns bounded filename/MIME fields and streaming hash
@@ -462,7 +462,7 @@ source body. The receipt `outcome` distinguishes `completed`, `error`, and
 The contracts are
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md)
 and
-[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+[SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
 Both prompt facts also carry required harness-stamped
 `PromptSubmissionSource` provenance while retaining raw accepted prompt text.
 They separately carry validated `trusted_internal_spans`; only those durable

@@ -46,7 +46,7 @@ When locking is enabled, verify all of these behaviors:
   harness-owned context envelope. Follow
   [SPEC-tau-proto-provider-data](../../../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md),
   [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md), and
-  [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+  [SPEC-context-output-formatting](../../../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
   Incremental source may wake an eligible wait without consuming completion;
   `complete_only` suppresses that wake, not source retention.
 

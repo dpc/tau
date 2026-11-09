@@ -89,4 +89,4 @@ the trust model remains a configured same-UID executable boundary rather than a
 hostile-code sandbox. The cross-component contract is
 [SPEC-extension-secret-storage](SPEC-extension-secret-storage.md).
 
-New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

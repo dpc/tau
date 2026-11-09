@@ -269,7 +269,7 @@ Report concise but complete findings:
   recipient, empty payload, rich content payload.
 * Include exact unexpected errors or output.
 * Mention any timing surprises, missed messages, duplicate messages, or ordering uncertainty.
-* Confirm the `message` success output has headers `status: committed`, `msg_id: <actual-message-id>`, and `recipient_status: live`, with no payload. The `msg_id` is the actual stable message ID. The receipt confirms async acceptance, not delivery completion or inference. See [the tool response format](../../../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+* Confirm the `message` success output has headers `status: committed`, `msg_id: <actual-message-id>`, and `recipient_status: live`, with no payload. The `msg_id` is the actual stable message ID. The receipt confirms async acceptance, not delivery completion or inference. See [the tool response format](../../../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text).
 * Include whether stopped recipients, restored-unavailable recipients, and
   never-known recipients produce their distinct errors.
 * Include whether parent recipient ID discovery was clear from `self_agent_id` or still had to be inferred from sub-agent logs.

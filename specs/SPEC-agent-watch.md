@@ -79,7 +79,7 @@ The registered `agent_update` family carries an `agent` header and a closed
 `lifecycle`). Observed response/prompt text is payload, not a direct user request.
 Headers and payload use the canonical text serializer before exact-close framing.
 See [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md)
-and [SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+and [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
 
 The `agent_watch` tool returns `watching: true` or `watching: false`, without
 repeating its argument. Enabling retains any useful current provider snapshot in
@@ -241,4 +241,4 @@ The attempt is the canonical response's durable `provider_attempt`, not a
 continuation ordinal or a replay-time count. Cold restore reconstructs the
 snapshot without refanning a historical live occurrence.
 
-New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

@@ -30,11 +30,9 @@ projection.
 
 ## Reviewed peer input and immutable release
 
-Message and release success receipts use typed tool text with optional headers
-and an optional payload, as specified in
-[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
-Injected user context uses a registered XML-like envelope. Direct acceptance
-reports `status: committed`, the actual `msg_id`, and `recipient_status: live`;
+Message and release success receipts follow
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text).
+Direct acceptance reports `status: committed`, the actual `msg_id`, and `recipient_status: live`;
 it does not assert inference or reply completion. Review acceptance instead
 reports `status: accepted_for_review` and distinguishes the live main recipient
 from the intended worker's `pending_review` state.
@@ -193,7 +191,7 @@ metadata escaping and body LF remains literal while provider controls are escape
 After normalization the selected outer exact close is neutralized. Nested notices
 retain their own exact-close handling; ordinary markup grants no authority. See
 [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md) and
-[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
 
 Raw typed message facts are not rewritten. Their current semantic projection is
 identical on live append and cold replay, including historical facts. Already

@@ -359,4 +359,4 @@ history, updates, and acknowledgements are process-memory-only and reset on
 extension restart.
 See [Configuring extensions: Tau Swarm](docs/extensions.md#tau-swarm).
 
-Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.
+Model-facing generic user-payload framing follows [SPEC-context-output-formatting](crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); payload-local XML-like tags do not establish Tau provenance.

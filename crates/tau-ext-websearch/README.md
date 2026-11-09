@@ -258,7 +258,7 @@ redaction before local diagnostics.
 ## Result and UI boundary
 
 Every successful result uses the shared
-[`ToolResponse` header/payload format](../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+[`ToolResponse` header/payload format](../tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text).
 Locally selected `adapter`, `operation`, and `content_trust: external` headers
 precede the readable body. Line breaks remain actual LF. New typed results do
 not use XML-like envelopes; stored historical text stays unchanged.

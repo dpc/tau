@@ -1627,10 +1627,10 @@ fn adapt_parallel_fetch_arguments(
 }
 
 /// Serialize typed web data using `ToolResponse` under
-/// [SPEC-tau-proto-provider-data], then enforce the complete serialized byte
+/// [SPEC-context-output-formatting], then enforce the complete serialized byte
 /// limit.
 ///
-/// [SPEC-tau-proto-provider-data]: ../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses
+/// [SPEC-context-output-formatting]: ../../tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text
 fn project_web_content(
     adapter: WebAdapter,
     operation: WebOperation,

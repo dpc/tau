@@ -110,4 +110,4 @@ semantic authority, replay input, or recovery state.
 The live-acceptance versus worker-persistence crash boundary follows
 [SPEC-semantic-journal-writeback-durability](SPEC-semantic-journal-writeback-durability.md).
 
-New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

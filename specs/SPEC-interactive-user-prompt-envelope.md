@@ -11,7 +11,7 @@ provider context as exactly one user-role text item with the base form
 `<user source="ui">{body}</user>`. The fixed `ui` value identifies the direct
 Tau user-channel submission class; it does not attest a human author or a
 particular CLI executable. The envelope has no added whitespace and uses
-[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md)
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes)
 for attribute order and body framing.
 
 The accepted raw text and typed source remain canonical in submitted or steered

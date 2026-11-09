@@ -21,7 +21,7 @@ pub const MAX_TOOL_OUTPUT_FINAL_BYTES: usize = 8 * 1024;
 
 /// Harness-owned bounded rendering of an opted-in terminal, captured before
 /// publication custody. Its carrier is selected by the canonical terminal.
-/// Text serialization follows `SPEC-tau-proto-provider-data`; capture and
+/// Text serialization follows `SPEC-context-output-formatting`; capture and
 /// delivery follow `SPEC-streamed-tool-output`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolFinalOutput {
@@ -274,8 +274,8 @@ impl std::fmt::Write for BoundedToolOutput {
 /// Render one ordered tool-origin occurrence, without interpreting its payload.
 /// Tool identity and sequence remain canonical metadata; the model sees only
 /// call correlation, terminal status, and nonzero omission counts.
-/// Framing follows `SPEC-exact-sentinel-prompt-envelopes`; this does not
-/// replace the `ToolResponse` text contract in `SPEC-tau-proto-provider-data`.
+/// Framing and the separate `ToolResponse` text contract follow
+/// `SPEC-context-output-formatting`.
 pub fn render_output(
     call_id: &ToolCallId,
     _tool_name: &ToolName,

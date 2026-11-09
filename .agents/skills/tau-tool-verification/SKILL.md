@@ -116,7 +116,7 @@ that timer records preserve one-shot, fixed-interval, daily, and awaiting-timezo
 states. Replay must recognize compact timer successes.
 
 The normative entry point is
-[SPEC-tau-proto-provider-data](../../../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions).
+[SPEC-context-output-formatting](../../../crates/tau-harness/specs/SPEC-context-output-formatting.md).
 `ToolResponse` owns optional headers/payload serialization. Injected user-role
 source has a separate registered semantic envelope; native typed results do not.
 

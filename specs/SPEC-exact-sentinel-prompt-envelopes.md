@@ -49,7 +49,7 @@ New injected-user projections use unprefixed, meaning-specific names.
 `tau_background_result` remain registered for historical recognition.
 `tau_web_content` remains registered only for historical recognition and scanning.
 New typed web results use canonical headers and payload through
-[`ToolResponse`](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses),
+[`ToolResponse`](../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text),
 not an injected-user envelope. Stored opaque or historical text is not rewritten.
 The shared `ToolResponse` serializer renders semantic headers before outer framing;
 header metadata also retains source-specific visible escaping.

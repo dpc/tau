@@ -48,7 +48,7 @@ triggers reject the request. The adapter replaces that trigger with one
 harness-authored user message last, inside
 the registered `summary_request` family, which asks for a continuation summary
 and forbids tool calls. Provisional continuation steers use `summary_continuation`;
-both follow [SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+both follow [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
 The ordinary prefix is not canonicalized, stripped, or rewritten, so a provider
 may reuse the prefix warmed by ordinary inference. Cache reuse remains a
 provider behavior, not a Tau guarantee.
@@ -835,4 +835,4 @@ attempt failures leave the overall manual/tool request pending. Every durable
 output-limit hit warns in the UI, including empty and noncontinuable hits, without
 attributing the cap exclusively to server configuration.
 
-New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

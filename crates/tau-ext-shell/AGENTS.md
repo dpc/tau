@@ -3,7 +3,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 # ext-shell
 
 Before changing tool-result presentation, read
-[SPEC-tau-proto-provider-data](../tau-proto/specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions).
+[SPEC-context-output-formatting](../tau-harness/specs/SPEC-context-output-formatting.md).
 Use the shared semantic text representation, not producer-local envelope serialization.
 
 File-mutation tools such as `edit` and `apply_patch` MUST attach structured UI-only diff payloads for changed UTF-8 files. The agent-visible tool result must stay minimal and must not include the diff.
@@ -24,4 +24,4 @@ Protocol/UI/locking test coverage is documented in `testing.md`; read and update
 
 Security and reliability boundaries are documented in `specs/ARCH-tau-ext-shell.md`, `specs/SPEC-tau-ext-shell-directory-locking.md`, and `specs/SPEC-tau-ext-shell-process-lifecycle.md`; read and update them when changing shell execution, filesystem mutation, directory-lock behavior, process lifecycle, output draining, or cancellation.
 
-- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-context-output-formatting`](../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

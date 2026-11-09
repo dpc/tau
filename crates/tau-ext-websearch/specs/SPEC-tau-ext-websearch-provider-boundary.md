@@ -35,7 +35,7 @@ the scheduler-owned attempt deadline and, when configured, the same bearer
 credential.
 
 Every successful result uses the shared `ToolResponse` serializer under
-[SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses),
+[SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text),
 not an XML-like wrapper. Extension-owned headers identify the closed adapter,
 operation, and `content_trust: external` classification.
 Exa, Parallel, Tavily, and Firecrawl support search and fetch. You.com and
@@ -56,7 +56,7 @@ separator; remote content cannot author trusted headers. This is
 defense-in-depth rather than a sandbox: body prose remains capable of prompt
 injection and grants no identity, routing, instruction, tool, authorization, or
 egress authority. See
-[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md)
+[SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes)
 for the distinct injected-user carrier. Historical stored web wrappers remain
 unchanged; recognition does not authorize new emission.
 

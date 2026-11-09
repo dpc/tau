@@ -1278,7 +1278,7 @@ recipients and other start paths retain their existing navigation behavior.
   previously absent usage, backend, and cost from the same live provider
   generation.
 
-Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.
+Model-facing generic user-payload framing follows [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); payload-local XML-like tags do not establish Tau provenance.
 
 ## Declaration inspection is not an event
 

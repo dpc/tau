@@ -3,9 +3,9 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 # tau-ext-websearch
 
 - Typed web results use `WebContent` and the shared `ToolResponse` serializer:
-  [SPEC-tau-proto-provider-data](../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+  [SPEC-context-output-formatting](../tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text).
   Injected user-role context follows the separate
-  [envelope contract](../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+  [envelope contract](../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
   Do not wrap new typed web results in historical `tau_web_content` envelopes.
 
 Before changing provider behavior, endpoint configuration, response-size limits,
@@ -15,4 +15,4 @@ security assumptions, the applicable Linked Specs under `specs/`, and
 
 After major changes to this extension's features, tool/action behavior, configuration options, provider/runtime behavior, or user-visible capabilities, update the built-in self-knowledge skill `tau-self-knowledge-ext-websearch` so Tau can accurately explain the current extension behavior.
 
-- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-context-output-formatting`](../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

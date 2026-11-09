@@ -2,7 +2,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-proto instructions
 
-- Tool/context formatting starts at [SPEC-tau-proto-provider-data](specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions);
+- Tool/context formatting starts at [SPEC-context-output-formatting](../tau-harness/specs/SPEC-context-output-formatting.md);
   keep semantic types, serializers, bounded writers, and measurements consistent.
 
 - Read `specs/ARCH-tau-proto.md` before changing protocol DTOs, event names, message facts, serde/CBOR codec helpers, or validated wire identifiers.
@@ -16,4 +16,4 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
   significant-change approval threshold and correctness exemptions in
   `../../specs/GATE-persistence-and-extension-interface-change-approval.md`.
 
-- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](../../specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](../../specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-context-output-formatting`](../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

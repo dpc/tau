@@ -14,7 +14,7 @@ tokens can therefore look identical, without changing disk bytes.
 For exact-byte reviews, inspect bounded hex (for example,
 `sed -n '148,149p' crates/tau-proto/src/prompt_envelope.rs | od -An -tx1`),
 or compare the bytes locally and print only a boolean rather than the source text.
-See [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md)
+See [SPEC-context-output-formatting](../../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes)
 for the framing contract.
 
 Primary upstream is Radicle:

@@ -46,7 +46,7 @@ Reviewed remote input instead reports `status: accepted_for_review`, the actual
 live main recipient, and the intended worker's `pending_review` state.
 These typed tool receipts use optional headers and an optional payload. Injected
 message context uses a registered XML-like envelope. See
-[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses)
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text)
 for the shared text format and
 [SPEC-agent-message-delivery](../specs/SPEC-agent-message-delivery.md)
 for commit and retained-release semantics.
@@ -446,4 +446,4 @@ final response remains live, and a never-known ID remains unknown.
 
 Tool arguments are schema-validated before dispatch. Unknown extra fields are rejected before any logical tool invocation is logged.
 
-Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.
+Model-facing generic user-payload framing follows [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); payload-local XML-like tags do not establish Tau provenance.

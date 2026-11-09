@@ -1160,7 +1160,7 @@ tool-result strings. The extension places optionally authenticated Exa/Parallel
 search/fetch, anonymous or optionally authenticated You.com search,
 credentialed Brave search, and credentialed Tavily/Firecrawl search/fetch
 results in the shared
-[`ToolResponse` format](crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses)
+[`ToolResponse` format](crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text)
 with locally selected adapter, operation, and external-trust headers. Tau enforces
 the result bound after complete serialization. Exa, Parallel, and You.com retain anonymous paths;
 configured You.com authentication selects its authenticated endpoint by
@@ -1766,4 +1766,4 @@ authority. Source read/decoding failures preserve older records and fail or skip
 the provider according to its required policy. Memory-only startup forwards no
 built-in provider declaration values.
 
-Model-facing generic user-payload framing follows [SPEC-exact-sentinel-prompt-envelopes](specs/SPEC-exact-sentinel-prompt-envelopes.md); payload-local XML-like tags do not establish Tau provenance.
+Model-facing generic user-payload framing follows [SPEC-context-output-formatting](crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); payload-local XML-like tags do not establish Tau provenance.

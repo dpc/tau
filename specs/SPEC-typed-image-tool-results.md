@@ -109,7 +109,7 @@ multiple images, and provider uploads are outside this version. Artifact reads
 do not renew original retention age.
 
 The canonical text and typed-image ordering follow
-[SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses).
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text).
 Image results retain native tool-result headers and typed image payloads rather
 than using an injected user-role envelope. See the native/source lane distinction
 in [SPEC-streamed-tool-output](SPEC-streamed-tool-output.md#source-and-completion).

@@ -775,4 +775,4 @@ hides it. Publishers must minimize it and exclude secrets and reusable route
 or action capabilities; only inert non-secret identifiers/descriptions that are
 safe to disclose to every matching subscriber belong there.
 
-New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

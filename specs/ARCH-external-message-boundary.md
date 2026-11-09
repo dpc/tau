@@ -117,4 +117,4 @@ session and effective receiver capability before a session is returned.
 Discovery never exposes socket paths, pids, full project roots, agent ids,
 prompts, tasks, models, tools, or provider state.
 
-New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-exact-sentinel-prompt-envelopes](../specs/SPEC-exact-sentinel-prompt-envelopes.md).
+New or reframed free-form payloads in the shared generic user-role text carrier follow [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

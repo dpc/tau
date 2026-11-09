@@ -16,7 +16,7 @@
 //! The first occurrence is kept verbatim — only the duplicates are collapsed.
 //! The durable pointer carries `HarnessDedupPointer` presentation and projects
 //! through `ToolResponse` with a `status: duplicate` header, not an
-//! injected-user envelope. See `SPEC-tau-proto-provider-data`.
+//! injected-user envelope. See `SPEC-context-output-formatting`.
 //! The model can cross-reference the pointer to the original `call_id` which is
 //! still present earlier in its own context.
 //!

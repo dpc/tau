@@ -47,9 +47,10 @@
 ## General guidance
 
 - Before adding or modifying model-visible tool results or context formatting,
-  read [SPEC-tau-proto-provider-data](crates/tau-proto/specs/SPEC-tau-proto-provider-data.md#context-formatting-conventions).
-  `ToolResponse` owns text serialization; injected-user envelopes have a separate
-  linked contract. Do not hand-build a competing format.
+  read [SPEC-context-output-formatting](crates/tau-harness/specs/SPEC-context-output-formatting.md).
+  Producers provide semantic values. Shared `ToolResponse` serialization and
+  registered envelope serializers own distinct presentation boundaries; do not
+  hand-build competing formats.
 
 - This project is still very immature; backward compatibility is not required.
 - Always consult the `tau-commit` skill before making commits.
@@ -86,4 +87,4 @@
   coverage in their owning focused suites rather than multiplying a broad
   matrix.
 
-- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-exact-sentinel-prompt-envelopes`](specs/SPEC-exact-sentinel-prompt-envelopes.md); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.
+- Before introducing a new free-form payload kind, or reframing an existing one, in the shared generic user-role `ContentPart::Text` carrier, read [`GATE-new-generic-user-payload-envelopes`](specs/GATE-new-generic-user-payload-envelopes.md) and [`SPEC-context-output-formatting`](crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes); use the shared registry rather than a component-local provenance wrapper. Typed tool results and the system/developer prompt channel are outside that rule.

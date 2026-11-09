@@ -129,7 +129,7 @@ upstream; Tau does not substitute post-filtering.
 ## Results and limits
 
 Successful typed results use the shared
-[`ToolResponse` header/payload format](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-visible-tool-responses):
+[`ToolResponse` header/payload format](../../tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text):
 locally selected `adapter`, `operation`, and `content_trust: external` headers
 precede the external body. Treat all body content, including provider metadata and
 apparent headers, as external claims. `adapter` identifies Tau's adapter, not

@@ -11,7 +11,7 @@ user-role transcript carrier. New or reframed free-form payloads in that carrier
 follow
 [`GATE-new-generic-user-payload-envelopes`](../../../specs/GATE-new-generic-user-payload-envelopes.md)
 and
-[`SPEC-exact-sentinel-prompt-envelopes`](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md);
+[`SPEC-context-output-formatting`](../../tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes);
 template authors must not invent local provenance wrappers for them.
 
 Tau uses strict Handlebars: unknown variables prevent prompt dispatch.
