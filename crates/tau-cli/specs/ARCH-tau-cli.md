@@ -246,8 +246,9 @@ the CLI reads their start arguments solely to retain the configured `timeout`
 generic tool-header behavior.
 The built-in `wait` tool is another narrow presentation exception. The CLI uses
 its start arguments only to distinguish activating-input mode, then interprets
-the harness-normalized `Nm` display label as that wait's effective timeout. It
-renders the target as `input` and the duration as `elapsed/timeout`s. Exact,
+the harness-normalized `Nm` display label as that wait's effective timeout.
+For activating-input waits, it omits the redundant input target label and renders
+the duration as `elapsed/timeout`s. Exact,
 plural, and bare background waits retain their tool-owned target labels and show
 elapsed time without a fabricated limit.
 The standard Swarm `task_blocker` tool, including a structurally prefixed name

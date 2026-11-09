@@ -129,7 +129,7 @@ pub(super) fn normalize_wait_display_timeout(
     }
     let minutes = display.args.strip_suffix('m')?.parse::<u64>().ok()?;
     let seconds = minutes.checked_mul(60)?;
-    display.args = "input".to_owned();
+    display.args.clear();
     Some(Duration::from_secs(seconds))
 }
 

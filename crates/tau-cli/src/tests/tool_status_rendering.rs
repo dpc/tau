@@ -5266,7 +5266,7 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         "READ_ARGUMENT",
         "SEARCH_ARGUMENT",
         "WRITE_ARGUMENT",
-        "wait input",
+        "wait ",
     ]
     .map(|argument| {
         verbose

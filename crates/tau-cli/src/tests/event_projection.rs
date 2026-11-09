@@ -1573,8 +1573,8 @@ fn wait_target_names_render_with_elapsed_time() {
     }
 }
 
-/// Activating-input waits identify their target and show the normalized wait
-/// bound alongside their own elapsed time both live and after completion.
+/// Activating-input waits omit the redundant input label while preserving the
+/// normalized bound and elapsed time live, after completion, and during replay.
 #[test]
 fn wait_timeout_label_survives_live_to_retained_transition() {
     let (_term, handle, vt) = setup(80, 24);
@@ -1597,7 +1597,8 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
         tau_proto::UnixMicros::new(1_100_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "wait input"));
+    assert!(vt.screen_contains(80, "wait "));
+    assert!(!vt.screen_contains(80, "wait input"));
     assert!(vt.screen_contains(80, "/3600s"));
 
     renderer.handle_recorded_at(
@@ -1621,7 +1622,7 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
         tau_proto::UnixMicros::new(2_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "wait input 1/3600s timeout"));
+    assert!(vt.screen_contains(80, "wait 1/3600s timeout"));
 
     // Durable replay does not include transient progress, so the terminal
     // descriptor must remain self-contained.
@@ -1666,7 +1667,7 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
         tau_proto::UnixMicros::new(2_000_000),
     );
     sync(&replay_handle);
-    assert!(replay_vt.screen_contains(80, "wait input 1/3600s timeout"));
+    assert!(replay_vt.screen_contains(80, "wait 1/3600s timeout"));
 }
 
 /// The CLI must use the harness wait parser rather than a looser structural
