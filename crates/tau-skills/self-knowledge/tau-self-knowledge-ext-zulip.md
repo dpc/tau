@@ -13,7 +13,7 @@ owns operational, security and routing documentation.
 
 The bridge uses bot email/API-key HTTP Basic authentication, queue registration
 and long polling, not webhooks. The linked-message producer uses registry
-SDK 0.29.0 and protocol 23.1. Rebuild all peers with compatible SDKs before
+SDK 0.29.1 and protocol 23.1. Rebuild all peers with compatible SDKs before
 separately authorized activation. Route changes do not fix a wire-version mismatch.
 
 ## Configuration and routing
@@ -213,7 +213,8 @@ Review former text-only roles; remove obsolete `zulip_send_attachment` and
 As designated receiver, supply at most ten attachments and exactly one
 `destination` or `reply_to`. Prefer a bare 24-digit lowercase hex key in `artifact`;
 plain `tau-artifact:KEY` URIs and Markdown `<tau-artifact:KEY>` autolinks also
-work; brackets are not required.
+work through the SDK's shared `ArtifactReference` input type. Brackets are for
+Markdown/context presentation; tool arguments do not require them.
 Do not use paths, URLs, inline bytes, `key` or
 `artifact_key` fields. Old algorithm-labelled full-digest references are rejected.
 Filenames must be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`, without a

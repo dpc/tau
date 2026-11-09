@@ -10,7 +10,7 @@ advertise: false
 `docs/setup.md` owns setup, `SECURITY.md` owns trust boundaries, and
 `docs/design.md` and `docs/runtime.md` own the full contract and limits.
 The linked-message producer uses registry `dpc-tau-client`/`dpc-tau-proto`
-SDK 0.29.0 and protocol 23.1. Update the installed extension with a compatible
+SDK 0.29.1 and protocol 23.1. Update the installed extension with a compatible
 harness before separately authorized activation. Ready or registration success
 does not prove Discord authentication, Gateway connectivity, or delivery.
 
@@ -84,9 +84,10 @@ plain sends. Replies neither fetch target text nor check its author.
 
 Optional `attachments: [{artifact, filename, content_type?}]` accepts at most ten
 artifact keys. Prefer bare 24-digit lowercase hex keys; plain `tau-artifact:KEY`
-URIs and Markdown autolinks also work; brackets are not required. Do not use
-paths, URLs or inline bytes. Without attachments, `message` must be nonempty;
-with attachments it may be omitted or empty.
+URIs and Markdown autolinks also work through the SDK's shared `ArtifactReference`
+input type. Brackets are for Markdown/context presentation; tool arguments do not
+require them. Do not use paths, URLs or inline bytes. Without attachments,
+`message` must be nonempty; with attachments it may be omitted or empty.
 
 Filenames must be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`,
 without a leading dot. Optional MIME hints accept image/avif, image/gif,

@@ -177,6 +177,8 @@ class PublicationTests(SourceFixture, unittest.TestCase):
             for product in products:
                 version, revision = complete.package_version(product, "1.2.3", self.sha, True)
                 core = product["name"] == "tau"
+                sdk = ("0.29.1" if product["project"] in
+                       ("tau", "tau-ext-slack", "tau-ext-zulip") else "0.29.0")
                 source = ({"source_sha": self.sha} if core else next(
                     p for p in manifest["external"] if p["input"] == product["project"]))
                 files = {"Cargo.toml", "Cargo.lock", "LICENSE"}
@@ -190,9 +192,9 @@ class PublicationTests(SourceFixture, unittest.TestCase):
                 }, "source": source, "source_file_sha256": dict.fromkeys(files, "a" * 64),
                     "third_party_notices_sha256": "b" * 64,
                     "sdk_lock_versions": {
-                        "dpc-tau-client": ["0.29.0"],
-                        "dpc-tau-proto": (["0.16.0", "0.29.0"] if product["project"] in (
-                            "tau-ext-slack", "tau-ext-telegram") else ["0.29.0"]),
+                        "dpc-tau-client": [sdk],
+                        "dpc-tau-proto": (["0.16.0", sdk] if product["project"] in (
+                            "tau-ext-slack", "tau-ext-telegram") else [sdk]),
                     },
                                    "package_version": version, "package_revision": revision})
             prefix = f"tau-1.2.3-{arch}"
@@ -249,7 +251,7 @@ class PublicationTests(SourceFixture, unittest.TestCase):
             release_assets.verify(output, self.repo, self.sha, "v1.2.3")
 
     def test_release_requires_current_core_and_compatible_external_sdk(self):
-        """Reject stale or mixed SDK closures even with matching metadata digests."""
+        """Require exact per-source SDK versions, not a blanket patch upgrade."""
         output = self.candidate()
         sourcefile = output / "tau-1.2.3-amd64-source-manifest.json"
         buildfile = output / "tau-1.2.3-amd64-build-manifest.json"
@@ -257,11 +259,20 @@ class PublicationTests(SourceFixture, unittest.TestCase):
         build = json.loads(buildfile.read_text())
         for component, dependency, versions in (
             (0, "dpc-tau-proto", ["0.28.0"]),
+            (0, "dpc-tau-proto", ["0.29.0"]),
+            (0, "dpc-tau-client", ["0.29.0"]),
             (1, "dpc-tau-proto", ["0.16.0"]),
             (1, "dpc-tau-proto", ["0.28.0", "0.29.0"]),
+            (1, "dpc-tau-proto", ["0.29.1"]),
+            (1, "dpc-tau-client", ["0.29.1"]),
             (3, "dpc-tau-proto", ["0.16.0"]),
+            (3, "dpc-tau-proto", ["0.16.0", "0.29.0"]),
             (3, "dpc-tau-proto", ["0.16.0", "0.28.0", "0.29.0"]),
             (3, "dpc-tau-client", ["0.16.0", "0.29.0"]),
+            (3, "dpc-tau-client", ["0.29.0"]),
+            (5, "dpc-tau-proto", ["0.16.0", "0.29.1"]),
+            (8, "dpc-tau-proto", ["0.29.0"]),
+            (8, "dpc-tau-client", ["0.29.0"]),
         ):
             with self.subTest(component=component, dependency=dependency, versions=versions):
                 source = json.loads(original)

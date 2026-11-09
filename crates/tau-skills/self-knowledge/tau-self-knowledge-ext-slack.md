@@ -22,7 +22,7 @@ as `disable_tools: ["fedi_slack_join_room"]` apply after group grants, but expli
 that were previously outside the group; review those grants before upgrading.
 Grouping changes no receiver, route, sender, installation or OAuth policy.
 Slack text is always untrusted external content. This source uses published Tau
-SDK 0.29.0 and protocol 23.1. It requires a protocol-23-compatible harness.
+SDK 0.29.1 and protocol 23.1. It requires a protocol-23-compatible harness.
 New original and avatar imports use anonymous metadata-bound artifact identity;
 outgoing originals verify complete descriptors, including historical payload-only
 objects. Local byte limits and tool grants remain unchanged.
@@ -394,9 +394,11 @@ Add the scope and reinstall/re-authorize separately; source support
 does not prove live OAuth permissions. No new events or `files:read` are needed.
 
 Provide `attachments: [{artifact, filename, content_type?}]`, with at most ten
-entries and 16 MiB total original bytes. Prefer a bare 24-digit lowercase hex key
-in `artifact`; plain `tau-artifact:KEY` URIs and Markdown autolinks also work.
-Brackets are not required. Slack rejects deprecated full `blake3:64-lowercase-hex` keys, bare or wrapped.
+entries and 16 MiB total original bytes. Prefer a bare 24-lowercase-hex key for
+`artifact`. You can also pass `tau-artifact:KEY` or the Markdown link
+`<tau-artifact:KEY>`. Use brackets for Markdown/context presentation; tool
+arguments do not require them. Slack rejects deprecated full
+`blake3:64-lowercase-hex` keys, bare or wrapped.
 The larger shared SDK object ceiling does not enlarge Slack's limits.
 The tool rejects unknown fields. Use the same outbound destination and optional
 reply/thread selectors as text sends. Omitting `attachments` or passing an empty list preserves

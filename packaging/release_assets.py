@@ -30,12 +30,14 @@ def component_valid(component, product, expected_source, arch):
     interpreter = native.ARCHES[arch][1]
     allowed = {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "libpthread.so.0",
                "libdl.so.2", Path(interpreter).name}
-    sdk_versions = {name: ["0.29.0"] for name in ("dpc-tau-client", "dpc-tau-proto")}
+    sdk_version = ("0.29.1" if product["project"] in
+                   ("tau", "tau-ext-slack", "tau-ext-zulip") else "0.29.0")
+    sdk_versions = {name: [sdk_version] for name in ("dpc-tau-client", "dpc-tau-proto")}
     # These two locked sources retain a 0.16 protocol validator only in their
     # dev dependencies. Runtime and build dependencies use registry SDK 0.29.
     # Keep the whole-lock inventory exact, rather than accepting arbitrary skew.
     if product["project"] in ("tau-ext-slack", "tau-ext-telegram"):
-        sdk_versions["dpc-tau-proto"] = ["0.16.0", "0.29.0"]
+        sdk_versions["dpc-tau-proto"] = ["0.16.0", sdk_version]
     return all([
         component["source"] == source,
         set(hashes) == expected_files, all(digest(v) for v in hashes.values()),

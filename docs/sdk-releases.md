@@ -20,18 +20,33 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.29.1: artifact tool-input domain type
+### Published SDK 0.29.1: artifact tool-input domain type
 
-Proto/client 0.29.1 are prepared, not yet published, and retain protocol 23.1.
-`tau_proto::ArtifactReference` is the
-shared tool/UI input type: it deserializes bare 24-digit lowercase hex keys
-(preferred), plain `tau-artifact:KEY` URIs, and Markdown autolinks, normalizes to
+Published proto/client 0.29.1 retain protocol 23.1.
+`tau_proto::ArtifactReference` is the shared tool/UI input type: it deserializes
+bare 24-digit lowercase hex keys (preferred), plain `tau-artifact:KEY` URIs, and Markdown autolinks, normalizes to
 `ArtifactKey`, and serializes only bare keys. Tool argument structs should use
 this type instead of implementing local parsers. `ArtifactKey` remains strict
 for wire/history identity fields. Shell export now returns a bare key.
 
-Publish proto before client; client pins proto at `=0.29.1`. Publication and
-downstream dependency updates are separate from runtime activation.
+Proto and then client were published from source revision
+`841c0854b5d58fba479be2934c0cd66a072428cb`; client pins proto at `=0.29.1`.
+Both registry archives match the prepared archives byte-for-byte, have clean
+Cargo VCS metadata for that revision, and are unyanked. Their SHA-256 values are
+`07c7463492324dedce5d38a47592a1a379569d590f07b47d46a2b18482db21a2`
+(proto) and
+`4cfca6c813574d6d316c657ecaa073af4173f9f33a3debba9aa9f1f870cee43c`
+(client). The registry-only consumer check passed all 21 tests on Rust 1.91
+with an empty `CARGO_HOME` and no local patches. Both SDK source tags resolve to
+that revision on Radicle and GitHub.
+
+Within the packaged external closure, only the changed Slack and Zulip
+artifact-input consumers adopt 0.29.1. Other packaged extensions retain their
+exact 0.29.0 dependencies; Slack and Telegram also retain a dev-only proto 0.16.0 lock entry.
+Discord is maintained separately and is not a core flake input or native package.
+The unchanged actions and blocking-notify-channel leaf packages remain 0.1.0.
+SDK publication and downstream dependency updates do not authorize runtime
+activation, installation, or restarts.
 
 ### SDK 0.29.0: protocol 23.1
 
