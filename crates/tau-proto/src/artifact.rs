@@ -12,6 +12,7 @@ mod key;
 mod limits;
 mod listing;
 mod read_id;
+mod reference;
 mod request_id;
 mod result;
 mod size;
@@ -28,6 +29,7 @@ pub use listing::{
     ARTIFACT_LIST_LIMIT, ArtifactListEntry, ArtifactSignature, artifact_prefix_valid,
 };
 pub use read_id::ArtifactReadId;
+pub use reference::ArtifactReference;
 pub use request_id::ArtifactRequestId;
 pub use result::{ArtifactResult, ArtifactValue};
 pub use size::ArtifactSize;
@@ -182,7 +184,7 @@ impl std::fmt::Debug for ArtifactRequest {
 /// Number of hexadecimal digits in the fixed 96-bit artifact identity.
 pub const ARTIFACT_DIGEST_HEX_LEN: usize = 24;
 
-/// Tool-input grammar shared with `parse_artifact_reference`, not wire serde.
+/// Tool-input grammar shared with `ArtifactReference`, not strict wire serde.
 ///
 /// Prefer a bare 24-lowercase-hex-digit key; plain URI and Markdown autolink
 /// spellings are conveniences normalized to `ArtifactKey` at the boundary.
@@ -200,7 +202,8 @@ pub fn artifact_digest(key: &str) -> Option<&str> {
 }
 
 /// Formats one internal content-address key as the canonical Markdown autolink
-/// used in prompts, tool results, and documentation.
+/// used when embedding references in Markdown/context, not structured tool
+/// APIs.
 #[must_use]
 pub fn artifact_reference(key: &ArtifactKey) -> String {
     format!("<{}>", artifact_uri(key))
@@ -216,6 +219,7 @@ pub fn artifact_uri(key: &ArtifactKey) -> String {
 /// Normalizes a bare 24-lowercase-hex-digit key (preferred for arguments),
 /// plain URI, or Markdown autolink into one public identity.
 ///
+/// `ArtifactReference` uses this parser for tool argument deserialization.
 /// This forgiving input boundary does not change `ArtifactKey`'s strict
 /// bare-key serde for typed identity fields. Display uses `artifact_uri` for UI
 /// and `artifact_reference` for model context; the identity does not retain a

@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.29.0",
+        "dpc-tau-proto": "=0.29.1",
     },
 }
 
@@ -184,6 +184,20 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
 
     assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 1));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// Packaged tool input accepts copied references without widening stored identities.
+#[test]
+fn packaged_sdk_normalizes_artifact_tool_inputs() {
+    use tau_proto::*;
+    let key = ArtifactKey::parse("0123456789abcdef01234567").expect("key");
+    for text in [key.to_string(), artifact_uri(&key), artifact_reference(&key)] {
+        let input: ArtifactReference = CborValue::Text(text).deserialized().expect("tool input");
+        assert_eq!(input.key(), &key);
+        let encoded = encode_message_to_vec(&input).expect("encode bare identity");
+        let decoded: ArtifactKey = decode_message_from_slice(&encoded).expect("strict identity");
+        assert_eq!(decoded, key);
+    }
 }
 
 /// Registry consumers preserve metadata-bound uploads and verify downloaded bytes.

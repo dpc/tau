@@ -14,7 +14,7 @@ advertise: false
   metadata, and missing-path suggestions. Input cap: 10 MiB; overlapping ranges
   can exceed the rendered-expansion cap.
 - `export`: uploads one regular file or in-process tar+zstd directory bundle and
-  returns only `kind` and `<tau-artifact:FULL_KEY>` in the `artifact` header.
+  returns only `kind` and a bare 24-digit lowercase hex key in the `artifact` header.
   Optional `mime_type` overrides file extension inference. The bounded filename
   and effective MIME persist immutably and participate in the artifact identity.
   `FULL_KEY` has exactly 24 lowercase hex digits (96-bit BLAKE3), without an

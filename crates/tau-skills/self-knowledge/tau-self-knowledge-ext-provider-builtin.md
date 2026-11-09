@@ -128,9 +128,11 @@ ChatGPT profiles declare `generate_image` by default; opt out with
 `image_generation: false`. Roles must opt in with `enable_tools: [generate_image]`;
 an instance `tool_prefix` prefixes the alias. Standard and Lite are supported.
 Use `{"prompt":"..."}` (non-whitespace, at most 32 KiB) to generate.
-Add `attachments: ["<tau-artifact:FULL_KEY>", ...]` to edit 1–5 originals in
-the supplied order. Omitted or empty attachments still generate. Bare canonical
-keys also work; paths, URLs, file IDs and previews do not. No masks, batches or
+Add `attachments: ["0123456789abcdef01234567", ...]` to edit 1–5 originals in
+the supplied order. Omitted or empty attachments still generate. Prefer bare
+24-digit lowercase hex keys. The `ArtifactReference` decoder also accepts plain
+`tau-artifact:KEY` URIs and Markdown autolinks; brackets are not required.
+Paths, URLs, file IDs and previews are not accepted. No masks, batches or
 automatic recent-image selection.
 
 Inputs must be valid static PNG, JPEG or WebP, at most 16 MiB each and 24 MiB
@@ -149,8 +151,8 @@ use the sibling JSON edit endpoint, without generation fallback or separate
 uploads. Edits follow the upstream source and have deterministic tests, but no
 live-account verification. Success returns
 `artifact`, `size`, and `mime_type` headers for the original PNG, at most 16 MiB.
-Pass `<tau-artifact:FULL_KEY>` directly to `import` or `read_image`; no inline image
-or store path is returned. Artifacts outlive ephemeral transcripts. Ordinary
+The `artifact` header contains a bare 24-digit lowercase hex key. Pass it directly
+to `import` or `read_image`; no inline image or store path is returned. Artifacts outlive ephemeral transcripts. Ordinary
 background/wait/cancel applies; uncertain/failed generation is not retried.
 Cancellation during publication may leave an orphan artifact. Network deadline:
 five minutes; overall call: seven minutes. Expired credentials require login

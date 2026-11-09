@@ -20,7 +20,20 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Prepared SDK 0.29.0: protocol 23.1
+### Prepared SDK 0.29.1: artifact tool-input domain type
+
+Proto/client 0.29.1 are prepared, not yet published, and retain protocol 23.1.
+`tau_proto::ArtifactReference` is the
+shared tool/UI input type: it deserializes bare 24-digit lowercase hex keys
+(preferred), plain `tau-artifact:KEY` URIs, and Markdown autolinks, normalizes to
+`ArtifactKey`, and serializes only bare keys. Tool argument structs should use
+this type instead of implementing local parsers. `ArtifactKey` remains strict
+for wire/history identity fields. Shell export now returns a bare key.
+
+Publish proto before client; client pins proto at `=0.29.1`. Publication and
+downstream dependency updates are separate from runtime activation.
+
+### SDK 0.29.0: protocol 23.1
 
 The prepared proto/client **0.29.0** packages contain the current protocol
 **23.1** source. Published SDK 0.28.0 advertises protocol 21.0 and cannot

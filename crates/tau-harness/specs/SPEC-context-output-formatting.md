@@ -42,7 +42,9 @@ Each header uses a `key: value` line. Header names should be clear and minimal.
 
 Tool-output status belongs in the headers, not duplicated in envelope attributes. A `format` header can concisely describe the payload's layout.
 
-Artifact references in tool-output headers use plain `tau-artifact:…` values, without Markdown autolink brackets.
+Structured artifact tool-output fields and headers use bare artifact keys.
+Markdown/context prose uses `<tau-artifact:…>` autolinks; plain-text UI locators
+may use `tau-artifact:…` without brackets.
 
 ### Errors
 

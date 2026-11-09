@@ -582,7 +582,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(EXPORT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Export a local file or directory as a shared artifact and return its <tau-artifact:KEY> reference."
+            "Export a local file or directory as a shared artifact and return its bare 24-digit lowercase hex key."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,

@@ -2008,12 +2008,14 @@ artifact reference into another call:
 ```json
 {
   "prompt": "Keep image 1's composition and transparency; make the leaf blue.",
-  "attachments": ["<tau-artifact:KEY_FROM_THE_FIRST_RESULT>"]
+  "attachments": ["KEY_FROM_THE_FIRST_RESULT"]
 }
 ```
 
-Supply 1–5 canonical artifact reference strings (bare canonical keys
-also work). Each occurrence counts in order as “image 1”, “image 2”, etc.;
+Supply 1–5 bare 24-digit lowercase hex artifact keys. The `ArtifactReference`
+decoder also accepts plain `tau-artifact:KEY` URIs and Markdown autolinks;
+brackets are not required. Each occurrence counts in order as “image 1”,
+“image 2”, etc.;
 there is no automatic recent-image selection. Paths, HTTP/data URLs, OpenAI
 file IDs and resized `read_image` previews are not accepted. Actual original
 bytes must decode as static PNG, JPEG or WebP. Animation and unsupported or
@@ -2036,10 +2038,10 @@ live edit behavior remain unverified.
 
 Before generation, the provider checks that shared artifact storage is
 available. Success returns `artifact`, `size`, and `mime_type` output headers;
-`artifact` contains the canonical `<tau-artifact:FULL_KEY>` reference.
+`artifact` contains a bare 24-digit lowercase hex key.
 The complete original PNG (up to 16 MiB, preserving alpha and metadata) lives
 in the harness-wide [artifact store](artifacts.md), independently of session
-lifetime. Pass the returned `<tau-artifact:FULL_KEY>` reference directly to
+lifetime. Pass the returned bare key directly to
 `read_image` if the model supports image tool results. Use shell `import(key)`
 only when another filesystem tool
 needs a private local copy. No inline image or host storage path is returned by

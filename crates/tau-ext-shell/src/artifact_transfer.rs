@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use tau_client::{ArtifactClient, ArtifactDownload, ArtifactUpload};
 use tau_proto::{
-    ARTIFACT_MAX_BYTES, ArtifactError, ArtifactRequestId, ArtifactResult, CborValue, Event,
-    HarnessOutputMessage, ToolCancelled, ToolError, ToolResult, ToolResultKind, ToolStarted,
-    artifact_uri, parse_artifact_reference,
+    ARTIFACT_MAX_BYTES, ArtifactError, ArtifactReference, ArtifactRequestId, ArtifactResult,
+    CborValue, Event, HarnessOutputMessage, ToolCancelled, ToolError, ToolResult, ToolResultKind,
+    ToolStarted,
 };
 
 use crate::Output;
@@ -402,7 +402,7 @@ impl ArtifactTransferManager {
                         "kind",
                         if directory { "directory" } else { "file" }.to_owned(),
                     ),
-                    text_entry("artifact", artifact_uri(&descriptor.key)),
+                    text_entry("artifact", descriptor.key.to_string()),
                 ];
                 report_result(output, &invoke, CborValue::Map(entries));
                 lifecycle.finish();
@@ -820,16 +820,19 @@ fn prepare_import_with_limit(
     lifecycle: ToolLifecycle,
     max_bytes: u64,
 ) -> Result<Command, (ToolStarted, ToolLifecycle, String)> {
-    let Some(key) = tau_proto::cbor_text_field(&invoke.arguments, "key") else {
+    let Some(key) = tau_proto::cbor_field(&invoke.arguments, "key") else {
         return Err((invoke, lifecycle, "key must be a string".to_owned()));
     };
-    let key = parse_artifact_reference(&key).map_err(|_| {
-        (
-            invoke.clone(),
-            lifecycle.clone(),
-            "invalid-artifact-reference".to_owned(),
-        )
-    })?;
+    let key = key
+        .deserialized::<ArtifactReference>()
+        .map_err(|_| {
+            (
+                invoke.clone(),
+                lifecycle.clone(),
+                "invalid-artifact-reference".to_owned(),
+            )
+        })?
+        .into_key();
     Ok(Command::StartImport {
         reservation: None,
         invoke,

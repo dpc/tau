@@ -21,11 +21,13 @@ digits, the first 96 bits of BLAKE3, with no algorithm label. For tool arguments
 prefer the bare 24-digit lowercase hex key. Import, image inspection, image
 attachments, and clipboard export also accept the plain
 `tau-artifact:0123456789abcdef01234567` URI and the Markdown autolink.
+Structured tool API results, including export's artifact field, use bare keys.
 Owned plain-text UI locators use the URI without brackets; prompt and model-facing
 Markdown references use the bracketed autolink. This identity is fixed, not a variable abbreviation.
-Input boundaries normalize these spellings once to `ArtifactKey`; the semantic
-identity does not retain the presentation. Typed artifact identity fields use
-only bare keys in wire and history serialization. Original tool-call arguments,
+Tool argument structs use the shared `ArtifactReference` input type. It
+deserializes all three spellings to `ArtifactKey` and serializes a bare key;
+the semantic identity does not retain the presentation. Typed artifact identity
+fields use only bare keys in wire and history serialization. Original tool-call arguments,
 including `raw_arguments_json`, retain the supplied text for replay.
 Former algorithm-labelled references and full64hex typed keys are rejected.
 
@@ -244,7 +246,7 @@ authoritative empty set.
 
 The shell `export` consumer reads one bounded local regular file using its
 ordinary remembered-workdir filesystem authority and performs a new explicit
-upload. Its model-facing result exposes only kind and canonical artifact reference.
+upload. Its model-facing result exposes only kind and bare artifact key.
 Export persists the bounded basename and the explicit file MIME override, or the
 MIME inferred from a known extension. Directory bundles record their fixed MIME.
 Shell `import` normalizes a bare key, plain URI, or Markdown autolink, verifies the complete

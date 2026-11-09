@@ -8,9 +8,8 @@ use image::{
     imageops as path_image_imageops,
 };
 use tau_proto::{
-    ArtifactKey, CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart,
-    ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus, artifact_uri,
-    parse_artifact_reference,
+    ArtifactKey, ArtifactReference, CborValue, ImageContent, ImageDetail, ImageMediaType,
+    ToolResultContentPart, ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus, artifact_uri,
 };
 
 pub(crate) const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
@@ -226,9 +225,13 @@ pub(crate) struct ReadImageRequest {
 impl ReadImageRequest {
     /// Parse the strict model-visible read-image arguments.
     pub(crate) fn from_arguments(arguments: &CborValue) -> Result<Self, String> {
-        let key = parse_artifact_reference(&argument_text(arguments, "key")?).map_err(|_| {
-            "argument `key` must be a canonical artifact reference or bare key".to_owned()
-        })?;
+        let key = tau_proto::cbor_field(arguments, "key")
+            .ok_or_else(|| "argument `key` must be an artifact key".to_owned())?
+            .deserialized::<ArtifactReference>()
+            .map_err(|_| {
+                "argument `key` must be a canonical artifact reference or bare key".to_owned()
+            })?
+            .into_key();
         Ok(Self {
             key,
             mode: ImageMode::from_arguments(arguments)?,
@@ -309,10 +312,6 @@ pub(crate) struct ReadImageOutput {
     pub(crate) provider_content: Vec<ToolResultContentPart>,
     /// Metadata-only UI presentation.
     pub(crate) display: ToolUseState,
-}
-
-fn argument_text(arguments: &CborValue, key: &str) -> Result<String, String> {
-    optional_argument_text(arguments, key)?.ok_or_else(|| format!("missing string argument: {key}"))
 }
 
 fn optional_argument_text(arguments: &CborValue, key: &str) -> Result<Option<String>, String> {

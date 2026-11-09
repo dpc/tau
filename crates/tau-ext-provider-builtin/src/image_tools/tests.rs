@@ -1042,7 +1042,7 @@ fn image_original_upload_returns_reference_without_path_or_inline_bytes() {
     assert_eq!(fields.len(), 3);
     assert!(fields.contains(&(
         CborValue::Text("artifact".into()),
-        CborValue::Text(tau_proto::artifact_reference(&descriptor.key))
+        CborValue::Text(descriptor.key.to_string())
     )));
     assert!(
         !fields

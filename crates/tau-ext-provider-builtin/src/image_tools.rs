@@ -108,7 +108,7 @@ pub(super) fn declarations(
                 name: ToolName::new(format!("codex_image_{index}")),
                 provider_scope: Some(provider.clone()),
                 model_visible_name: Some(ToolName::new("generate_image")),
-                description: Some("Generate one original PNG using the selected ChatGPT account, or edit with optional ordered attachments (up to 5 artifact keys for static PNG, JPEG or WebP originals). Omitted or empty attachments generate a new image. Attached original bytes, including metadata, are disclosed to that account; references can expire. Returns a canonical artifact reference, size and MIME headers; pass directly to import or read_image. Originals persist independently of this session, including ephemeral sessions. No masks or batches.".to_owned()),
+                description: Some("Generate one original PNG using the selected ChatGPT account, or edit with optional ordered attachments (up to 5 artifact keys for static PNG, JPEG or WebP originals). Omitted or empty attachments generate a new image. Attached original bytes, including metadata, are disclosed to that account; references can expire. Returns a bare artifact key, size and MIME headers; pass directly to import or read_image. Originals persist independently of this session, including ephemeral sessions. No masks or batches.".to_owned()),
                 tool_type: tau_proto::ToolType::Function,
                 parameters: Some(serde_json::json!({
                     "type": "object",
@@ -277,7 +277,7 @@ impl ImageTools {
                 result: CborValue::Map(vec![
                     (
                         CborValue::Text("artifact".into()),
-                        CborValue::Text(tau_proto::artifact_reference(&descriptor.key)),
+                        CborValue::Text(descriptor.key.to_string()),
                     ),
                     (
                         CborValue::Text("size".into()),
@@ -606,10 +606,10 @@ fn parse_arguments(arguments: &CborValue) -> Option<(String, Vec<ArtifactKey>)> 
                     values
                         .iter()
                         .map(|value| {
-                            let CborValue::Text(reference) = value else {
-                                return None;
-                            };
-                            tau_proto::parse_artifact_reference(reference).ok()
+                            value
+                                .deserialized::<tau_proto::ArtifactReference>()
+                                .ok()
+                                .map(tau_proto::ArtifactReference::into_key)
                         })
                         .collect::<Option<Vec<_>>>()?,
                 );

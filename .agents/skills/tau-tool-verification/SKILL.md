@@ -34,7 +34,7 @@ available.
 
 When `export` and `import` are exposed, verify a small original round trip:
 export a local regular file and confirm only `kind` and `artifact` output headers,
-using plain `tau-artifact:KEY` rather than Markdown autolink brackets,
+using a bare 24-digit lowercase hex key rather than a URI or Markdown autolink,
 with no trailing blank line. Import the returned artifact using each accepted
 spelling: bare 24-digit lowercase hex key (preferred), plain `tau-artifact:KEY`,
 and Markdown `<tau-artifact:KEY>`. Confirm the `kind`, `path`, `size`, and
@@ -48,8 +48,9 @@ Require exactly 24 lowercase hex digits without an algorithm label in exported
 references. Verify import and read_image reject old algorithm-labelled full-digest
 references, full64hex, uppercase, whitespace, suffix paths/queries/fragments,
 and arbitrary shorter prefixes. Check that schemas admit all three forms and
-normalize to the same identity; typed artifact identity field serde must reject
-URI/autolink spellings. Import accepts only the key argument.
+that `ArtifactReference` deserialization normalizes them to the same identity.
+Check that it serializes a bare key. Strict `ArtifactKey` identity field serde
+must reject URI/autolink spellings. Import accepts only the key argument.
 Export a small nested directory with an empty directory and binary member, then
 import using only its reference. Check `kind: directory`, the fixed directory
 MIME, exact member bytes and private non-executable permissions. Check that

@@ -212,7 +212,7 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
     let Event::ToolResult(export) = export else {
         panic!("expected export result");
     };
-    let reference = tau_proto::artifact_uri(&key);
+    let reference = key.to_string();
     assert_eq!(
         cbor_map_text(&export.result, "artifact"),
         Some(reference.as_str())

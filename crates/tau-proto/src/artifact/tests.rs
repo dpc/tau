@@ -103,6 +103,16 @@ fn artifact_references_round_trip_and_accept_bare_keys() {
             parse_artifact_reference(text).expect("accepted spelling"),
             key
         );
+        let input: ArtifactReference =
+            serde_json::from_value(serde_json::json!(text)).expect("tool argument");
+        assert_eq!(input.key(), &key);
+        assert_eq!(
+            serde_json::to_value(&input).expect("serialize canonical input"),
+            serde_json::json!(key)
+        );
+        let cbor = crate::CborValue::Text(text.to_owned());
+        let decoded: ArtifactReference = cbor.deserialized().expect("CBOR tool argument");
+        assert_eq!(decoded.into_key(), key);
         // Forgiving tool input must not widen durable identity decoding.
         assert_eq!(
             serde_json::from_value::<ArtifactKey>(serde_json::json!(text)).is_ok(),
@@ -124,6 +134,17 @@ fn artifact_references_round_trip_and_accept_bare_keys() {
         format!("tau-artifact:{}", "a".repeat(64)),
     ] {
         assert!(parse_artifact_reference(&invalid).is_err(), "{invalid}");
+        assert!(
+            serde_json::from_value::<ArtifactReference>(serde_json::json!(invalid)).is_err(),
+            "{invalid}"
+        );
+    }
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!(123),
+        serde_json::json!({}),
+    ] {
+        assert!(serde_json::from_value::<ArtifactReference>(invalid).is_err());
     }
 }
 

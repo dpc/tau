@@ -6,8 +6,9 @@ advertise: false
 
 # Artifacts and large pastes
 
-Tau stores immutable original bytes under a content-addressed key. The
-model-facing reference is `<tau-artifact:KEY>`. Prefer the bare key in `import`,
+Tau stores immutable original bytes under a content-addressed key. Markdown and
+model-context prose use `<tau-artifact:KEY>`; structured tool results use bare
+keys. Prefer the bare key in `import`,
 `read_image`, image-generation attachments, and clipboard commands; the complete
 plain `tau-artifact:KEY` URI or Markdown autolink also works.
 `KEY` is exactly 24 lowercase hex digits (96 bits of BLAKE3), with no
@@ -21,7 +22,7 @@ physical filename, not public read authority or a tool argument. Its Debug
 output is redacted; generic notices must not expose physical locators.
 Existing stored originals remain accessible through short keys.
 `export(path, mime_type?)` reads one regular file or directory under the shell
-instance's remembered workdir authority and returns only kind and artifact reference.
+instance's remembered workdir authority and returns only kind and bare artifact key.
 Filename and effective MIME are immutable hash-bound metadata; an explicit file MIME
 overrides extension inference. `import(key)` verifies bytes and metadata, restores
 a safe filename inside a fresh private directory, and returns kind, path, size and

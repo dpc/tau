@@ -4,16 +4,18 @@
 
 Use a bare 24-digit lowercase hex artifact key for tool arguments (`import`,
 `read_image`, and image-generation attachments) and clipboard commands.
-For convenient copying, those inputs also accept `tau-artifact:KEY` and
-`<tau-artifact:KEY>`. The input boundary normalizes them once to `ArtifactKey`;
-the semantic identity does not retain the presentation. Typed artifact identity
-fields serialize only bare keys; original tool-call arguments, including
+Those inputs also accept `tau-artifact:KEY` and `<tau-artifact:KEY>`; brackets
+are for Markdown embedding and are not required for tool input. Tool argument
+structs use the shared `ArtifactReference` domain type, which deserializes all
+three forms to `ArtifactKey` and serializes a bare key. The semantic identity
+does not retain the presentation. Typed artifact identity fields serialize only bare keys; original tool-call arguments, including
 `raw_arguments_json`, retain the supplied text for replay.
 Full 64-digit digests, uppercase hex, shorter prefixes, paths, queries, fragments,
 and whitespace are not complete keys.
 
-Model-context output keeps Markdown autolinks; owned plain-text UI locators use
-plain URIs. Harness storage separately uses a private validated `StorageDigest`
+Structured tool API results use bare keys. Model-context prose keeps Markdown
+autolinks; owned plain-text UI locators use plain URIs. Harness storage separately
+uses a private validated `StorageDigest`
 for full64hex physical filenames. It is not a tool argument or public identity,
 and its Debug output is redacted. Neither representation establishes provenance
 or safety. See [SPEC-shared-artifacts](../specs/SPEC-shared-artifacts.md).
@@ -146,8 +148,8 @@ The shell extension registers `export(path, mime_type?)` and
 `import(key)` under ordinary tool-role policy. Export reads one local regular file
 or directory under the shell instance's remembered workdir authority, applies the
 configured stored-byte limit
-(32 MiB by default), and returns only `kind` and `artifact` headers. It records a
-bounded basename and available MIME with the immutable artifact. Explicit MIME
+(32 MiB by default), and returns only `kind` and bare-key `artifact` headers.
+It records a bounded basename and available MIME with the immutable artifact. Explicit MIME
 wins; otherwise common
 filename extensions supply a best-effort declaration, without content sniffing.
 Import validates the reference, downloads and verifies the complete original,

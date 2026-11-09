@@ -83,10 +83,10 @@ The provider validates the exact reply target; missing targets never fall back t
 plain sends. Replies neither fetch target text nor check its author.
 
 Optional `attachments: [{artifact, filename, content_type?}]` accepts at most ten
-canonical `<tau-artifact:24-lowercase-hex-digits>` references or bare
-24-lowercase-hex keys, not paths, URLs or inline bytes. Without attachments,
-`message` must be nonempty; with
-attachments it may be omitted or empty.
+artifact keys. Prefer bare 24-digit lowercase hex keys; plain `tau-artifact:KEY`
+URIs and Markdown autolinks also work; brackets are not required. Do not use
+paths, URLs or inline bytes. Without attachments, `message` must be nonempty;
+with attachments it may be omitted or empty.
 
 Filenames must be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`,
 without a leading dot. Optional MIME hints accept image/avif, image/gif,
@@ -190,9 +190,10 @@ error. Checks do not prove image safety; cancellation may leave stored artifacts
 
 `discord_update_self_profile` accepts `username`, `avatar`, and `banner`; omitted
 fields stay unchanged. `username` is a non-null 2–32-character string subject to
-Discord's name rules. Images use canonical Artifact references or bare 24-lowercase-hex
-keys; `null` clears an image. For example,
-`{"avatar":"<tau-artifact:24-lowercase-hex-digits>","banner":null}` replaces the
+Discord's name rules. Prefer bare 24-digit lowercase hex artifact keys for images;
+plain `tau-artifact:KEY` URIs and Markdown autolinks also work. `null` clears an
+image. For example,
+`{"avatar":"0123456789abcdef01234567","banner":null}` replaces the
 avatar and clears the banner.
 
 The separate default-off `discord:profiles:write` grant is outside the core group.

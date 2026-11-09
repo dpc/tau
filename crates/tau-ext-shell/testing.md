@@ -18,6 +18,10 @@ by [SPEC-streamed-tool-output](../../specs/SPEC-streamed-tool-output.md).
 
 ## Protocol and UI
 
+Artifact round-trip lifecycle coverage requires export's `artifact` field and
+rendered header to contain a bare key. Import accepts that key, a plain URI, or
+a Markdown autolink through shared `ArtifactReference` deserialization.
+
 User-endpoint tests distinguish execution intent from live authenticated activity
 acquisition acknowledgement, verify no pre-ACK effects and sticky cancellation,
 and keep the hold through passive-context settlement. Harness lifecycle tests
@@ -87,8 +91,7 @@ Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
 Artifact coverage drives fake correlated export and import RPC responses, proves
 original-byte equality and private imported-file permissions, asserts
 minimal `kind`/`artifact` export and `path`/`size`/recorded-MIME import header
-projections, passes the
-canonical `<tau-artifact:KEY>` reference directly into import, and passes
+projections, passes the exported bare key directly into import, and passes
 the returned path as an ordinary filesystem artifact; image inspection consumes
 the same reference directly through `std-utils`.
 Canonical keys have 24 lowercase hex digits and no algorithm label. Coverage

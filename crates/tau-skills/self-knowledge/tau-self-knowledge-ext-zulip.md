@@ -211,8 +211,10 @@ Review former text-only roles; remove obsolete `zulip_send_attachment` and
 `zulip:attach` grants. There is no argument-level upload permission.
 
 As designated receiver, supply at most ten attachments and exactly one
-`destination` or `reply_to`. Use canonical Artifact autolinks containing a
-24-lowercase-hex key or the bare key, not paths, URLs, inline bytes, `key` or
+`destination` or `reply_to`. Prefer a bare 24-digit lowercase hex key in `artifact`;
+plain `tau-artifact:KEY` URIs and Markdown `<tau-artifact:KEY>` autolinks also
+work; brackets are not required.
+Do not use paths, URLs, inline bytes, `key` or
 `artifact_key` fields. Old algorithm-labelled full-digest references are rejected.
 Filenames must be 1–128-byte ASCII basenames using letters, digits, `.`, `_`, `-`, without a
 leading dot. Without attachments, `message` must be nonempty; with attachments
@@ -222,7 +224,7 @@ destination in this example:
 ```json
 {
   "attachments": [{
-    "artifact": "<tau-artifact:0123456789abcdef01234567>",
+    "artifact": "0123456789abcdef01234567",
     "filename": "chart.png",
     "content_type": "image/png"
   }],
@@ -351,8 +353,9 @@ or establish that a later build fixes the reported avatar incident.
 ### Editing the bot's own avatar
 
 `zulip_update_self_profile` accepts
-`{"avatar":"<tau-artifact:0123456789abcdef01234567>"}` or a bare
-24-lowercase-hex key. Old algorithm-labelled full-digest references are rejected.
+`{"avatar":"0123456789abcdef01234567"}`. Prefer the bare key; plain
+`tau-artifact:KEY` URIs and Markdown autolinks also work. Old algorithm-labelled
+full-digest references are rejected.
 `{"avatar":null}` resets to the realm default, which may not be blank.
 Enable it through its default-off `zulip:profiles:write` tag, exact tool or Zulip group.
 It requires the current ordinary receiver and is absent in send-only mode.

@@ -394,9 +394,9 @@ Add the scope and reinstall/re-authorize separately; source support
 does not prove live OAuth permissions. No new events or `files:read` are needed.
 
 Provide `attachments: [{artifact, filename, content_type?}]`, with at most ten
-entries and 16 MiB total original bytes. `artifact` accepts canonical
-`<tau-artifact:24-lowercase-hex>` or bare 24-lowercase-hex keys. Slack rejects
-deprecated full `blake3:64-lowercase-hex` keys, bare or wrapped.
+entries and 16 MiB total original bytes. Prefer a bare 24-digit lowercase hex key
+in `artifact`; plain `tau-artifact:KEY` URIs and Markdown autolinks also work.
+Brackets are not required. Slack rejects deprecated full `blake3:64-lowercase-hex` keys, bare or wrapped.
 The larger shared SDK object ceiling does not enlarge Slack's limits.
 The tool rejects unknown fields. Use the same outbound destination and optional
 reply/thread selectors as text sends. Omitting `attachments` or passing an empty list preserves
