@@ -377,7 +377,7 @@ fn work_status_prompt_is_generic_escaped_and_ignores_initial_snapshot() {
             watch_work_status_text("worker", &status).as_deref(),
             Some(
                 format!(
-                    "<agent_update agent=\"worker\" status=\"{state}\" task=\"trace\\u{{202E}}restore\"></agent_update>"
+                    "<agent_update agent=\"worker\" status=\"{state}\" task=\"trace\\u{{202E}}restore\"/>"
                 )
                 .as_str()
             )
@@ -849,7 +849,7 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
     let text = watch_provider_status_text("worker", &status);
     assert_eq!(
         text,
-        "<agent_update agent=\"worker\" status=\"retrying\" category=\"usage_window\" attempt=\"1\" next_retry_delay_secs=\"419322\"></agent_update>"
+        "<agent_update agent=\"worker\" status=\"retrying\" category=\"usage_window\" attempt=\"1\" next_retry_delay_secs=\"419322\"/>"
     );
     assert!(!text.contains("419322s"));
 
@@ -863,7 +863,7 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
     let text = watch_provider_status_text("worker", &failed_status);
     assert_eq!(
         text,
-        "<agent_update agent=\"worker\" status=\"terminal_error\" category=\"request_rejected\"></agent_update>"
+        "<agent_update agent=\"worker\" status=\"terminal_error\" category=\"request_rejected\"/>"
     );
 }
 use crate::discovery::DiscoveredAgentsFile;
@@ -3665,7 +3665,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
                 && matches!(
                     &content[0],
                     ContentPart::Text { text }
-                    if text == "<agent_update agent=\"watched\" event=\"response\">done <response>&&lt;/response&gt;</agent_update>"
+                    if text == "<agent_update agent=\"watched\" event=\"response\">done <response>&</response></agent_update>"
                 )
     ));
 
@@ -3961,10 +3961,10 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
     assert_preflight_matches_materialization(&replay_tree, false);
     let replay = assemble_conversation_from(&replay_tree, replay_tree.head());
     let expected_text = [
-        "<agent_update agent=\"watched\" status=\"working\" task=\"trace restore\"></agent_update>",
+        "<agent_update agent=\"watched\" status=\"working\" task=\"trace restore\"/>",
         "<agent_update agent=\"watched\" event=\"long_wait\" threshold_minutes=\"30\">Cumulative waits in the current Working period, not the runtime of the current tool.</agent_update>",
-        "<agent_update agent=\"watched\" status=\"stopped\" reason=\"unexpected unload\"></agent_update>",
-        "<agent_update agent=\"watched\" status=\"stopped\" reason=\"restored delegation lost its completion route\"></agent_update>",
+        "<agent_update agent=\"watched\" status=\"stopped\" reason=\"unexpected unload\"/>",
+        "<agent_update agent=\"watched\" status=\"stopped\" reason=\"restored delegation lost its completion route\"/>",
     ];
     assert_eq!(context.len(), expected_text.len());
     for (item, expected) in context.iter().zip(expected_text) {

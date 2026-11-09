@@ -2771,7 +2771,7 @@ fn wait_result_from_parts(
     let success =
         !timed_out && !cancelled && status.as_ref().is_some_and(|status| status.success());
     let termination_reason = if cancelled {
-        "cancelled"
+        "canceled"
     } else if timed_out {
         "timeout"
     } else if signal.is_some() {
@@ -2806,7 +2806,7 @@ struct WaitResult {
     termination_reason: &'static str,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputStream {
     Stdout,
     Stderr,
@@ -2858,6 +2858,9 @@ struct CapturedOutput {
     stdout: StreamDecoder,
     /// Incremental stderr decoder.
     stderr: StreamDecoder,
+    /// Last observed pipe, used to seal a readable segment before switching
+    /// pipes.
+    last_stream: Option<OutputStream>,
     /// Leading lines retained for model rendering.
     head_lines: Vec<OutputLine>,
     /// Trailing lines retained for model rendering.
@@ -2875,15 +2878,44 @@ struct CapturedOutput {
 }
 
 impl CapturedOutput {
+    /// Seal readable text when observation moves to another pipe, without
+    /// treating an incomplete UTF-8 sequence or CR as pipe EOF.
+    fn select_stream(&mut self, stream: OutputStream) {
+        if let Some(previous) = self.last_stream
+            && previous != stream
+        {
+            let decoder = self.decoder(previous);
+            if decoder.has_pending_text() {
+                let segment = decoder.take_pending_line(None);
+                self.push_line(previous, segment);
+            }
+        }
+        self.last_stream = Some(stream);
+    }
+
+    /// Select the independent byte decoder for one observed pipe.
+    fn decoder(&mut self, stream: OutputStream) -> &mut StreamDecoder {
+        match stream {
+            OutputStream::Stdout => &mut self.stdout,
+            OutputStream::Stderr => &mut self.stderr,
+        }
+    }
+
     fn push_bytes(&mut self, stream: OutputStream, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         if let Some(capture) = self.stream.as_mut() {
             capture.push(stream, bytes, path_std_time::Instant::now());
         }
-        let decoder = match stream {
-            OutputStream::Stdout => &mut self.stdout,
-            OutputStream::Stderr => &mut self.stderr,
-        };
-        for line in decoder.push_bytes(bytes) {
+        let decoder = self.decoder(stream);
+        let lines = decoder.push_bytes(bytes);
+        // An incomplete byte sequence or a lone CR has not produced a visible
+        // segment yet. Do not split the other pipe's pending text for it.
+        if !lines.is_empty() || decoder.has_pending_text() {
+            self.select_stream(stream);
+        }
+        for line in lines {
             self.push_line(stream, line);
         }
     }
@@ -2981,11 +3013,33 @@ impl CapturedOutput {
     }
 
     fn finish(&mut self) {
-        for line in self.stdout.finish() {
-            self.push_line(OutputStream::Stdout, line);
+        // Match streamed finalization: first resolve byte carries for each
+        // pipe, then pending CRs. Never flush all of stdout ahead of readable
+        // stderr merely because stdout owns an unresolved carry.
+        for stream in [OutputStream::Stdout, OutputStream::Stderr] {
+            if !self.decoder(stream).pending_utf8.is_empty() {
+                self.select_stream(stream);
+                for line in self.decoder(stream).finish_utf8() {
+                    self.push_line(stream, line);
+                }
+            }
         }
-        for line in self.stderr.finish() {
-            self.push_line(OutputStream::Stderr, line);
+        for stream in [OutputStream::Stdout, OutputStream::Stderr] {
+            if self.decoder(stream).pending_cr {
+                self.select_stream(stream);
+                let mut lines = Vec::new();
+                self.decoder(stream).flush_pending_cr_as_cr(&mut lines);
+                for line in lines {
+                    self.push_line(stream, line);
+                }
+            }
+        }
+        if let Some(stream) = self.last_stream {
+            let decoder = self.decoder(stream);
+            if decoder.has_pending_text() {
+                let line = decoder.take_pending_line(None);
+                self.push_line(stream, line);
+            }
         }
     }
 
@@ -3064,7 +3118,6 @@ impl StreamDecoder {
                         }
                         remaining = &remaining[valid_up_to + error_len..];
                     } else {
-                        self.flush_pending_cr_as_cr(&mut lines);
                         self.pending_utf8 = remaining[valid_up_to..].to_vec();
                         break;
                     }
@@ -3107,7 +3160,14 @@ impl StreamDecoder {
         }
         self.pending_line.push(ch);
     }
-    fn finish(&mut self) -> Vec<OutputContent> {
+    /// Whether decoded text is ready to become one source segment.
+    fn has_pending_text(&self) -> bool {
+        !self.pending_line.is_empty() || self.pending_line_invalid || self.pending_line_truncated
+    }
+
+    /// Resolve only the incomplete UTF-8 carry. CRs and the final readable
+    /// segment are sealed separately in the shared two-pipe finish order.
+    fn finish_utf8(&mut self) -> Vec<OutputContent> {
         let mut lines = Vec::new();
         if !self.pending_utf8.is_empty() {
             self.had_invalid_utf8 = true;
@@ -3121,11 +3181,6 @@ impl StreamDecoder {
                     .pending_line_original_bytes
                     .saturating_add('\u{fffd}'.len_utf8());
             }
-        }
-        self.flush_pending_cr_as_cr(&mut lines);
-        if !self.pending_line.is_empty() || self.pending_line_invalid || self.pending_line_truncated
-        {
-            lines.push(self.take_pending_line(None));
         }
         lines
     }
@@ -3360,7 +3415,7 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
     }
     if let Some(status) = status {
         entries.push((
-            CborValue::Text("status".to_owned()),
+            CborValue::Text("exit_code".to_owned()),
             CborValue::Integer(status.into()),
         ));
     }

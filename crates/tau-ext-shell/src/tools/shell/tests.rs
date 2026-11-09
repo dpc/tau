@@ -1,3 +1,4 @@
+use std::sync::mpsc;
 use std::time as path_std_time;
 #[cfg(unix)]
 use std::{fs::File, process::Command};
@@ -1211,6 +1212,112 @@ fn captured_output_totals_match_rendered_records() {
     let visible = output.truncate();
     assert_eq!(visible.content, expected);
     assert_eq!(visible.total_bytes, expected.len());
+}
+
+/// Saved and delivered source must agree on pipe-observation order even when
+/// stdout has no final newline before a complete stderr record arrives.
+#[test]
+fn saved_capture_and_model_tail_preserve_observed_pipe_segments() {
+    let (tx, _rx) = mpsc::channel();
+    let capture = OutputStreamCapture::new(
+        Output::channel(tx),
+        "ordered-source".into(),
+        tau_proto::ToolName::new("shell_command"),
+    )
+    .expect("stream capture");
+    let mut output = CapturedOutput {
+        stream: Some(capture),
+        ..Default::default()
+    };
+    output.push_bytes(OutputStream::Stdout, b"stream-start\nstream-tail");
+    output.push_bytes(OutputStream::Stderr, b"stderr-tail\n");
+    output.finish();
+    let tail = output.stream.as_mut().expect("capture").finish();
+    let expected = "out stream-start\nout(no_nl) stream-tail\nerr stderr-tail";
+    assert_eq!(tail, expected);
+    assert_eq!(output.saved_output, expected);
+    assert_eq!(output.truncate().content, expected);
+    let result = command_details_value(CommandDetails {
+        status: Some(0),
+        signal: None,
+        duration_seconds: None,
+        termination_reason: "exit",
+        total_lines: None,
+        total_bytes: None,
+        output: tail,
+        truncated: false,
+        valid_utf8: true,
+        saved_output: None,
+    });
+    assert_eq!(
+        tau_proto::ToolResponse::from_cbor(&result).render(),
+        format!("termination_reason: exit\nexit_code: 0\n\n{expected}")
+    );
+}
+
+/// EOF carry resolution must not move stdout ahead of later observed stderr;
+/// incomplete UTF-8 remains explicitly marked in the saved diagnostic.
+#[test]
+fn saved_capture_and_tail_preserve_order_across_eof_carries() {
+    for (chunks, expected_tail, expected_saved) in [
+        (
+            vec![
+                (OutputStream::Stdout, &b"a\r"[..]),
+                (OutputStream::Stderr, &b"b"[..]),
+            ],
+            "out(no_nl) a\nerr(no_nl) b\nout(cr) ",
+            "out(no_nl) a\nerr(no_nl) b\nout(cr) ",
+        ),
+        (
+            vec![
+                (OutputStream::Stdout, &b"\xc3"[..]),
+                (OutputStream::Stderr, &b"b"[..]),
+            ],
+            "err(no_nl) b\nout(no_nl) \u{fffd}",
+            "err(no_nl) b\nout(invalid-utf8,no_nl) \u{fffd}",
+        ),
+        (
+            vec![
+                (OutputStream::Stdout, &b"a"[..]),
+                (OutputStream::Stderr, &b"\xc3"[..]),
+                (OutputStream::Stdout, &b"b\n"[..]),
+            ],
+            "out ab\nerr(no_nl) \u{fffd}",
+            "out ab\nerr(invalid-utf8,no_nl) \u{fffd}",
+        ),
+        (
+            vec![
+                (OutputStream::Stdout, &b"\xc3"[..]),
+                (OutputStream::Stderr, &b"b"[..]),
+                (OutputStream::Stdout, &b"\xa9\r\n"[..]),
+            ],
+            "err(no_nl) b\nout(crlf) é",
+            "err(no_nl) b\nout(crlf) é",
+        ),
+    ] {
+        let (tx, _rx) = mpsc::channel();
+        let mut output = CapturedOutput {
+            stream: Some(
+                OutputStreamCapture::new(
+                    Output::channel(tx),
+                    "carry-source".into(),
+                    tau_proto::ToolName::new("shell_command"),
+                )
+                .expect("stream capture"),
+            ),
+            ..Default::default()
+        };
+        for (stream, bytes) in chunks {
+            output.push_bytes(stream, bytes);
+        }
+        output.finish();
+        assert_eq!(
+            output.stream.as_mut().expect("capture").finish(),
+            expected_tail
+        );
+        assert_eq!(output.saved_output, expected_saved);
+        assert_eq!(output.truncate().content, expected_saved);
+    }
 }
 
 /// Ensures many complete prefixed lines stop the saved rendering at its

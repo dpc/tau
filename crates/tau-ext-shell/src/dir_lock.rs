@@ -219,14 +219,12 @@ impl AbandonedLock {
 }
 
 fn duplicate_manual_lock_details(
-    owner: &AgentId,
+    _owner: &AgentId,
     blocking_dir: &Path,
-    requested_dir: &Path,
+    _requested_dir: &Path,
 ) -> CborValue {
     CborValue::Map(vec![
         cbor_text_entry("blocking_directory", blocking_dir.display().to_string()),
-        cbor_text_entry("requested_directory", requested_dir.display().to_string()),
-        cbor_text_entry("lock_owner_id", owner.to_string()),
         cbor_text_entry("output", DUPLICATE_LOCK_OUTPUT),
     ])
 }

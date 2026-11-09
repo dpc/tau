@@ -1274,7 +1274,7 @@ impl TimerRuntime {
         };
         line.push(b'\n');
         match storage.append_papercut(line) {
-            Ok(()) => result_fields(vec![("status", text_result("recorded".to_owned()))]),
+            Ok(()) => result_fields(Vec::new()),
             Err(error) => {
                 tracing::debug!(%error, "papercut append was not recorded");
                 papercut_not_recorded("papercut storage rejected the report")
@@ -2363,7 +2363,7 @@ fn validate_timer_id(id: &str) -> Result<String, String> {
 }
 
 fn generated_timer_id(call_id: &str) -> String {
-    let mut id = String::from("call-");
+    let mut id = String::new();
     for b in call_id.bytes() {
         if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
             id.push(char::from(b));

@@ -42,7 +42,7 @@ distinct nonce.
   `Reminder: when working on a task use \`status\` tool to acknowledge it.`,
   `Your \`status\` is set to \`working\` on "<title>". Set it to \`done\`,
   \`waiting\`, or \`blocked\` to finish or call \`wait\` when waiting for external events.`,
-  and `Watched agent <agent-id> status: <state> on <title>`.
+  and status watch notices with agent, status, and task attributes.
 
 ## Efficient live plan
 
@@ -102,9 +102,7 @@ Do not infer causality merely because two events are adjacent. Strong evidence
 is an acknowledgement directive source-linked to the watched event in a trace,
 or a controlled comparison where the directive appears only after that event.
 Verify that all progress arrives without watcher status steering, while the
-final response remains a distinct activating input. Require the same generic
-`status: <state> on <title>` shape for initial reports and title updates; do not
-expect sequencing language such as “started” or “updated”.
+final response remains a distinct activating input. Require agent, status, and task attributes for initial reports and title updates; do not expect obsolete `Watched agent ...` prose.
 
 ### Genuine activation paths
 

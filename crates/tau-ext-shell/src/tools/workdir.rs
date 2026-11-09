@@ -88,7 +88,17 @@ pub(crate) fn target_dir(
         .join(path)
     };
     path.canonicalize()
-        .map_err(|error| ToolFailure::from(format!("failed to resolve directory: {error}")))
+        .map_err(|error| {
+            let identifier = match error.kind() {
+                ErrorKind::NotFound => "directory-not-found",
+                ErrorKind::PermissionDenied => "directory-inaccessible",
+                _ => "directory-resolution-failed",
+            };
+            ToolFailure::new(identifier).with_details(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(error.to_string()),
+            )]))
+        })
         .and_then(|path| {
             if path.is_dir() {
                 Ok(path)
@@ -129,10 +139,12 @@ pub(crate) fn status_output(path: Option<&Path>) -> ToolOutput {
             CborValue::Text(path.display().to_string()),
         ));
     }
-    entries.push((
-        CborValue::Text("status".to_owned()),
-        CborValue::Text(status.to_owned()),
-    ));
+    if !matches!(workdir_status, WorkdirStatus::Available) {
+        entries.push((
+            CborValue::Text("status".to_owned()),
+            CborValue::Text(status.to_owned()),
+        ));
+    }
     let result = CborValue::Map(entries);
     let display_path = path.map_or_else(
         || "<invalid> (invalid)".to_owned(),

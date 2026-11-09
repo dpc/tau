@@ -28,7 +28,7 @@ invalid/unknown recipients. Also verify timing, sender IDs, async delivery,
 payload escaping in hidden prompts, exact durable `AgentMessage` payloads, and
 error behavior.
 
-Do not rely on memory. Give every sub-agent a self-contained prompt. A delegated agent starts with a clean context and does not know this skill, the parent conversation, or the IDs of other agents unless you include them in its prompt or later messages.
+Do not rely on memory. Give every sub-agent a self-contained prompt. A delegated agent starts with a clean context and receives its parent sender ID in the harness bootstrap. It does not know this skill, the parent conversation, or other agent IDs unless you include them in its prompt or later messages.
 
 #### What to verify
 
@@ -52,9 +52,7 @@ Record all of these observations:
 
 #### Phase 1: spawn two peer agents and report to the parent
 
-Start with two shared delegates. Name them Agent A and Agent B. Their initial
-prompts wait for a bootstrap message because the parent `self_agent_id` is
-returned only after `agent_start` submits those prompts.
+Start with two shared delegates. Name them Agent A and Agent B. Each delegate receives the parent sender ID in its harness bootstrap.
 
 Use this prompt for Agent A, replacing only the agent name where needed for Agent B:
 
@@ -68,14 +66,13 @@ Important:
 - Keep a full log of every inbound message you receive after this initial task prompt. Include exact text, apparent sender/recipient if visible, and when you noticed it.
 - You may use only safe commands. Use short `sleep` commands only to stay alive and give the parent/peer time to send messages.
 - If you receive a message containing `COMMAND: SEND_PEER`, parse `recipient_id={id}` and `text={text}`, then call the `message` tool to send exactly `{text}` to that recipient. Log the tool result.
-- Your first inbound message must be `BOOTSTRAP parent_id={main_agent_id}`.
-  Save that ID and use it as `{main_agent_id}` below.
+- Use the parent sender ID from the harness bootstrap as `{main_agent_id}` below.
 - If you receive a message containing `COMMAND: REPORT`, send a `message` to `{main_agent_id}` with your current full log.
 - Do not finish early. Run four observation rounds.
 
 Procedure:
-1. Wait for the `BOOTSTRAP` message, then send a message to `{main_agent_id}`
-   with exactly: `READY Agent A: started message-tool test`.
+1. Send a message to `{main_agent_id}`
+   starting with `READY Agent A: started message-tool test` and include the parent sender ID from the bootstrap.
 2. For rounds 1 through 4:
    a. Run `sleep 3` using the shell tool.
    b. After the sleep result, inspect any new inbound messages/prompts you have received.
@@ -86,11 +83,7 @@ Procedure:
 You are expected to receive messages from the parent and possibly from Agent B. Be precise and do not invent messages.
 ```
 
-After the `agent_start` results return, note the caller `self_agent_id` and each
-`sub_agent_id`. In legacy/background `agent_start` sessions, also note any
-returned agent_start tool-call ids. Send
-`BOOTSTRAP parent_id={self_agent_id}` to each `sub_agent_id`, wait for both
-`READY` reports, then send the first batch of messages in parallel:
+After the `agent_start` results return, note each `sub_agent_id`. In legacy/background sessions, also note any returned agent_start tool-call IDs. Wait for both `READY` reports, then send the first batch of messages in parallel:
 
 ```text
 To Agent A:
@@ -127,12 +120,12 @@ a sender nor recipient projection.
 
 Wait for both delegates. In their final logs, verify that:
 
-* The agent_start result exposes `self_agent_id` and `sub_agent_id` without redundant aliases.
+* The agent_start result exposes only `sub_agent_id`.
 * Each agent saw the direct main-agent messages addressed to it.
 * Each agent saw the peer message from the other agent.
-* Each `COMMAND: SEND_PEER` caused exactly one peer `message` call with headers `status: committed`, `msg_id: <actual-message-id>`, and `recipient_status: live`, and no payload.
+* Each `COMMAND: SEND_PEER` caused exactly one peer `message` call with only `msg_id: <actual-message-id>` and no payload.
 * Delayed messages arrived even though the agents were already running.
-* The visible sender ID for messages from the main agent is present and matches the `self_agent_id` from the agent_start result. Save that sender ID; it is the main agent recipient ID for the next phase.
+* The visible sender ID for messages from the main agent is present and matches the parent sender ID in the delegate bootstrap. Save that sender ID; it is the main agent recipient ID for the next phase.
 
 After both delegates emit final responses, send a follow-up message to each old
 `sub_agent_id`. A final response ends a turn but does not stop a still-loaded
@@ -161,7 +154,7 @@ You are a Tau message-tool verification sub-agent for queued-tool preemption. Go
 Procedure:
 1. Start a long shell command: `sleep 30`.
 2. After Tau returns the background placeholder for that shell call, immediately request another shell command: `sleep 5`.
-3. If you receive any inbound `[tau-internal]` message from the parent, respond to `{main_agent_id}` exactly: `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` plus the exact inbound message text and visible sender id.
+3. If you receive any inbound `agent_message` from the parent, respond to `{main_agent_id}` exactly: `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` plus the exact inbound message text and visible sender id.
 4. After sending the parent message, final answer exactly: `FINAL queued-tool message probe reported to parent`.
 5. If no inbound message arrives, final answer exactly: `UNEXPECTED queued-tool message missing`.
 
@@ -178,7 +171,7 @@ Parent queued-tool delivery probe. nonce=queued-tool-message-001. Reply via mess
 
 Expected behavior:
 
-* The message call returns headers `status: committed`, `msg_id: <actual-message-id>`, and `recipient_status: live`, with no payload.
+* The message call returns only `msg_id: <actual-message-id>`, with no payload.
 * The delegate responds to the parent with `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` instead of remaining stuck behind the queued `sleep 5`.
 * If event logs are available, verify that the `AgentMessage` was recorded, the not-yet-started queued tool call was terminalized with `ToolCancelled`, and a new `AgentPromptCreated` was emitted for the delegate message prompt.
 * The long backgrounded `sleep 30` may still complete later in the delegate conversation. Its completion should not be delivered to the parent conversation or block the message response.
@@ -187,9 +180,9 @@ This scenario specifically protects the code path where `agent.message` delivery
 
 #### Phase 3: verify sub-agent to main-agent routing
 
-Use the main agent recipient ID returned by `agent_start` in Phase 1. Spawn two fresh shared sub-agents with `agent_start`, Agent C and Agent D. These agents should report back to the main agent recipient ID, not to `user`. This proves that parent-directed messages are delivered as model-visible `[tau-internal]` inbound messages to the main agent.
+Use the main agent sender ID reported from a delegate bootstrap or inbound message in Phase 1. Spawn two fresh shared sub-agents with `agent_start`, Agent C and Agent D. These agents should report back to the main agent recipient ID, not to `user`. This proves that parent-directed messages are delivered as model-visible `agent_message` envelopes with sender attributes to the main agent.
 
-Use this prompt for Agent C, replacing only the agent name where needed for Agent D and filling `{main_agent_id}` with the ID returned in Phase 1:
+Use this prompt for Agent C, replacing only the agent name where needed for Agent D and filling `{main_agent_id}` with the ID reported in Phase 1:
 
 ```text
 You are Agent C in a second Tau message-tool verification test. Parent/main agent recipient_id is `{main_agent_id}`. Goal: verify messages among parent, Agent C, and Agent D.
@@ -221,7 +214,7 @@ To Agent D:
 - COMMAND: REPORT_PARENT nonce=report-d-parent-001.
 ```
 
-The main agent should receive `[tau-internal]` inbound messages from each sub-agent. Record whether the sender ID in those inbound messages matches the sub-agent `sub_agent_id`. Sleep for about three seconds, then send one delayed direct message to each agent:
+The main agent should receive `agent_message` envelopes with sender attributes from each sub-agent. Record whether the sender ID in those inbound messages matches the sub-agent `sub_agent_id`. Sleep for about three seconds, then send one delayed direct message to each agent:
 
 ```text
 To Agent C:
@@ -239,7 +232,7 @@ stopped without lifecycle evidence.
 
 #### Phase 4: verify self, content, and simple validation errors
 
-After the main agent recipient ID is known, send a message from the main agent to itself. Expect a model-visible `[tau-internal]` inbound message whose sender is the same main agent ID and whose payload is exact.
+After the main agent recipient ID is known, send a message from the main agent to itself. Expect a model-visible `agent_message` envelope whose sender is the same main agent ID and whose payload is exact.
 
 Then send a multiline self-message like this:
 
@@ -252,9 +245,7 @@ line 5 code-ish: `backticks` and {"json":true}
 ```
 
 Verify that blank lines, unicode, ampersands, backticks, JSON-like text, and
-literal inner `<message>` openings remain exact and readable. Exact `</message>`
-collisions must appear as `&lt;/message&gt;`, and the delivered wrapper must contain
-exactly one exact close. If you inspect durable `AgentMessage` events, verify that
+literal inner `<message>` openings remain exact and readable. Non-enclosing `</message>`, `</response>`, and `</prompt>` remain literal. Escape actual enclosing closing sentinels; peer messages with nested wrappers protect those wrapper boundaries. If you inspect durable `AgentMessage` events, verify that
 the stored payload is still exact and unframed.
 
 Finally, call `message` with an empty string to a valid recipient. Expect a tool error such as `` `message` must not be empty ``. Also verify an unknown recipient error if it was not already checked in Phase 1.
@@ -269,12 +260,11 @@ Report concise but complete findings:
   recipient, empty payload, rich content payload.
 * Include exact unexpected errors or output.
 * Mention any timing surprises, missed messages, duplicate messages, or ordering uncertainty.
-* Confirm the `message` success output has headers `status: committed`, `msg_id: <actual-message-id>`, and `recipient_status: live`, with no payload. The `msg_id` is the actual stable message ID. The receipt confirms async acceptance, not delivery completion or inference. See [the tool response format](../../../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text).
+* Confirm the `message` success output has only `msg_id: <actual-message-id>`, with no payload. The `msg_id` is the actual stable message ID. The receipt confirms async acceptance, not delivery completion or inference; retain non-default review or routing information. See [the tool response format](../../../crates/tau-harness/specs/SPEC-context-output-formatting.md).
 * Include whether stopped recipients, restored-unavailable recipients, and
   never-known recipients produce their distinct errors.
-* Include whether parent recipient ID discovery was clear from `self_agent_id` or still had to be inferred from sub-agent logs.
-* Include whether the delivered wrapper preserved literal `<message>` openings
-  and ampersands while replacing every exact `</message>` collision.
+* Include whether the parent sender ID was clear in the delegate bootstrap.
+* Include whether the delivered envelope preserved non-enclosing closing tags and escaped actual enclosing sentinels.
 
 
 ### Agent watch tool verification plan
@@ -288,31 +278,13 @@ that these state notices do not expose prompt, message, tool, response, or error
 content, and that notification-only turns do not recursively amplify cyclic
 watches.
 
-Watch notifications must be distinguishable from explicit `message` tool deliveries in the model-visible prompt. Explicit messages use a “received a message from ...” wrapper with a `<message>` block. Watch response notifications use this exact shape:
-
-```text
-[tau-internal]: Watched agent engineer-aSSq emitted a response
-
-<response>
-The task is complete.
-</response>
-```
-
-Watch prompt notifications use this exact shape:
-
-```text
-[tau-internal]: Watched agent engineer-aSSq received a user prompt
-
-<prompt>
-Please continue.
-</prompt>
-```
+Injected messages use `agent_message` or `peer_message` envelopes with sender metadata in attributes. Empty `agent_update` notices self-close. Distinguish watch response and user-prompt notifications from explicit message deliveries; protect nested wrapper boundaries where they occur.
 
 `agent_watch` must not forward tool-completion notices, background-tool wakeups, ordinary internal steering prompts, prompts delivered through the `message` tool, or any other internal prompt delivered to the watched agent. A watched agent may later emit a final response after processing such an input; the final response is the watchable event, not the internal input itself. A completed `agent_start` result is also a watchable final response of that started agent to the delegating watcher, even if the delegating watcher is itself a side agent.
 
 If the watching agent repeats the same notification text in a commentary/final response, that is the agent echoing the notification, not a second watch delivery. When checking for duplicate delivery, count actual message events/results, not streamed echoes of text the model chose to repeat.
 
-A watch notification that arrives while the watcher is blocked in `wait` may interrupt the wait with an `internal: true` result saying new input is queued. Treat that as expected: it is the same active-wait interruption behavior used for ordinary agent messages.
+A watch notification that arrives while the watcher is blocked in `wait` may interrupt the wait with `interrupted: <typed-input>` and `cause: <actual-source-id>`. Treat that as expected: it is the same active-wait interruption behavior used for ordinary agent messages.
 
 Calls with exact recipient `user` must fail as unsupported and create no message projection. Use the parent agent ID or a watched response/final answer when proving that the parent observed a notification.
 
@@ -321,12 +293,12 @@ Calls with exact recipient `user` must fail as unsupported and create no message
 Record all of these observations:
 
 * `agent_start` automatically watches the returned `sub_agent_id` for the starting agent.
-* Watch response notifications are model-visible as “Watched agent <id> emitted a response” with a `<response>` block, not as “received a message” with a `<message>` block.
-* Watch prompt notifications are model-visible as “Watched agent <id> received a user prompt” with a `<prompt>` block.
+* Watch response notifications remain distinguishable from explicit messages.
+* Watch prompt notifications remain distinguishable from explicit messages.
 * The watched agent's final responses arrive as async response notifications from the sub-agent to the watcher until disabled.
 * A completed `agent_start` result from a watched child is reported as the child agent's final response to the watcher.
 * Tool-completion notices and other internal/steering prompts delivered to the watched agent are not forwarded as watch prompt notifications.
-* The `agent_start` final tool result contains metadata such as `self_agent_id` and `sub_agent_id`, but does not duplicate the sub-agent response text as `output`.
+* The `agent_start` final tool result contains `sub_agent_id`, but does not duplicate the sub-agent response text as `output`.
 * `agent_watch({"agent_id": id, "enable": false})` disables notifications for that watcher.
 * Re-enabling with `enable: true` restores notifications for later responses.
 * Unknown, empty, or self `agent_id` values fail clearly. A stopped known agent
@@ -338,16 +310,16 @@ Record all of these observations:
 #### Suggested procedure
 
 1. Start a sub-agent with `agent_start` whose prompt final-answers a nonce, for example `WATCH auto final nonce=watch-auto-001`. Do not ask the sub-agent to also message the parent with the same nonce in this phase.
-2. Confirm the starter receives an async `[tau-internal]` response notification from the `sub_agent_id` containing that nonce, using a “Watched agent <id> emitted a response” wrapper and a `<response>` block. It must not use the explicit-message “received a message from ...” wrapper or a `<message>` block. Avoid echoing the full notification text in commentary; summarize it when reporting.
-3. Confirm the `agent_start` result exposes `self_agent_id` and `sub_agent_id` without returning the nonce as duplicated tool output.
+2. Confirm the starter receives an async `agent_update` response notification from the `sub_agent_id` containing that nonce, and distinguish it from an explicit message. Avoid echoing the full notification text in commentary; summarize it when reporting.
+3. Confirm the `agent_start` result exposes only `sub_agent_id` without returning the nonce as duplicated tool output.
 4. Start a long-lived sub-agent. Disable watching it with `agent_watch({"agent_id":"<sub_agent_id>","enable":false})`, then cause or wait for a later response. Confirm no watch message is delivered to the starter for that response.
 5. Re-enable the watch and cause another response. Confirm a watch message is delivered again.
 6. Exercise validation: watch self, watch an empty id, watch an unknown id, and
    watch a stopped sub-agent. Unknown, empty, self, and enabling a stopped agent
    should error; disabling the stopped known agent may succeed idempotently.
    Record exact tool results or errors.
-7. Deliver a real user prompt to a watched agent, or inspect event logs from a test that does so, and confirm the watcher receives exactly the “Watched agent <id> received a user prompt” wrapper with a `<prompt>` block.
-8. Deliver an internal prompt to a watched agent if you can do so safely, or inspect event logs around a watched agent's background tool completion. Confirm no watch prompt notification is delivered for `[tau-internal] Tool call ... completed. Its result is queued; use wait to consume it.` or similar internal/steering text. If the watched agent later responds after processing that internal prompt, record that later response as a separate final-response notification.
+7. Deliver a real user prompt to a watched agent, or inspect event logs from a test that does so, and confirm the watcher receives a distinct watch user-prompt notification.
+8. Deliver an internal prompt to a watched agent if you can do so safely, or inspect event logs around a watched agent's background tool completion. Confirm no watch prompt notification is delivered for an internal completion or steering input. If the watched agent later responds after processing that internal prompt, record that later response as a separate final-response notification.
 9. In current watch-based sessions, verify an erroring watched sub-agent reports a useful watch/error notification. If legacy/background `agent_start` cancellation is available, cancel a watched long-running `agent_start` and confirm cancellation still reports a useful error; if watch delivery reached the starter, generic watch-delivered wording is acceptable, otherwise the original `Tool call canceled` must be preserved.
 
 #### Reporting format for `agent_watch` verification
@@ -356,6 +328,6 @@ Report concise but complete findings:
 
 * List each tested route and whether it passed: auto-watch, final response wrapper, user-prompt wrapper, internal/tool-completion non-forwarding, disable, re-enable, validation errors, cancellation/error fallback, and no duplicated `agent_start` output.
 * Include exact notification text, tool results, and unexpected errors. Call out any watch notification that is formatted like an explicit `message` tool delivery.
-* Mention duplicate notifications, missed notifications, premature mid-turn notifications, duplicate UI/status rows for the same watched agent, or unclear sender/recipient IDs. If a sub-agent was instructed to both message the parent and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `[tau-internal]` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
+* Mention duplicate notifications, missed notifications, premature mid-turn notifications, duplicate UI/status rows for the same watched agent, or unclear sender/recipient IDs. If a sub-agent was instructed to both message the parent and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `agent_update` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
 * Include whether `wait` was interrupted by a watch notification while waiting; this is expected if it reports that new input is queued.
-* Include whether `self_agent_id` and `sub_agent_id` made the watcher and watched IDs clear enough.
+* Include whether the delegate bootstrap and `sub_agent_id` made the watcher and watched IDs clear enough.

@@ -48,14 +48,13 @@ Historical committed stream-receipt terminals keep their original projection.
 
 Background source and historical stream-receipt source use the registered
 `tool_output` generic user-role envelope. Its ordered attributes identify
-call identity and whether the occurrence is terminal (`terminal` boolean), followed
+the call and whether the occurrence is terminal (`terminal` boolean), followed
 by `omitted_bytes` only when nonzero.
 Tool-output status belongs in the canonical text headers, not envelope attributes.
-Cancellation retains `status: canceled`, including an empty available tail;
-unavailable capture also retains its diagnostic reason. This presentation spelling
-does not change durable `cancelled` outcomes or wait receipts. Available cancellation
-output remains payload, including genuinely empty output; unavailable capture
-retains its useful diagnostic rather than pretending to be empty.
+Cancellation retains `status: canceled` and any available output as payload,
+including a genuinely empty tail. Unavailable capture retains its diagnostic
+reason instead of appearing empty. This presentation spelling does not change
+durable `cancelled` outcome variants; model-visible wait receipts use `canceled`.
 Tool identity and sequence remain in canonical metadata and validation, not the
 model-facing header. The envelope body contains untrusted tool data. Final source
 precedes background completion settlement. Historical stream receipts remain

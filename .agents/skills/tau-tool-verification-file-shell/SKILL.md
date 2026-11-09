@@ -184,6 +184,8 @@ any partial-change fields/UI diffs from earlier successful hunks.
 
 #### Streaming segments and saved output
 
+Source records use `out`/`err` and `(no_nl)` for segments. Saved captures and delivered tails retain the same observed pipe-segment order; cross-pipe observation does not establish process write chronology.
+
 Probe a command that writes partial stdout and stderr, pauses across an update,
 then completes both lines and exits with new no-newline tails. Incremental
 `out` / `err` segments use the ordinary LF, `crlf`, `cr`, and `no_nl`

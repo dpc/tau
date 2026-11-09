@@ -2500,7 +2500,7 @@ impl Harness {
         target_call_id: ToolCallId,
     ) -> Result<(), String> {
         if !self.is_running_cancellable_tool_call_for(conversation_id, &target_call_id) {
-            return Err("Unknown tool call id".to_owned());
+            return Err("unknown-tool-call".to_owned());
         }
         if let (Some(cancel_call), Some(target_call)) =
             (cancel_call, self.wait_tool_call_ref(&target_call_id))

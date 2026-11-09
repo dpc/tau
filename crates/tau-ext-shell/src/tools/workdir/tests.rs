@@ -4,8 +4,32 @@ use tau_proto::CborValue;
 
 use super::{output, status_output};
 
+/// A failed setter identifies a missing directory without echoing its argument
+/// in the error header or replacing the underlying diagnostic with a generic
+/// label.
+#[test]
+fn missing_setter_reports_identifier_and_payload() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let arguments = CborValue::Map(vec![(
+        CborValue::Text("path".to_owned()),
+        CborValue::Text("missing".to_owned()),
+    )]);
+    let error = super::target_dir(&arguments, Some(dir.path())).expect_err("missing directory");
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_deref().expect("diagnostic"),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("render");
+    assert!(text.starts_with("error: directory-not-found\n\n"));
+    assert!(!text.contains(dir.path().to_str().expect("path")));
+}
+
 /// Successful reads omit the routine availability chip while retaining
-/// semantic status without a formatter-owned final newline.
+/// only the path, without a redundant availability header or final newline.
 #[test]
 fn available_read_uses_path_only_display() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -15,15 +39,12 @@ fn available_read_uses_path_only_display() {
     assert_eq!(output.display.args, dir.path().display().to_string());
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&output.result).render(),
-        format!("path: {}\nstatus: available", dir.path().display())
+        format!("path: {}", dir.path().display())
     );
     assert!(matches!(
         output.result,
         CborValue::Map(ref entries)
-            if entries.contains(&(
-                CborValue::Text("status".to_owned()),
-                CborValue::Text("available".to_owned()),
-            ))
+            if entries.len() == 1
     ));
 }
 

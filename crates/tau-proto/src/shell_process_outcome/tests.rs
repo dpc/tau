@@ -1,5 +1,27 @@
 use super::*;
 
+/// The display rename must not change historical outcomes, and two aliases
+/// must not let conflicting exit evidence bypass duplicate-field validation.
+#[test]
+fn exit_code_header_preserves_history_and_rejects_alias_duplicates() {
+    let field = |key: &str, value| (CborValue::Text(key.to_owned()), value);
+    for name in ["exit_code", "status"] {
+        let value = CborValue::Map(vec![
+            field(name, CborValue::Integer(7.into())),
+            field("termination_reason", CborValue::Text("exit".to_owned())),
+        ]);
+        let outcome = ShellProcessOutcome::from_result(&value).expect("normal exit");
+        assert_eq!(outcome.exit_code(), Some(7));
+        assert!(!outcome.success());
+    }
+    let duplicate = CborValue::Map(vec![
+        field("exit_code", CborValue::Integer(0.into())),
+        field("status", CborValue::Integer(7.into())),
+        field("termination_reason", CborValue::Text("exit".to_owned())),
+    ]);
+    assert!(ShellProcessOutcome::from_result(&duplicate).is_none());
+}
+
 /// The bounded parser requires an explicit reason and rejects malformed,
 /// contradictory, or duplicated recognized fields.
 #[test]

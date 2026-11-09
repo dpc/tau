@@ -118,12 +118,12 @@ impl BuiltinState {
     ) -> Result<(), String> {
         if !is_owned_running_call {
             if is_owned_completed_call {
-                return Err("Tool call is already done".to_owned());
+                return Err("tool-call-completed".to_owned());
             }
-            return Err("Unknown tool call id".to_owned());
+            return Err("unknown-tool-call".to_owned());
         }
         if self.cancel_requested.contains(target) {
-            return Err("Tool call already canceled".to_owned());
+            return Err("tool-call-canceled".to_owned());
         }
         self.cancel_requested.insert(target.clone());
         Ok(())
@@ -770,8 +770,17 @@ fn finish_agent_watch_error(
         call_id,
         tool_name,
         tool_type,
-        message,
-        Some(arguments.clone()),
+        if message.starts_with("unknown agent:") {
+            "unknown-agent".to_owned()
+        } else {
+            "invalid-agent-watch".to_owned()
+        },
+        (!message.starts_with("unknown agent:")).then(|| {
+            CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(message),
+            )])
+        }),
         Some(display),
     );
 }
@@ -1146,6 +1155,15 @@ fn skill_search_result(
             })
             .collect(),
     );
+    if total_matches == 0 {
+        return (
+            CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(skill_search_guidance(total_matches, search_content)),
+            )]),
+            Some(display),
+        );
+    }
     (
         CborValue::Map(vec![
             (
@@ -1521,11 +1539,13 @@ fn finish_message_error(
     message: String,
 ) {
     let display = message_error_display(arguments, &message);
-    let (message, details) = if message == "unsupported-message-recipient" {
-        (message, None)
+    let (message, details) = if message == "unsupported-message-recipient"
+        || message.starts_with("unsupported message recipient:")
+    {
+        ("unsupported-message-recipient".to_owned(), None)
     } else {
         (
-            "message-rejected".to_owned(),
+            message_error_identifier(&message).to_owned(),
             Some(CborValue::Map(vec![(
                 CborValue::Text("output".to_owned()),
                 CborValue::Text(message),
@@ -1541,6 +1561,28 @@ fn finish_message_error(
         details,
         Some(display),
     );
+}
+
+/// Classify a routing or validation failure while preserving its recovery
+/// detail.
+fn message_error_identifier(message: &str) -> &'static str {
+    if message.starts_with("unknown message recipient:") {
+        "unknown-message-recipient"
+    } else if message.starts_with("stopped message recipient:")
+        || message.starts_with("recipient is unavailable")
+    {
+        "message-recipient-unavailable"
+    } else if message.contains("recipient_id")
+        || message.starts_with("invalid message recipient")
+        || message.starts_with("invalid inter-session")
+        || message.starts_with("inter-session recipient")
+    {
+        "invalid-message-recipient"
+    } else if message.starts_with("`message`") {
+        "invalid-message-body"
+    } else {
+        "message-delivery-failed"
+    }
 }
 
 impl BuiltinTools {
@@ -1574,10 +1616,7 @@ impl BuiltinTools {
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                CborValue::Map(vec![(
-                    CborValue::Text("status".to_owned()),
-                    CborValue::Text("ok".to_owned()),
-                )]),
+                CborValue::Map(Vec::new()),
                 Some(cancel_display(
                     &call.arguments,
                     ToolUseStatus::Success,
@@ -1592,7 +1631,7 @@ impl BuiltinTools {
                     visible_tool_name,
                     call.tool_type,
                     message,
-                    Some(call.arguments.clone()),
+                    None,
                     Some(display),
                 );
             }
@@ -2076,17 +2115,11 @@ fn delegate_start_request(
     }
 }
 
-fn delegate_result_value(self_agent_id: &str, agent_id: &str) -> CborValue {
-    CborValue::Map(vec![
-        (
-            CborValue::Text("self_agent_id".to_owned()),
-            CborValue::Text(self_agent_id.to_owned()),
-        ),
-        (
-            CborValue::Text("sub_agent_id".to_owned()),
-            CborValue::Text(agent_id.to_owned()),
-        ),
-    ])
+fn delegate_result_value(_self_agent_id: &str, agent_id: &str) -> CborValue {
+    CborValue::Map(vec![(
+        CborValue::Text("sub_agent_id".to_owned()),
+        CborValue::Text(agent_id.to_owned()),
+    )])
 }
 
 fn parse_cancel_args(arguments: &CborValue) -> Result<ToolCallId, String> {
@@ -2232,7 +2265,7 @@ fn wait_tool_spec() -> ToolSpec {
              timeout_minutes. Selectors are mutually exclusive. Plural waits accept 1–64 distinct \
              nonempty IDs and settle only after every member terminates, returning receipts in \
              request order. All completion receipts are successful synchronization results with \
-             outcome completed, error, or cancelled; they never repeat target output. \
+             outcome completed, error, or canceled; they never repeat target output. \
              Output arrives separately in ordered tool-origin context. \
              Bare wait remains pending while an owned background \
              call runs; with no available or running call it fails. Input timeouts are positive \

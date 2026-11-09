@@ -1584,7 +1584,7 @@ fn extension_apply_patch_add_rejects_existing_file() {
         panic!("expected tool error");
     };
     assert!(
-        error.message.contains("Add File target already exists"),
+        error.message == "patch-target-exists",
         "unexpected error: {}",
         error.message
     );

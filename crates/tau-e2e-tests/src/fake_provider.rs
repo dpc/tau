@@ -1167,11 +1167,11 @@ impl FakeState {
         }
         let status = status_call(
             "status-policy-working",
+            "working",
             match initial_status {
-                InitialStatusOutcome::AcceptedWorking => "working",
-                InitialStatusOutcome::Rejected => "invalid",
+                InitialStatusOutcome::AcceptedWorking => "Exercise current status policy",
+                InitialStatusOutcome::Rejected => "bad\nprobe",
             },
-            "Exercise current status policy",
         );
         let work = ContextItem::ToolCall(ToolCallItem {
             call_id: "status-policy-work".into(),
@@ -1211,6 +1211,23 @@ impl FakeState {
             InitialStatusOutcome::Rejected => {
                 require_tool_error(prompt, "status-policy-working")
                     .map_err(|message| self.mismatch(index, message))?;
+                let rejected = prompt
+                    .context
+                    .flatten_iter()
+                    .find_map(|item| match item {
+                        ContextItem::ToolResult(result)
+                            if result.call_id.as_str() == "status-policy-working" =>
+                        {
+                            Some(result)
+                        }
+                        _ => None,
+                    })
+                    .expect("required error result");
+                if rejected.render_provider_text()
+                    != "error: invalid-task-name\n\nstatus task_name must be one line without control characters"
+                {
+                    return Err(self.mismatch(index, "rejected task-name diagnostic mismatch"));
+                }
                 if !prompt_contains_text(prompt, STATUS_REMINDER) {
                     return Err(self.mismatch(index, "rejected status suppressed reminder"));
                 }
@@ -2905,8 +2922,7 @@ impl FakeState {
                     || results[0].tool_type != ToolType::Function
                     || results[0].status != tau_proto::ToolResultStatus::Success
                     || !results[0].output.body.is_empty()
-                    || !results[0].output.headers.iter().any(|header| header.key == "status" && header.value == "committed")
-                    || !results[0].output.headers.iter().any(|header| header.key == "recipient_status" && header.value == "live")
+                    || results[0].output.headers.len() != 1
                     || committed_message_id.is_none_or(|message_id| {
                         tau_proto::AgentMessageId::parse(message_id).is_err()
                     })
@@ -3322,27 +3338,18 @@ impl FakeState {
                 {
                     return Err(self.mismatch(cursor, "agent_start result continuity mismatch"));
                 }
-                let Some(self_agent_id) =
-                    cbor_map_text_field(&results[0].output.raw, "self_agent_id")
-                else {
-                    return Err(self.mismatch(cursor, "agent_start result lacks self_agent_id"));
-                };
                 let Some(child_agent_id) =
                     cbor_map_text_field(&results[0].output.raw, "sub_agent_id")
                 else {
                     return Err(self.mismatch(cursor, "agent_start result lacks sub_agent_id"));
                 };
-                let self_agent_id = tau_proto::AgentId::parse(self_agent_id)
-                    .map_err(|_| self.mismatch(cursor, "agent_start returned invalid self id"))?;
+                let self_agent_id = prompt.agent_id.clone();
                 let child_agent_id = tau_proto::AgentId::parse(child_agent_id)
                     .map_err(|_| self.mismatch(cursor, "agent_start returned invalid child id"))?;
                 let CborValue::Map(entries) = &results[0].output.raw else {
                     return Err(self.mismatch(cursor, "agent_start result is not a map"));
                 };
-                if entries.len() != 2
-                    || self_agent_id != prompt.agent_id
-                    || child_agent_id == self_agent_id
-                {
+                if entries.len() != 1 || child_agent_id == self_agent_id {
                     return Err(self.mismatch(cursor, "agent_start result identity mismatch"));
                 }
                 let children = self
@@ -3963,6 +3970,11 @@ fn validate_shell_stream_prompt(
                 .headers
                 .iter()
                 .any(|header| header.key == "status" && header.value == "running-in-background")
+            || !results[0]
+                .output
+                .headers
+                .iter()
+                .any(|header| header.key == "call_id" && header.value == "stream-child")
         {
             return Err("stream child must background before incremental wake");
         }
@@ -4013,6 +4025,15 @@ fn validate_shell_stream_prompt(
                 ))
         {
             return Err("stream cancellation must close with one payload-free receipt");
+        }
+    }
+    if step == ShellStreamStep::Receipt {
+        let results = result("stream-cancel");
+        if results.len() != 1
+            || results[0].status != tau_proto::ToolResultStatus::Success
+            || !results[0].render_provider_text().is_empty()
+        {
+            return Err("accepted cancellation must have an empty model receipt");
         }
     }
     Ok(())

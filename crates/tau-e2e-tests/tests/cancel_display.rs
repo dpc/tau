@@ -137,13 +137,7 @@ fn builtin_cancel_terminals_retain_target_without_claiming_termination()
     let [result] = results.as_slice() else {
         panic!("expected one acknowledgement: {results:?}");
     };
-    assert_eq!(
-        result.result,
-        CborValue::Map(vec![(
-            CborValue::Text("status".to_owned()),
-            CborValue::Text("ok".to_owned()),
-        )])
-    );
+    assert_eq!(result.result, CborValue::Map(Vec::new()));
     let display = result.display.as_ref().expect("accepted display");
     assert_eq!(display.args, "cancel-display-target");
     assert_eq!(display.status, ToolUseStatus::Success);
@@ -166,7 +160,7 @@ fn builtin_cancel_terminals_retain_target_without_claiming_termination()
     let display = error.display.as_ref().expect("rejected display");
     assert_eq!(display.args, "cancel-display-unknown");
     assert_eq!(display.status, ToolUseStatus::Error);
-    assert_eq!(display.status_text, "Unknown tool call id");
+    assert_eq!(display.status_text, "unknown-tool-call");
     assert!(display.payload.is_none());
     assert_eq!(events.iter().filter(|event| matches!(event,
         Event::ToolCancelRequest(request) if request.target_call_id.as_str() == "cancel-display-target"

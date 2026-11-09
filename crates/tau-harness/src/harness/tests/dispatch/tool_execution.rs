@@ -1732,7 +1732,7 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
     assert!(context.iter().any(|item| {
         text_part(item).is_some_and(|text| {
             text.contains(&format!("<agent_message sender=\"{recipient_id}\">"))
-                && text.contains(">secret <message>&&lt;/message&gt; payload ></agent_message>")
+                && text.contains(">secret <message>&</message> payload ></agent_message>")
         })
     }));
     assert!(!event_log_contains_any_source(&h, |event| matches!(

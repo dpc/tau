@@ -238,10 +238,7 @@ fn peer_review_parked_release_revalidates_authority_and_preserves_retry() {
                     Event::ToolResult(result) if result.call_id == call => {
                         assert_eq!(
                             tau_proto::ToolResponse::from_cbor(&result.result).render(),
-                            format!(
-                                "status: committed\nmsg_id: {}\nrecipient_status: live",
-                                expected.message_id
-                            )
+                            format!("msg_id: {}", expected.message_id)
                         );
                         result.display
                     }

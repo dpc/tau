@@ -102,9 +102,7 @@ const PEER_MESSAGE_CLOSE_VISIBLE: &str = "&lt;/tau_peer_message&gt;";
 const NOTICE_CLOSE: &str = "</notice>";
 const NOTICE_CLOSE_VISIBLE: &str = "&lt;/notice&gt;";
 const WATCH_RESPONSE_CLOSE: &str = "</response>";
-const WATCH_RESPONSE_CLOSE_VISIBLE: &str = "&lt;/response&gt;";
 const WATCH_PROMPT_CLOSE: &str = "</prompt>";
-const WATCH_PROMPT_CLOSE_VISIBLE: &str = "&lt;/prompt&gt;";
 
 /// Reusable strict Handlebars registry and exact immutable-source parse cache.
 ///
@@ -1888,15 +1886,8 @@ fn assemble_prompt_context_window(
                                 &review_annotation,
                                 message,
                             ),
-                            None => {
-                                let body = tau_proto::escape_exact_sentinel_close(
-                                    message,
-                                    MESSAGE_CLOSE,
-                                    MESSAGE_CLOSE_VISIBLE,
-                                );
-                                tau_proto::SemanticEnvelope::AgentMessage
-                                    .render_fields(&[("sender", sender_id.to_string())], &body)
-                            }
+                            None => tau_proto::SemanticEnvelope::AgentMessage
+                                .render_fields(&[("sender", sender_id.to_string())], message),
                         }
                     };
                     blocks.push(tau_proto::ContextBlock::UserInput(
@@ -1923,17 +1914,12 @@ fn assemble_prompt_context_window(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: {
-                                            let body = tau_proto::escape_exact_sentinel_close(
-                                                message,
-                                                WATCH_RESPONSE_CLOSE,
-                                                WATCH_RESPONSE_CLOSE_VISIBLE,
-                                            );
                                             tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
                                                 &[
                                                     ("agent", sender_label),
                                                     ("event", "response".to_owned()),
                                                 ],
-                                                &body,
+                                                message,
                                             )
                                         },
                                     }],
@@ -1957,17 +1943,12 @@ fn assemble_prompt_context_window(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: {
-                                            let body = tau_proto::escape_exact_sentinel_close(
-                                                message,
-                                                WATCH_PROMPT_CLOSE,
-                                                WATCH_PROMPT_CLOSE_VISIBLE,
-                                            );
                                             tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
                                                 &[
                                                     ("agent", sender_label),
                                                     ("event", "prompt".to_owned()),
                                                 ],
-                                                &body,
+                                                message,
                                             )
                                         },
                                     }],

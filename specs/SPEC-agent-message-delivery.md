@@ -31,11 +31,11 @@ projection.
 ## Reviewed peer input and immutable release
 
 Message and release success receipts follow
-[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text).
-Direct acceptance reports `status: committed`, the actual `msg_id`, and `recipient_status: live`;
-it does not assert inference or reply completion. Review acceptance instead
-reports `status: accepted_for_review` and distinguishes the live main recipient
-from the intended worker's `pending_review` state.
+[SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md).
+Direct acceptance reports the actual `msg_id` without routine committed/live
+fields; it does not assert inference or reply completion. Review acceptance
+reports `status: accepted_for_review` and distinguishes the resolved main
+recipient from the intended worker's `pending_review` state.
 
 An authenticated exact-worker message may commit as a pending review in the
 session main's journal. `peer_review` identifies the intended worker; the actual

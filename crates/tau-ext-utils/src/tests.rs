@@ -496,7 +496,7 @@ fn replay_terminal_correlation_preserves_typed_call_ids_and_fallback_timer_ids()
     assert!(rt.pending_invocations.is_empty());
     assert!(rt.timers.contains_key(&TimerKey {
         agent_id: agent,
-        timer_id: "call-call-one-".to_owned(),
+        timer_id: "call-one-".to_owned(),
     }));
 }
 
@@ -1308,8 +1308,8 @@ fn compact_timer_receipts_replay_live_mutations() {
     let scheduled = live.handle_live_tool(&schedule, now).expect("schedule");
     let timer_id = tau_proto::cbor_text_field(&scheduled.result, "timer_id")
         .expect("generated id is essential for cancellation");
-    assert_eq!(timer_id, "call-generated");
-    assert_eq!(rendered(&scheduled.result), "timer_id: call-generated");
+    assert_eq!(timer_id, "generated");
+    assert_eq!(rendered(&scheduled.result), "timer_id: generated");
     let list = started(
         "list",
         "agent-one",
@@ -1326,7 +1326,7 @@ fn compact_timer_receipts_replay_live_mutations() {
     let listed = live.handle_live_tool(&list, now).expect("list");
     assert_eq!(
         rendered(&listed.result),
-        "count: 1\nformat: timer_id: deadline, recurrence\n\ncall-generated: due in 10s, one-shot"
+        "count: 1\nformat: timer_id: deadline, recurrence\n\ngenerated: due in 10s, one-shot"
     );
     let cancelled = live.handle_live_tool(&cancel, now).expect("cancel");
     let mut absent_call = cancel.clone();
@@ -1806,7 +1806,7 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
                 if let Event::ToolErrorReported(error) = *emit.event
                     && error.call_id.as_str() == "bounded-8"
                 {
-                    assert_eq!(error.message, "image-read-failed");
+                    assert_eq!(error.message, "image-limit-exceeded");
                     assert_eq!(
                         tau_proto::cbor_text_field(
                             error.details.as_ref().expect("diagnostic"),
@@ -1853,7 +1853,7 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
         if let Event::ToolErrorReported(error) = *emit.event
             && error.call_id.as_str() == "bounded-replacement"
         {
-            assert_eq!(error.message, "image-read-failed");
+            assert_eq!(error.message, "image-limit-exceeded");
             assert_eq!(
                 tau_proto::cbor_text_field(error.details.as_ref().expect("diagnostic"), "output")
                     .as_deref(),
@@ -2011,7 +2011,7 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
                 if let Event::ToolErrorReported(error) = *emit.event
                     && error.call_id.as_str() == "oversized"
                 {
-                    assert_eq!(error.message, "image-read-failed");
+                    assert_eq!(error.message, "image-limit-exceeded");
                     assert!(
                         tau_proto::cbor_text_field(
                             error.details.as_ref().expect("diagnostic"),
@@ -3103,7 +3103,7 @@ fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
 
     assert_eq!(
         rendered(&rt.record_papercut(&invoke, UnixMicros::new(1_234))),
-        "status: recorded"
+        ""
     );
     let lines = lines.borrow();
     assert_eq!(lines.len(), 1);
@@ -3171,9 +3171,7 @@ fn replayed_papercut_does_not_duplicate_append() {
     rt.papercut_storage = Some(Box::new(storage));
     let invoke = papercut_started("call-1", "agent-one", "one-time report");
 
-    assert!(
-        rendered(&rt.record_papercut(&invoke, UnixMicros::new(1))).starts_with("status: recorded")
-    );
+    assert!(rendered(&rt.record_papercut(&invoke, UnixMicros::new(1))).is_empty());
     rt.handle_started_replay(&invoke, None);
 
     assert_eq!(lines.borrow().len(), 1);

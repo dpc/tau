@@ -2480,19 +2480,13 @@ fn optional_barrier_consumes_exact_late_and_coalesced_spans() {
 
 fn start_result(
     call_id: &str,
-    parent: &tau_proto::AgentId,
+    _parent: &tau_proto::AgentId,
     child: &tau_proto::AgentId,
 ) -> tau_proto::ToolResultItem {
-    let raw = CborValue::Map(vec![
-        (
-            CborValue::Text("self_agent_id".to_owned()),
-            CborValue::Text(parent.to_string()),
-        ),
-        (
-            CborValue::Text("sub_agent_id".to_owned()),
-            CborValue::Text(child.to_string()),
-        ),
-    ]);
+    let raw = CborValue::Map(vec![(
+        CborValue::Text("sub_agent_id".to_owned()),
+        CborValue::Text(child.to_string()),
+    )]);
     tau_proto::ToolResultItem {
         presentation: Default::default(),
         call_id: call_id.into(),

@@ -34,6 +34,22 @@ fn background_terminal_source_replaces_visible_completion_notice() {
             "source-call",
             "source_work",
         );
+        let placeholder = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::ProviderToolResult(result)
+                    if result.call_id.as_str() == "source-call"
+                        && result.kind == ToolResultKind::BackgroundPlaceholder =>
+                {
+                    Some(result)
+                }
+                _ => None,
+            })
+            .expect("placeholder precedes terminal source");
+        assert_eq!(
+            tau_proto::ToolResponse::from_cbor(&placeholder.result).render(),
+            "status: running-in-background\ncall_id: source-call"
+        );
         let before = event_log_events(&h)
             .iter()
             .filter(|event| matches!(event, Event::AgentPromptCreated(_)))

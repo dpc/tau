@@ -660,25 +660,15 @@ impl Harness {
                                 }),
                             );
                         }
-                        let reviewed = accepted.review_recipient.is_some();
                         let mut receipt = vec![
-                            (
-                                "status",
-                                if reviewed {
-                                    "accepted_for_review"
-                                } else {
-                                    "committed"
-                                }
-                                .to_owned(),
-                            ),
                             ("msg_id", command.auth_message_id.to_string()),
-                            ("recipient_status", "live".to_owned()),
                             (
                                 "recipient",
                                 format!("{}/{}", command.recipient_session_id, recipient_id),
                             ),
                         ];
                         if let Some(worker) = &accepted.review_recipient {
+                            receipt.insert(0, ("status", "accepted_for_review".to_owned()));
                             receipt.push(("intended_recipient", worker.to_string()));
                             receipt
                                 .push(("intended_recipient_status", "pending_review".to_owned()));

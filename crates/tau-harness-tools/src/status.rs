@@ -69,7 +69,7 @@ pub(crate) fn handle_tool_call(
             call.id.clone(),
             visible_tool_name,
             call.tool_type,
-            "invalid-status".to_owned(),
+            status_error_identifier(&message).to_owned(),
             Some(CborValue::Map(vec![(
                 CborValue::Text("output".to_owned()),
                 CborValue::Text(message),
@@ -77,6 +77,17 @@ pub(crate) fn handle_tool_call(
         ),
     }
     Ok(())
+}
+
+/// Classify validation diagnostics without reflecting rejected argument values.
+fn status_error_identifier(message: &str) -> &'static str {
+    if message.starts_with("status task_name ") || message == "status requires task_name" {
+        "invalid-task-name"
+    } else if message.starts_with("status state") || message == "status requires state" {
+        "invalid-work-state"
+    } else {
+        "invalid-status-arguments"
+    }
 }
 
 /// Parse a tool call while redacting rejected arguments from its error.

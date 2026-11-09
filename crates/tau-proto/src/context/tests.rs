@@ -273,7 +273,7 @@ fn provider_tool_result_separators_depend_on_rendered_body() {
             ),
             (
                 ProviderToolResultStatus::Cancelled { reason: "stopped" },
-                "cancelled: stopped",
+                "canceled: stopped",
             ),
         ] {
             let expected = match status {

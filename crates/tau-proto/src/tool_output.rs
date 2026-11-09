@@ -345,7 +345,7 @@ impl ToolCompletionOutcome {
         match self {
             Self::Completed => "completed",
             Self::Error => "error",
-            Self::Cancelled => "cancelled",
+            Self::Cancelled => "canceled",
         }
     }
 }

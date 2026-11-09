@@ -1215,7 +1215,7 @@ fn external_message_major_skew_warning_headers_real_failure() {
 }
 
 /// A successful best-effort cross-major delivery must retain the warning as
-/// the status header while reporting the actual committed recipient.
+/// a warning header while reporting the actual committed recipient.
 #[test]
 fn external_message_major_skew_warning_headers_success() {
     let td = TempDir::new().expect("tempdir");
@@ -1259,7 +1259,7 @@ fn external_message_major_skew_warning_headers_success() {
     )
     .expect("handle completion");
 
-    let status = event_log_events(&h)
+    let message_id = event_log_events(&h)
         .into_iter()
         .find_map(|event| match event {
             Event::ToolResult(result) if result.call_id == call_id => {
@@ -1270,14 +1270,22 @@ fn external_message_major_skew_warning_headers_success() {
                     CborValue::Text("warning".to_owned()),
                     CborValue::Text(warning.to_owned())
                 )));
+                assert!(
+                    !entries
+                        .iter()
+                        .any(|(key, _)| key == &CborValue::Text("status".to_owned()))
+                );
                 entries.into_iter().find_map(|(key, value)| {
-                    (key == CborValue::Text("status".to_owned())).then_some(value)
+                    (key == CborValue::Text("msg_id".to_owned())).then_some(value)
                 })
             }
             _ => None,
         })
-        .expect("caller-visible status");
-    assert_eq!(status, CborValue::Text("committed".to_owned()));
+        .expect("caller-visible message identity");
+    assert_eq!(
+        message_id,
+        CborValue::Text("skew-success-message".to_owned())
+    );
     let sent = session_agent_message_sent_events(&h);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].sender_notice.as_deref(), Some("sender guidance"));
@@ -1360,7 +1368,7 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 reviewed_receipts += 1;
                 let response = tau_proto::ToolResponse::from_cbor(&result.result);
                 assert!(response.body.is_empty());
-                assert_eq!(response.render(), "status: accepted_for_review\nmsg_id: reviewed-message\nrecipient_status: live\nrecipient: other-session/main_recipient\nintended_recipient: intended_worker\nintended_recipient_status: pending_review");
+                assert_eq!(response.render(), "status: accepted_for_review\nmsg_id: reviewed-message\nrecipient: other-session/main_recipient\nintended_recipient: intended_worker\nintended_recipient_status: pending_review");
                 None
             }
             Event::ToolResult(result) => Some((result.call_id, result.result)),
@@ -1376,16 +1384,8 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 "external-message-reused-call".into(),
                 CborValue::Map(vec![
                     (
-                        CborValue::Text("status".to_owned()),
-                        CborValue::Text("committed".to_owned()),
-                    ),
-                    (
                         CborValue::Text("msg_id".to_owned()),
                         CborValue::Text("delivered-reused-message".to_owned()),
-                    ),
-                    (
-                        CborValue::Text("recipient_status".to_owned()),
-                        CborValue::Text("live".to_owned())
                     ),
                     (
                         CborValue::Text("recipient".to_owned()),
@@ -1397,16 +1397,8 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 "external-message-auto-started-call".into(),
                 CborValue::Map(vec![
                     (
-                        CborValue::Text("status".to_owned()),
-                        CborValue::Text("committed".to_owned()),
-                    ),
-                    (
                         CborValue::Text("msg_id".to_owned()),
                         CborValue::Text("delivered-auto-started-message".to_owned()),
-                    ),
-                    (
-                        CborValue::Text("recipient_status".to_owned()),
-                        CborValue::Text("live".to_owned())
                     ),
                     (
                         CborValue::Text("recipient".to_owned()),
@@ -3057,7 +3049,7 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     assert!(text.contains(&format!(
         "<agent_update agent=\"{recipient_id}\" event=\"response\""
     )));
-    assert!(text.contains(">done <response>&&lt;/response&gt; payload ></agent_update>"));
+    assert!(text.contains(">done <response>&</response> payload ></agent_update>"));
     assert!(!text.contains("You have received a message"));
     assert!(!text.contains("<message>"));
 

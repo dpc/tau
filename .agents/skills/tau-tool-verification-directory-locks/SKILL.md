@@ -46,7 +46,7 @@ When locking is enabled, verify all of these behaviors:
   harness-owned context envelope. Follow
   [SPEC-tau-proto-provider-data](../../../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md),
   [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md), and
-  [SPEC-context-output-formatting](../../../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).
+  [SPEC-context-output-formatting](../../../crates/tau-harness/specs/SPEC-context-output-formatting.md).
   Incremental source may wake an eligible wait without consuming completion;
   `complete_only` suppresses that wake, not source retention.
 
@@ -58,7 +58,7 @@ When locking is enabled, verify all of these behaviors:
   `locked`, while UI display still names the canonical path.
 * Missing directories and regular files are rejected before any lock is acquired.
 * Manual locks are owner-scoped by `agent_id`; a different agent cannot unlock them unless it passes `owner_agent_id` for an explicit force-unlock.
-* Repeated `update` by the same agent on the same canonical directory, an ancestor, or a child is an error. It should return `error: dir_lock_duplicate` with details headers including `blocking_directory`, `requested_directory`, and `lock_owner_id`, plus a short text payload in `output`. Same-agent automatic writer reentry under a manual lock should still complete, including while another same-agent mutating tool under that lock is still running.
+* Repeated `update` by the same agent on the same canonical directory, an ancestor, or a child is an error. It should return `error: dir_lock_duplicate` with the `blocking_directory` header and recovery guidance, without repeating the requested path or caller ID, plus a short text payload in `output`. Same-agent automatic writer reentry under a manual lock should still complete, including while another same-agent mutating tool under that lock is still running.
 * Ancestor and child directories conflict both ways. Sibling directories do not conflict, even when a blocked waiter for another subtree is already queued.
 * Reads stay free: `read`, `grep`, `find`, and `ls` complete while an update lock is held.
 * Mutating filesystem tools participate when enabled: `edit` and `apply_patch` wait on conflicting locks.

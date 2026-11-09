@@ -59,8 +59,12 @@ fn oversized_prepared_image_becomes_byte_free_error() {
     let error = budget_prepared_result(result)
         .expect("measure terminal")
         .expect_err("oversized image becomes error");
-    assert_eq!(error.message, IMAGE_TOO_LARGE_MESSAGE);
-    assert!(error.details.is_none());
+    assert_eq!(error.message, "image-limit-exceeded");
+    assert_eq!(
+        tau_proto::cbor_text_field(error.details.as_ref().expect("diagnostic"), "output")
+            .as_deref(),
+        Some(IMAGE_TOO_LARGE_MESSAGE)
+    );
     let message =
         tau_proto::HarnessInputMessage::emit_with_persist(Event::ToolErrorReported(error), false);
     assert!(

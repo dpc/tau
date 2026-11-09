@@ -157,6 +157,15 @@ fn complete_decode(
     invoke: ToolStarted,
     output: ReadImageOutput,
 ) {
+    complete_decode_result(manager, invoke, Ok(output));
+}
+
+/// Drives either decoder outcome through the actual framed report writer.
+fn complete_decode_result(
+    manager: &mut ArtifactImageManager,
+    invoke: ToolStarted,
+    result: Result<ReadImageOutput, String>,
+) {
     let cancelled = Arc::new(AtomicBool::new(false));
     manager.calls.insert(
         invoke.call_id.clone(),
@@ -173,11 +182,44 @@ fn complete_decode(
         .push_back(DecodeCompletion {
             call_id: invoke.call_id,
             cancelled,
-            result: Ok(output),
+            result,
         });
     manager.drain();
 }
 
+/// Invalid crops reach the model as a specific error and preserved source-size
+/// diagnostic, without an image fallback or echoed tool arguments.
+#[test]
+fn invalid_crop_reports_specific_model_error() {
+    let (mut invoke, _, _, original_key) = prepared_fixture(PreparedImageStorage::Artifact);
+    invoke.arguments = tau_proto::json_to_cbor(&serde_json::json!({
+        "key": original_key.as_str(),
+        "region": {"x": 4, "y": 0, "width": 1, "height": 1},
+    }));
+    let error = ReadImageRequest::from_arguments(&invoke.arguments)
+        .expect("request")
+        .prepare(&source_bytes())
+        .err()
+        .expect("out of bounds");
+    let frames = with_manager(|manager| complete_decode_result(manager, invoke, Err(error)));
+    let terminal = terminals(&frames);
+    let [Event::ToolErrorReported(error)] = terminal.as_slice() else {
+        panic!("one error");
+    };
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_ref().expect("diagnostic"),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("render");
+    assert_eq!(
+        text,
+        "error: image-region-out-of-bounds\n\nargument `region` (4,0 1x1) is outside oriented source 4x3"
+    );
+}
 /// Responds to Begin and verifies every prepared chunk before Finalize is
 /// admitted.
 fn write_prepared(manager: &mut ArtifactImageManager, call_id: &ToolCallId, expected: &[u8]) {
@@ -430,7 +472,7 @@ fn prepared_upload_busy_fails_once_without_inline_fallback() {
         let [Event::ToolErrorReported(error)] = terminal.as_slice() else {
             panic!("one error");
         };
-        assert_eq!(error.message, "image-read-failed");
+        assert_eq!(error.message, "image-artifact-transfer-failed");
         assert_eq!(
             tau_proto::cbor_text_field(error.details.as_ref().expect("diagnostic"), "output")
                 .as_deref(),

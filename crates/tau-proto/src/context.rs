@@ -990,7 +990,7 @@ fn provider_tool_result_text_shape(
         }
         ProviderToolResultStatus::Cancelled { reason } => {
             let mut shape =
-                ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
+                ProviderTextShape::literal("canceled").sanitized(ProviderTextMode::Header);
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
             shape
@@ -1010,7 +1010,7 @@ fn provider_tool_result_text_cached_shape(
         }
         ProviderToolResultStatus::Cancelled { reason } => {
             let mut shape =
-                ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
+                ProviderTextShape::literal("canceled").sanitized(ProviderTextMode::Header);
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
             shape
@@ -1626,7 +1626,7 @@ fn write_provider_tool_result_text_with_cache(
             write_cbor_tool_response(value, Some(("error", message)), cache, output)
         }
         ProviderToolResultStatus::Cancelled { reason } => {
-            write_sanitized_provider_text("cancelled", ProviderTextMode::Header, output)?;
+            write_sanitized_provider_text("canceled", ProviderTextMode::Header, output)?;
             output.write_str(": ")?;
             write_sanitized_provider_text(reason, ProviderTextMode::Header, output)?;
             Ok(())
@@ -1937,7 +1937,7 @@ impl ToolResultItem {
             ToolResultStatus::Cancelled { reason } => ToolResponse {
                 raw: CborValue::Null,
                 headers: vec![ToolResponseHeader {
-                    key: "cancelled".to_owned(),
+                    key: "canceled".to_owned(),
                     value: reason.clone(),
                 }],
                 body: String::new(),

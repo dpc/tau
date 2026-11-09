@@ -463,21 +463,21 @@ impl Harness {
         else {
             return;
         };
-        let mut headers = vec![(
-            CborValue::Text("status".to_owned()),
-            CborValue::Text("running-in-background".to_owned()),
-        )];
-        if let Some((self_agent_id, sub_agent_id)) = agent_ids {
-            headers.extend([
-                (
-                    CborValue::Text("self_agent_id".to_owned()),
-                    CborValue::Text(self_agent_id.to_owned()),
-                ),
-                (
-                    CborValue::Text("sub_agent_id".to_owned()),
-                    CborValue::Text(sub_agent_id.to_owned()),
-                ),
-            ]);
+        let mut headers = vec![
+            (
+                CborValue::Text("status".to_owned()),
+                CborValue::Text("running-in-background".to_owned()),
+            ),
+            (
+                CborValue::Text("call_id".to_owned()),
+                CborValue::Text(call_id.to_string()),
+            ),
+        ];
+        if let Some((_self_agent_id, sub_agent_id)) = agent_ids {
+            headers.extend([(
+                CborValue::Text("sub_agent_id".to_owned()),
+                CborValue::Text(sub_agent_id.to_owned()),
+            )]);
         }
         let result = ToolResult {
             captured_output: None,

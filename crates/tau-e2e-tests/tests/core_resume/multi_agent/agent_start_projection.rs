@@ -19,21 +19,16 @@ pub(super) fn arguments_match(arguments: &CborValue) -> bool {
         ])
 }
 
-/// Matches the exact main/worker IDs in the production tool result.
+/// Matches the sole child ID in the production result; the tool owner
+/// identifies the parent without a redundant result field.
 pub(super) fn result_ids_match(
     result: &CborValue,
-    main_agent_id: &AgentId,
+    _main_agent_id: &AgentId,
     worker_agent_id: &AgentId,
 ) -> bool {
     result
-        == &CborValue::Map(vec![
-            (
-                CborValue::Text("self_agent_id".to_owned()),
-                CborValue::Text(main_agent_id.to_string()),
-            ),
-            (
-                CborValue::Text("sub_agent_id".to_owned()),
-                CborValue::Text(worker_agent_id.to_string()),
-            ),
-        ])
+        == &CborValue::Map(vec![(
+            CborValue::Text("sub_agent_id".to_owned()),
+            CborValue::Text(worker_agent_id.to_string()),
+        )])
 }

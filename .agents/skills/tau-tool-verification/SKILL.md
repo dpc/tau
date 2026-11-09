@@ -105,13 +105,12 @@ with two LF, and preserve the payload's whitespace. Empty status output stays
 empty. Check exact bytes rather than whitespace around a Markdown fence.
 Persistent `workdir` setters return an empty result when the committed path matches
 the supplied spelling, or the canonical `path` when canonicalization adds information;
-getters retain their structured availability result.
+getters return canonical `path` without routine `status: available`; degraded availability remains reported. Missing directories use `error: directory-not-found` and an underlying diagnostic.
 Check relative paths and symlinks without changing discovery ordering. Utility
-receipts use the same shared projection: papercut reports distinguish `recorded`
-from successful best-effort `not recorded` with a reason; archive receipts retain
+receipts use the same shared projection: successful papercut recording returns empty text; best-effort failure reports `status: not recorded` and a reason; archive receipts retain
 the generated archive path or explicit `none`. Papercut lists contain
 generation/count/format headers and metadata records only; reads return only a
-Markdown payload. Timer schedules retain only a generated timer ID; schedules
+Markdown payload. Timer schedules retain only a generated timer ID, derived from a sanitized call ID without an extra `call-` prefix; schedules
 with a supplied ID and successful cancels have empty results. Cancel UI metadata
 still distinguishes `not active`. Lists contain count/format headers
 with optional records. Verify that empty lists have no blank payload region and
@@ -128,7 +127,8 @@ For model shell output, test both the native 15 KiB body budget and the separate
 must expose a readable `full_output_path`, truthful partial `saved_output_path`
 metadata, or `saved_output_unavailable`. Also check a small terminal tail after
 earlier live batches: saved-file metadata must not depend on native truncation.
-Inspect files with ordinary shell commands; there is no dedicated output reader.
+Inspect saved shell files with ordinary shell commands. The `tool_output` tool
+pages retained accepted output; it does not read raw saved shell files.
 
 All tools should return a normalized HTTP-protocol-like structure:
 
@@ -182,7 +182,7 @@ non-redundant values that help the agent decide what to do next. Do not emit
 aliases or duplicate fields that carry the same information.
 
 Every completed shell process result is an exception: it carries an explicit
-`termination_reason`, including `exit` with `status: 0`, so downstream
+`termination_reason`, including `exit` with `exit_code: 0`, so downstream
 consumers never infer normal termination from an exit status alone.
 
 Do not include headers that are straight copies of tool invocation arguments.
@@ -196,11 +196,13 @@ an ordinary completion. It uses `interrupted` with the typed activating input
 (`completion`, `partial_tool_output`, `user`, and so on) and `cause` with the actual
 source call or activation observation. It does not consume the target result.
 Mode remains UI metadata only. Background placeholders use
-`status: running-in-background`. Terminal source appears once, without a redundant
+`status: running-in-background` and `call_id: <canonical-id>` for exact wait or cancel. Terminal source appears once, without a redundant
 completion notice or envelope status attribute. Canceled source retains its
 `status: canceled` header, available tail, and unavailable-capture diagnostics.
 Shell timeouts expose `termination_reason: timeout`, not a duplicate `timed_out`.
 Routine watch and directory-lock mutations return no echoed boolean flags.
+
+No-match skill output is body-only guidance, without echoed query/defaults, empty match arrays, zero count, or a `guidance` header. Errors use meaningful identifiers such as `unknown-tool-call`, `tool-call-completed`, `tool-call-canceled`, `patch-target-exists`, `unknown-agent`, `unsupported-message-recipient`, `invalid-task-name`, and `image-region-out-of-bounds`, with useful diagnostics in the body.
 
 ### Layered escaping policy
 

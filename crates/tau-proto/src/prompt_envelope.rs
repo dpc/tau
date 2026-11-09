@@ -275,6 +275,13 @@ impl RegisteredPayloadEnvelope {
     /// family.
     #[must_use]
     pub fn matches_whole(self, text: &str) -> bool {
+        if let PayloadEnvelopeOpening::Attributed(prefix) = self.opening
+            && let Some(attributes) = text
+                .strip_prefix(prefix)
+                .and_then(|text| text.strip_suffix("/>"))
+        {
+            return !attributes.contains('>');
+        }
         let body = match self.opening {
             PayloadEnvelopeOpening::Fixed(open) => text.strip_prefix(open),
             PayloadEnvelopeOpening::Attributed(prefix) => text
@@ -319,6 +326,10 @@ impl RegisteredPayloadEnvelope {
             output.push_str("=\"");
             output.push_str(&escape_payload_envelope_attribute(value));
             output.push('"');
+        }
+        if body.is_empty() {
+            output.push_str("/>");
+            return Ok(output);
         }
         output.push('>');
         output.push_str(&escaped_body);

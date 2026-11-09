@@ -48,8 +48,10 @@ advertise: false
 - `shell`: command execution with call-local `cwd`; timeout defaults to 300 seconds.
 - `gpt_shell`, visible as `shell_command`: equivalent GPT-style surface with
   call-local `workdir`, not `cwd`.
-- `workdir`: reads instance-local persistent cwd, or validates/canonicalizes and
-  commits a new one. It is separate from either command's call-local override.
+- `workdir`: reads the instance-local persistent cwd, or validates, canonicalizes,
+  and commits a new one. A getter returns `path` without a routine availability
+  header; it still reports degraded availability. This is separate from either
+  command's call-local override.
 - `grep`: in-process ripgrep search; no external `rg` or `RIPGREP_CONFIG_PATH`.
   `limit` caps at 2000 matches; `context` at 20 lines. It searches regular files
   and directories, not special files.
@@ -91,6 +93,11 @@ Model shell output is an ordered source stream, separate from completion
 receipts. Pending output flushes after 15 seconds of inactivity or 30 seconds
 from its first pending bytes, whichever comes first; silence sends no update and size
 limits never cause an early flush. Actual completion flushes the final tail.
+Background placeholders expose `status: running-in-background` and the canonical
+`call_id` so you can wait for or cancel that call before source arrives. A
+successful cancellation request returns empty text; completion remains separate.
+An ordinary process exit reports `termination_reason: exit` and `exit_code`,
+not `status`.
 Streamed `out`/`err` source-line segments reuse the ordinary `crlf`, `cr`, and
 `no_nl` markers. `no_nl` marks the absence of a source newline at the segment boundary, not
 process EOF. Later output from the same pipe can continue the segment across
@@ -104,8 +111,10 @@ Accepted updates are limited to 8 KiB each and 64 KiB/64 updates per call, with 
 separate bounded final diagnostic capture. Tau drains excess output, retains
 recent text, and reports omissions; overflow does not cancel the command.
 `wait` returns a successful receipt with `cause` (the source call ID) and
-`outcome` (`completed`, `error`, or `cancelled`), without a copy of the output.
-There is no dedicated output lookup tool. Inspect oversized shell output using
+`outcome` (`completed`, `error`, or `canceled`), without a copy of the output.
+The `tool_output` tool can page retained accepted text, but cannot recover
+omitted raw output.
+Inspect oversized shell output using
 ordinary shell commands and the terminal's temporary-file path header. Existing
 best-effort compaction transcript archives support historical inspection of
 accepted text; neither route recovers omitted raw bytes or expired files.
@@ -117,7 +126,9 @@ capture is separate from that aggregate.
 
 Native truncation includes totals. Completed commands also expose saved output
 when the smaller final harness capture omits bytes or earlier live batches
-leave only a terminal tail. The saved rendering is capped at 16 MiB:
+leave only a terminal tail. Saved and delivered records preserve the observed
+pipe-segment order, which does not establish cross-pipe write chronology.
+The saved rendering is capped at 16 MiB:
 `full_output_path` means complete; `saved_output_path` with
 `saved_output_truncated: true` and `saved_output_bytes` means incomplete.
 `saved_output_unavailable: true` means no private saved file could be created.

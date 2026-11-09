@@ -556,7 +556,7 @@ impl ArtifactImageManager {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
-            message: "image-read-failed".to_owned(),
+            message: image_error_identifier(&message).to_owned(),
             details: Some(CborValue::Map(vec![(
                 CborValue::Text("output".to_owned()),
                 CborValue::Text(message.clone()),
@@ -616,8 +616,11 @@ fn budget_prepared_result(
         call_id: result.call_id,
         tool_name: result.tool_name,
         tool_type: result.tool_type,
-        message: IMAGE_TOO_LARGE_MESSAGE.to_owned(),
-        details: None,
+        message: "image-limit-exceeded".to_owned(),
+        details: Some(CborValue::Map(vec![(
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(IMAGE_TOO_LARGE_MESSAGE.to_owned()),
+        )])),
         display,
         originator: result.originator,
     }))
@@ -662,6 +665,25 @@ impl ActiveCall {
             }
             _ => None,
         }
+    }
+}
+
+/// Select a useful error category while retaining the original diagnostic body.
+fn image_error_identifier(message: &str) -> &'static str {
+    if message.starts_with("argument `region`") && message.contains("outside oriented source") {
+        "image-region-out-of-bounds"
+    } else if message.starts_with("argument `region`") {
+        "invalid-image-region"
+    } else if message.starts_with("argument `key`") {
+        "invalid-artifact-reference"
+    } else if message.starts_with("argument ") || message.starts_with("missing string argument:") {
+        "invalid-image-arguments"
+    } else if message.starts_with("artifact ") {
+        "image-artifact-transfer-failed"
+    } else if message.contains("limit") || message == "too many active image reads" {
+        "image-limit-exceeded"
+    } else {
+        "image-decode-failed"
     }
 }
 

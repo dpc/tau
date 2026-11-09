@@ -273,9 +273,22 @@ fn add_file_rejects_existing_target() {
     .expect_err("add file should reject existing target");
 
     assert!(
-        err.message.contains("Add File target already exists"),
+        err.message == "patch-target-exists",
         "unexpected error: {}",
         err.message
+    );
+    let mut rendered = String::new();
+    tau_proto::write_provider_tool_result_text(
+        &failure_details(&err).expect("target diagnostic"),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &err.message,
+        },
+        &mut rendered,
+    )
+    .expect("render");
+    assert_eq!(
+        rendered,
+        format!("error: patch-target-exists\npath: {}", render_path(&path))
     );
     assert_eq!(
         std::fs::read_to_string(&path).expect("read original"),

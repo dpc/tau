@@ -650,7 +650,7 @@ fn failed_stream_terminals_omit_self_cause_without_losing_final_source() {
             assert_eq!(
                 receipt.output.render(),
                 if cancelled {
-                    "outcome: cancelled"
+                    "outcome: canceled"
                 } else {
                     "outcome: error"
                 },

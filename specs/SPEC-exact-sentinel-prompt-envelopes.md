@@ -83,8 +83,9 @@ order. Payload cannot inject attributes.
 
 Before framing, the trusted renderer normalizes and bounds the complete body,
 replaces every byte-exact occurrence of that family's closing token with its fixed
-visible form, and appends the trusted closing token. No later normalization or
-truncation may modify the result. Replacement is case-sensitive and changes no
+visible form, and appends the trusted closing token. Empty attributed envelopes
+instead self-close with `/>`. No later normalization or truncation may modify the
+result. Replacement is case-sensitive and changes no
 other text. Opening tags, near variants, other families, Markdown, JSON,
 entity-shaped text, and Unicode remain literal unless the source contract defines a
 separate visible-normalization rule.

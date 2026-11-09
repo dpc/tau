@@ -124,11 +124,12 @@ impl ShellProcessOutcome {
 
     /// Read a coherent outcome from the selected canonical terminal field.
     ///
-    /// Recognized fields are `status` and `signal` as signed 32-bit integers,
-    /// `timed_out` as a boolean, and `termination_reason` as one of `exit`,
-    /// `timeout`, `signal`, `start_error`, or `unknown`. Unknown fields are
-    /// ignored. A duplicate or malformed recognized field, or a contradictory
-    /// combination, makes the projection unavailable.
+    /// Recognized fields are `exit_code` (historically `status`) and `signal`
+    /// as signed 32-bit integers, `timed_out` as a boolean, and
+    /// `termination_reason` as one of `exit`, `timeout`, `signal`,
+    /// `start_error`, or `unknown`. Unknown fields are ignored. A duplicate
+    /// or malformed recognized field, or a contradictory combination, makes
+    /// the projection unavailable.
     ///
     /// Every recognized process outcome must carry an explicit coherent
     /// `termination_reason`.
@@ -146,7 +147,10 @@ impl ShellProcessOutcome {
             let CborValue::Text(key) = key else {
                 continue;
             };
-            let key = key.as_str();
+            let key = match key.as_str() {
+                "exit_code" => "status",
+                key => key,
+            };
             if matches!(
                 key,
                 "status" | "signal" | "timed_out" | "termination_reason"

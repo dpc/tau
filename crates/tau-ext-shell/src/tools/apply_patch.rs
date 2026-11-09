@@ -161,6 +161,8 @@ struct AppliedChange {
 struct ApplyPatchFailure {
     /// Single-line provider-visible failure summary.
     message: String,
+    /// Specific target that distinguishes a failure in a multi-file patch.
+    target_path: Option<String>,
     /// Optional bounded multiline recovery body.
     recovery_output: Option<String>,
     /// Files changed before the failure occurred.
@@ -171,6 +173,7 @@ impl ApplyPatchFailure {
     fn new(message: impl Into<String>, changes: &[AppliedChange]) -> Self {
         Self {
             message: message.into(),
+            target_path: None,
             recovery_output: None,
             changes: changes.to_vec(),
         }
@@ -240,10 +243,9 @@ impl<'world> HunkApplier<'world> {
     fn apply_add(&mut self, path: &Path, contents: &str) -> Result<(), ApplyPatchFailure> {
         let abs = resolve_path(&self.cwd, path);
         if self.read_optional_file(&abs)?.is_some() {
-            return Err(self.failure(format!(
-                "Add File target already exists: {}",
-                render_path(&abs)
-            )));
+            let mut failure = self.failure("patch-target-exists".to_owned());
+            failure.target_path = Some(render_path(&abs));
+            return Err(failure);
         }
         write_file_creating_parent(&abs, contents, self.world).map_err(|error| {
             self.failure(format!(
@@ -486,11 +488,20 @@ fn populate_change_display(display: &mut tau_proto::ToolUseState, changes: &[App
 }
 
 fn failure_details(failure: &ApplyPatchFailure) -> Option<CborValue> {
-    if failure.changes.is_empty() && failure.recovery_output.is_none() {
+    if failure.changes.is_empty()
+        && failure.recovery_output.is_none()
+        && failure.target_path.is_none()
+    {
         return None;
     }
 
     let mut details = Vec::new();
+    if let Some(path) = &failure.target_path {
+        details.push((
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(path.clone()),
+        ));
+    }
     if let Some(output) = &failure.recovery_output {
         details.push((
             CborValue::Text("output".to_owned()),

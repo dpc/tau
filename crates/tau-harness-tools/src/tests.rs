@@ -749,8 +749,8 @@ fn finish_agent_watch_error_passes_informative_display() {
     assert_eq!(call.call_id.as_str(), "call-1");
     assert_eq!(call.tool_name.as_str(), AGENT_WATCH_TOOL_NAME);
     assert_eq!(call.tool_type, ToolType::Function);
-    assert_eq!(call.message, "unknown agent: `agent-missing`");
-    assert_eq!(call.details, Some(args));
+    assert_eq!(call.message, "unknown-agent");
+    assert_eq!(call.details, None);
     assert_eq!(display.args, "unwatch agent-missing");
     assert_eq!(display.status, ToolUseStatus::Error);
     assert_eq!(display.status_text, "unknown agent: `agent-missing`");
@@ -1130,7 +1130,7 @@ fn finish_message_success_passes_recipient_display_without_message_payload() {
     assert_eq!(call.tool_type, ToolType::Function);
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&call.result).render(),
-        "status: committed\nmsg_id: message-1\nrecipient_status: live"
+        "msg_id: message-1"
     );
     assert_eq!(display.args, "agent-a");
     assert_eq!(display.status, ToolUseStatus::Success);
@@ -1171,7 +1171,7 @@ fn finish_message_error_passes_recipient_display_without_message_payload() {
     assert_eq!(call.call_id.as_str(), "message-call");
     assert_eq!(call.tool_name.as_str(), MESSAGE_TOOL_NAME);
     assert_eq!(call.tool_type, ToolType::Function);
-    assert_eq!(call.message, "message-rejected");
+    assert_eq!(call.message, "invalid-message-body");
     assert_eq!(
         call.details,
         Some(CborValue::Map(vec![(
@@ -1184,6 +1184,33 @@ fn finish_message_error_passes_recipient_display_without_message_payload() {
     assert_eq!(display.status_text, "`message` must be a string");
     assert_eq!(display.stats, ToolUseStats::default());
     assert_eq!(display.payload, None);
+}
+
+/// Rejected addresses need an actionable error identity, not repeated arguments
+/// or an otherwise empty generic rejection receipt.
+#[test]
+fn unsupported_message_recipient_has_specific_header_only_error() {
+    let mut finisher = RecordingMessageToolFinisher::default();
+    finish_message_error(
+        &mut finisher,
+        &AgentId::parse("parent").expect("agent"),
+        "rejected-message".into(),
+        ToolName::new(MESSAGE_TOOL_NAME),
+        ToolType::Function,
+        &CborValue::Map(Vec::new()),
+        "unsupported message recipient: `user`".to_owned(),
+    );
+    let error = finisher.error.expect("error");
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_ref().unwrap_or(&CborValue::Null),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("render");
+    assert_eq!(text, "error: unsupported-message-recipient");
 }
 
 /// Pending and terminal headers count UTF-8 body bytes and logical lines, not
@@ -1340,12 +1367,12 @@ fn cancel_duplicate_request_state_does_not_leak_to_non_owner() {
     let err = state
         .validate_cancel_request(&call_id, false, false)
         .expect_err("non-owner should see unknown call");
-    assert_eq!(err, "Unknown tool call id");
+    assert_eq!(err, "unknown-tool-call");
 
     let err = state
         .validate_cancel_request(&call_id, true, false)
         .expect_err("owner should still see duplicate cancel");
-    assert_eq!(err, "Tool call already canceled");
+    assert_eq!(err, "tool-call-canceled");
 }
 
 /// Ensures completed-call diagnostics are likewise emitted only for the owning
@@ -1358,12 +1385,12 @@ fn cancel_completed_request_state_is_owner_scoped() {
     let err = state
         .validate_cancel_request(&call_id, false, false)
         .expect_err("non-owner should see unknown call");
-    assert_eq!(err, "Unknown tool call id");
+    assert_eq!(err, "unknown-tool-call");
 
     let err = state
         .validate_cancel_request(&call_id, false, true)
         .expect_err("owner should see completed call");
-    assert_eq!(err, "Tool call is already done");
+    assert_eq!(err, "tool-call-completed");
 }
 
 /// Ensures session shutdown drops runtime-only bookkeeping for abandoned
@@ -1401,16 +1428,13 @@ fn cancel_args_reject_whitespace_only_tool_call_id() {
 /// Agent-start results are routing metadata only: the child response travels
 /// through watch notifications, so legacy child output and `agent_id` stay out.
 #[test]
-fn delegate_result_includes_only_caller_and_sub_agent_ids() {
+fn delegate_result_includes_only_sub_agent_id() {
     // `agent_start` no longer returns the sub-agent's first final text as tool
     // output. That content is delivered through the unified `agent_watch`
     // notification path, while the tool result keeps routing metadata.
     let value = delegate_result_value("engineer_parent", "engineer_child");
 
-    assert_eq!(
-        cbor_map_text(&value, "self_agent_id"),
-        Some("engineer_parent")
-    );
+    assert_eq!(cbor_map_text(&value, "self_agent_id"), None);
     assert_eq!(
         cbor_map_text(&value, "sub_agent_id"),
         Some("engineer_child")
@@ -1479,10 +1503,7 @@ fn finish_agent_start_success_passes_informative_display() {
     assert_eq!(call.call_id.as_str(), "call-1");
     assert_eq!(call.tool_name.as_str(), AGENT_START_TOOL_NAME);
     assert_eq!(call.tool_type, ToolType::Function);
-    assert_eq!(
-        cbor_map_text(&call.result, "self_agent_id"),
-        Some("engineer_parent")
-    );
+    assert_eq!(cbor_map_text(&call.result, "self_agent_id"), None);
     assert_eq!(
         cbor_map_text(&call.result, "sub_agent_id"),
         Some("engineer_child")
@@ -1595,11 +1616,12 @@ fn skill_search_guidance_matches_content_search_branch() {
             },
         );
 
+        assert_eq!(cbor_map_bool(&result, "search_content"), None);
+        let guidance = cbor_map_text(&result, "output").expect("guidance payload");
         assert_eq!(
-            cbor_map_bool(&result, "search_content"),
-            Some(search_content)
+            tau_proto::ToolResponse::from_cbor(&result).render(),
+            guidance
         );
-        let guidance = cbor_map_text(&result, "guidance").expect("guidance");
         assert!(guidance.contains("No skills matched"));
         assert_eq!(
             guidance.contains("search_content: true"),

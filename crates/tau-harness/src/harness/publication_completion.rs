@@ -2433,16 +2433,8 @@ impl Harness {
                     tool_type,
                     tau_proto::CborValue::Map(vec![
                         (
-                            tau_proto::CborValue::Text("status".to_owned()),
-                            tau_proto::CborValue::Text("committed".to_owned()),
-                        ),
-                        (
                             tau_proto::CborValue::Text("msg_id".to_owned()),
                             tau_proto::CborValue::Text(message_id.to_string()),
-                        ),
-                        (
-                            tau_proto::CborValue::Text("recipient_status".to_owned()),
-                            tau_proto::CborValue::Text("live".to_owned()),
                         ),
                         (
                             tau_proto::CborValue::Text("recipient".to_owned()),

@@ -586,10 +586,7 @@ fn workdir_without_path_reports_current_status_without_mutation() {
         tau_proto::cbor_text_field(&result.result, "path"),
         Some(remembered.path().display().to_string())
     );
-    assert_eq!(
-        tau_proto::cbor_text_field(&result.result, "status"),
-        Some("available".to_owned())
-    );
+    assert_eq!(tau_proto::cbor_text_field(&result.result, "status"), None);
 }
 
 /// Malformed present metadata must fail closed while an absolute setter remains
@@ -2650,11 +2647,8 @@ fn dir_lock_update_errors_when_same_agent_already_holds_overlapping_lock() {
                     cbor_map_text(details, "blocking_directory"),
                     Some(lock_dir.to_str().expect("utf8 path"))
                 );
-                assert_eq!(
-                    cbor_map_text(details, "requested_directory"),
-                    Some(child_dir.to_str().expect("utf8 path"))
-                );
-                assert_eq!(cbor_map_text(details, "lock_owner_id"), Some("agent-a"));
+                assert_eq!(cbor_map_text(details, "requested_directory"), None);
+                assert_eq!(cbor_map_text(details, "lock_owner_id"), None);
                 assert_eq!(
                     cbor_map_text(details, "output"),
                     Some(

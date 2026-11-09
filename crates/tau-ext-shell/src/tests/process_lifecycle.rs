@@ -271,7 +271,7 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
         Err(error) => panic!("unexpected shell start error: {error:?}"),
     };
 
-    assert_ne!(cbor_int_field(&output.result, "status"), Some(0));
+    assert_ne!(cbor_int_field(&output.result, "exit_code"), Some(0));
     assert!(
         !dir.path().join("created.txt").exists(),
         "read-only shell command must not create files in cwd"
@@ -375,7 +375,7 @@ fn shell_tool_closed_stdin_provides_poll_visible_readiness() {
         panic!("expected finished shell outcome");
     };
 
-    assert_eq!(cbor_int_field(&output.result, "status"), Some(0));
+    assert_eq!(cbor_int_field(&output.result, "exit_code"), Some(0));
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some("out after poll")
@@ -708,7 +708,7 @@ fn protected_pager_overlay_prevents_stall_and_opt_out_forfeits_guarantee() {
     .expect("run protected pager probe") else {
         panic!("expected finished protected shell outcome");
     };
-    assert_eq!(cbor_int_field(&output.result, "status"), Some(0));
+    assert_eq!(cbor_int_field(&output.result, "exit_code"), Some(0));
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some("out pager payload")
@@ -1059,7 +1059,7 @@ fn shell_tool_runs_with_tty_outputs_closed_stdin_and_separate_streams() {
         panic!("expected finished shell outcome");
     };
 
-    assert_eq!(cbor_int_field(&output.result, "status"), Some(0));
+    assert_eq!(cbor_int_field(&output.result, "exit_code"), Some(0));
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some("out tty stdout\nerr tty stderr")
@@ -1102,7 +1102,7 @@ fn protected_pager_reports_command_not_found_when_cat_is_absent() {
     .expect("run missing-cat probe") else {
         panic!("expected finished missing-cat shell outcome");
     };
-    assert_eq!(cbor_int_field(&output.result, "status"), Some(127));
+    assert_eq!(cbor_int_field(&output.result, "exit_code"), Some(127));
     assert!(
         cbor_map_text(&output.result, "output")
             .is_some_and(|output| output.contains("cat") && output.contains("not found"))
@@ -1845,7 +1845,7 @@ fn shell_tool_reports_signal_termination_details() {
         cbor_map_text(&output.result, "termination_reason"),
         Some("signal")
     );
-    assert!(cbor_map_field(&output.result, "status").is_none());
+    assert!(cbor_map_field(&output.result, "exit_code").is_none());
 }
 
 /// Nonzero shell exits still return captured output as a result, with an error
@@ -1880,7 +1880,7 @@ fn shell_tool_reports_failures_with_details() {
     let display = result.display.as_ref().expect("failed shell display");
     assert_eq!(display.status, ToolUseStatus::Error);
     assert_eq!(display.status_text, "7");
-    assert_eq!(cbor_int_field(&result.result, "status"), Some(7));
+    assert_eq!(cbor_int_field(&result.result, "exit_code"), Some(7));
     assert_eq!(
         cbor_map_text(&result.result, "termination_reason"),
         Some("exit")

@@ -2105,11 +2105,11 @@ fn no_arg_wait_resolves_when_running_background_call_is_cancelled() {
         cbor_map_text(&receipt, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("bg-cancel-any")
     );
-    assert_eq!(cbor_map_text(&receipt, "outcome"), Some("cancelled"));
+    assert_eq!(cbor_map_text(&receipt, "outcome"), Some("canceled"));
     let display = display.expect("wait cancellation display");
     assert_eq!(display.args, "slow");
     assert_eq!(display.status, ToolUseStatus::Success);
-    assert_eq!(display.status_text, "cancelled");
+    assert_eq!(display.status_text, "canceled");
 }
 
 /// Background errors are completions too. A no-arg wait must return the
@@ -2230,7 +2230,7 @@ fn explicit_waiter_wins_over_any_waiter_for_same_cancelled_completion() {
             && matches!(
                 &reply.kind,
                 WaitReplyKind::Result { result, .. }
-                    if *result == expected_receipt("bg-cancel-race", "cancelled")
+                    if *result == expected_receipt("bg-cancel-race", "canceled")
             )
     }));
     assert!(cancelled.replies.iter().any(|reply| matches!(
@@ -2570,7 +2570,7 @@ fn exact_wait_after_background_cancel_returns_cancelled_receipt_once() {
         cbor_map_text(&receipt, ORIGINAL_TOOL_CALL_ID_HEADER),
         Some("bg-cancel")
     );
-    assert_eq!(cbor_map_text(&receipt, "outcome"), Some("cancelled"));
+    assert_eq!(cbor_map_text(&receipt, "outcome"), Some("canceled"));
 
     let reply = start_reply(start_wait_exact(
         &mut tracker,
@@ -3471,7 +3471,7 @@ fn wait_all_reuse_then_interruption_preserves_old_cancellation_receipt() {
         &owner,
         "wait-old",
     )));
-    assert_eq!(cbor_map_text(&receipt, "outcome"), Some("cancelled"));
+    assert_eq!(cbor_map_text(&receipt, "outcome"), Some("canceled"));
     assert!(!format!("{receipt:?}").contains("producer wording"));
     assert_eq!(
         tracker.call_ref(&ToolCallId::from("reused")),
@@ -3970,7 +3970,7 @@ fn wait_all_cancellation_preserves_member_and_group_atomicity() {
     let CborValue::Array(members) = &root[0].1 else {
         panic!("plural results must be an array");
     };
-    assert_eq!(members[0], expected_receipt("a", "cancelled"));
+    assert_eq!(members[0], expected_receipt("a", "canceled"));
     assert_eq!(members[1], expected_receipt("b", "completed"));
 
     let mut tracker = WaitTracker::default();

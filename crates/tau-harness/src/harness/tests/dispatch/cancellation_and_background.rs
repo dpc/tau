@@ -185,7 +185,7 @@ fn unsolicited_cancellation_preserves_live_and_restored_wait_outcome() {
                     } else {
                         &result.result
                     };
-                    completion_receipt_matches(receipt, "cancel-source", "cancelled")
+                    completion_receipt_matches(receipt, "cancel-source", "canceled")
                 }),
                 "cold={cold} plural={plural}"
             );
@@ -5096,7 +5096,7 @@ fn background_cancel_clears_actual_running_call() {
         event,
         Event::ToolResult(result)
             if result.call_id == wait_call.id
-                && cbor_map_text(&result.result, "outcome") == Some("cancelled")
+                && cbor_map_text(&result.result, "outcome") == Some("canceled")
     )));
     reopened.shutdown().expect("shutdown reopened harness");
 }
@@ -5208,7 +5208,7 @@ fn cancel_request_api_rejects_non_owner_conversation() {
     assert_eq!(
         h.publish_tool_cancel_request_for(&attacker, None, target.clone())
             .expect_err("non-owner must not cancel the call"),
-        "Unknown tool call id"
+        "unknown-tool-call"
     );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
