@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.28.0",
+        "dpc-tau-proto": "=0.29.0",
     },
 }
 
@@ -182,8 +182,42 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(21, 0));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 1));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// Registry consumers preserve metadata-bound uploads and verify downloaded bytes.
+#[test]
+fn packaged_sdk_preserves_artifact_identity() {
+    use tau_proto::*;
+    let identity = ArtifactIdentity::metadata(
+        Some("output.txt".into()), Some("text/plain".into()),
+    ).expect("metadata");
+    let descriptor = ArtifactDescriptor::from_bytes(b"output", identity.clone())
+        .expect("descriptor");
+    let begin = ArtifactOp::Begin { size: descriptor.size, identity };
+    let bytes = encode_message_to_vec(&(begin.clone(), descriptor.clone())).expect("encode");
+    let decoded: (ArtifactOp, ArtifactDescriptor) =
+        decode_message_from_slice(&bytes).expect("decode");
+    assert_eq!(decoded, (begin, descriptor));
+    decoded.1.verify(b"output").expect("complete identity verifies");
+    assert!(decoded.1.verify(b"changed").is_err());
+}
+
+/// Protocol 23 peers decode native foreground output and updated discovery facts.
+#[test]
+fn packaged_sdk_preserves_native_output_and_discovery_updates() {
+    use tau_proto::*;
+    let presentation = ToolResultPresentation::NativeCapturedOutput;
+    let delivery = DiscoveryContextDelivery {
+        scope: vec![],
+        items: vec![],
+        updated: vec!["skill:example".into()],
+    };
+    let bytes = encode_message_to_vec(&(presentation.clone(), delivery.clone())).expect("encode");
+    let decoded: (ToolResultPresentation, DiscoveryContextDelivery) =
+        decode_message_from_slice(&bytes).expect("decode");
+    assert_eq!(decoded, (presentation, delivery));
 }
 
 /// Packaged bridge consumers can opt in without changing ordinary defaults.
@@ -218,6 +252,7 @@ fn packaged_sdk_preserves_discovery_context() {
     let delivery = DiscoveryContextDelivery {
         scope: vec![item.reference()],
         items: vec![item],
+        updated: vec![],
     };
     let event = Event::AgentUserMessageInjected(AgentUserMessageInjected {
         agent_id: "worker".parse().expect("agent"),
@@ -587,12 +622,6 @@ fn packaged_sdk_preserves_streamed_output_and_completion() {
         let bytes = encode_message_to_vec(&event).expect("encode output event");
         assert_eq!(decode_message_from_slice::<Event>(&bytes).expect("decode output event"), event);
     }
-    let page = ToolOutputPage {
-        call, text: "first batch".into(), offset: 0, next_offset: Some(11),
-        retained_bytes: 27, terminal: true,
-    };
-    let bytes = encode_message_to_vec(&page).expect("encode lookup page");
-    assert_eq!(decode_message_from_slice::<ToolOutputPage>(&bytes).expect("decode lookup page"), page);
     for outcome in [
         ToolCompletionOutcome::Completed,
         ToolCompletionOutcome::Error,
@@ -600,8 +629,8 @@ fn packaged_sdk_preserves_streamed_output_and_completion() {
     ] {
         let receipt = tool_completion_receipt(&call_id, outcome);
         assert_eq!(receipt, CborValue::Map(vec![
-            (CborValue::Text("original_tool_call_id".into()), CborValue::Text("call".into())),
-            (CborValue::Text("target_outcome".into()), CborValue::Text(outcome.as_str().into())),
+            (CborValue::Text("cause".into()), CborValue::Text("call".into())),
+            (CborValue::Text("outcome".into()), CborValue::Text(outcome.as_str().into())),
         ]));
     }
 }

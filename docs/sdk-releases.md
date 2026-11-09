@@ -20,9 +20,62 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Prepared SDK 0.29.0: protocol 23.1
+
+The prepared proto/client **0.29.0** packages contain the current protocol
+**23.1** source. Published SDK 0.28.0 advertises protocol 21.0 and cannot
+connect to a protocol-23 harness. Both SDK crates advance to the next pre-1.0
+minor because public Rust types changed incompatibly. The published 0.1.0
+actions and blocking-notify-channel leaf packages remain unchanged. Publish
+proto first, then client; client pins proto exactly at `=0.29.0`.
+
+External extensions should pin `dpc-tau-proto` and `dpc-tau-client` to
+`=0.29.0`, regenerate their Cargo lockfiles, and rebuild. Do not bypass protocol
+admission. Depending on the APIs your extension uses, migration from 0.28.0
+requires these changes:
+
+- `ArtifactOp::Begin` now requires `identity: ArtifactIdentity`. New uploads
+  use `ArtifactIdentity::anonymous()` or `ArtifactIdentity::metadata(...)`.
+  `ArtifactDescriptor` also carries `identity`; use
+  `ArtifactDescriptor::from_bytes(bytes, identity)` for new objects and
+  `descriptor.verify(bytes)` to verify the complete metadata-bound identity.
+  `ArtifactDescriptor::new` still represents historical payload-only objects.
+  Prefer the SDK upload/download helpers over reproducing the hashing scheme.
+- Exhaustive `ToolResultPresentation` matches must handle
+  `NativeCapturedOutput`, a harness-owned foreground-output presentation. It is
+  not a new extension streaming opt-in. Existing background receipts remain.
+- Initialize `updated: Vec<String>` in `DiscoveryContextDelivery` literals.
+  Omitted wire fields default to an empty list.
+- `TrustedInternalSpan` gains an `envelope` field, and
+  `ContentPart::HarnessInternalText` gains `envelope: Option<SemanticEnvelope>`;
+  `ToolFinalOutput` gains an `outcome` field.
+- `ArtifactListEntry.signature` and `TAU_INTERNAL_HEADER_NAME` were removed.
+- The public `ToolOutputPage` DTO was removed without an SDK replacement.
+  Harness `tool_output` replies now use tool-response serialization.
+- `tool_completion_receipt(call_id,outcome)` now returns a map with `cause` and
+  `outcome` keys instead of `original_tool_call_id` and `target_outcome`.
+  Receipt parsers should use the new keys and the `"canceled"` spelling returned
+  by `ToolCompletionOutcome::Cancelled.as_str()`.
+
+The package check exercises the extracted archives on Rust 1.91, including
+protocol 23.1, metadata-bound artifact uploads and verification, native output
+presentation, and discovery update identities. Run it without arguments before
+publication and with `--registry` after both uploads:
+
+```console
+./.config/selfci/check-sdk-packages.sh
+./.config/selfci/check-sdk-packages.sh --registry
+```
+
+This SDK-only publication does not bump the application version, publish
+application assets, migrate extension repositories, change flake pins, deploy,
+restart services, or reset stored state. Source-identifying
+`dpc-tau-proto-v0.29.0` and `dpc-tau-client-v0.29.0` tags follow successful
+registry verification.
+
 ### Published SDK 0.28.0
 
-The current source uses protocol **21.0**, which adds ordered tool report, update,
+The published 0.28.0 source uses protocol **21.0**, which adds ordered tool report, update,
 and final-capture types, declaration-frozen policy, and receipt-only background
 waits. Configured extensions and UI peers require a coordinated rebuild. The
 SDK package version is **0.28.0**. Publication does not rebuild configured
