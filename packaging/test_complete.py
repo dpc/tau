@@ -189,8 +189,11 @@ class PublicationTests(SourceFixture, unittest.TestCase):
                     "runtime_qualification": "not-performed",
                 }, "source": source, "source_file_sha256": dict.fromkeys(files, "a" * 64),
                     "third_party_notices_sha256": "b" * 64,
-                    "sdk_lock_versions": {n: ["0.19.0" if core else "0.16.0"]
-                                          for n in ("dpc-tau-client", "dpc-tau-proto")},
+                    "sdk_lock_versions": {
+                        "dpc-tau-client": ["0.29.0"],
+                        "dpc-tau-proto": (["0.16.0", "0.29.0"] if product["project"] in (
+                            "tau-ext-slack", "tau-ext-telegram") else ["0.29.0"]),
+                    },
                                    "package_version": version, "package_revision": revision})
             prefix = f"tau-1.2.3-{arch}"
             native.write_json(output / f"{prefix}-source-manifest.json", {
@@ -252,14 +255,17 @@ class PublicationTests(SourceFixture, unittest.TestCase):
         buildfile = output / "tau-1.2.3-amd64-build-manifest.json"
         original = sourcefile.read_bytes()
         build = json.loads(buildfile.read_text())
-        for component, versions in (
-            (0, ["0.18.0"]),
-            (1, ["0.15.0"]),
-            (1, ["0.16.0", "0.15.0"]),
+        for component, dependency, versions in (
+            (0, "dpc-tau-proto", ["0.28.0"]),
+            (1, "dpc-tau-proto", ["0.16.0"]),
+            (1, "dpc-tau-proto", ["0.28.0", "0.29.0"]),
+            (3, "dpc-tau-proto", ["0.16.0"]),
+            (3, "dpc-tau-proto", ["0.16.0", "0.28.0", "0.29.0"]),
+            (3, "dpc-tau-client", ["0.16.0", "0.29.0"]),
         ):
-            with self.subTest(component=component, versions=versions):
+            with self.subTest(component=component, dependency=dependency, versions=versions):
                 source = json.loads(original)
-                source["components"][component]["sdk_lock_versions"]["dpc-tau-proto"] = versions
+                source["components"][component]["sdk_lock_versions"][dependency] = versions
                 native.write_json(sourcefile, source)
                 build["metadata_sha256"]["source-manifest.json"] = native.sha256(sourcefile.read_bytes())
                 native.write_json(buildfile, build)

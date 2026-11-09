@@ -11,8 +11,8 @@ advertise: false
 Tau supervises it over stdio but bundles neither executable nor source.
 Its empty Tau default config supplies no account, room or gateway settings.
 
-For Tau protocol 16.0, rebuild with registry `dpc-tau-client`/`dpc-tau-proto`
-0.16.0 and update with the harness before separately authorized activation.
+For Tau protocol 23.1, rebuild with registry `dpc-tau-client`/`dpc-tau-proto`
+0.29.0. Update the extension with the harness before separately authorized activation.
 Older-protocol binaries fail before configuration.
 
 Tau owns secret delivery, instance state, publisher identity, prefixes, role policy

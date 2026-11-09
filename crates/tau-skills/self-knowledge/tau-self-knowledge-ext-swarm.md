@@ -11,9 +11,9 @@ separately maintained `tau-ext-swarm` executable and make it available through
 `PATH` before enabling it. Set the pinned `config.endpoint.peer_id`, public
 `credential_id`, and `credential_secret` name. Declare that name under the
 extension's `secrets`; the extension never reads an ambient credential
-environment variable. For Tau protocol 16.0, rebuild with registry SDK crates
-`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update the extension with the
-harness before separately authorized activation. Older-protocol binaries are
+environment variable. For Tau protocol 23.1, rebuild with registry SDK crates
+`dpc-tau-client`/`dpc-tau-proto` pinned to 0.29.0. Update the extension with the harness before separately
+authorized activation. Older-protocol binaries are
 rejected before configuration.
 
 `endpoint.relay_url` and `endpoint.direct_addresses` are optional route hints.

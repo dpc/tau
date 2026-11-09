@@ -10,7 +10,7 @@ advertise: false
 `docs/setup.md` owns setup, `SECURITY.md` owns trust boundaries, and
 `docs/design.md` and `docs/runtime.md` own the full contract and limits.
 The linked-message producer uses registry `dpc-tau-client`/`dpc-tau-proto`
-SDK 0.21.0 / protocol 16.6. Update the installed extension with a compatible
+SDK 0.29.0 and protocol 23.1. Update the installed extension with a compatible
 harness before separately authorized activation. Ready or registration success
 does not prove Discord authentication, Gateway connectivity, or delivery.
 
@@ -306,7 +306,7 @@ but does not choose or create a first receiver. When true, ordinary targeting ke
 an eligible saved receiver or selects the oldest eligible agent; lazy creation
 requires admitted input and an explicit `role`.
 
-`target: canonical_main` requires protocol 16.5 or newer within 16.x. It selects
+`target: canonical_main` requires a protocol-23-compatible harness. It selects
 only the committed main; admitted input can create a missing main without a role
 or bootstrap prompt. It never substitutes an ordinary agent or replaces an
 unavailable bound main. Busy receivers remain selected; same-agent registration

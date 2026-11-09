@@ -9,14 +9,13 @@ advertise: false
 `std-pim` runs the separately installed `tau-ext-pim` executable. It provides
 split email/calendar tools and `:email` / `:calendar` approval actions.
 
-For Tau protocol 16.0, rebuild the extension with registry SDK crates
-`dpc-tau-client`/`dpc-tau-proto` pinned to 0.16.0 and update it with the harness
+For Tau protocol 23.1, rebuild the extension with registry SDK crates
+`dpc-tau-client`/`dpc-tau-proto` pinned to 0.29.0 and update it with the harness
 before separately authorized activation.
 Older-protocol binaries are rejected before configuration; changing the advertised
 version alone is not a migration. The old `std-email` standard-instance alias
-is removed; rename it to `std-pim`. PIM
-configuration accepts only the nested `config.email` and `config.calendar`
-module keys.
+is removed; rename it to `std-pim`. PIM configuration accepts only the nested
+`config.email` and `config.calendar` module keys.
 
 Do not include private account or message/event data unless the user provided
 it for that answer.

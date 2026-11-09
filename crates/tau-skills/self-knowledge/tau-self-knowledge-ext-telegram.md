@@ -12,8 +12,8 @@ Tau supervises it over stdio. The
 owns setup and operational documentation. Its Cargo README installation
 instructions depend on future registry publication.
 
-For Tau protocol 16.0, rebuild bridge and gateway with registry
-`dpc-tau-client`/`dpc-tau-proto` 0.16.0 and update them with a compatible harness
+For Tau protocol 23.1, rebuild the bridge and gateway with registry
+`dpc-tau-client`/`dpc-tau-proto` 0.29.0 and update them with a compatible harness
 before separately authorized activation. Older-protocol bridges fail before
 configuration; changing the advertised version is not migration.
 The authenticated gateway protocol remains 0.
@@ -33,8 +33,8 @@ destination. Give each bot instance a distinct generic `tool_prefix`.
 ## Reply context
 
 Local-poll and gateway-client delivery may include bounded same-event/chat/thread
-`reply_to_message` context beside the normalized outer request in `message` and
-`quoted_message` parts. `quote.text` is a sender-selected unverified excerpt.
+`reply_to_message` context as a descriptive text suffix after the normalized outer
+request. `quote.text` is a sender-selected unverified excerpt.
 The producer does not fetch parents, include `external_reply` or parent
 attachments, or recurse. Missing content does not prove deletion.
 
@@ -43,8 +43,8 @@ capabilities. Only the outer message controls admission, `/to`, routes and menti
 Context remains frozen through retries/ACKs; parent changes do not refresh it.
 Optional context may shrink or disappear to preserve the outer body.
 
-Typed context requires rebuilding against the 0.19.0 source SDK; the legacy 0.16
-producer remains unchanged and may append textual context instead.
+The SDK 0.29.0 migration preserves this text suffix; the producer does not use
+typed `quoted_message` parts.
 This adds no native per-message send routing.
 
 ## Gateway modes

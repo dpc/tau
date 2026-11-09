@@ -12,8 +12,8 @@ Tau supervises it over stdio. The
 [standalone project](https://radicle.network/nodes/radicle.dpc.pw/rad%3Az4LrrRivcgNjJii5wzbjTvA8ttt6o)
 owns operational documentation.
 
-For Tau protocol 16.0, rebuild with registry `dpc-tau-client`/`dpc-tau-proto`
-0.16.0 and update the extension with the harness before separately authorized
+For Tau protocol 23.1, rebuild with registry `dpc-tau-client`/`dpc-tau-proto`
+0.29.0. Update the extension with the harness before separately authorized
 activation. Older-protocol binaries fail before configuration.
 Declaration inspection needs no secrets/state and starts no network work.
 

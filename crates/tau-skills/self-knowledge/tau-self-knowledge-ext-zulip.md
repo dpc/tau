@@ -13,8 +13,8 @@ owns operational, security and routing documentation.
 
 The bridge uses bot email/API-key HTTP Basic authentication, queue registration
 and long polling, not webhooks. The linked-message producer uses registry
-SDK 0.26.0 / protocol 19. Rebuild all peers with compatible SDKs before separately
-authorized activation. Route changes do not fix a wire-version mismatch.
+SDK 0.29.0 and protocol 23.1. Rebuild all peers with compatible SDKs before
+separately authorized activation. Route changes do not fix a wire-version mismatch.
 
 ## Configuration and routing
 
@@ -89,7 +89,7 @@ unloaded saved agents are not force-loaded.
 
 ### Opt-in canonical-main receiver
 
-`target: canonical_main` requires the SDK's compiled protocol major, currently 19,
+`target: canonical_main` requires the SDK's compiled protocol major, currently 23,
 and accepts all minors within that major. The guard rejects missing or other
 majors before submission.
 With automatic registration, admitted input can create a missing main without a
@@ -201,6 +201,11 @@ checks still apply; reactions, attachment reads and participants retain their
 existing live source requirements.
 
 Ordinary `zulip_send` accepts `attachments: [{artifact, filename, content_type?}]`.
+New attachment and avatar imports use metadata-bound anonymous artifact identity.
+Downloads verify complete descriptors, including metadata, before provider effects;
+historical payload-only objects remain readable. Reimporting the same historical
+bytes can produce a different key. Caller-supplied Zulip filenames and media types remain
+separate from artifact metadata; attachment and avatar limits remain unchanged.
 The `zulip:send`, exact send and Zulip-group grants authorize both text and uploads.
 Review former text-only roles; remove obsolete `zulip_send_attachment` and
 `zulip:attach` grants. There is no argument-level upload permission.
