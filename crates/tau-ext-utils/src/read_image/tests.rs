@@ -26,7 +26,7 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
         .expect("accepted argument spelling");
         let output = request.prepare(bytes.get_ref()).expect("same original");
         assert_eq!(output.display.args, tau_proto::artifact_uri(&key));
-        assert_eq!(render_image_result(&output), "size: 4x3\n");
+        assert_eq!(render_image_result(&output), "size: 4x3");
     }
     let reference = tau_proto::artifact_reference(&key);
     let request = ReadImageRequest::from_arguments(&CborValue::Map(vec![(
@@ -40,7 +40,7 @@ fn artifact_request_prepares_typed_content_without_path_authority() {
         output.provider_content.as_slice(),
         [ToolResultContentPart::Image(_)]
     ));
-    assert_eq!(render_image_result(&output), "size: 4x3\n");
+    assert_eq!(render_image_result(&output), "size: 4x3");
     let [ToolResultContentPart::Image(image)] = output.provider_content.as_slice() else {
         panic!("one typed image")
     };
@@ -447,7 +447,7 @@ fn compact_metadata_tracks_delivered_and_full_source_sizes() {
         }
         .prepare(bytes.get_ref())
         .expect("prepare");
-        assert_eq!(render_image_result(&output), format!("{expected}\n"));
+        assert_eq!(render_image_result(&output), expected);
         let Some(ToolUsePayload::Text { text }) = &output.display.payload else {
             panic!("transformed image details")
         };
@@ -503,7 +503,7 @@ fn compact_metadata_uses_oriented_source_coordinates() {
         }
         .prepare(&bytes)
         .expect("prepare");
-        assert_eq!(render_image_result(&output), format!("{expected}\n"));
+        assert_eq!(render_image_result(&output), expected);
         if region.is_some_and(|region| region != ImageRegion::full(2, 4)) {
             assert!(matches!(
                 &output.display.payload,

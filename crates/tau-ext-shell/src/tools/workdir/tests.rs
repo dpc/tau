@@ -5,7 +5,7 @@ use tau_proto::CborValue;
 use super::{output, status_output};
 
 /// Successful reads omit the routine availability chip while retaining
-/// semantic status.
+/// semantic status without a formatter-owned final newline.
 #[test]
 fn available_read_uses_path_only_display() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -13,6 +13,10 @@ fn available_read_uses_path_only_display() {
 
     assert_eq!(output.display.mode, "get");
     assert_eq!(output.display.args, dir.path().display().to_string());
+    assert_eq!(
+        tau_proto::ToolResponse::from_cbor(&output.result).render(),
+        format!("path: {}\nstatus: available", dir.path().display())
+    );
     assert!(matches!(
         output.result,
         CborValue::Map(ref entries)
@@ -34,7 +38,7 @@ fn setter_uses_path_only_display_and_canonical_receipt() {
     assert_eq!(output.display.args, "/tmp/result");
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&output.result).render(),
-        "status: changed\npath: /tmp/result\n"
+        "status: changed\npath: /tmp/result"
     );
 }
 

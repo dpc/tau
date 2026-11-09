@@ -4595,7 +4595,7 @@ fn build_request_replays_cancelled_tool_result_with_header() {
     assert_eq!(input.len(), 1);
     assert_eq!(input[0]["type"], "function_call_output");
     assert_eq!(input[0]["call_id"], "call-cancelled");
-    assert_eq!(input[0]["output"], "cancelled: user interrupted\n");
+    assert_eq!(input[0]["output"], "cancelled: user interrupted");
 }
 
 #[test]

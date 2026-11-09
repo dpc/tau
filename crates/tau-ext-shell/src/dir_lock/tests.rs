@@ -105,7 +105,7 @@ fn manual_admission_snapshot_survives_holder_release() {
                         assert!(text.contains(if descendant {
                             "/snapshot/parent/child"
                         } else {
-                            "blocker_directory: /snapshot/parent\n"
+                            "blocker_directory: /snapshot/parent"
                         }));
                         assert!(manager.cancel_waiting_call(&"waiter".into()));
                     },
@@ -169,7 +169,7 @@ fn explicit_wait_stream_precedes_acquisition_or_cancellation() {
             match *emit.event {
                 Event::ToolOutputReported(report) => {
                     assert_eq!(report.sequence, 0);
-                    assert!(report.text.contains("blocker_directory: /stream/root\n"));
+                    assert!(report.text.ends_with("blocker_directory: /stream/root"));
                     break;
                 }
                 Event::ToolProgressReported(_) => {}
@@ -380,7 +380,7 @@ fn wait_diagnostics_identify_earlier_overlapping_request() {
                 let text = blocker.render();
                 assert!(text.contains("blocker_kind: earlier_queued_request"));
                 assert!(text.contains("blocker_agent: earlier"));
-                assert!(text.contains("blocker_directory: /diagnostic/parent\n"));
+                assert!(text.ends_with("blocker_directory: /diagnostic/parent"));
                 DirLockManager::annotate_blocker(&mut progress, Some(&blocker));
                 assert!(manager.cancel_waiting_call(&invoke.call_id));
             },

@@ -11,7 +11,7 @@ fn retained_release_receipt_is_payload_free() {
     assert!(response.body.is_empty());
     assert_eq!(
         response.render(),
-        "status: already_delivered\nreceipt: retained\nnew_message: false\n"
+        "status: already_delivered\nreceipt: retained\nnew_message: false"
     );
 }
 
@@ -606,13 +606,13 @@ fn agent_watch_enable_result_includes_safe_current_snapshot() {
     .render();
     assert_eq!(
         result,
-        "watching: true\nprovider_status: retrying (throttle, attempt 50, next retry about 60s)\n"
+        "watching: true\nprovider_status: retrying (throttle, attempt 50, next retry about 60s)"
     );
     assert_eq!(result.matches("provider_status:").count(), 1);
     assert!(!result.contains("[tau-internal]"));
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&agent_watch_enabled_result("agent-a", None)).render(),
-        "watching: true\n"
+        "watching: true"
     );
 }
 
@@ -1130,7 +1130,7 @@ fn finish_message_success_passes_recipient_display_without_message_payload() {
     assert_eq!(call.tool_type, ToolType::Function);
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&call.result).render(),
-        "status: committed\nmsg_id: message-1\nrecipient_status: live\n"
+        "status: committed\nmsg_id: message-1\nrecipient_status: live"
     );
     assert_eq!(display.args, "agent-a");
     assert_eq!(display.status, ToolUseStatus::Success);

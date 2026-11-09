@@ -173,7 +173,7 @@ fn work_status_prompt_is_generic_escaped_and_ignores_initial_snapshot() {
             watch_work_status_text("worker", &status).as_deref(),
             Some(
                 format!(
-                    "<agent_update>\nagent: worker\nkind: work_status\nstatus: {state}\ntask: trace\\u{{202E}}restore\n</agent_update>"
+                    "<agent_update>\nagent: worker\nkind: work_status\nstatus: {state}\ntask: trace\\u{{202E}}restore</agent_update>"
                 )
                 .as_str()
             )
@@ -645,7 +645,7 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
     let text = watch_provider_status_text("worker", &status);
     assert_eq!(
         text,
-        "<agent_update>\nagent: worker\nkind: provider_status\nstatus: retrying\ncategory: usage_window\nattempt: 1\nnext_retry_delay_secs: 419322\n</agent_update>"
+        "<agent_update>\nagent: worker\nkind: provider_status\nstatus: retrying\ncategory: usage_window\nattempt: 1\nnext_retry_delay_secs: 419322</agent_update>"
     );
     assert!(!text.contains("419322s"));
 
@@ -659,7 +659,7 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
     let text = watch_provider_status_text("worker", &failed_status);
     assert_eq!(
         text,
-        "<agent_update>\nagent: worker\nkind: provider_status\nstatus: terminal_error\ncategory: request_rejected\n</agent_update>"
+        "<agent_update>\nagent: worker\nkind: provider_status\nstatus: terminal_error\ncategory: request_rejected</agent_update>"
     );
 }
 use crate::discovery::DiscoveredAgentsFile;
@@ -3757,10 +3757,10 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
     assert_preflight_matches_materialization(&replay_tree, false);
     let replay = assemble_conversation_from(&replay_tree, replay_tree.head());
     let expected_text = [
-        "<agent_update>\nagent: watched\nkind: work_status\nstatus: working\ntask: trace restore\n</agent_update>",
+        "<agent_update>\nagent: watched\nkind: work_status\nstatus: working\ntask: trace restore</agent_update>",
         "<agent_update>\nagent: watched\nkind: long_wait\nthreshold_minutes: 30\n\nCumulative waits in the current Working period, not the runtime of the current tool.</agent_update>",
-        "<agent_update>\nagent: watched\nkind: lifecycle\nstatus: stopped\nreason: unexpected unload\n</agent_update>",
-        "<agent_update>\nagent: watched\nkind: lifecycle\nstatus: stopped\nreason: restored delegation lost its completion route\n</agent_update>",
+        "<agent_update>\nagent: watched\nkind: lifecycle\nstatus: stopped\nreason: unexpected unload</agent_update>",
+        "<agent_update>\nagent: watched\nkind: lifecycle\nstatus: stopped\nreason: restored delegation lost its completion route</agent_update>",
     ];
     assert_eq!(context.len(), expected_text.len());
     for (item, expected) in context.iter().zip(expected_text) {

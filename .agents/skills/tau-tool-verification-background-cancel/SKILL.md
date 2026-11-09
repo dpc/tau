@@ -109,8 +109,9 @@ A wait may consume its matching completion before that completion's own
 queued notification preempts it. A different unsuppressed completion prompt,
 watch notification, or direct message is ordinary activating input and may
 interrupt the wait even when the requested call is already complete. The
-successful interruption result must use exactly these closed headers, with LF
-line endings and one blank line before any optional concise prose:
+successful interruption result must use exactly these closed headers. Join them
+with LF and omit the final LF for a header-only result. Separate the headers
+from any optional concise prose with two LF:
 
 ```text
 internal: true

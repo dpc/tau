@@ -2505,10 +2505,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     seed_tools_running(&mut h, &cid, Vec::new());
     h.queue_background_completion_prompt(&cid, &call_id);
     let completion_prompt = background_completion_prompt(&call_id);
-    assert_eq!(
-        completion_prompt,
-        "call_id: bg-any-after\nstatus: terminal\n"
-    );
+    assert_eq!(completion_prompt, "call_id: bg-any-after\nstatus: terminal");
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch

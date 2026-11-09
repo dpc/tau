@@ -563,7 +563,8 @@ impl ToolResponse {
 
     /// Serialize optional headers and payload under
     /// `SPEC-tau-proto-provider-data#provider-visible-tool-responses`.
-    /// Empty, header-only, and payload-only responses need no blank separator.
+    /// Header-only responses have no final LF. Empty and payload-only responses
+    /// have no framing separators; payload whitespace is preserved.
     ///
     /// This is the last provider-visible defense-in-depth boundary. It escapes
     /// header controls and Unicode line/paragraph separators, escapes body
@@ -579,14 +580,16 @@ impl ToolResponse {
     }
 
     fn write_rendered(&self, out: &mut impl fmt::Write) -> fmt::Result {
-        for header in &self.headers {
+        for (index, header) in self.headers.iter().enumerate() {
+            if index != 0 {
+                out.write_char('\n')?;
+            }
             write_sanitized_provider_text(&header.key, ProviderTextMode::Header, out)?;
             out.write_str(": ")?;
             write_sanitized_provider_text(&header.value, ProviderTextMode::Header, out)?;
-            out.write_char('\n')?;
         }
         if !self.headers.is_empty() && !self.body.is_empty() {
-            out.write_char('\n')?;
+            out.write_str("\n\n")?;
         }
         write_sanitized_provider_text(&self.body, ProviderTextMode::Body, out)
     }
@@ -594,7 +597,7 @@ impl ToolResponse {
     fn from_cbor_map(entries: &[(CborValue, CborValue)]) -> Self {
         let raw = CborValue::Map(entries.to_vec());
         let mut projection = MaterializedMapProjection::default();
-        visit_cbor_tool_response_map(entries, None, &mut projection)
+        visit_cbor_tool_response_map(entries, None, ToolResponseFraming::Root, &mut projection)
             .expect("materialized map projection cannot fail");
         Self {
             raw,
@@ -651,7 +654,9 @@ fn is_provider_unsafe_control(ch: char) -> bool {
 
 fn cbor_tool_response_text(value: &CborValue) -> String {
     let mut output = String::new();
-    write_provider_tool_result_text(value, ProviderToolResultStatus::Success, &mut output)
+    let mut cache = Some(HashMap::new());
+    let _ = cbor_tool_response_text_shape(value, &mut cache);
+    write_cbor_tool_response_text(value, cache.as_ref().expect("cache enabled"), &mut output)
         .expect("writing CBOR tool response text to String cannot fail");
     output
 }
@@ -988,7 +993,6 @@ fn provider_tool_result_text_shape(
                 ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n"));
             shape
         }
     }
@@ -1009,7 +1013,6 @@ fn provider_tool_result_text_cached_shape(
                 ProviderTextShape::literal("cancelled").sanitized(ProviderTextMode::Header);
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(reason).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n"));
             shape
         }
     }
@@ -1027,15 +1030,14 @@ fn cbor_tool_response_shape(
             shape.append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n"));
             if body.body_bytes != 0 {
-                shape.append(ProviderTextShape::literal("\n"));
+                shape.append(ProviderTextShape::literal("\n\n"));
             }
         }
         shape.append(body);
         return shape;
     };
-    cbor_tool_response_map_shape(entries, prefix_header, cache)
+    cbor_tool_response_map_shape(entries, prefix_header, ToolResponseFraming::Root, cache)
 }
 
 fn cbor_tool_response_cached_shape(
@@ -1051,27 +1053,27 @@ fn cbor_tool_response_cached_shape(
             shape.append(ProviderTextShape::literal(key).sanitized(ProviderTextMode::Header));
             shape.append(ProviderTextShape::literal(": "));
             shape.append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
-            shape.append(ProviderTextShape::literal("\n"));
             if body.body_bytes != 0 {
-                shape.append(ProviderTextShape::literal("\n"));
+                shape.append(ProviderTextShape::literal("\n\n"));
             }
         }
         shape.append(body);
         return shape;
     };
-    cbor_tool_response_map_cached_shape(entries, prefix_header, cache)
+    cbor_tool_response_map_cached_shape(entries, prefix_header, ToolResponseFraming::Root, cache)
 }
 
 fn cbor_tool_response_map_cached_shape(
     entries: &[(CborValue, CborValue)],
     prefix_header: Option<(&str, &str)>,
+    framing: ToolResponseFraming,
     cache: &mut Option<HashMap<usize, ProviderTextShape>>,
 ) -> ProviderTextShape {
     let mut projection = ShapeMapProjection {
         cache,
         rendered: ProviderTextShape::default(),
     };
-    visit_cbor_tool_response_map(entries, prefix_header, &mut projection)
+    visit_cbor_tool_response_map(entries, prefix_header, framing, &mut projection)
         .expect("shape projection cannot fail");
     projection.rendered
 }
@@ -1079,6 +1081,7 @@ fn cbor_tool_response_map_cached_shape(
 fn cbor_tool_response_map_shape(
     entries: &[(CborValue, CborValue)],
     prefix_header: Option<(&str, &str)>,
+    framing: ToolResponseFraming,
     cache: &mut Option<HashMap<usize, ProviderTextShape>>,
 ) -> ProviderTextShape {
     let mut without_output = MapShapeAccumulator::new(prefix_header);
@@ -1104,9 +1107,9 @@ fn cbor_tool_response_map_shape(
         );
     }
     if has_output {
-        with_output.finish()
+        with_output.finish(framing)
     } else {
-        without_output.finish()
+        without_output.finish(framing)
     }
 }
 
@@ -1138,7 +1141,6 @@ impl MapShapeAccumulator {
             accumulator
                 .headers
                 .append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
-            accumulator.headers.append(ProviderTextShape::literal("\n"));
             accumulator.wrote_header = true;
         }
         accumulator
@@ -1153,11 +1155,13 @@ impl MapShapeAccumulator {
         match projection {
             MapEntryProjection::Suppressed => {}
             MapEntryProjection::Header => {
+                if self.wrote_header {
+                    self.headers.append(ProviderTextShape::literal("\n"));
+                }
                 self.headers.append(key.sanitized(ProviderTextMode::Header));
                 self.headers.append(ProviderTextShape::literal(": "));
                 self.headers
                     .append(value.sanitized(ProviderTextMode::Header));
-                self.headers.append(ProviderTextShape::literal("\n"));
                 self.wrote_header = true;
             }
             MapEntryProjection::Body { label } => {
@@ -1174,8 +1178,10 @@ impl MapShapeAccumulator {
         }
     }
 
-    fn finish(mut self) -> ProviderTextShape {
+    fn finish(mut self, framing: ToolResponseFraming) -> ProviderTextShape {
         if self.wrote_header && self.body.body_bytes != 0 {
+            self.headers.append(ProviderTextShape::literal("\n\n"));
+        } else if self.wrote_header && matches!(framing, ToolResponseFraming::Recursive) {
             self.headers.append(ProviderTextShape::literal("\n"));
         }
         self.headers.append(self.body);
@@ -1226,7 +1232,9 @@ fn cbor_tool_response_text_shape(
             }
             shape
         }
-        CborValue::Map(entries) => cbor_tool_response_map_shape(entries, None, cache),
+        CborValue::Map(entries) => {
+            cbor_tool_response_map_shape(entries, None, ToolResponseFraming::Recursive, cache)
+        }
         CborValue::Tag(_, inner) => cbor_tool_response_text_shape(inner, cache),
         _ => ProviderTextShape::default(),
     };
@@ -1280,7 +1288,12 @@ fn cbor_tool_response_text_cached_shape(
             }
             shape
         }
-        CborValue::Map(entries) => cbor_tool_response_map_cached_shape(entries, None, cache),
+        CborValue::Map(entries) => cbor_tool_response_map_cached_shape(
+            entries,
+            None,
+            ToolResponseFraming::Recursive,
+            cache,
+        ),
         CborValue::Tag(_, inner) => cbor_tool_response_text_cached_shape(inner, cache),
         _ => ProviderTextShape::default(),
     };
@@ -1317,6 +1330,18 @@ enum MapEntryProjection {
     },
 }
 
+/// Framing at the tool-result boundary versus recursive CBOR projection.
+///
+/// Recursive header-only maps retain their final LF: their rendered newlines
+/// determine enclosing map classification and are part of existing body text.
+#[derive(Clone, Copy)]
+enum ToolResponseFraming {
+    /// Top-level headers have no formatter-owned final LF.
+    Root,
+    /// Preserve recursive projection bytes and multiline classification.
+    Recursive,
+}
+
 /// Consumer operations for the shared map projection traversal.
 trait CborMapProjectionOps {
     /// Classify one canonically rendered key.
@@ -1329,8 +1354,8 @@ trait CborMapProjectionOps {
     fn prefix_header(&mut self, key: &str, value: &str) -> fmt::Result;
     /// Emit one ordinary header entry.
     fn header(&mut self, key: &CborValue, value: &CborValue) -> fmt::Result;
-    /// Emit the separator between non-empty header and body regions.
-    fn header_body_separator(&mut self) -> fmt::Result;
+    /// Emit one framing LF between headers or around the body boundary.
+    fn framing_newline(&mut self) -> fmt::Result;
     /// Emit one body entry and its canonical inter-entry separator.
     fn body(
         &mut self,
@@ -1346,6 +1371,7 @@ trait CborMapProjectionOps {
 fn visit_cbor_tool_response_map(
     entries: &[(CborValue, CborValue)],
     prefix_header: Option<(&str, &str)>,
+    framing: ToolResponseFraming,
     ops: &mut impl CborMapProjectionOps,
 ) -> fmt::Result {
     let has_output = entries.iter().any(|(key, _)| {
@@ -1367,6 +1393,9 @@ fn visit_cbor_tool_response_map(
         if classify_map_entry(has_output, key_kind, ops.value_has_newline(value))
             == MapEntryProjection::Header
         {
+            if wrote_header {
+                ops.framing_newline()?;
+            }
             ops.header(key, value)?;
             wrote_header = true;
         }
@@ -1381,12 +1410,16 @@ fn visit_cbor_tool_response_map(
             classify_map_entry(has_output, key_kind, ops.value_has_newline(value))
         {
             if wrote_header && (wrote_body || label || !ops.value_is_empty(value)) {
-                ops.header_body_separator()?;
+                ops.framing_newline()?;
+                ops.framing_newline()?;
                 wrote_header = false;
             }
             ops.body(key, value, label, wrote_body)?;
             wrote_body = true;
         }
+    }
+    if wrote_header && matches!(framing, ToolResponseFraming::Recursive) {
+        ops.framing_newline()?;
     }
     Ok(())
 }
@@ -1470,7 +1503,7 @@ impl CborMapProjectionOps for MaterializedMapProjection {
         Ok(())
     }
 
-    fn header_body_separator(&mut self) -> fmt::Result {
+    fn framing_newline(&mut self) -> fmt::Result {
         Ok(())
     }
 
@@ -1525,7 +1558,6 @@ impl CborMapProjectionOps for ShapeMapProjection<'_> {
         self.rendered.append(ProviderTextShape::literal(": "));
         self.rendered
             .append(ProviderTextShape::literal(value).sanitized(ProviderTextMode::Header));
-        self.rendered.append(ProviderTextShape::literal("\n"));
         Ok(())
     }
 
@@ -1539,11 +1571,10 @@ impl CborMapProjectionOps for ShapeMapProjection<'_> {
             cbor_tool_response_text_cached_shape(value, self.cache)
                 .sanitized(ProviderTextMode::Header),
         );
-        self.rendered.append(ProviderTextShape::literal("\n"));
         Ok(())
     }
 
-    fn header_body_separator(&mut self) -> fmt::Result {
+    fn framing_newline(&mut self) -> fmt::Result {
         self.rendered.append(ProviderTextShape::literal("\n"));
         Ok(())
     }
@@ -1598,7 +1629,7 @@ fn write_provider_tool_result_text_with_cache(
             write_sanitized_provider_text("cancelled", ProviderTextMode::Header, output)?;
             output.write_str(": ")?;
             write_sanitized_provider_text(reason, ProviderTextMode::Header, output)?;
-            output.write_str("\n")
+            Ok(())
         }
     }
 }
@@ -1615,9 +1646,8 @@ fn write_cbor_tool_response(
             write_sanitized_provider_text(key, ProviderTextMode::Header, output)?;
             output.write_str(": ")?;
             write_sanitized_provider_text(value, ProviderTextMode::Header, output)?;
-            output.write_str("\n")?;
             if has_body {
-                output.write_str("\n")?;
+                output.write_str("\n\n")?;
             }
         }
         return write_sanitized_cbor_tool_response_text(
@@ -1627,17 +1657,24 @@ fn write_cbor_tool_response(
             output,
         );
     };
-    write_cbor_tool_response_map(entries, prefix_header, cache, output)
+    write_cbor_tool_response_map(
+        entries,
+        prefix_header,
+        ToolResponseFraming::Root,
+        cache,
+        output,
+    )
 }
 
 fn write_cbor_tool_response_map(
     entries: &[(CborValue, CborValue)],
     prefix_header: Option<(&str, &str)>,
+    framing: ToolResponseFraming,
     cache: &HashMap<usize, ProviderTextShape>,
     output: &mut dyn fmt::Write,
 ) -> fmt::Result {
     let mut projection = StreamingMapProjection { cache, output };
-    visit_cbor_tool_response_map(entries, prefix_header, &mut projection)
+    visit_cbor_tool_response_map(entries, prefix_header, framing, &mut projection)
 }
 
 /// Streaming text consumer for the shared map traversal.
@@ -1668,7 +1705,7 @@ impl CborMapProjectionOps for StreamingMapProjection<'_> {
         write_sanitized_provider_text(key, ProviderTextMode::Header, self.output)?;
         self.output.write_str(": ")?;
         write_sanitized_provider_text(value, ProviderTextMode::Header, self.output)?;
-        self.output.write_char('\n')
+        Ok(())
     }
 
     fn header(&mut self, key: &CborValue, value: &CborValue) -> fmt::Result {
@@ -1685,10 +1722,10 @@ impl CborMapProjectionOps for StreamingMapProjection<'_> {
             self.cache,
             self.output,
         )?;
-        self.output.write_char('\n')
+        Ok(())
     }
 
-    fn header_body_separator(&mut self) -> fmt::Result {
+    fn framing_newline(&mut self) -> fmt::Result {
         self.output.write_char('\n')
     }
 
@@ -1781,7 +1818,13 @@ fn write_cbor_tool_response_text(
             }
             Ok(())
         }
-        CborValue::Map(entries) => write_cbor_tool_response_map(entries, None, cache, output),
+        CborValue::Map(entries) => write_cbor_tool_response_map(
+            entries,
+            None,
+            ToolResponseFraming::Recursive,
+            cache,
+            output,
+        ),
         CborValue::Tag(_, inner) => write_cbor_tool_response_text(inner, cache, output),
         _ => Ok(()),
     }

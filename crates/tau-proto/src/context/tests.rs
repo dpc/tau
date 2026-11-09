@@ -192,8 +192,8 @@ fn provider_tool_result_normalization_matches_across_cbor_shapes() {
     }
 }
 
-/// Empty payloads must not allocate a blank body region, while real whitespace
-/// and inter-entry separators remain byte-exact in rendering and measurement.
+/// Header-only roots have no final LF, while real payload whitespace and nested
+/// projection bytes remain exact across materialized, streaming and size paths.
 #[test]
 fn provider_tool_result_separators_depend_on_rendered_body() {
     let map = |entries: &[(&str, &str)]| {
@@ -210,8 +210,20 @@ fn provider_tool_result_separators_depend_on_rendered_body() {
         )
     };
     let cases = [
-        (map(&[("status", "0")]), "status: 0\n"),
-        (map(&[("status", "0"), ("output", "")]), "status: 0\n"),
+        (map(&[("status", "0")]), "status: 0"),
+        (map(&[("status", "0"), ("output", "")]), "status: 0"),
+        (
+            map(&[("path", "/home/dpc/lab/tau/tau"), ("status", "available")]),
+            "path: /home/dpc/lab/tau/tau\nstatus: available",
+        ),
+        (
+            map(&[
+                ("count", "0"),
+                ("format", "timer_id: deadline, recurrence"),
+                ("output", ""),
+            ]),
+            "count: 0\nformat: timer_id: deadline, recurrence",
+        ),
         (
             map(&[("status", "0"), ("output", "xyz")]),
             "status: 0\n\nxyz",
@@ -236,6 +248,19 @@ fn provider_tool_result_separators_depend_on_rendered_body() {
             )]),
             "nested:\nstatus: 0\n",
         ),
+        (
+            CborValue::Array(vec![map(&[("status", "0")]), map(&[("status", "1")])]),
+            "status: 0\n\nstatus: 1",
+        ),
+        (
+            CborValue::Map(vec![(
+                CborValue::Text("nested".into()),
+                CborValue::Array(vec![map(&[("status", "0")]), map(&[("status", "1")])]),
+            )]),
+            "nested:\nstatus: 0\n\nstatus: 1",
+        ),
+        (CborValue::Null, ""),
+        (CborValue::Map(vec![]), ""),
         (CborValue::Text(String::new()), ""),
     ];
     for (value, expected) in cases {
@@ -244,11 +269,11 @@ fn provider_tool_result_separators_depend_on_rendered_body() {
             (ProviderToolResultStatus::Success, ""),
             (
                 ProviderToolResultStatus::Error { message: "failed" },
-                "error: failed\n",
+                "error: failed",
             ),
             (
                 ProviderToolResultStatus::Cancelled { reason: "stopped" },
-                "cancelled: stopped\n",
+                "cancelled: stopped",
             ),
         ] {
             let expected = match status {
@@ -257,9 +282,11 @@ fn provider_tool_result_separators_depend_on_rendered_body() {
                 ProviderToolResultStatus::Error { .. } => {
                     let response = ToolResponse::from_cbor(&value);
                     if response.headers.is_empty() && !response.body.is_empty() {
-                        format!("{prefix}\n{expected}")
+                        format!("{prefix}\n\n{expected}")
+                    } else if expected.is_empty() {
+                        prefix.to_owned()
                     } else {
-                        format!("{prefix}{expected}")
+                        format!("{prefix}\n{expected}")
                     }
                 }
             };
@@ -269,6 +296,11 @@ fn provider_tool_result_separators_depend_on_rendered_body() {
             assert_eq!(rendered, expected);
             assert_eq!(
                 measure_provider_tool_result_text(&value, status).rendered_bytes,
+                expected.len(),
+            );
+            assert_eq!(
+                provider_tool_result_text_cached_shape(&value, status, &mut Some(HashMap::new()))
+                    .raw_bytes,
                 expected.len(),
             );
             let item = ToolResultItem {

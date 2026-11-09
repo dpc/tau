@@ -347,7 +347,7 @@ fn ordered_tool_output_and_recovery_match_live_and_cold_deferred_round() {
             &"stream".into(),
         )
         .expect("native receipt");
-    assert_eq!(result.output.render(), "outcome: completed\n");
+    assert_eq!(result.output.render(), "outcome: completed");
     assert!(!result.output.render().contains("last-unique"));
     assert!(tree.validate_event(&update(call, 2, "late")).is_err());
 }
@@ -410,9 +410,9 @@ fn failed_stream_terminals_omit_self_cause_without_losing_final_source() {
             assert_eq!(
                 receipt.output.render(),
                 if cancelled {
-                    "outcome: cancelled\n"
+                    "outcome: cancelled"
                 } else {
-                    "outcome: error\n"
+                    "outcome: error"
                 },
             );
             let page = tree.accepted_source(call);

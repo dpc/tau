@@ -222,7 +222,7 @@ fn artifact_roundtrip(directory: bool, preencoded: bool) {
     assert_eq!(
         rendered_export,
         format!(
-            "kind: {}\nartifact: {reference}\n",
+            "kind: {}\nartifact: {reference}",
             if directory { "directory" } else { "file" }
         )
     );

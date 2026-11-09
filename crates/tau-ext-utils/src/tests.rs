@@ -1223,7 +1223,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         .expect("schedule");
     assert_eq!(
         rendered(&scheduled.result),
-        "status: scheduled\ntimer_id: standup\n"
+        "status: scheduled\ntimer_id: standup"
     );
     assert_eq!(scheduled.display.args, "schedule standup in 10m every 1h");
     assert!(scheduled.display.info_chips.is_empty());
@@ -1262,7 +1262,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     let cancelled = rt
         .handle_live_tool(&cancel, UnixMicros::new(0))
         .expect("cancel");
-    assert_eq!(rendered(&cancelled.result), "status: cancelled\n");
+    assert_eq!(rendered(&cancelled.result), "status: cancelled");
     assert_eq!(cancelled.display.args, "cancel standup");
     assert!(cancelled.display.info_chips.is_empty());
     assert!(cancelled.display.payload.is_none());
@@ -1270,7 +1270,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     let absent = rt
         .handle_live_tool(&cancel, UnixMicros::new(0))
         .expect("cancel absent timer");
-    assert_eq!(rendered(&absent.result), "status: not active\n");
+    assert_eq!(rendered(&absent.result), "status: not active");
     assert_eq!(absent.display.info_chips, ["not active"]);
 
     let empty = rt
@@ -1278,7 +1278,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         .expect("empty list");
     assert_eq!(
         rendered(&empty.result),
-        "count: 0\nformat: timer_id: deadline, recurrence\n"
+        "count: 0\nformat: timer_id: deadline, recurrence"
     );
     assert_eq!(empty.display.stats.matches, Some(0));
     if let Ok(directory) = std::env::var("TAU_TOOL_UI_FIXTURE_DIR") {
@@ -1314,7 +1314,7 @@ fn compact_timer_receipts_replay_live_mutations() {
     assert_eq!(timer_id, "call-generated");
     assert_eq!(
         rendered(&scheduled.result),
-        "status: scheduled\ntimer_id: call-generated\n"
+        "status: scheduled\ntimer_id: call-generated"
     );
     let list = started(
         "list",
@@ -2768,7 +2768,7 @@ fn papercut_history_empty_read_and_archive() {
         assert_eq!(
             rendered(&read),
             format!(
-                "generation: {}\ncount: 0\nformat: index: timestamp agent [session]\n",
+                "generation: {}\ncount: 0\nformat: index: timestamp agent [session]",
                 blake3::hash(b"").to_hex()
             )
         );
@@ -2781,9 +2781,9 @@ fn papercut_history_empty_read_and_archive() {
         assert_eq!(
             rendered(&result),
             if existed {
-                "archived: 0\narchive: papercuts.archive-0000000000000001.jsonl\n"
+                "archived: 0\narchive: papercuts.archive-0000000000000001.jsonl"
             } else {
-                "archived: 0\narchive: none\n"
+                "archived: 0\narchive: none"
             }
         );
         assert_eq!(*requests.borrow(), if existed { 3 } else { 2 });
@@ -2841,7 +2841,7 @@ fn papercut_history_tools_separate_metadata_full_read_and_archive() {
             )
             .expect("archive")
         ),
-        "archived: 1\narchive: papercuts.archive-0000000000000001.jsonl\n"
+        "archived: 1\narchive: papercuts.archive-0000000000000001.jsonl"
     );
     assert!(active.borrow().is_none());
     assert!(
@@ -3088,7 +3088,7 @@ fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
 
     assert_eq!(
         rendered(&rt.record_papercut(&invoke, UnixMicros::new(1_234))),
-        "status: recorded\n"
+        "status: recorded"
     );
     let lines = lines.borrow();
     assert_eq!(lines.len(), 1);
@@ -3113,7 +3113,7 @@ fn papercut_without_active_session_does_not_append() {
             &papercut_started("call-1", "agent-one", "missing lifecycle state"),
             UnixMicros::new(1),
         )),
-        "status: not recorded\nreason: no active session is available\n"
+        "status: not recorded\nreason: no active session is available"
     );
     assert!(lines.borrow().is_empty());
 }
@@ -3139,7 +3139,7 @@ fn papercut_append_failure_does_not_distract_the_primary_task() {
 
     assert_eq!(
         rendered(&outcome),
-        "status: not recorded\nreason: papercut storage rejected the report\n"
+        "status: not recorded\nreason: papercut storage rejected the report"
     );
     assert!(lines.borrow().is_empty());
 }
@@ -3157,8 +3157,7 @@ fn replayed_papercut_does_not_duplicate_append() {
     let invoke = papercut_started("call-1", "agent-one", "one-time report");
 
     assert!(
-        rendered(&rt.record_papercut(&invoke, UnixMicros::new(1)))
-            .starts_with("status: recorded\n")
+        rendered(&rt.record_papercut(&invoke, UnixMicros::new(1))).starts_with("status: recorded")
     );
     rt.handle_started_replay(&invoke, None);
 

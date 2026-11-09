@@ -98,6 +98,10 @@ Restore the original workdir with a separate setter when the probe finishes.
 
 ### Tool result output structure
 
+Header-only tool results join records with LF and have no final LF, including
+workdir receipts and empty timer lists. Separate headers from a nonempty payload
+with two LF, and preserve the payload's whitespace. Empty status output stays
+empty. Check exact bytes rather than whitespace around a Markdown fence.
 Persistent `workdir` setters return header-only `status: changed` and the
 canonical committed `path`; getters retain their structured availability result.
 Check relative paths and symlinks without changing discovery ordering. Utility
@@ -140,7 +144,7 @@ body-only scalar response is valid and must not gain a leading empty line or
 redundant status header.
 
 Verify that header-bearing results with an empty body, including an empty
-`output`, end at the final header LF without a separator. Preserve
+`output`, end at the final header without a trailing LF or separator. Preserve
 whitespace-only bodies. Check success, error with empty details, and cancellation.
 For streamed shell terminals, check for exactly one blank line between metadata
 and the first `out`/`err` record. Remove one formatter LF, not source blank

@@ -1360,7 +1360,7 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 reviewed_receipts += 1;
                 let response = tau_proto::ToolResponse::from_cbor(&result.result);
                 assert!(response.body.is_empty());
-                assert_eq!(response.render(), "status: accepted_for_review\nmsg_id: reviewed-message\nrecipient_status: live\nrecipient: other-session/main_recipient\nintended_recipient: intended_worker\nintended_recipient_status: pending_review\n");
+                assert_eq!(response.render(), "status: accepted_for_review\nmsg_id: reviewed-message\nrecipient_status: live\nrecipient: other-session/main_recipient\nintended_recipient: intended_worker\nintended_recipient_status: pending_review");
                 None
             }
             Event::ToolResult(result) => Some((result.call_id, result.result)),
