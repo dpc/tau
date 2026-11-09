@@ -3113,8 +3113,8 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     sync(&handle);
 
     let progress = vt.screen_text(100).join("\n");
-    assert!(progress.contains("Compacting…"), "{progress}");
-    assert_eq!(progress.matches("Compacting…").count(), 1, "{progress}");
+    assert!(progress.contains("compact 0s ?/?"), "{progress}");
+    assert!(!progress.contains("Compacting"), "{progress}");
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
         effectiveness: Some(compaction_estimates()),
@@ -4452,8 +4452,8 @@ fn late_self_compaction_tool_start_adopts_retained_lifecycle_status() {
     sync(&handle);
 
     let text = vt.screen_text(100).join("\n");
-    assert!(text.contains("Compacting…"), "{text}");
-    assert_eq!(text.matches("Compacting…").count(), 1, "{text}");
+    assert!(text.contains("compact 0s ?/?"), "{text}");
+    assert!(!text.contains("Compacting"), "{text}");
 }
 
 /// Supply a coherent persisted estimate, intentionally unlike provider usage.

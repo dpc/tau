@@ -1464,7 +1464,8 @@ fn mismatched_self_compaction_correlation_fails_open_to_distinct_rows() {
     sync(&handle);
 
     let text = vt.screen_text(100).join("\n");
-    assert_eq!(text.matches("Compacting…").count(), 1, "{text}");
+    assert_eq!(text.matches("compact ?/?").count(), 1, "{text}");
+    assert!(!text.contains("Compacting"), "{text}");
     assert!(text.contains("compact 0s (queued)"), "{text}");
 }
 

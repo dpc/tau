@@ -21,7 +21,10 @@ pub(super) fn append_compaction_progress(
     }
     let current = current.map_or_else(|| "?".to_owned(), |n| n.to_string());
     let total = total.map_or_else(|| "?".to_owned(), |n| n.to_string());
-    text.push_str(&format!(" {current}/{total}"));
+    if !text.is_empty() {
+        text.push(' ');
+    }
+    text.push_str(&format!("{current}/{total}"));
 }
 
 /// Formats ordinary inline provider compaction, whose status is provider-owned.

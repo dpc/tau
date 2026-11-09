@@ -7293,13 +7293,13 @@ impl EventRenderer {
                 self.update_self_compaction_tool_status(
                     &call_id,
                     CompactionStatus::Progress,
-                    "Compacting…",
+                    "?/?",
                 );
                 return;
             }
             self.update_live_compaction_block(
                 &prompt.agent_prompt_id,
-                Some((CompactionStatus::Progress, "Compacting…".to_owned())),
+                Some((CompactionStatus::Progress, "?/?".to_owned())),
             );
             return;
         }
@@ -7554,11 +7554,11 @@ impl EventRenderer {
             }
             let progress = state.standalone_compaction_progress;
             if update.status.is_some() || update.compaction.is_some() {
-                let mut text = update
-                    .status
-                    .as_ref()
-                    .map_or_else(|| "Compacting…".to_owned(), |status| status.text.clone());
+                let mut text = String::new();
                 append_compaction_progress(&mut text, progress, false);
+                if text.is_empty() {
+                    text.push_str("?/?");
+                }
                 if let Some(call_id) = self.self_compaction_tool_for_prompt(spid) {
                     self.update_self_compaction_tool_status(
                         &call_id,
@@ -9498,7 +9498,7 @@ impl EventRenderer {
                         self.update_self_compaction_tool_status(
                             &call_id,
                             CompactionStatus::Progress,
-                            "Compacting…",
+                            "?/?",
                         );
                     }
                 }

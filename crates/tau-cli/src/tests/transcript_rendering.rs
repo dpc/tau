@@ -4837,7 +4837,8 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     ));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact Compacting…"));
+    assert!(vt.screen_contains(100, "compact ?/?"));
+    assert!(!vt.screen_contains(100, "Compacting"));
     assert!(!vt.screen_contains(100, "private compactor answer"));
     assert!(!vt.screen_contains(100, "private compactor reasoning"));
     let editor_context = renderer.editor_context();
@@ -4861,7 +4862,8 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     });
     renderer.handle(&Event::ProviderResponseUpdated(activity));
     sync(&handle);
-    assert!(vt.screen_contains(100, "Compacting… 2/?"));
+    assert!(vt.screen_contains(100, "compact 2/?"));
+    assert!(!vt.screen_contains(100, "Compacting"));
     assert!(!vt.screen_contains(100, "2/2"));
     assert!(!vt.screen_contains(100, "private compactor"));
 
@@ -4878,7 +4880,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     sync(&handle);
     assert!(renderer.agent_has_active_prompt_for_test(&agent_id("main")));
     assert!(renderer.main_agent_turn_active_for_test());
-    assert!(vt.screen_contains(100, "Compacting… 2/?"));
+    assert!(vt.screen_contains(100, "compact 2/?"));
     assert!(!vt.screen_contains(100, "2/2"));
     assert!(!vt.screen_contains(100, " ok"));
     assert!(!vt.screen_contains(100, "opaque"));
