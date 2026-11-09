@@ -1,5 +1,8 @@
 //! Ordered text output, independent of provider tool-round closure.
 
+#[cfg(test)]
+mod tests;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{CborValue, ToolCallId, ToolCallRef, ToolName};
@@ -17,7 +20,7 @@ pub const MAX_TOOL_OUTPUT_UPDATES: u64 = 64;
 pub const MAX_TOOL_OUTPUT_FINAL_BYTES: usize = 8 * 1024;
 
 /// Harness-owned bounded rendering of an opted-in terminal, captured before
-/// publication custody. It is source text, never a second native tool payload.
+/// publication custody. Its carrier is selected by the canonical terminal.
 /// Text serialization follows `SPEC-tau-proto-provider-data`; capture and
 /// delivery follow `SPEC-streamed-tool-output`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -33,6 +36,31 @@ pub struct ToolFinalOutput {
 }
 
 impl ToolFinalOutput {
+    /// Capture foreground cancellation with its available tail and one status
+    /// header. Other outcomes use the same bounded rendering as background
+    /// capture; no accepted incremental bytes consume this final allowance.
+    #[must_use]
+    pub fn capture_native(value: &CborValue, status: crate::ProviderToolResultStatus<'_>) -> Self {
+        if let crate::ProviderToolResultStatus::Cancelled { reason } = status {
+            let mut output = BoundedToolOutput {
+                prefix: String::new(),
+                tail: String::new(),
+                total: 0,
+                prefix_closed: false,
+            };
+            crate::context::write_cancelled_tool_output(value, reason, &mut output)
+                .expect("bounded output sink cannot reject canonical text");
+            let (text, omitted_bytes) = output.finish();
+            Self {
+                outcome: Some(ToolCompletionOutcome::Cancelled),
+                text,
+                omitted_bytes,
+            }
+        } else {
+            Self::capture(value, status)
+        }
+    }
+
     /// Capture a terminal without allocating its complete textual form.
     /// Cancellation keeps available output, or the unavailable-capture reason.
     /// Its logical status is separate from the payload.
@@ -56,6 +84,64 @@ impl ToolFinalOutput {
             outcome: Some(outcome),
             text,
             omitted_bytes,
+        }
+    }
+}
+
+impl crate::ToolResponse {
+    /// Compose accepted batches and the separately bounded final capture once,
+    /// without reapplying the final cap. Explicit batch headers distinguish
+    /// partial lines and per-batch diagnostics from source in adjacent batches.
+    #[must_use]
+    pub fn from_captured_output(
+        updates: &[ToolOutputUpdate],
+        final_output: &ToolFinalOutput,
+    ) -> Self {
+        let mut body = String::new();
+        for update in updates {
+            let mut headers = vec![crate::ToolResponseHeader {
+                key: "output_batch".to_owned(),
+                value: update.output.sequence.to_string(),
+            }];
+            if update.output.omitted_bytes != 0 {
+                headers.push(crate::ToolResponseHeader {
+                    key: "omitted_bytes".to_owned(),
+                    value: update.output.omitted_bytes.to_string(),
+                });
+            }
+            let response = Self {
+                raw: CborValue::Null,
+                headers,
+                body: update.output.text.clone(),
+            };
+            body.push_str(&response.render());
+            body.push_str("\n\n");
+        }
+        let mut headers = Vec::new();
+        if !updates.is_empty() {
+            headers.push(crate::ToolResponseHeader {
+                key: "final_output".to_owned(),
+                value: "true".to_owned(),
+            });
+        }
+        if final_output.omitted_bytes != 0 {
+            headers.push(crate::ToolResponseHeader {
+                key: "omitted_bytes".to_owned(),
+                value: final_output.omitted_bytes.to_string(),
+            });
+        }
+        body.push_str(
+            &Self {
+                raw: CborValue::Null,
+                headers,
+                body: final_output.text.clone(),
+            }
+            .render(),
+        );
+        Self {
+            raw: CborValue::Null,
+            headers: Vec::new(),
+            body,
         }
     }
 }

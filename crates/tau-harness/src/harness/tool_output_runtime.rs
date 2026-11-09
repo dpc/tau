@@ -44,6 +44,60 @@ struct HeldToolOutputTerminal {
 }
 
 impl Harness {
+    /// Native continuation fulfills only its own accepted update wake sources.
+    /// Source residency remains until the result aggregate actually
+    /// materializes.
+    pub(super) fn retire_native_tool_output_wakes(&mut self, call_id: &ToolCallId) {
+        let Some(cid) = self.tool_routing.tool_runtime.tool_agents.get(call_id) else {
+            return;
+        };
+        let Some(call) = self.persisted_tool_call_ref(cid, call_id) else {
+            return;
+        };
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
+            return;
+        };
+        let Some(tree) = agent
+            .identity
+            .agent_id
+            .as_deref()
+            .and_then(|id| self.session_runtime.agent_store.agent(id))
+        else {
+            return;
+        };
+        agent.dispatch.pending_message_wakes.retain(|wake| {
+            let PendingMessageWakeSource::ToolOutput {
+                durable_event_seq, ..
+            } = wake.source
+            else {
+                return true;
+            };
+            !tree.tool_output_occurrence_is_native(call, durable_event_seq)
+        });
+    }
+
+    /// Freeze the carrier before a terminal waits behind accepted reports.
+    fn captured_terminal_presentation(
+        &mut self,
+        call: &ToolCallId,
+        presentation: tau_proto::ToolResultPresentation,
+        captured: bool,
+    ) -> tau_proto::ToolResultPresentation {
+        if captured {
+            return presentation;
+        }
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .reserve_foreground_terminal(call)
+        {
+            tau_proto::ToolResultPresentation::NativeCapturedOutput
+        } else {
+            tau_proto::ToolResultPresentation::ToolStreamReceipt
+        }
+    }
+
     /// Presentation follows the frozen declaration even if execution admission
     /// fails, no frame arrives, or restart repair has no live output lane.
     pub(super) fn tool_call_streams_output(&self, cid: &AgentId, call: &ToolCallId) -> bool {
@@ -377,7 +431,11 @@ impl Harness {
         let call = match event {
             Event::ProviderToolResult(result) if result.kind == ToolResultKind::Final => {
                 if self.tool_call_streams_output(cid, &result.call_id) {
-                    result.presentation = tau_proto::ToolResultPresentation::ToolStreamReceipt;
+                    result.presentation = self.captured_terminal_presentation(
+                        &result.call_id,
+                        result.presentation,
+                        result.captured_output.is_some(),
+                    );
                     capture_result(
                         &mut result.result,
                         &mut result.captured_output,
@@ -389,7 +447,11 @@ impl Harness {
             }
             Event::ProviderToolError(error) => {
                 if self.tool_call_streams_output(cid, &error.call_id) {
-                    error.presentation = tau_proto::ToolResultPresentation::ToolStreamReceipt;
+                    error.presentation = self.captured_terminal_presentation(
+                        &error.call_id,
+                        error.presentation,
+                        error.captured_output.is_some(),
+                    );
                     capture_error(
                         &mut error.message,
                         &mut error.details,
@@ -401,7 +463,11 @@ impl Harness {
             }
             Event::ToolCancelled(cancelled) => {
                 if self.tool_call_streams_output(cid, &cancelled.call_id) {
-                    cancelled.presentation = tau_proto::ToolResultPresentation::ToolStreamReceipt;
+                    cancelled.presentation = self.captured_terminal_presentation(
+                        &cancelled.call_id,
+                        cancelled.presentation,
+                        cancelled.captured_output.is_some(),
+                    );
                     capture_cancelled(cancelled);
                 }
                 &cancelled.call_id
@@ -490,14 +556,20 @@ impl Harness {
 /// Preserve available cancellation diagnostics before terminal publication.
 pub(super) fn capture_cancelled(cancelled: &mut tau_proto::ToolCancelled) {
     if cancelled.captured_output.is_none() {
+        let capture =
+            if cancelled.presentation == tau_proto::ToolResultPresentation::NativeCapturedOutput {
+                tau_proto::ToolFinalOutput::capture_native
+            } else {
+                tau_proto::ToolFinalOutput::capture
+            };
         cancelled.captured_output = Some(match cancelled.output.take() {
-            Some(text) => tau_proto::ToolFinalOutput::capture(
+            Some(text) => capture(
                 &tau_proto::CborValue::Text(text),
                 tau_proto::ProviderToolResultStatus::Cancelled {
                     reason: "tool cancelled",
                 },
             ),
-            None => tau_proto::ToolFinalOutput::capture(
+            None => capture(
                 &tau_proto::CborValue::Null,
                 tau_proto::ProviderToolResultStatus::Cancelled {
                     reason: "final capture unavailable",

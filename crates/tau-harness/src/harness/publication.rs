@@ -3,7 +3,7 @@
 //! The interception chain remains in `interception`; this module preserves the
 //! governed commit ordering from enqueue through persistence and publication.
 
-use tau_proto::ToolResultStatus;
+use tau_proto::{ToolResultPresentation, ToolResultStatus};
 
 use super::prompt_acceptance_timing::{PromptAcceptanceTerminal, PromptAcceptanceTiming};
 use super::prompt_materialization_timing::MaterializationStage;
@@ -156,7 +156,8 @@ impl Harness {
                     None => tree.pending_terminal_tool_result(call_id),
                 })
                 .is_some_and(|item| {
-                    matches!(item.status, ToolResultStatus::Success)
+                    item.presentation != ToolResultPresentation::NativeCapturedOutput
+                        && matches!(item.status, ToolResultStatus::Success)
                         && canonical_value_eq(&item.output.raw, &result.result)
                 })
             })
@@ -230,6 +231,9 @@ impl Harness {
                     None => tree.pending_terminal_tool_result(call_id),
                 })
                 .is_some_and(|item| {
+                    if item.presentation == ToolResultPresentation::NativeCapturedOutput {
+                        return false;
+                    }
                     let stored_message = match &item.status {
                         ToolResultStatus::Error { message } => message,
                         ToolResultStatus::Cancelled { reason } => reason,
@@ -521,6 +525,20 @@ impl Harness {
         retain_rejected: bool,
     ) {
         if result.kind == ToolResultKind::Final
+            && self
+                .tool_routing
+                .tool_runtime
+                .tool_turn
+                .background_selected(&result.call_id)
+        {
+            self.handle_background_tool_result_inner(
+                source.unwrap_or(crate::harness::harness_connection_id()),
+                result,
+                BackgroundCompletionPromptMode::QueueAndAdvance,
+            );
+            return;
+        }
+        if result.kind == ToolResultKind::Final
             && let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &result.call_id)
         {
@@ -627,6 +645,20 @@ impl Harness {
         cause: tau_proto::ToolTerminalCause,
         retain_rejected: bool,
     ) {
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .background_selected(&error.call_id)
+        {
+            self.handle_background_tool_error_inner(
+                source,
+                error,
+                BackgroundCompletionPromptMode::QueueAndAdvance,
+                cause,
+            );
+            return;
+        }
         if let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &error.call_id)
         {

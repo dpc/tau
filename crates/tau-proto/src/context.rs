@@ -1634,6 +1634,23 @@ fn write_provider_tool_result_text_with_cache(
     }
 }
 
+/// Render native cancellation using the ordinary response grammar while
+/// retaining an available tail. Null distinguishes unavailable capture.
+pub(crate) fn write_cancelled_tool_output(
+    value: &CborValue,
+    reason: &str,
+    output: &mut dyn fmt::Write,
+) -> fmt::Result {
+    let mut cache = Some(HashMap::new());
+    cbor_tool_response_cached_shape(value, None, &mut cache);
+    write_cbor_tool_response(
+        value,
+        Some(("cancelled", reason)),
+        &cache.expect("requested provider shape cache"),
+        output,
+    )
+}
+
 fn write_cbor_tool_response(
     value: &CborValue,
     prefix_header: Option<(&str, &str)>,
@@ -1893,6 +1910,9 @@ impl ToolResultItem {
     /// status.
     #[must_use]
     pub fn render_provider_text(&self) -> String {
+        if self.presentation == crate::ToolResultPresentation::NativeCapturedOutput {
+            return self.output.render();
+        }
         match &self.status {
             ToolResultStatus::Success => self.output.render(),
             ToolResultStatus::Error { message } => {

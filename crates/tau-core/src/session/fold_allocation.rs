@@ -23,6 +23,32 @@ impl AgentTree {
             .observe_allocation_charge(event);
         let mut additions = NodeAdditions::default();
         let parent = record.parent.resolve(self.head);
+        // A native terminal gathers typed deferred batches, renders them once,
+        // and later associates every source occurrence with the aggregate.
+        // Conservatively charge the bounded queued sources on any terminal;
+        // this also covers a nonstreaming sibling closing a native aggregate.
+        if matches!(
+            event,
+            Event::ProviderToolResult(_) | Event::ProviderToolError(_) | Event::ToolCancelled(_)
+        ) {
+            let mut native_occurrences = 0;
+            for input in &self.pending_context_inputs {
+                if let PendingToolContextEntry::Output(update) = &input.entry {
+                    charge = charge.saturating_add(
+                        owned_value(update).saturating_mul(16).saturating_add(2048),
+                    );
+                    native_occurrences += 1;
+                }
+            }
+            for round in self.pending_tool_rounds.values() {
+                native_occurrences += round.native_source_occurrences.len();
+            }
+            native_occurrences += 1;
+            charge = charge.saturating_add(
+                new_vec::<PersistedAgentEventSeq>(native_occurrences).saturating_mul(2),
+            );
+            additions.context = additions.context.saturating_add(native_occurrences);
+        }
 
         if event.name().category() == &tau_proto::EventCategory::Message {
             charge = charge.saturating_add(message_projection_charge(event));
@@ -61,7 +87,11 @@ impl AgentTree {
             ),
             Event::ToolBackgroundError(error) => Some(owned_value(error)),
             Event::ProviderToolResult(result)
-                if result.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt =>
+                if matches!(
+                    result.presentation,
+                    tau_proto::ToolResultPresentation::ToolStreamReceipt
+                        | tau_proto::ToolResultPresentation::NativeCapturedOutput
+                ) =>
             {
                 Some(
                     tool_response_allocation_charge(&result.result)
@@ -69,13 +99,20 @@ impl AgentTree {
                 )
             }
             Event::ProviderToolError(error)
-                if error.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt =>
+                if matches!(
+                    error.presentation,
+                    tau_proto::ToolResultPresentation::ToolStreamReceipt
+                        | tau_proto::ToolResultPresentation::NativeCapturedOutput
+                ) =>
             {
                 Some(owned_value(error))
             }
             Event::ToolCancelled(cancelled)
-                if cancelled.presentation
-                    == tau_proto::ToolResultPresentation::ToolStreamReceipt =>
+                if matches!(
+                    cancelled.presentation,
+                    tau_proto::ToolResultPresentation::ToolStreamReceipt
+                        | tau_proto::ToolResultPresentation::NativeCapturedOutput
+                ) =>
             {
                 Some(owned_value(cancelled))
             }

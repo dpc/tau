@@ -100,6 +100,18 @@ enum TestMessage {
 fn materialized_source_text(tree: &tau_core::AgentTree) -> String {
     tree.all_entries()
         .filter_map(|entry| {
+            if let tau_core::AgentEntry::ToolResults { items } = entry {
+                return Some(
+                    items
+                        .iter()
+                        .filter(|item| {
+                            item.presentation
+                                == tau_proto::ToolResultPresentation::NativeCapturedOutput
+                        })
+                        .map(tau_proto::ToolResultItem::render_provider_text)
+                        .collect::<String>(),
+                );
+            }
             let tau_core::AgentEntry::UserInput { items, .. } = entry else {
                 return None;
             };

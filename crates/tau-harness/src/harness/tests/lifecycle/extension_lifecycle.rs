@@ -8955,9 +8955,9 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
             AgentEntry::ToolResults { items }
                 if items.iter().any(|item| {
                     item.call_id.as_str() == "c1"
-                        && item.status == ToolResultStatus::Success
-                        && item.output.render().contains("outcome")
-                        && item.output.render().contains("error")
+                        && matches!(&item.status, ToolResultStatus::Error { message }
+                            if message == &expected_prefix)
+                        && item.presentation == tau_proto::ToolResultPresentation::NativeCapturedOutput
                 })
         )
     }));

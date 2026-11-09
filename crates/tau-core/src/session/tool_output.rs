@@ -3,6 +3,81 @@
 use super::*;
 
 impl AgentTree {
+    /// Native continuation owns these accepted occurrences, even while a
+    /// sibling still holds the aggregate. They no longer authorize input wakes.
+    #[must_use]
+    pub fn tool_output_is_native(&self, call: tau_proto::ToolCallRef) -> bool {
+        self.indexes
+            .tool_outputs
+            .get(&call)
+            .is_some_and(|state| state.native)
+    }
+
+    /// Test occurrence identity rather than a reusable provider display ID.
+    #[must_use]
+    pub fn tool_output_occurrence_is_native(
+        &self,
+        call: tau_proto::ToolCallRef,
+        seq: PersistedAgentEventSeq,
+    ) -> bool {
+        self.indexes
+            .tool_outputs
+            .get(&call)
+            .is_some_and(|state| state.native && state.occurrences.contains(&seq))
+    }
+
+    /// Fold only unexposed source belonging to this exact declaration into its
+    /// native terminal. Historical receipts keep the ordinary envelope route.
+    pub(super) fn record_native_tool_output(
+        &mut self,
+        seq: PersistedAgentEventSeq,
+        call_id: &ToolCallId,
+        tool_type: ToolType,
+        status: ToolResultStatus,
+        capture: &tau_proto::ToolFinalOutput,
+    ) -> Option<NodeId> {
+        let call = self.indexes.tool_output_calls[call_id];
+        let mut updates = Vec::new();
+        self.pending_context_inputs.retain_mut(|input| {
+            if let PendingToolContextEntry::Output(update) = &input.entry
+                && update.call == call
+            {
+                updates.push((**update).clone());
+                false
+            } else {
+                true
+            }
+        });
+        let state = self
+            .indexes
+            .tool_outputs
+            .get_mut(&call)
+            .expect("native declaration");
+        assert_eq!(
+            updates.len(),
+            state.occurrences.len(),
+            "native source already exposed"
+        );
+        state.terminal = true;
+        state.native = true;
+        state.occurrences.push(seq);
+        let round = self
+            .pending_tool_rounds
+            .get_mut(&self.tool_call_rounds[call_id])
+            .expect("native foreground round");
+        round
+            .native_source_occurrences
+            .extend_from_slice(&state.occurrences);
+        self.record_terminal_tool_result(ToolResultItem {
+            call_id: call_id.clone(),
+            tool_type,
+            status,
+            output: tau_proto::ToolResponse::from_captured_output(&updates, capture),
+            presentation: tau_proto::ToolResultPresentation::NativeCapturedOutput,
+            provider_content: Vec::new(),
+        })
+    }
+
     /// Read the durable declaration's output policy, without consulting live
     /// tools.
     #[must_use]

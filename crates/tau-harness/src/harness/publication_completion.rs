@@ -2479,6 +2479,9 @@ impl Harness {
             _ => return,
         };
         let runtime_only_cid = self.take_post_commit_runtime_only_tool_cid(call_id);
+        if append_outcome.is_some() {
+            self.retire_native_tool_output_wakes(call_id);
+        }
         if let Event::ProviderToolError(error) = event {
             let projection_cid = runtime_only_cid.clone().or_else(|| {
                 self.tool_routing
@@ -4768,7 +4771,7 @@ impl Harness {
                 .tool_routing
                 .tool_runtime
                 .tool_turn
-                .is_backgrounded(&call_id)
+                .background_selected(&call_id)
         {
             self.handle_background_tool_error_inner(
                 Some(crate::harness::harness_connection_id()),

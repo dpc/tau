@@ -8,6 +8,14 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 23.0 is a major revision that adds the harness-owned `NativeCapturedOutput`
+variant to a closed presentation enum. Opted-in tools that complete in the
+foreground deliver accepted chunks and the final tail through their native tool
+result; background and historical receipt carriers remain unchanged. Older peers
+cannot decode the new variant in prompt results or canonical events, so configured
+peers must rebuild together. Journal framing, SDK publication, and runtime
+activation do not change.
+
 Protocol 22.0 binds artifact filename and MIME metadata into immutable identity.
 Begin requires the new scheme; descriptors carry it through storage and clients.
 UI listing returns stored metadata without header classification. Old peers hash

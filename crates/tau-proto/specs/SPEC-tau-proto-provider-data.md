@@ -32,6 +32,13 @@ asynchronous delivery and source custody follow
 [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 Those records own their specialized semantics rather than duplicating this grammar.
 
+Harness-captured foreground results compose typed deferred batches with their
+bounded final capture through `ToolResponse`. Batch boundaries preserve partial
+lines and omission metadata without applying another cap to accepted source. The harness-owned
+native-capture presentation records that terminal status is already rendered;
+provider lowering must not add it again. Historical stream-receipt presentation
+retains its original meaning.
+
 ## Provider-visible tool responses
 
 Tool result events carry raw CBOR for non-provider consumers, but provider prompt construction must render tool outputs through `ToolResponse::render()`. That render path is the central defense-in-depth normalization boundary after tool-local semantic escaping.

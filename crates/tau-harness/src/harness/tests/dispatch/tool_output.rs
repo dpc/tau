@@ -1,6 +1,151 @@
 //! Ordered output policy, publication custody, and recovery.
 
+use std::time::{Duration, Instant};
+
+use tau_proto::ToolResultKind;
+
 use super::*;
+use crate::agent::PendingMessageWakeSource;
+
+/// Startup repairs the unresolved sibling without resurrecting absorbed source
+/// wakes or delivering the native source again on a subsequent resume.
+#[test]
+fn native_output_recovery_with_unresolved_sibling_dispatches_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent = durable_agent_id_for_conversation(&h, &cid);
+    let connection = crate::test_connection_id("stream-worker");
+    connect_ready_configured_extension(
+        &mut h,
+        "stream-worker",
+        "stream-worker",
+        tau_proto::ClientKind::Tool,
+    );
+    let mut stream = scheduled_test_tool_spec(
+        "streaming",
+        tau_proto::BackgroundSupport::MinForegroundSeconds(60),
+    );
+    stream
+        .tags
+        .push(tau_proto::ToolTag::new(tau_proto::TOOL_OUTPUT_STREAM_TAG));
+    h.tool_routing.registry.register(&connection, stream);
+    h.tool_routing.registry.register(
+        &connection,
+        scheduled_test_tool_spec("blocking", tau_proto::BackgroundSupport::Never),
+    );
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("run both tools".into()))
+        .expect("dispatch");
+    let source = read_nth_prompt_created(&h, 0);
+    let mut response = provider_tool_response(
+        &source,
+        "stream-call",
+        "streaming",
+        CborValue::Map(Vec::new()),
+    );
+    response
+        .output_items
+        .push(ContextItem::ToolCall(ToolCallItem {
+            call_id: "block-call".into(),
+            name: ToolName::new("blocking"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        }));
+    h.handle_provider_response_finished(response)
+        .expect("declare tool round");
+    for (sequence, text) in ["native-recovery-first", "native-recovery-second"]
+        .into_iter()
+        .enumerate()
+    {
+        h.handle_extension_event_inner(
+            &connection,
+            Event::ToolOutputReported(tau_proto::ToolOutputReport {
+                call_id: "stream-call".into(),
+                tool_name: ToolName::new("streaming"),
+                sequence: sequence as u64,
+                text: text.into(),
+                omitted_bytes: 0,
+            }),
+        )
+        .expect("accepted output");
+    }
+    h.handle_extension_event_inner(
+        &connection,
+        Event::ToolResultReported(final_tool_result(
+            "stream-call",
+            "streaming",
+            "native-recovery-tail",
+        )),
+    )
+    .expect("native terminal");
+    assert!(materialized_source_text(default_agent_tree(&h)).is_empty());
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(agent.as_str())
+        .expect("crash prefix");
+    h.shutdown().expect("shutdown");
+    wait_for_session_unlock(&state, "s1");
+    rewrite_agent_records(&state, &agent, &records);
+    let mut restored =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("restore");
+    let events = event_log_events(&restored);
+    let prompts = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptCreated(prompt) => Some(prompt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts.len(),
+        1,
+        "sibling repair must dispatch exactly once"
+    );
+    let context = serde_json::to_string(&prompts[0].context).expect("context");
+    for text in [
+        "native-recovery-first",
+        "native-recovery-second",
+        "native-recovery-tail",
+    ] {
+        assert_eq!(context.matches(text).count(), 1);
+    }
+    assert!(
+        restored
+            .derive_replay_message_wakes(agent.as_str())
+            .is_empty()
+    );
+    let cid = test_user_agent(&restored);
+    assert!(
+        !restored.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_message_wakes
+            .iter()
+            .any(|wake| matches!(wake.source, PendingMessageWakeSource::ToolOutput { .. }))
+    );
+    restored
+        .handle_provider_response_finished(provider_text_response(
+            &prompts[0].agent_prompt_id,
+            agent,
+            "recovered",
+        ))
+        .expect("close recovery");
+    restored.shutdown().expect("shutdown restored");
+    wait_for_session_unlock(&state, "s1");
+    let mut again =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("second restore");
+    assert!(
+        !event_log_events(&again)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
+    again.shutdown().expect("second shutdown");
+}
 
 /// Incremental source is ordinary activating input: it never interrupts a live
 /// provider, but contributes ordinary queued-input recovery authority. Final
@@ -426,10 +571,11 @@ fn start_stream_round(h: &mut Harness, cid: &AgentId, calls: Vec<(&str, &str)>) 
         tau_proto::ClientKind::Tool,
     );
     let mut stream = shared_test_tool_spec("streaming");
+    stream.background_support = Some(tau_proto::BackgroundSupport::MinForegroundSeconds(60));
     stream
         .tags
         .push(tau_proto::ToolTag::new(tau_proto::TOOL_OUTPUT_STREAM_TAG));
-    let sibling = shared_test_tool_spec("blocking");
+    let sibling = scheduled_test_tool_spec("blocking", tau_proto::BackgroundSupport::Never);
     for spec in [&stream, &sibling] {
         h.tool_routing.registry.register(&connection, spec.clone());
     }
@@ -822,6 +968,13 @@ fn rejected_stream_head_retries_before_terminal_without_reinterception() {
         )),
     )
     .expect("report terminal");
+    h.process_background_deadlines_at(Instant::now() + Duration::from_secs(120));
+    assert!(
+        !h.tool_routing
+            .tool_runtime
+            .tool_turn
+            .background_selected(&"stream-call".into())
+    );
     h.handle_extension_event_inner(
         &connection,
         Event::ToolOutputReported(tau_proto::ToolOutputReport {
@@ -880,6 +1033,135 @@ fn rejected_stream_head_retries_before_terminal_without_reinterception() {
     );
 }
 
+/// A deadline reservation made while the producer terminal report is parked
+/// must route success, error, and cancellation behind the placeholder. The
+/// report's earlier arrival does not authorize a second foreground closure.
+#[test]
+fn parked_terminal_report_honors_reserved_background_lane() {
+    for outcome in 0..3 {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path().join("state")).expect("start");
+        h.config.selected_model = Some("test/model".into());
+        let cid = ensure_test_user_agent(&mut h);
+        let agent = durable_agent_id_for_conversation(&h, &cid);
+        start_stream_with_foreground_sibling(&mut h, &cid);
+        let _interceptor = connect_test_tool(&mut h, "terminal-interceptor");
+        let (selector, terminal) = match outcome {
+            0 => (
+                tau_proto::EventName::TOOL_RESULT_REPORTED,
+                Event::ToolResultReported(final_tool_result(
+                    "stream-call",
+                    "streaming",
+                    "reserved-tail",
+                )),
+            ),
+            1 => (
+                tau_proto::EventName::TOOL_ERROR_REPORTED,
+                Event::ToolErrorReported(tau_proto::ToolError {
+                    call_id: "stream-call".into(),
+                    tool_name: ToolName::new("streaming"),
+                    tool_type: tau_proto::ToolType::Function,
+                    message: "reserved-error".into(),
+                    details: Some(CborValue::Text("reserved-tail".into())),
+                    captured_output: None,
+                    presentation: Default::default(),
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            ),
+            _ => (
+                tau_proto::EventName::TOOL_CANCELLED_REPORTED,
+                Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                    call_id: "stream-call".into(),
+                    tool_name: ToolName::new("streaming"),
+                    tool_type: tau_proto::ToolType::Function,
+                    output: Some("reserved-tail".into()),
+                    captured_output: None,
+                    presentation: Default::default(),
+                    display: None,
+                }),
+            ),
+        };
+        h.handle_extension_event(
+            "terminal-interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(selector)],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("intercept report");
+        h.handle_extension_event_inner(&crate::test_connection_id("stream-worker"), terminal)
+            .expect("park report");
+        assert!(h.runtime_io.publication.pending_intercept.is_some());
+        h.process_background_deadlines_at(Instant::now() + Duration::from_secs(120));
+        assert!(
+            h.tool_routing
+                .tool_runtime
+                .tool_turn
+                .background_selected(&"stream-call".into())
+        );
+        assert!(
+            !h.tool_routing
+                .tool_runtime
+                .tool_turn
+                .is_backgrounded(&"stream-call".into())
+        );
+        h.handle_extension_event(
+            "terminal-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("release report before queued placeholder");
+        finish_stream_sibling(&mut h);
+        if h.runtime_io.publication.pending_intercept.is_some() {
+            h.handle_extension_event(
+                "terminal-interceptor",
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("release sibling result");
+        }
+        let records = h
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(agent.as_str())
+            .expect("records");
+        let placeholders = records.iter().filter(|record| matches!(&record.event,
+            Event::ProviderToolResult(result) if result.call_id.as_str() == "stream-call" && result.kind == ToolResultKind::BackgroundPlaceholder)).count();
+        assert_eq!(placeholders, 1);
+        assert!(!records.iter().any(|record| match &record.event {
+            Event::ProviderToolResult(result) =>
+                result.call_id.as_str() == "stream-call" && result.kind == ToolResultKind::Final,
+            Event::ProviderToolError(error) => error.call_id.as_str() == "stream-call",
+            Event::ToolCancelled(cancelled) => cancelled.call_id.as_str() == "stream-call",
+            _ => false,
+        }));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| match &record.event {
+                    Event::ToolBackgroundResult(result) => result.call_id.as_str() == "stream-call",
+                    Event::ToolBackgroundError(error) => error.call_id.as_str() == "stream-call",
+                    _ => false,
+                })
+                .count(),
+            1
+        );
+        let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold background");
+        let source = materialized_source_text(&cold);
+        assert_eq!(source.matches("reserved-tail").count(), 1);
+        assert!(source.contains("<tool_output "));
+        assert!(
+            h.tool_routing
+                .tool_runtime
+                .pending_background_completions
+                .is_empty()
+        );
+    }
+}
+
 /// Completion cannot reuse output capacity while another native call still
 /// prevents its accepted source occurrences from entering the context.
 #[test]
@@ -930,6 +1212,15 @@ fn streamed_terminal_holds_residency_until_foreground_sibling_closes() {
     let cold =
         tau_core::AgentTree::try_from_events(agent.clone(), &records).expect("cold deferred");
     assert!(cold.tool_output_needs_residency(reference));
+    assert!(cold.tool_output_is_native(reference));
+    assert!(h.derive_replay_message_wakes(agent.as_str()).is_empty());
+    assert!(
+        !h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_message_wakes
+            .iter()
+            .any(|wake| matches!(wake.source, PendingMessageWakeSource::ToolOutput { .. }))
+    );
     assert!(
         materialized_source_text(&cold).is_empty(),
         "sibling must defer source placement"
@@ -1065,7 +1356,7 @@ fn silent_stream_policy_is_frozen_and_repair_uses_durable_declaration() {
             .collect();
         assert_eq!(errors.len(), 1);
         assert_eq!(
-            errors[0].presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt,
+            errors[0].presentation == tau_proto::ToolResultPresentation::NativeCapturedOutput,
             streamed,
         );
         let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold repair");

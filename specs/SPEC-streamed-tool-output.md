@@ -38,7 +38,17 @@ Completion does not supersede or discard accepted updates. The harness holds its
 terminal behind them. The terminal owns the last source occurrence; it is not
 another update event.
 
-The harness projects every source occurrence exactly once through the registered
+The harness delivers every accepted source occurrence once. A foreground terminal
+folds its own deferred typed batches and separately bounded final capture into
+one native tool result, preserving the real success, error, or cancellation
+status. It emits neither a completion receipt nor a duplicate source envelope.
+Background reservation, not elapsed time or the number of batches, chooses the
+background lane; a reserved placeholder wins even before it commits. A selected
+foreground terminal cannot background while waiting behind accepted updates.
+Source already assigned to the background lane never moves back to native output.
+Historical committed stream-receipt terminals keep their original projection.
+
+Background source and historical stream-receipt source use the registered
 `tool_output` generic user-role envelope. Its ordered attributes identify
 call and terminal status, followed by `omitted_bytes` only when nonzero.
 New terminal captures expose logical `status="completed"`, `"error"`, or
@@ -48,9 +58,8 @@ output remains payload, including genuinely empty output; unavailable capture
 retains its useful diagnostic rather than pretending to be empty.
 Tool identity and sequence remain in canonical metadata and validation, not the
 model-facing header. The envelope body contains untrusted tool data. Final source
-precedes the native closure or background completion settlement. Opted-in
-foreground text calls close with a successful typed receipt;
-the receipt's `outcome` distinguishes completed, error, and cancelled.
+precedes background completion settlement. Historical stream receipts remain
+successful synchronization results whose `outcome` identifies the terminal status.
 Non-opted foreground tools retain native output, including images.
 
 All background tools place their final bounded source at the canonical terminal,
@@ -84,6 +93,11 @@ It never cancels active provider inference. Existing background policy and
 foreground continuation barriers remain in force; opting in does not force a
 tool into the background or bypass `BackgroundSupport::Never`.
 
+When native foreground completion absorbs deferred updates, native continuation
+fulfills their exact occurrence wakes before the aggregate materializes, including
+on cold replay before another dispatch. Other calls' deferred inputs and background
+wake obligations retain their order and authority.
+
 `wait.complete_only` defaults to false and applies to exact, plural, bare, and
 timed-input waits. While the wait owns its registration or retained settlement,
 it masks nonterminal tool-output wake causes for that agent, including causes
@@ -109,7 +123,10 @@ text display. Wait custody retains completion metadata, not source captures.
 The harness admits at most eight captured invocations per agent and 64 globally
 before execution effects. A slot remains occupied until completion and all
 accepted source occurrences materialize, even if another foreground sibling
-keeps their context deferred. Owner teardown releases custody. Cold restore
+keeps their context deferred. Absorbed native occurrences resolve to their shared
+result aggregate only when that aggregate materializes. The final allowance is
+not reapplied to accepted incremental bytes during composition. Owner teardown
+releases custody. Cold restore
 blocks new captured invocations while genuinely deferred source or unresolved
 restorable calls remain; it does not reconstruct processes or mint capture slots
 for historical off-branch background placeholders.

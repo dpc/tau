@@ -2283,6 +2283,7 @@ pub(crate) fn project_tool_result_items(
         .map(|mut item| {
             item.output.body = match item.presentation {
                 tau_proto::ToolResultPresentation::ToolPayload
+                | tau_proto::ToolResultPresentation::NativeCapturedOutput
                 | tau_proto::ToolResultPresentation::ToolStreamReceipt => {
                     crate::internal_envelope::escape_untrusted_close(&item.output.body).into_owned()
                 }
@@ -2298,6 +2299,7 @@ pub(crate) fn project_tool_result_items(
                 tau_proto::ToolResultStatus::Error { message } => {
                     *message = match item.presentation {
                         tau_proto::ToolResultPresentation::ToolPayload
+                        | tau_proto::ToolResultPresentation::NativeCapturedOutput
                         | tau_proto::ToolResultPresentation::ToolStreamReceipt => {
                             crate::internal_envelope::escape_untrusted_close(message).into_owned()
                         }

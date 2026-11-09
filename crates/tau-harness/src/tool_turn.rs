@@ -215,6 +215,8 @@ struct InFlightToolInvocation {
     foreground_pending: bool,
     /// The sole placeholder is reserved but has not committed yet.
     backgrounding: bool,
+    /// A completed foreground terminal awaiting earlier output or persistence.
+    foreground_terminal: bool,
     backgrounded: bool,
     foreground_deadline: Option<Instant>,
 }
@@ -304,6 +306,7 @@ impl ToolTurnMachine {
                 conversation_id,
                 foreground_pending: true,
                 backgrounding: false,
+                foreground_terminal: false,
                 backgrounded: false,
                 foreground_deadline: None,
                 turn_categories: turn_categories.normalized_call(),
@@ -337,7 +340,8 @@ impl ToolTurnMachine {
         let Some(in_flight) = self.in_flight_tool_invocations.get_mut(call_id) else {
             return false;
         };
-        if !in_flight.foreground_pending || in_flight.backgrounding {
+        if !in_flight.foreground_pending || in_flight.backgrounding || in_flight.foreground_terminal
+        {
             return false;
         }
         in_flight.backgrounding = true;
@@ -371,6 +375,7 @@ impl ToolTurnMachine {
                 foreground_pending: false,
                 backgrounding: false,
                 backgrounded: true,
+                foreground_terminal: false,
                 foreground_deadline: None,
             });
     }
@@ -381,6 +386,28 @@ impl ToolTurnMachine {
         self.in_flight_tool_invocations
             .get(call_id)
             .is_some_and(|in_flight| in_flight.backgrounded)
+    }
+
+    /// Terminal routing follows the reserved lane before placeholder commit.
+    pub(crate) fn background_selected(&self, call_id: &ToolCallId) -> bool {
+        self.in_flight_tool_invocations
+            .get(call_id)
+            .is_some_and(|invocation| invocation.backgrounding || invocation.backgrounded)
+    }
+
+    /// Reserve foreground completion before it waits behind accepted output.
+    /// An earlier background reservation wins, even before its placeholder
+    /// commits. Repair and pre-effect failures have no live invocation.
+    pub(crate) fn reserve_foreground_terminal(&mut self, call_id: &ToolCallId) -> bool {
+        let Some(invocation) = self.in_flight_tool_invocations.get_mut(call_id) else {
+            return true;
+        };
+        if invocation.backgrounding || invocation.backgrounded {
+            return false;
+        }
+        invocation.foreground_terminal = true;
+        invocation.foreground_deadline = None;
+        true
     }
 
     /// Backgrounded calls still actually running for `conversation_id`.
@@ -526,6 +553,7 @@ impl ToolTurnMachine {
                 foreground_pending,
                 backgrounding: false,
                 backgrounded,
+                foreground_terminal: false,
                 foreground_deadline,
                 turn_categories: pending.turn_categories.normalized_call(),
             },

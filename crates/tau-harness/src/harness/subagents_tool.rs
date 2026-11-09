@@ -3589,7 +3589,7 @@ impl Harness {
             .tool_routing
             .tool_runtime
             .tool_turn
-            .is_backgrounded(&call_id)
+            .background_selected(&call_id)
         {
             self.handle_background_tool_result_inner(
                 crate::harness::harness_connection_id(),
@@ -3637,7 +3637,7 @@ impl Harness {
             .tool_routing
             .tool_runtime
             .tool_turn
-            .is_backgrounded(&call_id)
+            .background_selected(&call_id)
         {
             self.handle_background_tool_error_inner(
                 Some(crate::harness::harness_connection_id()),

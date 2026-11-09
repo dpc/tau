@@ -365,6 +365,8 @@ struct ToolOutputState {
     bytes: usize,
     /// A canonical terminal prevents subsequent updates.
     terminal: bool,
+    /// Source was absorbed by a native foreground continuation, not a wake.
+    native: bool,
     /// Canonical context occurrences in acceptance order, including the final.
     occurrences: Vec<PersistedAgentEventSeq>,
 }
@@ -413,17 +415,46 @@ struct PendingToolContextInput {
     /// Canonical journal occurrence order.
     durable_event_seq: PersistedAgentEventSeq,
     /// Exact typed entry to materialize after the aggregate tool result.
-    entry: Box<AgentEntry>,
+    entry: PendingToolContextEntry,
     /// Whether the committed source event authorizes one background-result
     /// envelope.
     background_completion_prompt: bool,
+}
+
+/// Deferred source retains its type until native closure chooses its carrier.
+#[derive(Clone, Debug, PartialEq)]
+enum PendingToolContextEntry {
+    /// Unrelated context retains its existing ordering and placement.
+    Context(Box<AgentEntry>),
+    /// Accepted output can still join its foreground native terminal.
+    Output(Box<tau_proto::ToolOutputUpdate>),
+}
+
+impl PendingToolContextEntry {
+    /// Borrow only ordinary context, for fact-authority lookups.
+    fn context(&self) -> Option<&AgentEntry> {
+        match self {
+            Self::Context(entry) => Some(entry),
+            Self::Output(_) => None,
+        }
+    }
+
+    /// Materialize the background/historical envelope only after placement.
+    fn into_entry(self) -> AgentEntry {
+        match self {
+            Self::Context(entry) => *entry,
+            Self::Output(update) => {
+                AgentTree::user_text_input_entry(update.render(), &[], None, false, true)
+            }
+        }
+    }
 }
 
 impl From<PendingInferenceInput> for PendingToolContextInput {
     fn from(input: PendingInferenceInput) -> Self {
         Self {
             durable_event_seq: input.durable_event_seq,
-            entry: input.entry,
+            entry: PendingToolContextEntry::Context(input.entry),
             background_completion_prompt: input.background_completion_prompt,
         }
     }
@@ -435,6 +466,8 @@ struct PendingToolRound {
     /// Tool-calling assistant node that owns the round and its result
     /// aggregate.
     assistant_node_id: NodeId,
+    /// Accepted native source occurrences awaiting this aggregate's node.
+    native_source_occurrences: Vec<PersistedAgentEventSeq>,
     /// Provider call IDs in model-authored order.
     call_order: Vec<ToolCallId>,
     /// Terminal results received so far, keyed by their owning call ID.
@@ -2766,7 +2799,7 @@ impl AgentTree {
                 self.pending_context_inputs
                     .iter()
                     .find(|input| input.durable_event_seq == seq)
-                    .map(|input| input.entry.as_ref())
+                    .and_then(|input| input.entry.context())
             })
             .or_else(|| {
                 self.pending_inference_inputs
@@ -3979,6 +4012,14 @@ impl AgentTree {
                 state.sequence = update.output.sequence + 1;
                 state.bytes += update.output.text.len();
                 state.occurrences.push(durable_event_seq);
+                if self.open_tool_round_applies_to(parent) {
+                    self.pending_context_inputs.push(PendingToolContextInput {
+                        durable_event_seq,
+                        entry: PendingToolContextEntry::Output(Box::new(update.clone())),
+                        background_completion_prompt: false,
+                    });
+                    return None;
+                }
                 self.record_context_entry(
                     parent,
                     Self::user_text_input_entry(update.render(), &[], None, false, true),
@@ -4016,6 +4057,18 @@ impl AgentTree {
                 }),
             ),
             Event::ProviderToolResult(result) => {
+                if result.presentation == tau_proto::ToolResultPresentation::NativeCapturedOutput {
+                    return self.record_native_tool_output(
+                        durable_event_seq,
+                        &result.call_id,
+                        result.tool_type,
+                        ToolResultStatus::Success,
+                        result
+                            .captured_output
+                            .as_ref()
+                            .expect("native final capture"),
+                    );
+                }
                 if result.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt {
                     self.record_tool_output_final(
                         parent,
@@ -4044,6 +4097,20 @@ impl AgentTree {
                 self.record_provider_tool_result(result)
             }
             Event::ProviderToolError(error) => {
+                if error.presentation == tau_proto::ToolResultPresentation::NativeCapturedOutput {
+                    return self.record_native_tool_output(
+                        durable_event_seq,
+                        &error.call_id,
+                        error.tool_type,
+                        ToolResultStatus::Error {
+                            message: error.message.clone(),
+                        },
+                        error
+                            .captured_output
+                            .as_ref()
+                            .expect("native error capture"),
+                    );
+                }
                 if error.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt {
                     self.record_tool_output_final(
                         parent,
@@ -4079,6 +4146,21 @@ impl AgentTree {
                 self.record_provider_tool_error(error)
             }
             Event::ToolCancelled(cancelled) => {
+                if cancelled.presentation == tau_proto::ToolResultPresentation::NativeCapturedOutput
+                {
+                    return self.record_native_tool_output(
+                        durable_event_seq,
+                        &cancelled.call_id,
+                        cancelled.tool_type,
+                        ToolResultStatus::Cancelled {
+                            reason: "tool cancelled".to_owned(),
+                        },
+                        cancelled
+                            .captured_output
+                            .as_ref()
+                            .expect("native cancellation capture"),
+                    );
+                }
                 if cancelled.presentation == tau_proto::ToolResultPresentation::ToolStreamReceipt {
                     self.record_tool_output_final(
                         parent,
@@ -4230,7 +4312,7 @@ impl AgentTree {
         if self.open_tool_round_applies_to(parent) {
             self.pending_context_inputs.push(PendingToolContextInput {
                 durable_event_seq,
-                entry: Box::new(entry),
+                entry: PendingToolContextEntry::Context(Box::new(entry)),
                 background_completion_prompt,
             });
             return None;
@@ -4466,6 +4548,7 @@ impl AgentTree {
             node_id,
             PendingToolRound {
                 assistant_node_id: node_id,
+                native_source_occurrences: Vec::new(),
                 call_order,
                 terminal_results: HashMap::new(),
             },
@@ -6924,6 +7007,44 @@ impl AgentTree {
         head: Option<NodeId>,
         event: &Event,
     ) -> Option<Result<(), AgentEventValidationError>> {
+        let native_call = match event {
+            Event::ProviderToolResult(result)
+                if result.presentation
+                    == tau_proto::ToolResultPresentation::NativeCapturedOutput =>
+            {
+                Some((
+                    &result.call_id,
+                    result.captured_output.as_ref(),
+                    result.kind == ToolResultKind::Final,
+                ))
+            }
+            Event::ProviderToolError(error)
+                if error.presentation
+                    == tau_proto::ToolResultPresentation::NativeCapturedOutput =>
+            {
+                Some((&error.call_id, error.captured_output.as_ref(), true))
+            }
+            Event::ToolCancelled(cancelled)
+                if cancelled.presentation
+                    == tau_proto::ToolResultPresentation::NativeCapturedOutput =>
+            {
+                Some((&cancelled.call_id, cancelled.captured_output.as_ref(), true))
+            }
+            _ => None,
+        };
+        if let Some((call_id, capture, final_kind)) = native_call {
+            let source_unexposed = self.indexes.tool_output_calls.get(call_id)
+                .and_then(|call| self.indexes.tool_outputs.get(call).map(|state| (call, state)))
+                .is_some_and(|(call, state)| state.streamed && !state.terminal
+                    && state.occurrences.iter().all(|seq| self.pending_context_inputs.iter().any(|input|
+                        input.durable_event_seq == *seq
+                        && matches!(&input.entry, PendingToolContextEntry::Output(update) if update.call == *call))));
+            if !final_kind || capture.is_none() || !source_unexposed {
+                return Some(Err(AgentEventValidationError::new(
+                    "invalid native captured tool source",
+                )));
+            }
+        }
         let captured = match event {
             Event::ProviderToolResult(result) => result.captured_output.as_ref(),
             Event::ProviderToolError(error) => error.captured_output.as_ref(),
@@ -7513,6 +7634,11 @@ impl AgentTree {
             Some(round.assistant_node_id),
             AgentEntry::ToolResults { items },
         );
+        for seq in round.native_source_occurrences {
+            self.indexes
+                .context_nodes_by_event_seq
+                .insert(seq, result_node_id);
+        }
         for call_id in &round.call_order {
             self.terminal_tool_result_nodes
                 .insert(call_id.clone(), result_node_id);
@@ -7524,7 +7650,7 @@ impl AgentTree {
             head = self.append_context_node_at(
                 Some(head),
                 input.durable_event_seq,
-                *input.entry,
+                input.entry.into_entry(),
                 input.background_completion_prompt,
             );
         }

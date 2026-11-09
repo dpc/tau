@@ -2,6 +2,36 @@ use tau_proto::{CborValue, ToolCallId, ToolName, ToolResultItem, ToolResultStatu
 
 use super::*;
 
+/// Native captured error source cannot anchor an ordinary message-only error.
+#[test]
+fn rebuild_excludes_native_captured_error_source() {
+    let message = "e".repeat(1024);
+    let mut entry = result_entry_with_status(
+        "native",
+        ToolResultStatus::Error {
+            message: message.clone(),
+        },
+        "accepted update and final details",
+    );
+    let AgentEntry::ToolResults { items } = &mut entry else {
+        unreachable!()
+    };
+    items[0].presentation = ToolResultPresentation::NativeCapturedOutput;
+    items[0].output.raw = CborValue::Null;
+    let mut map = ResultDedupMap::new();
+    map.rebuild_from_transcript(
+        [(NodeId::new(0), &entry)],
+        Some(NodeId::new(0)),
+        DEFAULT_THRESHOLD_BYTES,
+    );
+    let ordinary_error = fingerprint_error(&message, None);
+    assert!(ordinary_error.encoded_len >= DEFAULT_THRESHOLD_BYTES);
+    assert!(
+        map.find_matching(&ordinary_error.hash, |_, _| true)
+            .is_none()
+    );
+}
+
 fn cbor_text(s: &str) -> CborValue {
     CborValue::Text(s.to_owned())
 }

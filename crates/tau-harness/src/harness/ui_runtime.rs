@@ -1328,7 +1328,7 @@ impl Harness {
             .tool_routing
             .tool_runtime
             .tool_turn
-            .is_backgrounded(&target.call_id)
+            .background_selected(&target.call_id)
         {
             return;
         }
@@ -2454,7 +2454,7 @@ impl Harness {
                 .tool_routing
                 .tool_runtime
                 .tool_turn
-                .is_backgrounded(&target.call_id)
+                .background_selected(&target.call_id)
     }
 
     pub(crate) fn is_running_tool_call(&self, target_call_id: &ToolCallId) -> bool {

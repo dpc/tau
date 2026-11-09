@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use tau_core::AgentEntry;
-use tau_proto::{CborValue, NodeId, ToolCallId, ToolResultStatus};
+use tau_proto::{CborValue, NodeId, ToolCallId, ToolResultPresentation, ToolResultStatus};
 
 /// Minimum CBOR-serialized size of a tool result to consider
 /// deduping. Below this, the pointer text is comparable to the
@@ -123,6 +123,11 @@ impl ResultDedupMap {
                 continue;
             };
             for item in items.iter().rev() {
+                // Captured source lives in rendered text, not the raw CBOR
+                // value.
+                if item.presentation == ToolResultPresentation::NativeCapturedOutput {
+                    continue;
+                }
                 let fingerprint = match &item.status {
                     ToolResultStatus::Success => fingerprint_value(&item.output.raw),
                     ToolResultStatus::Error { message } => {

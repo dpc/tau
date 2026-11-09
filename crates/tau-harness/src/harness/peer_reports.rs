@@ -2626,7 +2626,7 @@ impl Harness {
             .tool_routing
             .tool_runtime
             .tool_turn
-            .is_backgrounded(&result.call_id)
+            .background_selected(&result.call_id)
         {
             self.handle_background_tool_result(crate::harness::harness_connection_id(), result);
         } else if let Some(cid) = self
@@ -2771,7 +2771,7 @@ impl Harness {
             .tool_routing
             .tool_runtime
             .tool_turn
-            .is_backgrounded(&error.call_id)
+            .background_selected(&error.call_id)
         {
             self.handle_background_tool_error(Some(crate::harness::harness_connection_id()), error);
         } else if let Some(cid) = self
@@ -2835,7 +2835,7 @@ impl Harness {
             .tool_routing
             .tool_runtime
             .tool_turn
-            .is_backgrounded(&cancelled.call_id)
+            .background_selected(&cancelled.call_id)
         {
             self.handle_background_tool_cancelled(
                 crate::harness::harness_connection_id(),

@@ -382,9 +382,13 @@ The harness retains ordered tool text in a separate canonical source lane rather
 than transient progress or another provider terminal. Prompt-frozen opt-in policy
 identifies exact declarations. The lane retains accepted updates through
 publication retry and holds the final terminal behind them; capture residency
-lasts through deferred context placement. Incremental source input wakes idle
-agents without interrupting active inference. Waits synchronize with receipts and may suppress nonterminal
-wake causes without suppressing capture. See
+lasts through deferred context placement. Foreground terminals absorb their
+unexposed batches into one native result; a reserved background placeholder
+keeps the envelope route even before commit. Native continuation fulfills only
+the absorbed occurrence wakes before aggregate materialization; custody remains
+until sibling closure. Incremental source input wakes idle agents without
+interrupting active inference. Waits synchronize with receipts and may suppress
+nonterminal wake causes without suppressing capture. See
 [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 
 The harness assigns immutable per-instance tool-prefix envelopes through

@@ -1474,6 +1474,9 @@ pub enum ToolResultPresentation {
     HarnessDedupPointer,
     /// Payload is the final stream tail; close the native call with a receipt.
     ToolStreamReceipt,
+    /// Harness-captured foreground source, including deferred update batches.
+    /// The normalized response already contains terminal status text.
+    NativeCapturedOutput,
 }
 
 /// Successful logical tool completion.

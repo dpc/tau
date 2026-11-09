@@ -20,6 +20,15 @@ impl AgentTree {
         let state = &self.indexes.tool_outputs[&call];
         let mut text = String::new();
         for seq in &state.occurrences {
+            if let Some(input) = self
+                .pending_context_inputs
+                .iter()
+                .find(|input| input.durable_event_seq == *seq)
+                && let PendingToolContextEntry::Output(update) = &input.entry
+            {
+                text.push_str(&update.render());
+                continue;
+            }
             let entry = self
                 .node_for_durable_event_seq(*seq)
                 .and_then(|id| self.node(id))
@@ -28,7 +37,7 @@ impl AgentTree {
                     self.pending_context_inputs
                         .iter()
                         .find(|input| input.durable_event_seq == *seq)
-                        .map(|input| input.entry.as_ref())
+                        .and_then(|input| input.entry.context())
                 })
                 .or_else(|| {
                     self.pending_inference_inputs
@@ -62,6 +71,235 @@ fn streaming_response(main: &AgentId) -> tau_proto::ProviderResponseFinished {
         tool_calling_response(main, "ap-stream", vec!["stream".into(), "sibling".into()]);
     response.streamed_tool_items = vec![0];
     response
+}
+
+/// Build a new harness-owned native terminal without changing historical
+/// receipt fixtures below.
+fn native_result(id: &str, text: &str) -> Event {
+    Event::ProviderToolResult(tau_proto::ToolResult {
+        call_id: id.into(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+        result: tau_proto::CborValue::Null,
+        captured_output: Some(tau_proto::ToolFinalOutput::capture_native(
+            &tau_proto::CborValue::Text(text.to_owned()),
+            tau_proto::ProviderToolResultStatus::Success,
+        )),
+        presentation: tau_proto::ToolResultPresentation::NativeCapturedOutput,
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        originator: PromptOriginator::User,
+        display: None,
+    })
+}
+
+/// Foreground capture absorbs zero, multiple, and maximum-count batches without
+/// exposing source early or re-capping accepted bytes. Both sibling completion
+/// orders, foreign deferred input, and every cold cut preserve exact custody.
+#[test]
+fn native_foreground_source_matches_cold_cuts_and_preserves_deferred_order() {
+    for count in [0, 2, 64] {
+        for sibling_first in [false, true] {
+            let main = agent_id();
+            let mut tree = AgentTree::from_events(main.clone(), &[]);
+            let mut records = Vec::new();
+            let mut response = streaming_response(&main);
+            response.streamed_tool_items = vec![0, 1];
+            append(
+                &mut tree,
+                &mut records,
+                Event::ProviderResponseFinished(response),
+            );
+            let call = tree.declared_call("stream");
+            let sibling = tree.declared_call("sibling");
+            let mut source_seqs = Vec::new();
+            for sequence in 0..count {
+                source_seqs.push(tree.next_event_seq());
+                let mut batch = update(
+                    call,
+                    sequence,
+                    &format!("batch-{sequence}-λ{}", "x".repeat(990)),
+                );
+                if let Event::ToolOutputUpdated(update) = &mut batch {
+                    update.output.omitted_bytes = sequence + 1;
+                }
+                append(&mut tree, &mut records, batch);
+                let cold = AgentTree::try_from_events(main.clone(), &records).expect("cold update");
+                assert_eq!(tree.pending_context_inputs, cold.pending_context_inputs);
+                assert!(cold.tool_output_needs_residency(call));
+                assert!(
+                    cold.node_for_durable_event_seq(*source_seqs.last().unwrap())
+                        .is_none()
+                );
+            }
+            append(&mut tree, &mut records, prompt_event(main.clone()));
+            let prompt_seq = records.last().unwrap().seq;
+            let mut sibling_update = update(sibling, 0, "sibling-partial");
+            if let Event::ToolOutputUpdated(update) = &mut sibling_update {
+                update.output.call_id = "sibling".into();
+            }
+            append(&mut tree, &mut records, sibling_update);
+            if sibling_first {
+                append(
+                    &mut tree,
+                    &mut records,
+                    native_result("sibling", "sibling-tail"),
+                );
+            }
+            source_seqs.push(tree.next_event_seq());
+            append(
+                &mut tree,
+                &mut records,
+                native_result("stream", "final-tail"),
+            );
+            assert!(tree.tool_output_is_native(call));
+            let cold = AgentTree::try_from_events(main.clone(), &records).expect("cold native");
+            assert_eq!(tree.pending_context_inputs, cold.pending_context_inputs);
+            assert_eq!(tree.tool_output_needs_residency(call), !sibling_first);
+            assert_eq!(cold.tool_output_needs_residency(call), !sibling_first);
+            for seq in &source_seqs {
+                assert!(cold.tool_output_occurrence_is_native(call, *seq));
+            }
+            if !sibling_first {
+                append(
+                    &mut tree,
+                    &mut records,
+                    native_result("sibling", "sibling-tail"),
+                );
+            }
+            let node = tree
+                .node_for_durable_event_seq(source_seqs[0])
+                .expect("native source node");
+            for seq in &source_seqs {
+                assert_eq!(tree.node_for_durable_event_seq(*seq), Some(node));
+            }
+            let AgentEntry::ToolResults { items } = &tree.node(node).unwrap().entry else {
+                panic!("native source must be the result aggregate");
+            };
+            let output = items[0].render_provider_text();
+            assert_eq!(output.matches("final-tail").count(), 1);
+            for sequence in 0..count {
+                assert_eq!(output.matches(&format!("batch-{sequence}-λ")).count(), 1);
+            }
+            assert!(!output.contains("sibling"));
+            assert!(!output.contains("<tool_output"));
+            assert!(!output.contains("outcome: completed"));
+            assert_eq!(
+                items[1]
+                    .render_provider_text()
+                    .matches("sibling-partial")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                tree.node(tree.node_for_durable_event_seq(prompt_seq).unwrap())
+                    .unwrap()
+                    .parent_id,
+                Some(node)
+            );
+            assert!(!tree.tool_output_needs_residency(call));
+            assert!(!tree.tool_output_needs_residency(sibling));
+            let cold = AgentTree::try_from_events(main, &records).expect("cold closed");
+            assert_eq!(
+                tree.active_provider_window(tree.head()).transcript,
+                cold.active_provider_window(cold.head()).transcript
+            );
+        }
+    }
+}
+
+/// Native errors and all cancellation-tail states preserve real protocol
+/// outcomes and render one diagnostic, not a successful completion receipt.
+#[test]
+fn native_failure_source_preserves_status_and_available_empty_cancellation() {
+    for tail in [None, Some(""), Some("cancel-tail")] {
+        let main = agent_id();
+        let mut tree = AgentTree::from_events(main.clone(), &[]);
+        let mut records = Vec::new();
+        let mut response = streaming_response(&main);
+        response.streamed_tool_items = vec![0, 1];
+        append(
+            &mut tree,
+            &mut records,
+            Event::ProviderResponseFinished(response),
+        );
+        let call = tree.declared_call("stream");
+        append(
+            &mut tree,
+            &mut records,
+            update(call, 0, "accepted-before-cancel"),
+        );
+        let reason = if tail.is_some() {
+            "tool cancelled"
+        } else {
+            "final capture unavailable"
+        };
+        let value = tail.map_or(tau_proto::CborValue::Null, |text| {
+            tau_proto::CborValue::Text(text.to_owned())
+        });
+        append(
+            &mut tree,
+            &mut records,
+            Event::ToolCancelled(tau_proto::ToolCancelled {
+                call_id: "stream".into(),
+                tool_name: ToolName::new("tool"),
+                tool_type: ToolType::Function,
+                output: None,
+                captured_output: Some(tau_proto::ToolFinalOutput::capture_native(
+                    &value,
+                    tau_proto::ProviderToolResultStatus::Cancelled { reason },
+                )),
+                presentation: tau_proto::ToolResultPresentation::NativeCapturedOutput,
+                display: None,
+            }),
+        );
+        append(
+            &mut tree,
+            &mut records,
+            Event::ProviderToolError(tau_proto::ToolError {
+                call_id: "sibling".into(),
+                tool_name: ToolName::new("tool"),
+                tool_type: ToolType::Function,
+                message: "native-error".to_owned(),
+                details: None,
+                captured_output: Some(tau_proto::ToolFinalOutput::capture_native(
+                    &tau_proto::CborValue::Text("error-tail".to_owned()),
+                    tau_proto::ProviderToolResultStatus::Error {
+                        message: "native-error",
+                    },
+                )),
+                presentation: tau_proto::ToolResultPresentation::NativeCapturedOutput,
+                display: None,
+                originator: PromptOriginator::User,
+            }),
+        );
+        let node = tree.node_for_durable_event_seq(records[1].seq).unwrap();
+        let AgentEntry::ToolResults { items } = &tree.node(node).unwrap().entry else {
+            panic!("native aggregate");
+        };
+        assert!(matches!(
+            items[0].status,
+            ToolResultStatus::Cancelled { .. }
+        ));
+        assert!(matches!(items[1].status, ToolResultStatus::Error { .. }));
+        let text = items[0].render_provider_text();
+        assert_eq!(text.matches("cancelled:").count(), 1);
+        assert!(text.contains(reason));
+        assert_eq!(text.contains("final capture unavailable"), tail.is_none());
+        assert_eq!(text.matches("accepted-before-cancel").count(), 1);
+        if tail == Some("cancel-tail") {
+            assert_eq!(text.matches("cancel-tail").count(), 1);
+        }
+        assert_eq!(
+            items[1].render_provider_text(),
+            "error: native-error\n\nerror-tail"
+        );
+        let cold = AgentTree::try_from_events(main, &records).expect("cold failures");
+        assert_eq!(
+            tree.active_provider_window(tree.head()).transcript,
+            cold.active_provider_window(cold.head()).transcript
+        );
+    }
 }
 
 /// Admission must charge the owned final source even when its old raw payload

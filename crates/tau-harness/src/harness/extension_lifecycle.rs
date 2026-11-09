@@ -709,7 +709,7 @@ impl Harness {
                     .tool_routing
                     .tool_runtime
                     .tool_turn
-                    .is_backgrounded(call_id),
+                    .background_selected(call_id),
                 call_id.clone(),
             )
         });
@@ -720,7 +720,7 @@ impl Harness {
                     .tool_routing
                     .tool_runtime
                     .tool_turn
-                    .is_backgrounded(call_id)
+                    .background_selected(call_id)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -757,7 +757,7 @@ impl Harness {
                 .tool_routing
                 .tool_runtime
                 .tool_turn
-                .is_backgrounded(&call_id)
+                .background_selected(&call_id)
             {
                 error.message = extension_disconnected_background_tool_call_error_message(&call_id);
                 if self

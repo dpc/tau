@@ -23,6 +23,12 @@ declaration policy and final capture; producers cannot author them. Rebuild
 configured peers together; publication and activation remain separate.
 See [SPEC-streamed-tool-output](../../../specs/SPEC-streamed-tool-output.md).
 
+New foreground captures use a harness-owned native presentation discriminator.
+Typed response composition renders their accepted deferred batches and final
+status once; historical stream-receipt terminals retain envelope projection.
+This context-delivery correction changes neither producer streaming authority
+nor background source delivery.
+
 Protocol 20.1 adds an optional compaction transcript archive locator to
 `agent.prompt_started`. The locator carries the accepted transaction and artifact
 key for UI reconstruction; it does not change replacement bytes, retention, or

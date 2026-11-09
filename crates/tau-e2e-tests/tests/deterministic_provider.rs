@@ -308,6 +308,22 @@ fn deterministic_wait_all_returns_mixed_result_and_error_members()
     assert_eq!(outcome.response, RESPONSE);
 
     let events = fixture.published_trace_events()?;
+    let shell_terminal = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ProviderToolResult(result)
+                if result.call_id == success_call_id && result.kind == ToolResultKind::Final =>
+            {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("fast shell completes in the foreground");
+    assert_eq!(
+        shell_terminal.presentation,
+        tau_proto::ToolResultPresentation::NativeCapturedOutput
+    );
+    assert!(shell_terminal.captured_output.is_some());
     let aggregate = events
         .iter()
         .find_map(|event| match event {

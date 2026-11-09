@@ -2235,7 +2235,9 @@ impl Harness {
             .iter()
             .filter_map(|record| {
                 let source = match &record.event {
-                    Event::ToolOutputUpdated(update) => {
+                    Event::ToolOutputUpdated(update)
+                        if !tree.tool_output_is_native(update.call) =>
+                    {
                         Some(PendingMessageWakeSource::ToolOutput {
                             call_id: update.output.call_id.clone(),
                             durable_event_seq: record.seq,
