@@ -2271,7 +2271,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
             .iter()
             .filter(|item| {
                 text_part(item).is_some_and(|text| {
-                    text.contains(&format!("<agent_message>\nsender: {sender_id}"))
+                    text.contains(&format!("<agent_message sender=\"{sender_id}\">"))
                         && text.contains(BODY)
                 })
             })
@@ -3052,12 +3052,12 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     let text = context
         .iter()
         .filter_map(text_part)
-        .find(|text| text.contains("kind: response"))
+        .find(|text| text.contains("event=\"response\""))
         .expect("canonical watch response");
     assert!(text.contains(&format!(
-        "<agent_update>\nagent: {recipient_id}\nkind: response"
+        "<agent_update agent=\"{recipient_id}\" event=\"response\""
     )));
-    assert!(text.contains("\n\ndone <response>&&lt;/response&gt; payload ></agent_update>"));
+    assert!(text.contains(">done <response>&&lt;/response&gt; payload ></agent_update>"));
     assert!(!text.contains("You have received a message"));
     assert!(!text.contains("<message>"));
 
@@ -3259,12 +3259,12 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     let text = context
         .iter()
         .filter_map(text_part)
-        .find(|text| text.contains("kind: prompt"))
+        .find(|text| text.contains("event=\"prompt\""))
         .expect("canonical prompt notification");
     assert!(text.contains(&format!(
-        "<agent_update>\nagent: {watched_id}\nkind: prompt"
+        "<agent_update agent=\"{watched_id}\" event=\"prompt\""
     )));
-    assert!(text.contains("\n\nplease continue <now>&</now> ></agent_update>"));
+    assert!(text.contains(">please continue <now>&</now> ></agent_update>"));
     assert!(!text.contains("finished its turn"));
     assert!(!text.contains("<response>"));
 
@@ -4645,7 +4645,7 @@ fn external_agent_message_request_publishes_received_projection() {
     assert!(context.iter().any(|item| {
         text_part(item).is_some_and(|text| {
             text.contains(
-                "<peer_message>\nsender_session: other-session\nsender_agent: sender_agent",
+                "<peer_message sender_session=\"other-session\" sender_agent=\"sender_agent\">",
             ) && text.contains("hello from outside")
         })
     }));
@@ -5193,7 +5193,7 @@ fn agent_message_interrupts_recipient_active_wait() {
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
                 && result.result == CborValue::Text(format!(
-                    "outcome: interrupted\nreason: agent_message\ncause: {activation}"))
+                    "interrupted: agent_message\ncause: {activation}"))
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -5214,7 +5214,7 @@ fn agent_message_interrupts_recipient_active_wait() {
         .expect("message wake prompt");
     assert!(prompt.context.flatten().iter().any(|item| {
         text_part(item).is_some_and(|text| {
-            text.contains("<agent_message>\nsender: manager")
+            text.contains("<agent_message sender=\"manager\">")
                 && text.contains("please stop waiting")
         })
     }));
@@ -5316,7 +5316,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
                 && result.result == CborValue::Text(format!(
-                    "outcome: interrupted\nreason: agent_message\ncause: {activation}"))
+                    "interrupted: agent_message\ncause: {activation}"))
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -5449,7 +5449,7 @@ fn wait_start_cites_selected_branch_activation_after_off_branch_wake() {
         event,
         Event::ToolResult(result)
             if result.call_id == wait_call.id
-                && matches!(&result.result, CborValue::Text(text) if text.contains("outcome: interrupted"))
+                && matches!(&result.result, CborValue::Text(text) if text.starts_with("interrupted: "))
     )));
 }
 

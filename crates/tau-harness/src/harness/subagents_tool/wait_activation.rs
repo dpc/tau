@@ -63,7 +63,7 @@ impl WaitActivation {
     pub(super) fn receipt(&self) -> CborValue {
         let reason = match &self.source {
             WaitActivationSource::PartialToolOutput(_) => "partial_tool_output",
-            WaitActivationSource::BackgroundCompletion(_) => "background_completion",
+            WaitActivationSource::BackgroundCompletion(_) => "completion",
             WaitActivationSource::User => "user",
             WaitActivationSource::AgentMessage => "agent_message",
             WaitActivationSource::ExternalMessage => "external_message",
@@ -79,7 +79,7 @@ impl WaitActivation {
             WaitActivationSource::BackgroundCompletion(None) => "unavailable".to_owned(),
             _ => self.observation.to_string(),
         };
-        let mut receipt = format!("outcome: interrupted\nreason: {reason}\ncause: ");
+        let mut receipt = format!("interrupted: {reason}\ncause: ");
         tau_proto::write_provider_tool_header_text(&cause, &mut receipt)
             .expect("writing a header to String cannot fail");
         CborValue::Text(receipt)

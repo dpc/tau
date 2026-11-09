@@ -40,7 +40,6 @@ impl WebContent<'_> {
             headers: [
                 ("adapter", self.adapter.as_str()),
                 ("operation", self.operation.as_str()),
-                ("content_trust", "external"),
             ]
             .into_iter()
             .map(|(key, value)| ToolResponseHeader {

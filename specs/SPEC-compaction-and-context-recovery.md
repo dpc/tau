@@ -299,8 +299,11 @@ busy or dispatch-uncertain work. The target-scoped standalone transaction is
 the provider-work authority. A self request's accepted placeholder never starts
 ordinary inference. Its durable terminal produces one compact-specific internal
 continuation containing bounded status and request, call, and transaction
-correlation; this consumes the background terminal, suppresses generic completion
-delivery, and makes the original call unavailable to `wait`. Success continues
+correlation. Its model-visible projection is omitted only when that exact canonical
+terminal source survives in the selected provider window. Without that source, the
+compact-specific diagnostic remains visible. The continuation consumes the background
+terminal, suppresses generic completion delivery, and makes the original call
+unavailable to `wait`. Success continues
 from the replacement window. Failure or cancellation delivers the error-bearing
 terminal without dispatching ordinary inference, and leaves the matching
 model/lineage visibly paused. Replay delivers a committed but undelivered terminal once and never

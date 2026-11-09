@@ -654,18 +654,12 @@ fn agent_watch_tool_result(
             snapshot.as_deref(),
         ))
     } else {
-        Ok(CborValue::Map(vec![(
-            CborValue::Text("watching".to_owned()),
-            CborValue::Bool(false),
-        )]))
+        Ok(CborValue::Map(Vec::new()))
     }
 }
 
 fn agent_watch_enabled_result(_agent_id: &str, current_status: Option<&str>) -> CborValue {
-    let mut headers = vec![(
-        CborValue::Text("watching".to_owned()),
-        CborValue::Bool(true),
-    )];
+    let mut headers = Vec::new();
     if let Some(status) = current_status {
         headers.push((
             CborValue::Text("provider_status".to_owned()),
@@ -1527,13 +1521,24 @@ fn finish_message_error(
     message: String,
 ) {
     let display = message_error_display(arguments, &message);
+    let (message, details) = if message == "unsupported-message-recipient" {
+        (message, None)
+    } else {
+        (
+            "message-rejected".to_owned(),
+            Some(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(message),
+            )])),
+        )
+    };
     finisher.finish_message_error(
         conversation_id,
         call_id,
         tool_name,
         tool_type,
         message,
-        Some(arguments.clone()),
+        details,
         Some(display),
     );
 }

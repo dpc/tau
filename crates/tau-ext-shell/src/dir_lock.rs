@@ -1619,24 +1619,19 @@ fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner
 }
 
 fn send_dir_lock_update_result(invoke: &ToolStarted, tx: &Output, request: &DirLockToolRequest) {
-    send_dir_lock_result(invoke, tx, request, true);
+    send_dir_lock_result(invoke, tx, request);
 }
 
 fn send_dir_lock_unlock_result(invoke: &ToolStarted, tx: &Output, request: &DirLockToolRequest) {
-    send_dir_lock_result(invoke, tx, request, false);
+    send_dir_lock_result(invoke, tx, request);
 }
 
-fn send_dir_lock_result(
-    invoke: &ToolStarted,
-    tx: &Output,
-    request: &DirLockToolRequest,
-    locked: bool,
-) {
+fn send_dir_lock_result(invoke: &ToolStarted, tx: &Output, request: &DirLockToolRequest) {
     send_event(
         tx,
         tool_result(
             invoke,
-            dir_lock_result_value(&request.input_directory, &request.dir, Some(locked)),
+            dir_lock_result_value(&request.input_directory, &request.dir),
             dir_lock_display(request.command.as_str(), &request.dir),
         ),
     );
@@ -1980,23 +1975,13 @@ fn dirs_overlap(a: &[PathBuf], b: &[PathBuf]) -> bool {
         .any(|a_dir| b.iter().any(|b_dir| paths_overlap(a_dir, b_dir)))
 }
 
-fn dir_lock_result_value(
-    input_directory: &str,
-    canonical_dir: &Path,
-    locked: Option<bool>,
-) -> CborValue {
+fn dir_lock_result_value(input_directory: &str, canonical_dir: &Path) -> CborValue {
     let canonical_directory = canonical_dir.display().to_string();
     let mut entries = Vec::new();
     if canonical_directory != input_directory {
         entries.push((
             CborValue::Text("canonical_directory".to_owned()),
             CborValue::Text(canonical_directory),
-        ));
-    }
-    if let Some(locked) = locked {
-        entries.push((
-            CborValue::Text("locked".to_owned()),
-            CborValue::Bool(locked),
         ));
     }
     CborValue::Map(entries)

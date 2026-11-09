@@ -1128,7 +1128,6 @@ fn earlier_stream_batches_keep_truthful_saved_headers_without_native_truncation(
         let result = command_details_value(CommandDetails {
             status: Some(0),
             signal: None,
-            timed_out: false,
             duration_seconds: None,
             termination_reason: "exit",
             total_lines: None,

@@ -102,18 +102,16 @@ pub(crate) fn target_dir(
 }
 
 /// Build a successful committed `workdir` setter result.
-pub(crate) fn output(path: &Path) -> ToolOutput {
+pub(crate) fn output(path: &Path, report_canonical_path: bool) -> ToolOutput {
     ToolOutput {
-        result: CborValue::Map(vec![
-            (
-                CborValue::Text("status".to_owned()),
-                CborValue::Text("changed".to_owned()),
-            ),
-            (
+        result: CborValue::Map(if report_canonical_path {
+            vec![(
                 CborValue::Text("path".to_owned()),
                 CborValue::Text(path.display().to_string()),
-            ),
-        ]),
+            )]
+        } else {
+            Vec::new()
+        }),
         provider_content: Vec::new(),
         display: WorkdirOperation::Set.display(path.display().to_string()),
     }

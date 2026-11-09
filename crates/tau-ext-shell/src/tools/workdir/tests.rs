@@ -32,13 +32,17 @@ fn available_read_uses_path_only_display() {
 #[test]
 fn setter_uses_path_only_display_and_canonical_receipt() {
     let path = Path::new("/tmp/result");
-    let output = output(path);
+    let output = output(path, true);
 
     assert_eq!(output.display.mode, "set");
     assert_eq!(output.display.args, "/tmp/result");
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&output.result).render(),
-        "status: changed\npath: /tmp/result"
+        "path: /tmp/result"
+    );
+    assert_eq!(
+        tau_proto::ToolResponse::from_cbor(&super::output(path, false).result).render(),
+        ""
     );
 }
 

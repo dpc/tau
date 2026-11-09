@@ -3086,26 +3086,7 @@ impl Harness {
                         self.observe_tool_backgrounded(&call_id);
                         self.publish_internal_background_placeholder(
                             &call_id,
-                            tau_proto::CborValue::Map(vec![
-                                (
-                                    tau_proto::CborValue::Text("status".into()),
-                                    tau_proto::CborValue::Text("accepted".into()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("target_agent_id".into()),
-                                    tau_proto::CborValue::Text(
-                                        requested.target_agent_id.to_string(),
-                                    ),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("request_id".into()),
-                                    tau_proto::CborValue::Text(requested.request_id.to_string()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("deferred".into()),
-                                    tau_proto::CborValue::Bool(self_request),
-                                ),
-                            ]),
+                            manual_compaction_acknowledgement(requested),
                         );
                     }
                     if !self_request {
@@ -3794,24 +3775,11 @@ impl Harness {
                     call_id: pending.call_id,
                     tool_name: pending.tool_name,
                     tool_type: tau_proto::ToolType::Function,
-                    result: tau_proto::CborValue::Map(vec![
-                        (
-                            tau_proto::CborValue::Text("request_id".into()),
-                            tau_proto::CborValue::Text(pending.request_id.to_string()),
-                        ),
-                        (
-                            tau_proto::CborValue::Text("status".into()),
-                            tau_proto::CborValue::Text("compacted".into()),
-                        ),
-                        (
-                            tau_proto::CborValue::Text("target_agent_id".into()),
-                            tau_proto::CborValue::Text(pending.target_agent_id.to_string()),
-                        ),
-                        (
-                            tau_proto::CborValue::Text("transaction_id".into()),
-                            tau_proto::CborValue::Text(compacted.transaction_id.to_string()),
-                        ),
-                    ]),
+                    result: manual_compaction_result(
+                        &pending.request_id,
+                        &compacted.transaction_id,
+                        (!self_request).then_some(&pending.target_agent_id),
+                    ),
                     provider_content: Vec::new(),
                     kind: ToolResultKind::Final,
                     display: None,

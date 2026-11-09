@@ -1221,10 +1221,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     let scheduled = rt
         .handle_live_tool(&schedule, UnixMicros::new(0))
         .expect("schedule");
-    assert_eq!(
-        rendered(&scheduled.result),
-        "status: scheduled\ntimer_id: standup"
-    );
+    assert_eq!(rendered(&scheduled.result), "");
     assert_eq!(scheduled.display.args, "schedule standup in 10m every 1h");
     assert!(scheduled.display.info_chips.is_empty());
     assert_eq!(
@@ -1262,7 +1259,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     let cancelled = rt
         .handle_live_tool(&cancel, UnixMicros::new(0))
         .expect("cancel");
-    assert_eq!(rendered(&cancelled.result), "status: cancelled");
+    assert_eq!(rendered(&cancelled.result), "");
     assert_eq!(cancelled.display.args, "cancel standup");
     assert!(cancelled.display.info_chips.is_empty());
     assert!(cancelled.display.payload.is_none());
@@ -1270,7 +1267,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
     let absent = rt
         .handle_live_tool(&cancel, UnixMicros::new(0))
         .expect("cancel absent timer");
-    assert_eq!(rendered(&absent.result), "status: not active");
+    assert_eq!(rendered(&absent.result), "");
     assert_eq!(absent.display.info_chips, ["not active"]);
 
     let empty = rt
@@ -1312,10 +1309,7 @@ fn compact_timer_receipts_replay_live_mutations() {
     let timer_id = tau_proto::cbor_text_field(&scheduled.result, "timer_id")
         .expect("generated id is essential for cancellation");
     assert_eq!(timer_id, "call-generated");
-    assert_eq!(
-        rendered(&scheduled.result),
-        "status: scheduled\ntimer_id: call-generated"
-    );
+    assert_eq!(rendered(&scheduled.result), "timer_id: call-generated");
     let list = started(
         "list",
         "agent-one",
@@ -1812,7 +1806,15 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
                 if let Event::ToolErrorReported(error) = *emit.event
                     && error.call_id.as_str() == "bounded-8"
                 {
-                    assert_eq!(error.message, "too many active image reads");
+                    assert_eq!(error.message, "image-read-failed");
+                    assert_eq!(
+                        tau_proto::cbor_text_field(
+                            error.details.as_ref().expect("diagnostic"),
+                            "output"
+                        )
+                        .as_deref(),
+                        Some("too many active image reads")
+                    );
                     saw_busy = true;
                 }
             }
@@ -1851,7 +1853,12 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
         if let Event::ToolErrorReported(error) = *emit.event
             && error.call_id.as_str() == "bounded-replacement"
         {
-            assert_eq!(error.message, "too many active image reads");
+            assert_eq!(error.message, "image-read-failed");
+            assert_eq!(
+                tau_proto::cbor_text_field(error.details.as_ref().expect("diagnostic"), "output")
+                    .as_deref(),
+                Some("too many active image reads")
+            );
             break;
         }
     }
@@ -2004,7 +2011,15 @@ fn read_image_downloads_verified_artifact_and_reports_typed_image() {
                 if let Event::ToolErrorReported(error) = *emit.event
                     && error.call_id.as_str() == "oversized"
                 {
-                    assert!(error.message.contains("inspection limit"));
+                    assert_eq!(error.message, "image-read-failed");
+                    assert!(
+                        tau_proto::cbor_text_field(
+                            error.details.as_ref().expect("diagnostic"),
+                            "output"
+                        )
+                        .unwrap()
+                        .contains("inspection limit")
+                    );
                     saw_oversized_error = true;
                 }
             }

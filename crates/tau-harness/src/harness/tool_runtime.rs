@@ -465,7 +465,7 @@ impl Harness {
         };
         let mut headers = vec![(
             CborValue::Text("status".to_owned()),
-            CborValue::Text("backgrounded".to_owned()),
+            CborValue::Text("running-in-background".to_owned()),
         )];
         if let Some((self_agent_id, sub_agent_id)) = agent_ids {
             headers.extend([
@@ -972,6 +972,12 @@ impl Harness {
             source_terminal: source.terminal,
         };
         let activation = tau_proto::ObservationId::random();
+        let has_terminal_source = source.call.is_some_and(|call| {
+            self.session_runtime
+                .agent_store
+                .agent(cid.as_str())
+                .is_some_and(|tree| tree.tool_output_has_terminal_source(call))
+        });
         let queued = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             if conv.dispatch.pending_prompts.iter().any(|pending| {
                 pending.text == prompt
@@ -990,6 +996,13 @@ impl Harness {
                 return;
             }
             let mut prompt = make_prompt(prompt);
+            if !has_terminal_source {
+                // Recovery and legacy control-only terminals may have no
+                // retained output. Their completion remains useful information.
+                for span in &mut prompt.trusted_internal_spans {
+                    span.envelope = Some(tau_proto::SemanticEnvelope::SessionNotice);
+                }
+            }
             prompt.background_completion = Some(correlation);
             let inference_activation = prompt.creates_inference_activation();
             prompt.activation_observation = inference_activation.then_some(activation);

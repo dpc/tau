@@ -396,7 +396,6 @@ fn run_command_live_for_surface_with_authorized_cwd(
                 .with_details(command_details_value(CommandDetails {
                     status: None,
                     signal: None,
-                    timed_out: false,
                     duration_seconds: None,
                     termination_reason: "start_error",
                     total_lines: None,
@@ -453,7 +452,6 @@ fn run_command_live_for_surface_with_authorized_cwd(
     let mut result = command_details_value(CommandDetails {
         status: status_code,
         signal,
-        timed_out: wait.timed_out,
         duration_seconds,
         termination_reason: wait.termination_reason,
         total_lines: output_trunc
@@ -3253,8 +3251,6 @@ pub(crate) struct CommandDetails {
     pub(crate) status: Option<i32>,
     /// Terminating signal, when available.
     pub(crate) signal: Option<i32>,
-    /// Whether the deadline terminated the command.
-    pub(crate) timed_out: bool,
     /// Approximate duration for slow commands.
     pub(crate) duration_seconds: Option<u64>,
     /// Machine-readable process termination classification.
@@ -3278,7 +3274,6 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
     let CommandDetails {
         status,
         signal,
-        timed_out,
         duration_seconds,
         termination_reason,
         total_lines,
@@ -3296,12 +3291,6 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
         entries.push((
             CborValue::Text("valid_utf8".to_owned()),
             CborValue::Bool(false),
-        ));
-    }
-    if timed_out {
-        entries.push((
-            CborValue::Text("timed_out".to_owned()),
-            CborValue::Bool(true),
         ));
     }
     entries.push((

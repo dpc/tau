@@ -1641,11 +1641,19 @@ pub(crate) fn write_cancelled_tool_output(
     reason: &str,
     output: &mut dyn fmt::Write,
 ) -> fmt::Result {
+    output.write_str("status: canceled")?;
+    if matches!(value, CborValue::Null) {
+        output.write_str("\nreason: ")?;
+        return write_sanitized_provider_text(reason, ProviderTextMode::Header, output);
+    }
     let mut cache = Some(HashMap::new());
-    cbor_tool_response_cached_shape(value, None, &mut cache);
+    if cbor_tool_response_cached_shape(value, None, &mut cache).raw_bytes == 0 {
+        return Ok(());
+    }
+    output.write_str("\n\n")?;
     write_cbor_tool_response(
         value,
-        Some(("cancelled", reason)),
+        None,
         &cache.expect("requested provider shape cache"),
         output,
     )

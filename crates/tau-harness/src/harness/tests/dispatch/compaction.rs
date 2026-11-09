@@ -4074,7 +4074,15 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             &live_inference_prompts[0],
             &tau_proto::SemanticEnvelope::CompactionResult.render(&notification_text),
         ),
-        1
+        0
+    );
+    assert_eq!(
+        serde_json::to_string(&live_inference_prompts[0].context)
+            .unwrap()
+            .matches("status: compacted")
+            .count(),
+        1,
+        "the canonical final source replaces the duplicated model notice"
     );
     assert!(
         first

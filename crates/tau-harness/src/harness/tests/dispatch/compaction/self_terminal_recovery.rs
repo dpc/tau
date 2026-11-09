@@ -350,7 +350,13 @@ fn reproduce(mode: &str) {
                 .count(),
             1
         );
-        assert_eq!(context.matches("Self compact terminal:").count(), 1);
+        assert_eq!(context.matches("Self compact terminal:").count(), 0);
+        assert_eq!(
+            context.matches("status: compacted").count(),
+            1,
+            "the canonical terminal survives replacement once: {context}"
+        );
+        assert!(!context.contains("<compaction_result>"));
         assert!(!context.contains("input on the unrelated branch"));
     }
     assert_eq!(records.iter().filter(|record| matches!(

@@ -283,8 +283,10 @@ fn native_failure_source_preserves_status_and_available_empty_cancellation() {
         ));
         assert!(matches!(items[1].status, ToolResultStatus::Error { .. }));
         let text = items[0].render_provider_text();
-        assert_eq!(text.matches("cancelled:").count(), 1);
-        assert!(text.contains(reason));
+        assert_eq!(text.matches("status: canceled").count(), 1);
+        if tail.is_none() {
+            assert!(text.contains(reason));
+        }
         assert_eq!(text.contains("final capture unavailable"), tail.is_none());
         assert_eq!(text.matches("accepted-before-cancel").count(), 1);
         if tail == Some("cancel-tail") {

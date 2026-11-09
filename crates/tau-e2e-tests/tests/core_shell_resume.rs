@@ -749,10 +749,10 @@ fn core_shell_workdir_and_relative_edit_survive_cold_resume()
                 "gate2-workdir",
                 "workdir",
                 cbor_map(vec![("path", CborValue::Text("project".to_owned()))]),
-                cbor_map(vec![
-                    ("status", CborValue::Text("changed".to_owned())),
-                    ("path", CborValue::Text(project.display().to_string())),
-                ]),
+                cbor_map(vec![(
+                    "path",
+                    CborValue::Text(project.display().to_string()),
+                )]),
             ),
             (
                 "gate2-create",

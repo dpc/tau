@@ -2279,7 +2279,7 @@ fn wait_start_is_interrupted_by_already_queued_user_prompt() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
-                && matches!(&result.result, CborValue::Text(text) if text.contains("outcome: interrupted"))
+                && matches!(&result.result, CborValue::Text(text) if text.starts_with("interrupted: "))
     )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -2473,7 +2473,7 @@ fn human_ui_prompt_interrupts_exact_wait_at_five_second_deadline() {
         Event::ToolResult(result)
             if result.call_id == wait_call.id
                 && result.result == CborValue::Text(format!(
-                    "outcome: interrupted\nreason: user\ncause: {activation}"))
+                    "interrupted: user\ncause: {activation}"))
     )));
 }
 
@@ -2647,7 +2647,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
         Event::ToolResult(result)
             if result.call_id == exact.id
                 && matches!(&result.result, CborValue::Text(text)
-                    if text.contains("outcome: interrupted"))
+                    if text.starts_with("interrupted: "))
     )));
 
     let bare = wait_no_args_call("wait-bare-b");
@@ -2714,7 +2714,7 @@ fn distinct_queued_completion_preempts_wait_with_consumable_candidate() {
             Event::ToolResult(result)
                 if result.call_id == wait.id
                     && matches!(&result.result, CborValue::Text(text)
-                        if text.contains("outcome: interrupted"))
+                        if text.starts_with("interrupted: "))
         )));
         let consume_a = AgentToolCall {
             call_ref: None,

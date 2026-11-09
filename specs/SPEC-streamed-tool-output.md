@@ -48,10 +48,12 @@ Historical committed stream-receipt terminals keep their original projection.
 
 Background source and historical stream-receipt source use the registered
 `tool_output` generic user-role envelope. Its ordered attributes identify
-call and terminal status, followed by `omitted_bytes` only when nonzero.
-New terminal captures expose logical `status="completed"`, `"error"`, or
-`"canceled"`; incremental updates omit status. This presentation spelling does
-not change durable `cancelled` outcomes or wait receipts. Available cancellation
+call identity and whether the occurrence is terminal (`terminal` boolean), followed
+by `omitted_bytes` only when nonzero.
+Tool-output status belongs in the canonical text headers, not envelope attributes.
+Cancellation retains `status: canceled`, including an empty available tail;
+unavailable capture also retains its diagnostic reason. This presentation spelling
+does not change durable `cancelled` outcomes or wait receipts. Available cancellation
 output remains payload, including genuinely empty output; unavailable capture
 retains its useful diagnostic rather than pretending to be empty.
 Tool identity and sequence remain in canonical metadata and validation, not the
@@ -68,11 +70,13 @@ or cancellation does not make synchronization itself fail. Plural waits keep
 request order and existing atomic consumption, ownership, generation, and
 rollback rules. Invalid waits still fail normally.
 
-Background placeholders are typed tool responses with `status: backgrounded`
+Background placeholders are typed tool responses with `status: running-in-background`
 and any existing delegation metadata. `cancel` returns `status: ok` only to
-acknowledge acceptance of the request, not terminal completion. The injected
-`tool_completion` notice retains its existing scheduling role without duplicating
-source or telling the model to fetch output. Text grammar belongs to
+acknowledge acceptance of the request, not terminal completion. Completion notices
+retain their durable scheduling role but have no model-visible projection when
+canonical terminal source already supplies completion. A legacy or recovery
+completion without terminal source retains a visible session notice. Text grammar
+belongs to
 [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md);
 semantic carrier framing belongs to
 [SPEC-context-output-formatting](../crates/tau-harness/specs/SPEC-context-output-formatting.md#registered-injected-context-envelopes).

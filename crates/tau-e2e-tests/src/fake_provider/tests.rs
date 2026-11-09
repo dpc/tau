@@ -2515,7 +2515,7 @@ fn tool_result(call_id: &str, text: &str) -> tau_proto::ToolResultItem {
 }
 
 fn watch_result(call_id: &str, provider_status: Option<&str>) -> tau_proto::ToolResultItem {
-    let mut fields = vec![(CborValue::Text("watching".into()), CborValue::Bool(true))];
+    let mut fields = Vec::new();
     if let Some(status) = provider_status {
         fields.push((
             CborValue::Text("provider_status".into()),

@@ -3,6 +3,97 @@
 use super::*;
 
 impl AgentTree {
+    /// Find terminal source for the unique matching declaration on the notice's
+    /// physical branch. Later or off-branch display-id reuse cannot substitute
+    /// another invocation's source, even after cold replay.
+    #[must_use]
+    pub fn tool_completion_source_node(
+        &self,
+        call_id: &ToolCallId,
+        notice: NodeId,
+    ) -> Option<NodeId> {
+        self.terminal_tool_source_node(call_id, AgentHead::Node(notice), notice)
+    }
+
+    /// Display-only historical notices cannot distinguish multiple matching
+    /// declarations before delivery. Keep their diagnostic when ambiguous.
+    fn terminal_tool_source_node(
+        &self,
+        call_id: &ToolCallId,
+        declaration_head: AgentHead,
+        notice: NodeId,
+    ) -> Option<NodeId> {
+        let mut selected = None;
+        let mut cursor = declaration_head.as_option();
+        while let Some(id) = cursor {
+            let node = self.node(id)?;
+            cursor = node.parent_id;
+            let AgentEntry::AssistantResponse { output_items, .. } = &node.entry else {
+                continue;
+            };
+            for (item_index, item) in output_items.iter().enumerate() {
+                if !matches!(item, ContextItem::ToolCall(item) if &item.call_id == call_id) {
+                    continue;
+                }
+                if selected.is_some() {
+                    return None;
+                }
+                selected = Some((id, u32::try_from(item_index).ok()?));
+            }
+        }
+        let (declaration_node, item_index) = selected?;
+        let declaration = self
+            .indexes
+            .assistant_response_nodes_by_observation
+            .iter()
+            .find_map(|(observation, node)| (*node == declaration_node).then_some(*observation))?;
+        let state = self.indexes.tool_outputs.get(&tau_proto::ToolCallRef {
+            declaration,
+            item_index,
+        })?;
+        if !state.terminal {
+            return None;
+        }
+        let source = self.node_for_durable_event_seq(*state.occurrences.last()?)?;
+        self.is_ancestor_head(AgentHead::Node(source), AgentHead::Node(notice))
+            .then_some(source)
+    }
+
+    /// Locate canonical source preceding an authenticated compact continuation.
+    /// A reused display id on another branch or after this delivery cannot
+    /// authorize suppressing the older continuation.
+    #[must_use]
+    pub fn self_compaction_delivery_source_node(&self, node: NodeId) -> Option<NodeId> {
+        let delivery = self
+            .self_compaction_deliveries
+            .values()
+            .find(|delivery| delivery.node_id == node)?;
+        let request = self
+            .manual_compaction_requests
+            .get(&delivery.terminal.request_id)?;
+        // Bind the declaration to the request's captured branch, not merely
+        // the current display-id lookup. A later reuse of that id cannot
+        // substitute its terminal source for this request's source. Historical
+        // responses need not have an inference-dispatch checkpoint.
+        self.terminal_tool_source_node(
+            &delivery.terminal.tool_call_id,
+            request.requested.requested_target_head,
+            node,
+        )
+    }
+
+    /// Whether this exact declaration has terminal source custody,
+    /// independently of native versus background delivery. Legacy
+    /// control-only completions must retain their visible notice rather
+    /// than silently losing the outcome.
+    #[must_use]
+    pub fn tool_output_has_terminal_source(&self, call: tau_proto::ToolCallRef) -> bool {
+        self.indexes
+            .tool_outputs
+            .get(&call)
+            .is_some_and(|state| state.terminal && !state.occurrences.is_empty())
+    }
+
     /// Native continuation owns these accepted occurrences, even while a
     /// sibling still holds the aggregate. They no longer authorize input wakes.
     #[must_use]

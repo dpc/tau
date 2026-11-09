@@ -216,7 +216,7 @@ fn explicit_wait_stream_precedes_acquisition_or_cancellation() {
                 .expect("successful acquisition");
             assert_eq!(
                 optional_argument_bool(&result.result, "locked").expect("locked flag"),
-                Some(true)
+                None
             );
         }
         assert!(
@@ -624,21 +624,20 @@ fn cbor_bool_field(value: &CborValue, key: &str) -> Option<bool> {
 
 #[test]
 fn dir_lock_result_omits_echoed_arguments() {
-    let unchanged = dir_lock_result_value("/repo/a", Path::new("/repo/a"), Some(true));
+    let unchanged = dir_lock_result_value("/repo/a", Path::new("/repo/a"));
     assert!(cbor_text_field(&unchanged, "command").is_none());
     assert!(cbor_text_field(&unchanged, "directory").is_none());
     assert!(cbor_text_field(&unchanged, "canonical_directory").is_none());
-    assert_eq!(cbor_bool_field(&unchanged, "locked"), Some(true));
+    assert_eq!(cbor_bool_field(&unchanged, "locked"), None);
 
-    let canonicalized =
-        dir_lock_result_value("repo/../repo/a", Path::new("/tmp/repo/a"), Some(false));
+    let canonicalized = dir_lock_result_value("repo/../repo/a", Path::new("/tmp/repo/a"));
     assert!(cbor_text_field(&canonicalized, "command").is_none());
     assert!(cbor_text_field(&canonicalized, "directory").is_none());
     assert_eq!(
         cbor_text_field(&canonicalized, "canonical_directory"),
         Some("/tmp/repo/a")
     );
-    assert_eq!(cbor_bool_field(&canonicalized, "locked"), Some(false));
+    assert_eq!(cbor_bool_field(&canonicalized, "locked"), None);
 }
 
 #[test]

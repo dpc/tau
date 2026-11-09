@@ -2164,26 +2164,7 @@ impl Harness {
                         self.restore_manual_tool_runtime(&caller_cid, &request);
                         self.publish_internal_background_placeholder(
                             &request.required_tool_source().initiating_tool_call_id,
-                            tau_proto::CborValue::Map(vec![
-                                (
-                                    tau_proto::CborValue::Text("status".into()),
-                                    tau_proto::CborValue::Text("accepted".into()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("request_id".into()),
-                                    tau_proto::CborValue::Text(request.request_id.to_string()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("target_agent_id".into()),
-                                    tau_proto::CborValue::Text(request.target_agent_id.to_string()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("deferred".into()),
-                                    tau_proto::CborValue::Bool(
-                                        request.required_tool_source().resume_inference,
-                                    ),
-                                ),
-                            ]),
+                            manual_compaction_acknowledgement(&request),
                         );
                     }
                     waiting.push((
@@ -2396,24 +2377,13 @@ impl Harness {
                                 .clone(),
                             tool_name: request.required_tool_source().visible_tool_name.clone(),
                             tool_type: tau_proto::ToolType::Function,
-                            result: tau_proto::CborValue::Map(vec![
-                                (
-                                    tau_proto::CborValue::Text("status".into()),
-                                    tau_proto::CborValue::Text("compacted".into()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("request_id".into()),
-                                    tau_proto::CborValue::Text(request.request_id.to_string()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("target_agent_id".into()),
-                                    tau_proto::CborValue::Text(request.target_agent_id.to_string()),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("transaction_id".into()),
-                                    tau_proto::CborValue::Text(started.transaction_id.to_string()),
-                                ),
-                            ]),
+                            result: manual_compaction_result(
+                                &request.request_id,
+                                &started.transaction_id,
+                                (request.required_tool_source().caller_agent_id
+                                    != request.target_agent_id)
+                                    .then_some(&request.target_agent_id),
+                            ),
                             provider_content: Vec::new(),
                             kind: ToolResultKind::Final,
                             display: None,

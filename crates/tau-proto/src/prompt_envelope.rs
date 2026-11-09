@@ -58,7 +58,9 @@ impl SemanticEnvelope {
     pub fn render(self, body: &str) -> String {
         let family = self.family();
         let PayloadEnvelopeOpening::Fixed(open) = family.opening else {
-            unreachable!("semantic families have fixed openings");
+            return family
+                .render_attributed(&[], body)
+                .expect("empty semantic attributes follow the shared registry");
         };
         format!(
             "{open}{}{close}",
@@ -67,53 +69,65 @@ impl SemanticEnvelope {
         )
     }
 
-    /// Render semantic metadata and optional data using the shared typed text
-    /// serializer before exact-close framing. Headers cannot inject new lines.
-    /// The leading LF belongs to envelope layout, not the optional text
-    /// separator owned by `SPEC-context-output-formatting#canonical-tool-text`.
+    /// Render notice metadata as registered attributes, not tool-output
+    /// headers. Attribute values and exact closing delimiters are escaped
+    /// independently.
     #[must_use]
     pub fn render_fields(self, headers: &[(&str, String)], body: &str) -> String {
-        let response = crate::ToolResponse {
-            raw: crate::CborValue::Null,
-            headers: headers
-                .iter()
-                .map(|(key, value)| crate::ToolResponseHeader {
-                    key: (*key).to_owned(),
-                    value: crate::visible_escape_metadata(value),
-                })
-                .collect(),
-            body: body.to_owned(),
-        };
-        self.render(&format!("\n{}", response.render()))
+        let attributes = headers
+            .iter()
+            .map(|(name, value)| (*name, crate::visible_escape_metadata(value)))
+            .collect::<Vec<_>>();
+        self.family()
+            .render_attributed(&attributes, body)
+            .expect("semantic metadata follows the shared registry")
     }
 }
 
 /// Closed semantic families for harness-owned injected-user projections.
 pub const SEMANTIC_PAYLOAD_ENVELOPES: [RegisteredPayloadEnvelope; 16] = [
-    semantic_family(
-        "agent_update",
-        "<agent_update>",
-        "</agent_update>",
-        "&lt;/agent_update&gt;",
-    ),
-    semantic_family(
-        "agent_message",
-        "<agent_message>",
-        "</agent_message>",
-        "&lt;/agent_message&gt;",
-    ),
-    semantic_family(
-        "peer_message",
-        "<peer_message>",
-        "</peer_message>",
-        "&lt;/peer_message&gt;",
-    ),
-    semantic_family(
-        "cli_message",
-        "<cli_message>",
-        "</cli_message>",
-        "&lt;/cli_message&gt;",
-    ),
+    RegisteredPayloadEnvelope {
+        name: "agent_update",
+        opening: PayloadEnvelopeOpening::Attributed("<agent_update "),
+        ordered_attributes: &[
+            "agent",
+            "event",
+            "status",
+            "task",
+            "category",
+            "attempt",
+            "next_retry_delay_secs",
+            "threshold_minutes",
+            "reason",
+        ],
+        exact_close: "</agent_update>",
+        visible_close: "&lt;/agent_update&gt;",
+        carrier: PayloadEnvelopeCarrier::GenericUserText,
+    },
+    RegisteredPayloadEnvelope {
+        name: "agent_message",
+        opening: PayloadEnvelopeOpening::Attributed("<agent_message "),
+        ordered_attributes: &["sender"],
+        exact_close: "</agent_message>",
+        visible_close: "&lt;/agent_message&gt;",
+        carrier: PayloadEnvelopeCarrier::GenericUserText,
+    },
+    RegisteredPayloadEnvelope {
+        name: "peer_message",
+        opening: PayloadEnvelopeOpening::Attributed("<peer_message "),
+        ordered_attributes: &["sender_session", "sender_agent"],
+        exact_close: "</peer_message>",
+        visible_close: "&lt;/peer_message&gt;",
+        carrier: PayloadEnvelopeCarrier::GenericUserText,
+    },
+    RegisteredPayloadEnvelope {
+        name: "cli_message",
+        opening: PayloadEnvelopeOpening::Attributed("<cli_message "),
+        ordered_attributes: &["reply_mode", "recipient"],
+        exact_close: "</cli_message>",
+        visible_close: "&lt;/cli_message&gt;",
+        carrier: PayloadEnvelopeCarrier::GenericUserText,
+    },
     semantic_family(
         "agent_context",
         "<agent_context>",
@@ -341,7 +355,7 @@ impl fmt::Display for PayloadEnvelopeRenderError {
 pub const TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
     name: "tool_output",
     opening: PayloadEnvelopeOpening::Attributed("<tool_output "),
-    ordered_attributes: &["call_id", "terminal", "status", "omitted_bytes"],
+    ordered_attributes: &["call_id", "terminal", "omitted_bytes"],
     exact_close: "</tool_output>",
     visible_close: "&lt;/tool_output&gt;",
     carrier: PayloadEnvelopeCarrier::GenericUserText,

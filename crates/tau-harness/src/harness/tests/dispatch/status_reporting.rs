@@ -414,7 +414,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
     let prompt = read_nth_prompt_created(&resumed, 0);
     let context = serde_json::to_string(&prompt.context).expect("serialize prompt context");
     assert_eq!(
-        context.matches("status: retrying").count(),
+        context.matches("status=\\\"retrying\\\"").count(),
         1,
         "durable status appears exactly once in the next provider context"
     );

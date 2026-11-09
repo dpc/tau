@@ -430,7 +430,12 @@ fn prepared_upload_busy_fails_once_without_inline_fallback() {
         let [Event::ToolErrorReported(error)] = terminal.as_slice() else {
             panic!("one error");
         };
-        assert_eq!(error.message, "artifact storage is busy");
+        assert_eq!(error.message, "image-read-failed");
+        assert_eq!(
+            tau_proto::cbor_text_field(error.details.as_ref().expect("diagnostic"), "output")
+                .as_deref(),
+            Some("artifact storage is busy")
+        );
         assert_eq!(frames.iter().filter(|frame| matches!(frame,
             HarnessInputMessage::ArtifactRequest(request) if matches!(request.op, ArtifactOp::Begin { .. }))).count(), 1);
     }

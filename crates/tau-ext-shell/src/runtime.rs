@@ -510,7 +510,8 @@ impl ShellRuntime {
                     display: None,
                 })
             } else if pending_workdir.matched_request {
-                let output = path_crate_tools::workdir::output(cwd);
+                let output =
+                    path_crate_tools::workdir::output(cwd, pending_workdir.report_canonical_path);
                 Event::ToolResult(ToolResult {
                     captured_output: None,
                     presentation: Default::default(),

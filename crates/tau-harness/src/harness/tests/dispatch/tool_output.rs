@@ -7,6 +7,100 @@ use tau_proto::ToolResultKind;
 use super::*;
 use crate::agent::PendingMessageWakeSource;
 
+/// Background output already carries completion. Its control notice must still
+/// wake inference once without adding a second visible completion, both live
+/// and after cold replay, including failed terminals.
+#[test]
+fn background_terminal_source_replaces_visible_completion_notice() {
+    for failed in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        let connection = crate::test_connection_id("source-worker");
+        connect_ready_configured_extension(
+            &mut h,
+            "source-worker",
+            "source-worker",
+            tau_proto::ClientKind::Tool,
+        );
+        h.tool_routing.registry.register(
+            &connection,
+            instant_background_test_tool_spec("source_work"),
+        );
+        let cid = ensure_test_user_agent(&mut h);
+        let agent = durable_agent_id_for_conversation(&h, &cid);
+        start_background_tool_and_finish_placeholder_turn(
+            &mut h,
+            &cid,
+            "source-call",
+            "source_work",
+        );
+        let before = event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count();
+        let terminal = if failed {
+            Event::ToolErrorReported(tau_proto::ToolError {
+                captured_output: None,
+                presentation: Default::default(),
+                call_id: "source-call".into(),
+                tool_name: ToolName::new("source_work"),
+                tool_type: tau_proto::ToolType::Function,
+                message: "source-failed".into(),
+                details: Some(CborValue::Text("source-result </tool_output>".into())),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            })
+        } else {
+            Event::ToolResultReported(final_tool_result(
+                "source-call",
+                "source_work",
+                "source-result </tool_output>",
+            ))
+        };
+        h.handle_extension_event_inner(&connection, terminal)
+            .expect("canonical terminal");
+        let records = h
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(agent.as_str())
+            .expect("records");
+        let prompts = event_log_events(&h)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::AgentPromptCreated(prompt) => Some(prompt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prompts.len(),
+            before + 1,
+            "completion retains one inference activation"
+        );
+        let context = serde_json::to_string(&prompts.last().unwrap().context).unwrap();
+        assert_eq!(context.matches("source-result").count(), 1);
+        assert!(!context.contains("<tool_completion"));
+        assert!(context.contains("running-in-background"));
+        assert!(context.contains("source-result &lt;/tool_output&gt;"));
+        assert_eq!(context.contains("error: source-failed"), failed);
+        let live = h
+            .session_runtime
+            .agent_store
+            .agent(agent.as_str())
+            .expect("live");
+        let cold = tau_core::AgentTree::try_from_events(agent, &records).expect("cold");
+        let live_context = crate::prompt::assemble_prompt_context_from(live, live.head()).context;
+        let cold_context = crate::prompt::assemble_prompt_context_from(&cold, cold.head()).context;
+        assert_eq!(live_context, cold_context);
+        let text = serde_json::to_string(&cold_context).unwrap();
+        assert_eq!(text.matches("source-result").count(), 1);
+        assert!(!text.contains("<tool_completion"));
+        assert!(records.iter().any(|record| matches!(&record.event,
+            Event::AgentPromptSubmitted(prompt) if prompt.internal_kind == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+        )), "durable control delivery must remain");
+        h.shutdown().expect("shutdown");
+    }
+}
+
 /// Startup repairs the unresolved sibling without resurrecting absorbed source
 /// wakes or delivering the native source again on a subsequent resume.
 #[test]
@@ -782,7 +876,7 @@ fn complete_only_filters_queued_and_live_updates_in_each_wait_mode() {
                             event,
                             Event::ToolResult(result) if result.call_id.as_str() == "waiting-stream"
                                 && result.result == CborValue::Text(
-                                    "outcome: interrupted\nreason: partial_tool_output\ncause: background-stream".into())
+                                    "interrupted: partial_tool_output\ncause: background-stream".into())
                         )),
                         "{mode}, queued_first={queued_first}: exact source receipt"
                     );

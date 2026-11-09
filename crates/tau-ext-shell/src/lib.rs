@@ -1697,7 +1697,8 @@ fn schedule_tool_started(
         cwd_state
             .start_pending_workdir_result(
                 invoke.agent_id.clone(),
-                path,
+                path.clone(),
+                cbor_optional_text(&invoke.arguments, "path").as_deref() != Some(path.to_string_lossy().as_ref()),
                 identity.clone(),
                 None,
             )
@@ -2102,11 +2103,12 @@ fn dispatch_locked_tool_invoke(
             if lifecycle.claim_terminal_before_effect() {
                 let _ = send_tool_failure(
                     invoke,
-                    path_crate_display::ToolFailure::new(format!(
-                        "automatic directory lock is outside your manual lock coverage: requested {}; held {}",
-                        uncovered_dir.display(),
-                        held_dir.display()
-                    )),
+                    path_crate_display::ToolFailure::new("dir-lock-outside-coverage")
+                        .with_details(CborValue::Map(vec![
+                            (CborValue::Text("requested_directory".to_owned()), CborValue::Text(uncovered_dir.display().to_string())),
+                            (CborValue::Text("blocking_directory".to_owned()), CborValue::Text(held_dir.display().to_string())),
+                            (CborValue::Text("output".to_owned()), CborValue::Text("The automatic directory lock is outside your manual lock coverage. Release the existing lock or acquire a parent covering the requested directory.".to_owned())),
+                        ])),
                     &tx,
                 );
             }

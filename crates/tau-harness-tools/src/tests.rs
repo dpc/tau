@@ -606,13 +606,13 @@ fn agent_watch_enable_result_includes_safe_current_snapshot() {
     .render();
     assert_eq!(
         result,
-        "watching: true\nprovider_status: retrying (throttle, attempt 50, next retry about 60s)"
+        "provider_status: retrying (throttle, attempt 50, next retry about 60s)"
     );
     assert_eq!(result.matches("provider_status:").count(), 1);
     assert!(!result.contains("[tau-internal]"));
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&agent_watch_enabled_result("agent-a", None)).render(),
-        "watching: true"
+        ""
     );
 }
 
@@ -1171,8 +1171,14 @@ fn finish_message_error_passes_recipient_display_without_message_payload() {
     assert_eq!(call.call_id.as_str(), "message-call");
     assert_eq!(call.tool_name.as_str(), MESSAGE_TOOL_NAME);
     assert_eq!(call.tool_type, ToolType::Function);
-    assert_eq!(call.message, "`message` must be a string");
-    assert_eq!(call.details, Some(arguments));
+    assert_eq!(call.message, "message-rejected");
+    assert_eq!(
+        call.details,
+        Some(CborValue::Map(vec![(
+            CborValue::Text("output".into()),
+            CborValue::Text("`message` must be a string".into()),
+        )]))
+    );
     assert_eq!(display.args, "agent-a");
     assert_eq!(display.status, ToolUseStatus::Error);
     assert_eq!(display.status_text, "`message` must be a string");

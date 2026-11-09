@@ -844,7 +844,7 @@ fn shutdown_clears_reserved_workdir_setter_without_extension_terminal() {
     };
     runtime
         .cwd_state
-        .start_pending_workdir_result(agent_id, PathBuf::from("/tmp"), invoke, None)
+        .start_pending_workdir_result(agent_id, PathBuf::from("/tmp"), false, invoke, None)
         .expect("reserve setter");
     runtime.shutdown();
     assert!(rx.try_recv().is_err());
@@ -879,7 +879,7 @@ fn workdir_reservation_commit_phase_is_linearized() {
     let expected = PathBuf::from("/expected");
     runtime
         .cwd_state
-        .start_pending_workdir_result(agent_id.clone(), expected, invoke.clone(), None)
+        .start_pending_workdir_result(agent_id.clone(), expected, false, invoke.clone(), None)
         .expect("reserve");
     let mutation_id = runtime
         .cwd_state
@@ -957,6 +957,7 @@ fn awaiting_workdir_cancel_terminalizes_at_correlated_commit() {
         .start_pending_workdir_result(
             agent_id.clone(),
             PathBuf::from("/tmp"),
+            false,
             invoke.clone(),
             None,
         )

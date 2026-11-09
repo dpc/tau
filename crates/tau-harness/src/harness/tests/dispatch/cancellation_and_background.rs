@@ -126,12 +126,13 @@ fn unsolicited_cancellation_preserves_live_and_restored_wait_outcome() {
                 })
                 .expect("completion followup context");
             assert!(
-                live_context.contains("status=\\\"canceled\\\""),
+                live_context.contains("status: canceled"),
                 "status must reach the model without wait"
             );
             let replayed = tau_core::AgentTree::try_from_events(agent.clone(), &records)
                 .expect("replay final source");
-            assert!(materialized_source_text(&replayed).contains("status=\"canceled\""));
+            assert!(materialized_source_text(&replayed).contains("status: canceled"));
+            assert!(!live_context.contains("<tool_completion"));
             h.handle_provider_response_finished(provider_text_response(
                 &prompt,
                 agent.clone(),
@@ -5917,7 +5918,7 @@ fn cancel_clears_active_wait_state() {
         event,
         Event::ToolError(error)
             if error.call_id.as_str() == "wait-call-2"
-                && error.message.contains("already consumed")
+                && error.message == "already-consumed"
     )));
 
     h.shutdown().expect("shutdown");

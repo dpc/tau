@@ -294,7 +294,6 @@ fn command_details_value_round_trips_explicit_normal_exit() {
     let details = command_details_value(CommandDetails {
         status: Some(0),
         signal: None,
-        timed_out: false,
         duration_seconds: None,
         termination_reason: "exit",
         total_lines: None,
@@ -328,7 +327,6 @@ fn command_details_value_records_slow_command_exec_time() {
     let details = command_details_value(CommandDetails {
         status: Some(0),
         signal: None,
-        timed_out: false,
         duration_seconds: Some(6),
         termination_reason: "exit",
         total_lines: None,
@@ -732,7 +730,7 @@ fn protected_pager_overlay_prevents_stall_and_opt_out_forfeits_guarantee() {
     .expect("run opt-out pager probe") else {
         panic!("expected finished opt-out shell outcome");
     };
-    assert_eq!(cbor_bool_field(&output.result, "timed_out"), Some(true));
+    assert_eq!(cbor_bool_field(&output.result, "timed_out"), None);
     assert_eq!(
         cbor_map_text(&output.result, "termination_reason"),
         Some("timeout")
@@ -1513,7 +1511,7 @@ fn shell_tool_timeout_preserves_partial_output() {
     assert_eq!(output.display.status_text, "timeout");
     assert_eq!(cbor_map_text(&output.result, "output"), Some("out before"));
     assert!(cbor_map_field(&output.result, "total_lines").is_none());
-    assert_eq!(cbor_bool_field(&output.result, "timed_out"), Some(true));
+    assert_eq!(cbor_bool_field(&output.result, "timed_out"), None);
     assert!(cbor_int_field(&output.result, "timeout_secs").is_none());
     assert_eq!(
         cbor_map_text(&output.result, "termination_reason"),
@@ -1665,7 +1663,7 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_output_holder() {
     let output = cbor_map_text(&result.result, "output").expect("output");
     assert_eq!(output, "out(no_nl) early");
     assert!(!output.contains("late"));
-    assert_eq!(cbor_bool_field(&result.result, "timed_out"), Some(true));
+    assert_eq!(cbor_bool_field(&result.result, "timed_out"), None);
     assert_eq!(
         cbor_map_text(&result.result, "termination_reason"),
         Some("timeout")
@@ -1729,7 +1727,7 @@ fn shell_tool_timeout_zero_is_immediate_timeout() {
     let output = *output;
     assert_eq!(output.display.status, ToolUseStatus::Error);
     assert_eq!(output.display.status_text, "timeout");
-    assert_eq!(cbor_bool_field(&output.result, "timed_out"), Some(true));
+    assert_eq!(cbor_bool_field(&output.result, "timed_out"), None);
     assert!(cbor_int_field(&output.result, "timeout_secs").is_none());
     assert_eq!(
         cbor_map_text(&output.result, "termination_reason"),

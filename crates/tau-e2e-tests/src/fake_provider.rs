@@ -1049,7 +1049,7 @@ impl FakeState {
                     tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
                         &[
                             ("agent", child_agent_id.to_string()),
-                            ("kind", "response".to_owned()),
+                            ("event", "response".to_owned()),
                         ],
                         &body,
                     )
@@ -1063,7 +1063,7 @@ impl FakeState {
                     tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
                         &[
                             ("agent", child_agent_id.to_string()),
-                            ("kind", "prompt".to_owned()),
+                            ("event", "prompt".to_owned()),
                         ],
                         &body,
                     )
@@ -2809,9 +2809,8 @@ impl FakeState {
                         )) || !prompt.context.flatten_iter().any(|item| {
                     matches!(item,
                         ContextItem::Message(item) if item.content.iter().any(|part| matches!(part,
-                            ContentPart::Text { text } if text.starts_with("<cli_message>")
-                                && text.contains("reply_mode:")
-                                && text.ends_with("</cli_message>")
+                            ContentPart::Text { text } if text.starts_with("<cli_message reply_mode=\"")
+                                && tau_proto::SemanticEnvelope::CliMessage.family().matches_whole(text)
                         ))
                     )
                 }) {
@@ -3399,7 +3398,7 @@ impl FakeState {
                         "agent_watch result has no validated agent_start child identity",
                     ));
                 };
-                let mut fields = vec![(CborValue::Text("watching".into()), CborValue::Bool(true))];
+                let mut fields = Vec::new();
                 if *expectation == AgentWatchResultExpectationV2::DispatchUncertainUnknown {
                     fields.push((
                         CborValue::Text("provider_status".into()),
@@ -3963,7 +3962,7 @@ fn validate_shell_stream_prompt(
                 .output
                 .headers
                 .iter()
-                .any(|header| header.key == "status" && header.value == "backgrounded")
+                .any(|header| header.key == "status" && header.value == "running-in-background")
         {
             return Err("stream child must background before incremental wake");
         }

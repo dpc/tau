@@ -2764,13 +2764,15 @@ fn locked_apply_patch_reports_uncovered_target_and_held_manual_coverage() {
     loop {
         match reader.read_event().expect("read").expect("event") {
             Event::ToolError(error) if error.call_id.as_str() == "mixed-patch" => {
+                assert_eq!(error.message, "dir-lock-outside-coverage");
+                let details = error.details.as_ref().expect("lock coverage diagnostics");
                 assert_eq!(
-                    error.message,
-                    format!(
-                        "automatic directory lock is outside your manual lock coverage: requested {}; held {}",
-                        root.display(),
-                        project.display()
-                    )
+                    tau_proto::cbor_text_field(details, "requested_directory").as_deref(),
+                    Some(root.to_str().unwrap())
+                );
+                assert_eq!(
+                    tau_proto::cbor_text_field(details, "blocking_directory").as_deref(),
+                    Some(project.to_str().unwrap())
                 );
                 break;
             }

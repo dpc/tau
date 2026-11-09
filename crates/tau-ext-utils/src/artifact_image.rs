@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use prepared_upload::PreparedImageUpload;
 use tau_client::{ArtifactClient, ArtifactDownload, ClientHandle};
 use tau_proto::{
-    ArtifactError, ArtifactRequestId, ArtifactResult, Event, HarnessOutputMessage, ToolCallId,
-    ToolCancelled, ToolError, ToolResult, ToolResultKind, ToolStarted, ToolType,
+    ArtifactError, ArtifactRequestId, ArtifactResult, CborValue, Event, HarnessOutputMessage,
+    ToolCallId, ToolCancelled, ToolError, ToolResult, ToolResultKind, ToolStarted, ToolType,
 };
 
 use crate::read_image::{MAX_SOURCE_BYTES, ReadImageOutput, ReadImageRequest};
@@ -556,8 +556,11 @@ impl ArtifactImageManager {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
-            message: message.clone(),
-            details: None,
+            message: "image-read-failed".to_owned(),
+            details: Some(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(message.clone()),
+            )])),
             display: Some(tau_proto::ToolUseState {
                 status: tau_proto::ToolUseStatus::Error,
                 status_text: message.lines().next().unwrap_or_default().to_owned(),

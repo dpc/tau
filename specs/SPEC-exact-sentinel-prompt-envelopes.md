@@ -33,8 +33,8 @@ model-facing payload families:
 | `user` | Generic user-role text | Fixed `source="ui"`, then optional `delayed="true"`; direct Tau user-channel input |
 | `extension_output` | Generic user-role text | `publisher`, `operation_id`; passive configured-extension output |
 | `discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
-| `agent_update` | Generic user-role text | Fieldless; typed agent, kind, status/task or observed prompt/response |
-| `agent_message`, `peer_message`, `cli_message` | Generic user-role text | Fieldless; source-specific identity, reply policy and body |
+| `agent_update` | Generic user-role text | Typed agent and status/task attributes; observed prompt/response or long-wait events retain a distinct `event` attribute |
+| `agent_message`, `peer_message`, `cli_message` | Generic user-role text | Source-specific identity and reply-policy attributes; exact-close-framed body |
 | `agent_context`, `tool_completion`, `compaction_result` | Generic user-role text | Fieldless; bootstrap or typed lifecycle notice, never a second tool payload |
 | `context_size_alert`, `loop_guard`, `status_reminder`, `session_notice`, `tool_availability`, `output_continuation`, `compaction_recall` | Generic user-role text | Fieldless; meaning-specific harness instructions and notices |
 | `summary_request`, `summary_continuation` | Generic user-role text | Fieldless; provisional local-summary dialogue |
@@ -42,7 +42,7 @@ model-facing payload families:
 | `quoted_message` | Generic user-role text attached to a canonical delivered/edited message | Optional descriptive reference, author, and excerpt metadata; `content_trust="external"` |
 | `tau_web_content` | Historical typed tool result only | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Historical canonical background-preview attributes |
-| `tool_output` | Generic user-role text | `call_id`, `terminal`, optional terminal `status`, then nonzero `omitted_bytes`; ordered canonical tool source |
+| `tool_output` | Generic user-role text | `call_id`, `terminal`, then nonzero `omitted_bytes`; status stays in tool-output headers |
 
 New injected-user projections use unprefixed, meaning-specific names.
 `tau_internal`, `tau_extension_output`, `tau_discovery`, and
@@ -51,8 +51,9 @@ New injected-user projections use unprefixed, meaning-specific names.
 New typed web results use canonical headers and payload through
 [`ToolResponse`](../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text),
 not an injected-user envelope. Stored opaque or historical text is not rewritten.
-The shared `ToolResponse` serializer renders semantic headers before outer framing;
-header metadata also retains source-specific visible escaping.
+The shared `ToolResponse` serializer renders tool-output headers before outer framing.
+Injected notice metadata uses registered attributes with source-specific visible
+escaping, not tool-output headers.
 
 Each change that adds or reframes a generic-user family must register it and use
 the registry's shared metadata and exact-close helper. Family renderers own
@@ -136,8 +137,8 @@ Historical fieldless `<user>...</user>` replacement bytes remain recognizable
 for provenance-notice delivery only; recognition does not infer or reproject a
 typed source.
 Cross-session agent messages use authenticated `peer_message` framing with
-source identity in headers. When either persisted configured notice exists, the renderer exact-close-frames
-sender- and recipient-origin advisory `<notice>` nodes separately from the original
+source identity in attributes. When either persisted configured notice exists, the
+renderer exact-close-frames sender- and recipient-origin advisory `<notice>` nodes separately from the original
 `<message>` body. Nested notice/message tags establish no generic envelope family
 or authority. These notice snapshot, wire, rendering, bounds, mixed-version,
 and replay semantics were explicitly approved by the user on September 12,

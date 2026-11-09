@@ -1038,7 +1038,6 @@ pub(crate) fn watch_work_status_text(
     Some(tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
         &[
             ("agent", sender_label.to_owned()),
-            ("kind", "work_status".to_owned()),
             ("status", state.to_owned()),
             ("task", title),
         ],
@@ -1052,10 +1051,7 @@ pub(crate) fn watch_provider_status_text(
     sender_label: &str,
     status: &tau_proto::AgentWatchProviderStatusNotification,
 ) -> String {
-    let mut headers = vec![
-        ("agent", sender_label.to_owned()),
-        ("kind", "provider_status".to_owned()),
-    ];
+    let mut headers = vec![("agent", sender_label.to_owned())];
     match status.state {
         tau_proto::AgentWatchProviderState::Retrying {
             category,
@@ -1697,6 +1693,11 @@ fn assemble_prompt_context_window(
         measurement_state.record(boundary);
     }
 
+    let selected_nodes = active_window
+        .transcript
+        .iter()
+        .map(|(node, _)| *node)
+        .collect::<std::collections::HashSet<_>>();
     for (node_id, entry) in active_window.transcript {
         if matches!(entry, AgentEntry::AgentMessage { .. })
             && !agent_message_is_provider_visible(entry)
@@ -1767,6 +1768,21 @@ fn assemble_prompt_context_window(
                             submission_source.as_ref(),
                             background_completion_prompt,
                             *delayed,
+                            tree.self_compaction_delivery_source_node(node_id)
+                                .is_some_and(|source| selected_nodes.contains(&source)),
+                            |text| {
+                                let Some(id) = text
+                                    .strip_prefix("call_id: ")
+                                    .and_then(|text| text.strip_suffix("\nstatus: terminal"))
+                                else {
+                                    return false;
+                                };
+                                let id = tau_proto::ToolCallId::new(id);
+                                crate::harness::background_completion_prompt(&id) == text
+                                    && tree
+                                        .tool_completion_source_node(&id, node_id)
+                                        .is_some_and(|source| selected_nodes.contains(&source))
+                            },
                         ),
                     },
                 ));
@@ -1915,7 +1931,7 @@ fn assemble_prompt_context_window(
                                             tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
                                                 &[
                                                     ("agent", sender_label),
-                                                    ("kind", "response".to_owned()),
+                                                    ("event", "response".to_owned()),
                                                 ],
                                                 &body,
                                             )
@@ -1949,7 +1965,7 @@ fn assemble_prompt_context_window(
                                             tau_proto::SemanticEnvelope::AgentUpdate.render_fields(
                                                 &[
                                                     ("agent", sender_label),
-                                                    ("kind", "prompt".to_owned()),
+                                                    ("event", "prompt".to_owned()),
                                                 ],
                                                 &body,
                                             )
@@ -2013,7 +2029,7 @@ fn assemble_prompt_context_window(
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: tau_proto::SemanticEnvelope::AgentUpdate.render_fields(&[
                                             ("agent", sender_id.to_string()),
-                                            ("kind", "long_wait".to_owned()),
+                                            ("event", "long_wait".to_owned()),
                                             ("threshold_minutes", wait.threshold_minutes.to_string()),
                                         ], "Cumulative waits in the current Working period, not the runtime of the current tool."),
                                     }],
@@ -2045,7 +2061,6 @@ fn assemble_prompt_context_window(
                                             .render_fields(
                                                 &[
                                                     ("agent", sender_id.to_string()),
-                                                    ("kind", "lifecycle".to_owned()),
                                                     ("status", "stopped".to_owned()),
                                                     ("reason", reason.to_owned()),
                                                 ],
@@ -2182,19 +2197,40 @@ fn measurement_block_count(blocks: &[tau_proto::ContextBlock]) -> usize {
 
 /// Apply the provider-only envelope selected by typed prompt provenance.
 ///
-/// Prompt folding guarantees that a sourced entry contains exactly one
-/// user-role message with one text part, so this preserves the one-item
-/// provider shape while changing only that part's presentation text.
+/// Source bodies keep their carrier shape. Control-only notices may project to
+/// no items when canonical terminal output already supplies their information;
+/// the durable source and its inference activation remain unchanged.
 fn project_user_prompt_items(
     items: &[ContextItem],
     submission_source: Option<&tau_proto::PromptSubmissionSource>,
     background_completion_prompt: bool,
     delayed: bool,
+    suppress_compaction_result: bool,
+    suppress_tool_completion: impl Fn(&str) -> bool,
 ) -> Vec<ContextItem> {
     let mut projected = items.to_vec();
     let human_ui = submission_source == Some(&tau_proto::PromptSubmissionSource::HumanUi);
     for item in &mut projected {
         if let ContextItem::Message(message) = item {
+            // Only authenticated, canonical notices with exact source in this
+            // selected window are redundant. Historical/control-only notices
+            // and source-excluding compactions retain their visible diagnostic.
+            message.content.retain(|part| {
+                !matches!(
+                    part,
+                    tau_proto::ContentPart::HarnessInternalText {
+                        envelope: Some(tau_proto::SemanticEnvelope::ToolCompletion),
+                        text,
+                    } if suppress_tool_completion(text)
+                ) && !(suppress_compaction_result
+                    && matches!(
+                        part,
+                        tau_proto::ContentPart::HarnessInternalText {
+                            envelope: Some(tau_proto::SemanticEnvelope::CompactionResult),
+                            ..
+                        }
+                    ))
+            });
             for part in &mut message.content {
                 match part {
                     tau_proto::ContentPart::HarnessInternalText { text, envelope } => {
@@ -2231,6 +2267,12 @@ fn project_user_prompt_items(
             }
         }
     }
+    projected.retain(|item| {
+        !matches!(
+            item,
+            ContextItem::Message(message) if message.content.is_empty()
+        )
+    });
     projected
 }
 

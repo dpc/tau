@@ -64,13 +64,16 @@ pub(crate) fn handle_tool_call(
                 Some(display(phase, &title, ToolUseStatus::Success, "ok")),
             );
         }
-        Err((message, details)) => host.finish_tool_with_error(
+        Err((message, _details)) => host.finish_tool_with_error(
             conversation_id,
             call.id.clone(),
             visible_tool_name,
             call.tool_type,
-            message,
-            details,
+            "invalid-status".to_owned(),
+            Some(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(message),
+            )])),
         ),
     }
     Ok(())

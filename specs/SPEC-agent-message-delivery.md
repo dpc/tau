@@ -160,9 +160,9 @@ prompt text:
 - outbound ordinary `Message` projections are omitted from the sender's provider
   context;
 - local inbound `Message` uses user role and the registered `agent_message`
-  family, with a stable `sender` header and an exact-close-framed body;
+  family, with a stable `sender` attribute and an exact-close-framed body;
 - cross-session inbound `Message` uses `peer_message`, with authenticated
-  `sender_session` and `sender_agent` headers;
+  `sender_session` and `sender_agent` attributes;
 - when either configured notice is present, the same peer frame contains
   optional ordered `<notice origin="sender_config" authority="advisory">` and
   `<notice origin="recipient_config" authority="advisory">` nodes around one

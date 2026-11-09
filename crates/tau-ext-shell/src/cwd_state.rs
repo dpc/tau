@@ -38,6 +38,8 @@ struct PendingWorkdirResult {
     mutation_id: tau_proto::AgentMetadataMutationId,
     /// Canonical path requested by the setter.
     expected_cwd: PathBuf,
+    /// Whether canonicalization changed the submitted spelling.
+    report_canonical_path: bool,
     /// Argument-free wire/local identity retained until the commit boundary.
     identity: crate::tool_started_identity::ToolStartedIdentity,
     /// Lock wait metadata retained for the terminal event.
@@ -58,6 +60,8 @@ pub(crate) struct CompletedPendingWorkdir {
     pub(crate) lock_wait_duration_seconds: Option<u64>,
     /// Whether the committed path equals the setter's requested canonical path.
     pub(crate) matched_request: bool,
+    /// Whether the canonical path adds information to the setter arguments.
+    pub(crate) report_canonical_path: bool,
     /// Whether cancellation was requested after metadata emission.
     pub(crate) cancel_requested: bool,
 }
@@ -390,6 +394,7 @@ impl CwdState {
         &self,
         agent_id: tau_proto::AgentId,
         expected_cwd: PathBuf,
+        report_canonical_path: bool,
         identity: impl Into<crate::tool_started_identity::ToolStartedIdentity>,
         lock_wait_duration_seconds: Option<u64>,
     ) -> Result<(), Box<crate::tool_started_identity::ToolStartedIdentity>> {
@@ -416,6 +421,7 @@ impl CwdState {
                     .expect("fixed-size mutation id is valid")
                 },
                 expected_cwd,
+                report_canonical_path,
                 identity,
                 lock_wait_duration_seconds,
                 awaiting_echo: false,
@@ -491,6 +497,7 @@ impl CwdState {
             return None;
         }
         Some(CompletedPendingWorkdir {
+            report_canonical_path: pending.report_canonical_path,
             matched_request: pending.expected_cwd == *committed_cwd,
             cancel_requested: pending.cancel_requested,
             identity: pending.identity.clone(),
@@ -515,6 +522,7 @@ impl CwdState {
         }
         Some(CompletedPendingWorkdir {
             matched_request: false,
+            report_canonical_path: pending.report_canonical_path,
             cancel_requested: pending.cancel_requested,
             identity: pending.identity.clone(),
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
@@ -533,6 +541,7 @@ impl CwdState {
             .remove(agent_id)?;
         Some(CompletedPendingWorkdir {
             matched_request: false,
+            report_canonical_path: pending.report_canonical_path,
             cancel_requested: pending.cancel_requested,
             identity: pending.identity,
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
@@ -554,6 +563,7 @@ impl CwdState {
         let pending = pending.remove(&agent_id)?;
         Some(CompletedPendingWorkdir {
             matched_request: false,
+            report_canonical_path: pending.report_canonical_path,
             cancel_requested: pending.cancel_requested,
             identity: pending.identity,
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
@@ -568,6 +578,7 @@ impl CwdState {
             .drain()
             .map(|(_, pending)| CompletedPendingWorkdir {
                 matched_request: false,
+                report_canonical_path: pending.report_canonical_path,
                 cancel_requested: pending.cancel_requested,
                 identity: pending.identity,
                 lock_wait_duration_seconds: pending.lock_wait_duration_seconds,

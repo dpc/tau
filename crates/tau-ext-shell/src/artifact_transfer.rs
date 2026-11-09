@@ -15,7 +15,7 @@ use tau_client::{ArtifactClient, ArtifactDownload, ArtifactUpload};
 use tau_proto::{
     ARTIFACT_MAX_BYTES, ArtifactError, ArtifactRequestId, ArtifactResult, CborValue, Event,
     HarnessOutputMessage, ToolCancelled, ToolError, ToolResult, ToolResultKind, ToolStarted,
-    artifact_reference, parse_artifact_reference,
+    artifact_uri, parse_artifact_reference,
 };
 
 use crate::Output;
@@ -402,7 +402,7 @@ impl ArtifactTransferManager {
                         "kind",
                         if directory { "directory" } else { "file" }.to_owned(),
                     ),
-                    text_entry("artifact", artifact_reference(&descriptor.key)),
+                    text_entry("artifact", artifact_uri(&descriptor.key)),
                 ];
                 report_result(output, &invoke, CborValue::Map(entries));
                 lifecycle.finish();
@@ -827,7 +827,7 @@ fn prepare_import_with_limit(
         (
             invoke.clone(),
             lifecycle.clone(),
-            "invalid artifact reference".to_owned(),
+            "invalid-artifact-reference".to_owned(),
         )
     })?;
     Ok(Command::StartImport {

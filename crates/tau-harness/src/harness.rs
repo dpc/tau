@@ -537,6 +537,59 @@ pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
     .render()
 }
 
+/// Acknowledge durable acceptance without echoing the self target or success.
+fn manual_compaction_acknowledgement(
+    request: &tau_proto::AgentManualCompactionRequested,
+) -> CborValue {
+    let source = request.required_tool_source();
+    let mut fields = vec![
+        (
+            CborValue::Text("request_id".into()),
+            CborValue::Text(request.request_id.to_string()),
+        ),
+        (
+            CborValue::Text("deferred".into()),
+            CborValue::Bool(source.resume_inference),
+        ),
+    ];
+    if source.caller_agent_id != request.target_agent_id {
+        fields.push((
+            CborValue::Text("target_agent_id".into()),
+            CborValue::Text(request.target_agent_id.to_string()),
+        ));
+    }
+    CborValue::Map(fields)
+}
+
+/// Preserve transaction correlation while omitting an implied self target.
+fn manual_compaction_result(
+    request_id: &tau_proto::CompactionRequestId,
+    transaction_id: &tau_proto::CompactionTransactionId,
+    target: Option<&AgentId>,
+) -> CborValue {
+    let mut fields = vec![
+        (
+            CborValue::Text("request_id".into()),
+            CborValue::Text(request_id.to_string()),
+        ),
+        (
+            CborValue::Text("status".into()),
+            CborValue::Text("compacted".into()),
+        ),
+        (
+            CborValue::Text("transaction_id".into()),
+            CborValue::Text(transaction_id.to_string()),
+        ),
+    ];
+    if let Some(target) = target {
+        fields.push((
+            CborValue::Text("target_agent_id".into()),
+            CborValue::Text(target.to_string()),
+        ));
+    }
+    CborValue::Map(fields)
+}
+
 /// Render the bounded typed self-compaction terminal as an internal model
 /// envelope. The typed value remains attached to the durable steer event as
 /// replay and duplicate-delivery authority.

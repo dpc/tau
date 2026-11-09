@@ -97,8 +97,11 @@ pub(super) fn handle_tool_call(
                 call.id.clone(),
                 visible_tool_name,
                 call.tool_type,
-                error,
-                None,
+                "review-release-rejected".to_owned(),
+                Some(CborValue::Map(vec![(
+                    CborValue::Text("output".to_owned()),
+                    CborValue::Text(error),
+                )])),
                 Some(display),
             )
         }

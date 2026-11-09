@@ -270,6 +270,7 @@ fn workdir_discovery_setter_waits_for_installed_ack_even_when_cancelled() {
             .start_pending_workdir_result(
                 agent_id.clone(),
                 PathBuf::from("/tmp"),
+                false,
                 invoke.clone(),
                 None,
             )

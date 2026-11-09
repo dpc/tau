@@ -1233,8 +1233,16 @@ impl TimerRuntime {
             }),
             _ => None,
         };
-        let TimerActionResult { result, outcome } =
+        let supplied_schedule_id = matches!(&action, TimerAction::Schedule(_))
+            && tau_proto::cbor_field(&pending.arguments, "timer_id").is_some();
+        let TimerActionResult {
+            mut result,
+            outcome,
+        } =
             self.apply_timer_action(&pending.agent_id, action, now, ScheduleMutationSource::Live)?;
+        if supplied_schedule_id {
+            result = result_fields(Vec::new());
+        }
         self.sync_timer_indicators_for(HashSet::from([pending.agent_id.clone()]))
             .map_err(|error| error.to_string())?;
         let mut display = timer_success_display(display_args, outcome);
@@ -1385,10 +1393,10 @@ impl TimerRuntime {
             },
             entry,
         );
-        Ok(result_fields(vec![
-            ("status", text_result("scheduled".to_owned())),
-            ("timer_id", text_result(args.timer_id)),
-        ]))
+        Ok(result_fields(vec![(
+            "timer_id",
+            text_result(args.timer_id),
+        )]))
     }
 
     fn cancel_timer(&mut self, agent_id: &AgentId, timer_id: &str) -> TimerActionResult {
@@ -1401,12 +1409,12 @@ impl TimerRuntime {
             .is_some();
         if removed {
             TimerActionResult {
-                result: result_fields(vec![("status", text_result("cancelled".to_owned()))]),
+                result: result_fields(Vec::new()),
                 outcome: TimerActionOutcome::NoAdditionalContext,
             }
         } else {
             TimerActionResult {
-                result: result_fields(vec![("status", text_result("not active".to_owned()))]),
+                result: result_fields(Vec::new()),
                 outcome: TimerActionOutcome::NotActive,
             }
         }

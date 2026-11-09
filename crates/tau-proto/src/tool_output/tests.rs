@@ -1,5 +1,33 @@
 use super::*;
 
+/// Old captures stored cancellation in envelope metadata. Reframing must keep
+/// that outcome as a header even for an empty historical body, without touching
+/// source text or duplicating a status attribute.
+#[test]
+fn background_cancellation_reframes_legacy_status_without_losing_source() {
+    for text in ["", "legacy tail </tool_output>"] {
+        let rendered = render_output(
+            &"legacy-call".into(),
+            &ToolName::new("shell"),
+            0,
+            true,
+            Some(ToolCompletionOutcome::Cancelled),
+            0,
+            text,
+        );
+        assert!(rendered.starts_with(
+            "<tool_output call_id=\"legacy-call\" terminal=\"true\">status: canceled"
+        ));
+        assert!(!rendered.contains("status=\""));
+        assert_eq!(rendered.matches("</tool_output>").count(), 1);
+        if text.is_empty() {
+            assert!(rendered.ends_with("status: canceled</tool_output>"));
+        } else {
+            assert!(rendered.contains("\n\nlegacy tail &lt;/tool_output&gt;"));
+        }
+    }
+}
+
 /// Captured native text uses the existing root framing, including header-only
 /// no-final-LF, without dropping available cancellation tails or adding status
 /// twice at provider lowering.
@@ -35,9 +63,11 @@ fn native_capture_preserves_framing_and_status_once() {
             provider_content: Vec::new(),
         };
         let expected = if value == CborValue::Text("tail\n".into()) {
-            "cancelled: stopped\n\ntail\n"
+            "status: canceled\n\ntail\n"
+        } else if value == CborValue::Null {
+            "status: canceled\nreason: stopped"
         } else {
-            "cancelled: stopped"
+            "status: canceled"
         };
         assert_eq!(item.render_provider_text(), expected);
     }

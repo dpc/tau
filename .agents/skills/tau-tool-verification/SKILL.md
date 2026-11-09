@@ -34,6 +34,7 @@ available.
 
 When `export` and `import` are exposed, verify a small original round trip:
 export a local regular file and confirm only `kind` and `artifact` output headers,
+using plain `tau-artifact:KEY` rather than Markdown autolink brackets,
 with no trailing blank line. Import the returned artifact using each accepted
 spelling: bare 24-digit lowercase hex key (preferred), plain `tau-artifact:KEY`,
 and Markdown `<tau-artifact:KEY>`. Confirm the `kind`, `path`, `size`, and
@@ -102,15 +103,17 @@ Header-only tool results join records with LF and have no final LF, including
 workdir receipts and empty timer lists. Separate headers from a nonempty payload
 with two LF, and preserve the payload's whitespace. Empty status output stays
 empty. Check exact bytes rather than whitespace around a Markdown fence.
-Persistent `workdir` setters return header-only `status: changed` and the
-canonical committed `path`; getters retain their structured availability result.
+Persistent `workdir` setters return an empty result when the committed path matches
+the supplied spelling, or the canonical `path` when canonicalization adds information;
+getters retain their structured availability result.
 Check relative paths and symlinks without changing discovery ordering. Utility
 receipts use the same shared projection: papercut reports distinguish `recorded`
 from successful best-effort `not recorded` with a reason; archive receipts retain
 the generated archive path or explicit `none`. Papercut lists contain
 generation/count/format headers and metadata records only; reads return only a
-Markdown payload. Timer schedules retain the generated timer ID, cancels
-distinguish `cancelled` from `not active`, and lists contain count/format headers
+Markdown payload. Timer schedules retain only a generated timer ID; schedules
+with a supplied ID and successful cancels have empty results. Cancel UI metadata
+still distinguishes `not active`. Lists contain count/format headers
 with optional records. Verify that empty lists have no blank payload region and
 that timer records preserve one-shot, fixed-interval, daily, and awaiting-timezone
 states. Replay must recognize compact timer successes.
@@ -189,10 +192,15 @@ path, query, command, or similar argument when the tool has transformed it into
 new information, such as a canonicalized path that differs from the input.
 
 Harness-owned background-wait interruption is a successful control result, not
-an ordinary completion. It uses closed `internal: true`,
-`outcome: interrupted`, `reason: activating_input`, and
-`mode: exact`, `exact_all`, or `any_background` headers. It does not echo a target ID or
-consume the target result.
+an ordinary completion. It uses `interrupted` with the typed activating input
+(`completion`, `partial_tool_output`, `user`, and so on) and `cause` with the actual
+source call or activation observation. It does not consume the target result.
+Mode remains UI metadata only. Background placeholders use
+`status: running-in-background`. Terminal source appears once, without a redundant
+completion notice or envelope status attribute. Canceled source retains its
+`status: canceled` header, available tail, and unavailable-capture diagnostics.
+Shell timeouts expose `termination_reason: timeout`, not a duplicate `timed_out`.
+Routine watch and directory-lock mutations return no echoed boolean flags.
 
 ### Layered escaping policy
 

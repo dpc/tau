@@ -2392,7 +2392,7 @@ impl Harness {
             .ensure_agent_id_for_agent(agent_id)
             .ok_or_else(|| "sender agent no longer exists".to_owned())?;
         if recipient_id == "user" {
-            return Err("unsupported message recipient: `user`".to_owned());
+            return Err("unsupported-message-recipient".to_owned());
         }
         match self.agent_message_recipient_status(&recipient_id) {
             AgentMessageRecipientStatus::Live => {}

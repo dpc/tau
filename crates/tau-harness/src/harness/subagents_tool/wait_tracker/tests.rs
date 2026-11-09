@@ -1404,9 +1404,7 @@ fn interrupted_wait_receipt_preserves_actual_cause() {
         let reply = replies.pop().unwrap();
         assert_eq!(
             reply_result(reply),
-            CborValue::Text(
-                "outcome: interrupted\nreason: partial_tool_output\ncause: unrelated-source".into()
-            )
+            CborValue::Text("interrupted: partial_tool_output\ncause: unrelated-source".into())
         );
         assert!(tracker.call_is_owned_by(&"target".into(), &owner));
     }
@@ -1444,10 +1442,8 @@ fn interrupted_wait_cause_is_one_safe_provider_header() {
         provider_content: Vec::new(),
     }]);
     let rendered = projected[0].output.render();
-    assert_eq!(rendered.lines().count(), 3, "{rendered}");
-    assert!(
-        rendered.starts_with("outcome: interrupted\nreason: partial_tool_output\ncause: source")
-    );
+    assert_eq!(rendered.lines().count(), 2, "{rendered}");
+    assert!(rendered.starts_with("interrupted: partial_tool_output\ncause: source"));
     assert!(rendered.contains("&lt;/tau_internal&gt;"));
     assert!(!rendered.contains(['\r', '\u{1b}']));
     assert!(!rendered.contains("\nreason: forged"));
@@ -2513,7 +2509,7 @@ fn exact_wait_after_no_arg_consumes_reports_already_consumed() {
         "wait-exact",
         "bg-once",
     )));
-    assert!(message.contains("already consumed"));
+    assert_eq!(message, "already-consumed");
 }
 
 /// Agent teardown must retire completed background payloads instead of making
@@ -2583,7 +2579,7 @@ fn exact_wait_after_background_cancel_returns_cancelled_receipt_once() {
         "bg-cancel",
     ));
     let (message, _) = reply_error(reply);
-    assert_eq!(message, "result for tool call `bg-cancel` already consumed");
+    assert_eq!(message, "already-consumed");
 }
 
 /// Repeated-wait advice augments only timeout results and preserves the typed
@@ -3069,10 +3065,12 @@ fn wait_all_preflight_and_interruption_are_atomic() {
     assert!(invalid.registration.is_none());
     assert!(invalid.suppress_call_id.is_none());
     assert!(invalid.suppress_call_ids.is_empty());
-    assert!(matches!(
-        start_reply(invalid).kind,
-        WaitReplyKind::Error { .. }
-    ));
+    let (message, details) = reply_error(start_reply(invalid));
+    assert_eq!(message, "already-consumed");
+    assert_eq!(
+        cbor_map_text(&details.expect("offending plural member"), "tool_call_id"),
+        Some("b")
+    );
     assert!(tracker.exact_all_reservations.is_empty());
     assert_eq!(
         tracker.oldest_completed_for_owner(&owner),

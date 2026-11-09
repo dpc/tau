@@ -68,10 +68,11 @@ wait-tool delay, so completion before that cut coalesces the prompt and expiry
 interrupts the wait once with the typed activating-input result.
 
 An interrupted background wait remains a successful scheduling result with
-LF-separated `outcome: interrupted`, `reason`, and `cause` headers and no payload.
-The reason names the typed activating input: `partial_tool_output`, `user`,
+LF-separated `interrupted` and `cause` headers and no payload.
+The `interrupted` value names the typed activating input: `partial_tool_output`,
+`user`,
 `agent_message`, `external_message`, `internal_prompt`, `timer`,
-`watch_notification`, `loop_guard`, `background_completion`, or `other`.
+`watch_notification`, `loop_guard`, `completion`, or `other`.
 For tool input, `cause` is the actual activating call ID, not the wait target.
 For non-tool input, `cause` is the existing activation observation ID. When
 historical correlation is missing, `cause` is `unavailable`, not an invented identity.

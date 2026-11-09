@@ -71,14 +71,29 @@ impl ToolFinalOutput {
             crate::ProviderToolResultStatus::Error { .. } => ToolCompletionOutcome::Error,
             crate::ProviderToolResultStatus::Cancelled { .. } => ToolCompletionOutcome::Cancelled,
         };
-        let body_status = if matches!(status, crate::ProviderToolResultStatus::Cancelled { .. })
-            && !matches!(value, CborValue::Null)
-        {
-            crate::ProviderToolResultStatus::Success
+        let output = if let crate::ProviderToolResultStatus::Cancelled { reason } = status {
+            let mut output = BoundedToolOutput {
+                prefix: String::new(),
+                tail: String::new(),
+                total: 0,
+                prefix_closed: false,
+            };
+            if matches!(value, CborValue::Null) {
+                use std::fmt::Write as _;
+                output.write_str("reason: ").expect("bounded sink");
+                crate::write_provider_tool_header_text(reason, &mut output).expect("bounded sink");
+            } else {
+                crate::write_provider_tool_result_text(
+                    value,
+                    crate::ProviderToolResultStatus::Success,
+                    &mut output,
+                )
+                .expect("bounded sink");
+            }
+            output
         } else {
-            status
+            BoundedToolOutput::render(value, status)
         };
-        let output = BoundedToolOutput::render(value, body_status);
         let (text, omitted_bytes) = output.finish();
         Self {
             outcome: Some(outcome),
@@ -289,22 +304,25 @@ pub fn render_output(
         ("call_id", call_id.to_string()),
         ("terminal", terminal.to_string()),
     ];
-    if terminal && let Some(outcome) = outcome {
-        attributes.push((
-            "status",
-            match outcome {
-                ToolCompletionOutcome::Completed => "completed",
-                ToolCompletionOutcome::Error => "error",
-                ToolCompletionOutcome::Cancelled => "canceled",
-            }
-            .to_owned(),
-        ));
-    }
     if omitted_bytes != 0 {
         attributes.push(("omitted_bytes", omitted_bytes.to_string()));
     }
+    // Cancellation status was historically supplied by the envelope, not the
+    // stored capture. Project it as a header for old captures as well as new
+    // available-empty and unavailable-capture terminals.
+    let cancelled = (terminal && outcome == Some(ToolCompletionOutcome::Cancelled)).then(|| {
+        crate::ToolResponse {
+            raw: CborValue::Null,
+            headers: vec![crate::ToolResponseHeader {
+                key: "status".into(),
+                value: "canceled".into(),
+            }],
+            body: text.to_owned(),
+        }
+        .render()
+    });
     crate::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE
-        .render_attributed(&attributes, text)
+        .render_attributed(&attributes, cancelled.as_deref().unwrap_or(text))
         .expect("tool-output attributes follow the shared registry")
 }
 

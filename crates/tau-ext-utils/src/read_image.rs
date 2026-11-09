@@ -9,7 +9,7 @@ use image::{
 };
 use tau_proto::{
     ArtifactKey, CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart,
-    ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus, artifact_reference, artifact_uri,
+    ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus, artifact_uri,
     parse_artifact_reference,
 };
 
@@ -244,12 +244,10 @@ impl ReadImageRequest {
                 MAX_SOURCE_BYTES
             ));
         }
-        let display_reference = artifact_reference(&self.key);
         let mode = self.mode;
         let requested_region = self.requested_region;
         let _permit = DecodePermit::acquire();
-        let prepared = prepare_image(bytes, mode, requested_region)
-            .map_err(|message| format!("{display_reference}: {message}"))?;
+        let prepared = prepare_image(bytes, mode, requested_region)?;
         let image = prepared.content;
         let byte_count = image.data.len();
         let mut metadata = vec![(

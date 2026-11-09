@@ -1299,7 +1299,7 @@ impl WaitTracker {
                 let reply = wait_error_reply(
                     wait.call_id.clone(),
                     wait.tool_name.clone(),
-                    format!("result for tool call `{target}` already consumed"),
+                    "already-consumed".to_owned(),
                     None,
                 )
                 .with_source_display(source_tool_name, None)
@@ -1427,8 +1427,11 @@ impl WaitTracker {
                         wait_error_reply(
                             wait.call_id.clone(),
                             wait.tool_name.clone(),
-                            format!("result for tool call `{target}` already consumed"),
-                            None,
+                            "already-consumed".to_owned(),
+                            Some(CborValue::Map(vec![(
+                                CborValue::Text("tool_call_id".to_owned()),
+                                CborValue::Text(target.to_string()),
+                            )])),
                         )
                         .with_source_display(self.call_tool_names.get(target).cloned(), None)
                         .with_settlement(
@@ -3384,7 +3387,7 @@ fn interrupted_wait_reply(
         call_id,
         tool_name,
         source,
-        CborValue::Text("outcome: interrupted\nreason: other\ncause: unavailable".to_owned()),
+        CborValue::Text("interrupted: other\ncause: unavailable".to_owned()),
         None,
     );
     if let WaitReplyKind::Result {

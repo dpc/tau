@@ -49,7 +49,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     let sender_id = AgentId::parse("peer-sender")?;
     let message = "peer navigation activation".to_owned();
     let model_input = format!(
-        "<peer_message>\nsender_session: {sender_session}\nsender_agent: {sender_id}\n\n{message}</peer_message>"
+        "<peer_message sender_session=\"{sender_session}\" sender_agent=\"{sender_id}\">{message}</peer_message>"
     );
     let scenario = ScenarioV2::new(
         "external-message-first-agent-navigation",
@@ -170,7 +170,7 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
     let sender_id = AgentId::parse("peer-tool-sender")?;
     let message = "run the handover verification tool".to_owned();
     let model_input = format!(
-        "<peer_message>\nsender_session: {sender_session}\nsender_agent: {sender_id}\n\n{message}</peer_message>"
+        "<peer_message sender_session=\"{sender_session}\" sender_agent=\"{sender_id}\">{message}</peer_message>"
     );
     let call_id = ToolCallId::from(format!("peer-handover-tool-{}", std::process::id()));
     let scenario = ScenarioV2::new(
@@ -184,7 +184,7 @@ fn external_message_auto_start_dispatches_tool_without_ui_prompt()
                 },
                 ScenarioActionV2::DummyToolResult {
                     user_text: format!(
-                        "<peer_message>\nsender_session: {sender_session}\nsender_agent: {sender_id}\n\n{message}</peer_message>"
+                        "<peer_message sender_session=\"{sender_session}\" sender_agent=\"{sender_id}\">{message}</peer_message>"
                     ),
                     call_id: call_id.clone(),
                     response: "handover verification complete".to_owned(),
