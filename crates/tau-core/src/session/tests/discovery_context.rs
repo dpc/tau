@@ -14,6 +14,7 @@ fn discovery_delivery(identity: &str, content: &str) -> tau_proto::DiscoveryCont
     tau_proto::DiscoveryContextDelivery {
         scope: vec![item.reference()],
         items: vec![item],
+        updated: Vec::new(),
     }
 }
 
@@ -42,6 +43,11 @@ fn discovery_receipts_follow_live_replay_and_compaction_suffix() {
             tree.discovery_context_receipts(tree.head()),
             cold.discovery_context_receipts(cold.head()),
         );
+        assert_eq!(
+            tree.active_provider_window(tree.head()).transcript,
+            cold.active_provider_window(cold.head()).transcript,
+            "replay preserves the rendered envelopes as well as receipt authority",
+        );
     };
     let first = discovery_delivery("agents:/first/AGENTS.md", "first");
     append(
@@ -56,7 +62,8 @@ fn discovery_receipts_follow_live_replay_and_compaction_suffix() {
     );
     let first_cut = AgentHead::Node(live.head().expect("initial"));
     assert_eq!(live.discovery_context_receipts(live.head()), vec![&first]);
-    let second = discovery_delivery("agents:/second/AGENTS.md", "second");
+    let mut second = discovery_delivery("agents:/first/AGENTS.md", "second");
+    second.updated.push("agents:/first/AGENTS.md".to_owned());
     append(
         &mut live,
         Event::ProviderResponseFinished(tool_calling_response(

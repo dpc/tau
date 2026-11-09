@@ -22,23 +22,30 @@ impl Harness {
             .iter()
             .map(tau_proto::DiscoveryContextItem::reference)
             .collect::<Vec<_>>();
-        let items = current
-            .iter()
-            .filter(|item| {
-                !receipts
-                    .iter()
-                    .any(|receipt| receipt.items.iter().any(|seen| seen == *item))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if items.is_empty()
-            && receipts
-                .last()
-                .is_some_and(|receipt| receipt.scope == scope)
-        {
+        let mut items = Vec::new();
+        let mut updated = Vec::new();
+        for item in current {
+            let previous = receipts
+                .iter()
+                .rev()
+                .flat_map(|receipt| receipt.items.iter())
+                .find(|seen| seen.identity == item.identity);
+            if previous == Some(item) {
+                continue;
+            }
+            if previous.is_some() {
+                updated.push(item.identity.clone());
+            }
+            items.push(item.clone());
+        }
+        if items.is_empty() {
             return None;
         }
-        Some(tau_proto::DiscoveryContextDelivery { scope, items })
+        Some(tau_proto::DiscoveryContextDelivery {
+            scope,
+            items,
+            updated,
+        })
     }
 
     /// Append passive guidance immediately before an already-authorized

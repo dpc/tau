@@ -220,6 +220,7 @@ impl Harness {
                                     .map(tau_proto::DiscoveryContextItem::reference)
                                     .collect(),
                                 items,
+                                updated: Vec::new(),
                             }
                         });
                     self.send_rendered_prompt(&connection_id, request_id, discovery, result);

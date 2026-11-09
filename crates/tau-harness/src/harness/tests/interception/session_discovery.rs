@@ -783,6 +783,7 @@ fn agents_display_paths_preserve_canonical_identity_and_prompt() {
             .map(tau_proto::DiscoveryContextItem::reference)
             .collect(),
         items,
+        updated: Vec::new(),
     }
     .render();
     assert!(prompt.contains(&resolved.display().to_string()));

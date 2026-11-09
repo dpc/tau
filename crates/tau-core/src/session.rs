@@ -3935,15 +3935,31 @@ impl AgentTree {
                 }
                 self.record_context_entry(
                     parent,
-                    Self::user_text_input_entry(
-                        injected.discovery_context.as_ref().map_or_else(
-                            || injected.text.clone(),
-                            tau_proto::DiscoveryContextDelivery::render,
-                        ),
-                        &[],
-                        None,
-                        false,
-                        injected.inference_activation,
+                    injected.discovery_context.as_ref().map_or_else(
+                        || {
+                            Self::user_text_input_entry(
+                                injected.text.clone(),
+                                &[],
+                                None,
+                                false,
+                                injected.inference_activation,
+                            )
+                        },
+                        |delivery| AgentEntry::UserInput {
+                            items: vec![ContextItem::Message(MessageItem {
+                                role: ContextRole::User,
+                                content: delivery
+                                    .render_envelopes()
+                                    .into_iter()
+                                    .map(|text| ContentPart::Text { text })
+                                    .collect(),
+                                phase: None,
+                                responses_raw_json: None,
+                            })],
+                            submission_source: None,
+                            delayed: false,
+                            inference_activation: false,
+                        },
                     ),
                     durable_event_seq,
                     false,

@@ -69,6 +69,7 @@ fn agents_context_is_injected_when_agent_is_created() {
                             .map(tau_proto::DiscoveryContextItem::reference)
                             .collect(),
                         items: context.discovery_items.clone(),
+                        updated: Vec::new(),
                     }
                     .render(),
                 )
@@ -76,9 +77,9 @@ fn agents_context_is_injected_when_agent_is_created() {
             _ => None,
         })
         .expect("expected AGENTS.md initialization context");
-    assert!(bootstrap.contains("<discovery>"));
-    assert!(bootstrap.contains("agents:/repo/pkg/AGENTS.md"));
-    assert!(bootstrap.contains("agents:/repo/AGENTS.md"));
+    assert!(bootstrap.contains("<agents_md "));
+    assert!(bootstrap.contains("path=\"/repo/pkg/AGENTS.md\""));
+    assert!(bootstrap.contains("path=\"/repo/AGENTS.md\""));
     let root_pos = bootstrap.find("root rule").expect("root rule");
     let pkg_pos = bootstrap.find("package rule").expect("package rule");
     assert!(

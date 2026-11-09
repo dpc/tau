@@ -195,8 +195,12 @@ machine-specific files.
 Agent initialization uses remembered/inherited/restored cwd. A persistent setter,
 even to the same path, refreshes that instance's project discovery; getters and
 call-local overrides do not. Dependent inference and `:skill` expansion wait for
-installation. New instructions arrive as `tau_discovery` after tool results,
-without a separate turn. Scan failure removes stale project input but preserves
+installation. After tool results, the harness delivers each new or updated
+instruction file in a separate `agents_md` envelope and groups catalog entries
+in one `skills` envelope, without a separate turn. It compares each item with its
+latest delivered content: changed or reverted items carry full content and
+updated markers; unchanged returns and removals are silent. Scan failure removes
+stale project input but preserves
 user/other-source input; use an absolute or same-path setter to repair it.
 
 Skill metadata supports `user-invocable`, `disable-model-invocation`, and

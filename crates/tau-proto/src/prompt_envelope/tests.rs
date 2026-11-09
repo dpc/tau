@@ -93,6 +93,8 @@ fn registered_families_have_unique_complete_lexical_contracts() {
         &[
             super::EXTENSION_OUTPUT_PAYLOAD_ENVELOPE,
             super::DISCOVERY_PAYLOAD_ENVELOPE,
+            super::SKILLS_PAYLOAD_ENVELOPE,
+            super::AGENTS_MD_PAYLOAD_ENVELOPE,
             super::SEMANTIC_PAYLOAD_ENVELOPES[0],
             super::SEMANTIC_PAYLOAD_ENVELOPES[1],
             super::SEMANTIC_PAYLOAD_ENVELOPES[2],

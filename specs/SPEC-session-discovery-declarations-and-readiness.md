@@ -96,17 +96,19 @@ canonical workdir mutations explicitly replace only their bound source.
 Skill advertisements and AGENTS.md instructions never enter system/developer
 templates or a replaceable provider prefix. Before the first already-authorized
 inference, the harness appends a passive canonical `agent.user_message_injected`
-with typed discovery content, rendered as a separate user-role `tau_discovery`
-envelope.
+with typed discovery content, rendered in user-role context as one `skills`
+envelope for advertisements and a separate `agents_md` envelope per instruction
+file.
 The empty `text` field avoids storing the rendered body twice. Discovery alone
 does not activate inference or start an outer turn.
 
 Each item has a kind-qualified identity (skill name or canonical AGENTS.md path)
-and a digest of its exact model-facing content. Each delivery lists the complete
-current scope and includes bodies only for exact versions absent from surviving
-canonical delivery receipts in the selected context. A→B→A and content
-reversion reactivate retained versions by reference without repeating their
-bodies. Removal changes current scope; earlier instructions remain history.
+and a digest of its exact model-facing content. Deliveries include only items
+that are new or whose content differs from their latest delivery across surviving
+cumulative receipts in the selected context. Returning to an unchanged item omits
+it even after visiting other directories. Changed or reverted content is delivered
+in full with an updated marker. Removal alone causes no injection.
+No visible scope inventory, versions, or discovery wrapper is rendered.
 Role filtering, frontmatter stripping, collision selection, and advertisement
 truncation happen before versioning. Advertisements never include loaded skill
 bodies.

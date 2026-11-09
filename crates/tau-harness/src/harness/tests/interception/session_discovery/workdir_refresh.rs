@@ -718,6 +718,19 @@ pub(super) fn refresh_reply(
     refresh_id: u64,
     skills: Vec<tau_proto::DiscoverySkillCandidate>,
 ) {
+    refresh_reply_with_agents(h, agent, source, refresh_id, skills, Vec::new());
+}
+
+/// Admit a correlated refresh with instruction files as well as catalog
+/// entries.
+pub(super) fn refresh_reply_with_agents(
+    h: &mut Harness,
+    agent: &tau_proto::AgentId,
+    source: &str,
+    refresh_id: u64,
+    skills: Vec<tau_proto::DiscoverySkillCandidate>,
+    agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
+) {
     let initialization_id = h.prompt_coordination.context_discovery.pending_agents[agent]
         .initialization_id
         .clone();
@@ -732,7 +745,7 @@ pub(super) fn refresh_reply(
             discovery_error: None,
             frontmatter_diagnostics: Vec::new(),
             skills,
-            agents_files: Vec::new(),
+            agents_files,
         },
     );
 }

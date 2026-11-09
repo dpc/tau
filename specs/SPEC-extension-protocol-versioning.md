@@ -8,6 +8,12 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 23.1 adds optional updated-item identities to discovery deliveries.
+Older peers ignore the markers; newer peers default their absence to an empty
+list. Mixed versions retain workable discovery behavior without changing journal
+framing, activation, or receipt authority. This revision requires no major version
+bump and does not publish the SDK or activate a runtime.
+
 Protocol 23.0 is a major revision that adds the harness-owned `NativeCapturedOutput`
 variant to a closed presentation enum. Opted-in tools that complete in the
 foreground deliver accepted chunks and the final tail through their native tool

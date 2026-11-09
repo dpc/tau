@@ -56,17 +56,7 @@ impl SemanticEnvelope {
     /// Escape the complete body and frame it in exactly one semantic family.
     #[must_use]
     pub fn render(self, body: &str) -> String {
-        let family = self.family();
-        let PayloadEnvelopeOpening::Fixed(open) = family.opening else {
-            return family
-                .render_attributed(&[], body)
-                .expect("empty semantic attributes follow the shared registry");
-        };
-        format!(
-            "{open}{}{close}",
-            family.escape_body(body),
-            close = family.exact_close
-        )
+        self.family().render(body)
     }
 
     /// Render notice metadata as registered attributes, not tool-output
@@ -265,6 +255,22 @@ pub struct RegisteredPayloadEnvelope {
 }
 
 impl RegisteredPayloadEnvelope {
+    /// Frame a body using this family's registered delimiters and exact-close
+    /// escaping, without attributes.
+    #[must_use]
+    pub fn render(self, body: &str) -> String {
+        match self.opening {
+            PayloadEnvelopeOpening::Fixed(open) => format!(
+                "{open}{}{close}",
+                self.escape_body(body),
+                close = self.exact_close,
+            ),
+            PayloadEnvelopeOpening::Attributed(_) => self
+                .render_attributed(&[], body)
+                .expect("empty attributes follow the shared registry"),
+        }
+    }
+
     /// Neutralize this family's exact close while preserving every other byte.
     #[must_use]
     pub fn escape_body<'a>(self, body: &'a str) -> Cow<'a, str> {
@@ -518,12 +524,28 @@ pub const DISCOVERY_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = semantic_famil
     "&lt;/discovery&gt;",
 );
 
+/// Catalog advertisements grouped into one discovery envelope.
+pub const SKILLS_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope =
+    semantic_family("skills", "<skills>", "</skills>", "&lt;/skills&gt;");
+
+/// One discovered instruction file, optionally replacing earlier instructions.
+pub const AGENTS_MD_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
+    name: "agents_md",
+    opening: PayloadEnvelopeOpening::Attributed("<agents_md "),
+    ordered_attributes: &["path", "updated"],
+    exact_close: "</agents_md>",
+    visible_close: "&lt;/agents_md&gt;",
+    carrier: PayloadEnvelopeCarrier::GenericUserText,
+};
+
 /// Return every registered top-level model-facing payload-envelope family.
 #[must_use]
 pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelope] {
     &[
         EXTENSION_OUTPUT_PAYLOAD_ENVELOPE,
         DISCOVERY_PAYLOAD_ENVELOPE,
+        SKILLS_PAYLOAD_ENVELOPE,
+        AGENTS_MD_PAYLOAD_ENVELOPE,
         SEMANTIC_PAYLOAD_ENVELOPES[0],
         SEMANTIC_PAYLOAD_ENVELOPES[1],
         SEMANTIC_PAYLOAD_ENVELOPES[2],

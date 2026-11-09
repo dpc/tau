@@ -11,6 +11,7 @@ pub(super) fn expected_message() -> String {
     tau_proto::DiscoveryContextDelivery {
         scope: vec![item.reference()],
         items: vec![item],
+        updated: Vec::new(),
     }
     .render()
 }

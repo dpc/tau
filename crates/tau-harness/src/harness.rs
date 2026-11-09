@@ -2202,7 +2202,9 @@ where
                             // guidance.
                             if matches!(message.content.first(), Some(ContentPart::Text { text })
                                 if tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
-                                    || tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text))
+                                    || tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                                    || tau_proto::SKILLS_PAYLOAD_ENVELOPE.matches_whole(text)
+                                    || tau_proto::AGENTS_MD_PAYLOAD_ENVELOPE.matches_whole(text))
                             {
                                 return None;
                             }

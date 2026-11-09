@@ -4771,6 +4771,15 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
         .context
         .flatten()
         .into_iter()
+        // Closed fixtures match task text separately from lazy discovery.
+        // This lexical check is not runtime provenance or authority.
+        .filter(|item| !matches!(item,
+            ContextItem::Message(message) if matches!(message.content.first(),
+                Some(ContentPart::Text { text }) if tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                    || tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                    || tau_proto::SKILLS_PAYLOAD_ENVELOPE.matches_whole(text)
+                    || tau_proto::AGENTS_MD_PAYLOAD_ENVELOPE.matches_whole(text))
+        ))
         .filter_map(|item| match item {
             ContextItem::Message(message) if message.role == ContextRole::User => Some(
                 message
@@ -4787,12 +4796,6 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
                     .collect::<String>(),
             ),
             _ => None,
-        })
-        // Closed fixtures match task text separately from the harness's lazy
-        // discovery messages. This is not runtime provenance or authority.
-        .filter(|text| {
-            !tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
-                && !tau_proto::TAU_DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
         })
         .filter(|text| !tau_proto::TAU_TOOL_OUTPUT_PAYLOAD_ENVELOPE.matches_whole(text))
         .collect()

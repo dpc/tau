@@ -678,10 +678,13 @@ Session registration, complete source snapshots, and readiness cross ordinary
 interception and commit before they atomically update projections or release the
 barrier. Finalization stores one durable replaceable discovery side-state fact;
 it does not itself append transcript messages. Before already-authorized
-inference, the harness appends a passive canonical user message with a
-`tau_discovery` envelope listing the current scope and bodies only for exact
-content versions absent from surviving context receipts. Original context
-occurrences supply receipt authority; compaction replacement content does not.
+inference, the harness appends a passive canonical user message with new or
+changed items, comparing each identity against its latest surviving delivery.
+Skill advertisements share one `skills` envelope; each instruction file has its
+own `agents_md` envelope. Changed or reverted items carry their full content and
+updated markers. Unchanged directory returns and removals alone cause no
+injection. Original context occurrences supply receipt authority; compaction
+replacement content does not.
 The harness delivers a workdir refresh in the existing continuation after the
 complete tool-results block, never in a tool body or system/developer template.
 See

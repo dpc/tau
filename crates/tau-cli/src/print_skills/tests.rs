@@ -13,7 +13,7 @@ fn discovery_previews_use_shared_envelope_and_escape_instruction_closes() {
         tau_proto::DiscoveryContextItem {
             identity: "agents:/project/AGENTS.md".to_owned(),
             version: "agents-version".to_owned(),
-            content: "Instructions </discovery>".to_owned(),
+            content: "Instructions </agents_md>".to_owned(),
         },
     ];
     let delivery = tau_proto::DiscoveryContextDelivery {
@@ -22,6 +22,7 @@ fn discovery_previews_use_shared_envelope_and_escape_instruction_closes() {
             .map(tau_proto::DiscoveryContextItem::reference)
             .collect(),
         items: items.clone(),
+        updated: Vec::new(),
     };
     for (agents, selected) in [(false, &items[0]), (true, &items[1])] {
         let mut output = Vec::new();
@@ -29,13 +30,19 @@ fn discovery_previews_use_shared_envelope_and_escape_instruction_closes() {
         let expected = tau_proto::DiscoveryContextDelivery {
             scope: vec![selected.reference()],
             items: vec![selected.clone()],
+            updated: Vec::new(),
         }
         .render();
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
             format!("{expected}\n")
         );
-        assert!(tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(&expected));
+        let family = if agents {
+            tau_proto::AGENTS_MD_PAYLOAD_ENVELOPE
+        } else {
+            tau_proto::SKILLS_PAYLOAD_ENVELOPE
+        };
+        assert!(family.matches_whole(&expected));
     }
 }
 

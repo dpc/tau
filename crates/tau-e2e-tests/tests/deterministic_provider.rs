@@ -1741,7 +1741,7 @@ fn assert_restart_context(context: &tau_proto::PromptContext, h: &str, r: &str, 
     assert!(
         matches!(discovery_item.content.as_slice(),
             [tau_proto::ContentPart::Text { text }]
-                if tau_proto::DISCOVERY_PAYLOAD_ENVELOPE.matches_whole(text)
+                if tau_proto::SKILLS_PAYLOAD_ENVELOPE.matches_whole(text)
         ),
         "restart must preserve exactly the original discovery occurrence"
     );

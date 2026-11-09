@@ -1,5 +1,8 @@
 //! Model-facing discovery snapshots and canonical delivery receipts.
 
+#[cfg(test)]
+mod tests;
+
 use serde::{Deserialize, Serialize};
 
 /// A separately deduplicated piece of discovered guidance.
@@ -38,42 +41,54 @@ impl DiscoveryContextItem {
 pub struct DiscoveryContextDelivery {
     /// Complete current applicability, including references to earlier text.
     pub scope: Vec<DiscoveryContextVersion>,
-    /// Versions not already represented in surviving canonical context.
+    /// New or changed items relative to their latest surviving delivery.
     pub items: Vec<DiscoveryContextItem>,
+    /// Item identities that replace previously delivered content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updated: Vec<String>,
 }
 
 impl DiscoveryContextDelivery {
     /// Render initial and post-workdir user guidance identically.
     #[must_use]
     pub fn render(&self) -> String {
+        self.render_envelopes().join("\n")
+    }
+
+    /// Render each top-level family separately for generic user text carriers.
+    #[must_use]
+    pub fn render_envelopes(&self) -> Vec<String> {
         use std::fmt::Write as _;
 
-        let mut body = String::from(
-            "Discovery context\n\n\
-             This is the current applicable skill catalog and AGENTS.md guidance. \
-             Earlier versions remain history; only the versions listed below are \
-             currently applicable. References without new text refer to the same \
-             identity and version already delivered in this context. \
-             AGENTS.md instructions are ordered broadest to most specific; \
-             more specific files usually override broader ones.\n\n\
-             Current scope:\n",
-        );
-        for item in &self.scope {
-            let _ = writeln!(body, "- {} (version {})", item.identity, item.version);
+        let mut envelopes = Vec::new();
+        let mut skills = String::from("\n");
+        for item in &self.items {
+            let updated = self.updated.contains(&item.identity);
+            if let Some(name) = item.identity.strip_prefix("skill:") {
+                let marker = if updated { " (updated)" } else { "" };
+                let _ = writeln!(skills, "* `{name}`{marker} - {}", item.content);
+            }
         }
-        if self.scope.is_empty() {
-            body.push_str("- No advertised skills or AGENTS.md instructions.\n");
+        if skills.len() > 1 {
+            envelopes.push(crate::SKILLS_PAYLOAD_ENVELOPE.render(&skills));
         }
         for item in &self.items {
-            let _ = write!(
-                body,
-                "\n## {} (version {})\n\n{}\n",
-                item.identity, item.version, item.content
-            );
+            if let Some(path) = item.identity.strip_prefix("agents:") {
+                let mut attributes = vec![("path", crate::visible_escape_metadata(path))];
+                if self.updated.contains(&item.identity) {
+                    attributes.push(("updated", "true".to_owned()));
+                }
+                let mut body = format!("\n{}", item.content);
+                if !body.ends_with('\n') {
+                    body.push('\n');
+                }
+                envelopes.push(
+                    crate::AGENTS_MD_PAYLOAD_ENVELOPE
+                        .render_attributed(&attributes, &body)
+                        .expect("discovery attributes follow the shared registry"),
+                );
+            }
         }
-        format!(
-            "<discovery>\n{}</discovery>",
-            crate::DISCOVERY_PAYLOAD_ENVELOPE.escape_body(&body)
-        )
+        envelopes
     }
 }

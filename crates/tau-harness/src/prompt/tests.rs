@@ -1181,6 +1181,7 @@ fn render_effective_prompt_wraps_system_and_agents_context() {
             .map(tau_proto::DiscoveryContextItem::reference)
             .collect(),
         items,
+        updated: Vec::new(),
     }
     .render();
 
@@ -1188,8 +1189,8 @@ fn render_effective_prompt_wraps_system_and_agents_context() {
 
     assert!(prompt.starts_with("<message role=\"system\">\nSystem instructions\n</message>\n"));
     assert!(prompt.contains("<message role=\"user\" source=\"discovery\">"));
-    assert_eq!(prompt.matches("<discovery>").count(), 1);
-    assert!(prompt.contains("agents:/repo/AGENTS.md"));
+    assert_eq!(prompt.matches("<agents_md ").count(), 1);
+    assert!(prompt.contains("path=\"/repo/AGENTS.md\""));
     assert!(prompt.contains("Read the docs."));
 }
 

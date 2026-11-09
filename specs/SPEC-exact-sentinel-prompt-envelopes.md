@@ -32,7 +32,8 @@ model-facing payload families:
 | --- | --- | --- |
 | `user` | Generic user-role text | Fixed `source="ui"`, then optional `delayed="true"`; direct Tau user-channel input |
 | `extension_output` | Generic user-role text | `publisher`, `operation_id`; passive configured-extension output |
-| `discovery` | Generic user-role text | Fieldless; typed current discovery scope and content versions absent from surviving context receipts |
+| `skills` | Generic user-role text | Fieldless; one catalog list containing only new or latest-content-changed advertisements, with updated markers for changes |
+| `agents_md` | Generic user-role text | `path`, optional `updated`; full instructions from one new or latest-content-changed file, including reverted content |
 | `agent_update` | Generic user-role text | Typed agent and status/task attributes; observed prompt/response or long-wait events retain a distinct `event` attribute |
 | `agent_message`, `peer_message`, `cli_message` | Generic user-role text | Source-specific identity and reply-policy attributes; exact-close-framed body |
 | `agent_context`, `tool_completion`, `compaction_result` | Generic user-role text | Fieldless; bootstrap or typed lifecycle notice, never a second tool payload |
@@ -45,8 +46,9 @@ model-facing payload families:
 | `tool_output` | Generic user-role text | `call_id`, `terminal`, then nonzero `omitted_bytes`; status stays in tool-output headers |
 
 New injected-user projections use unprefixed, meaning-specific names.
-`tau_internal`, `tau_extension_output`, `tau_discovery`, and
-`tau_background_result` remain registered for historical recognition.
+`discovery`, `tau_internal`, `tau_extension_output`, `tau_discovery`, and
+`tau_background_result` remain registered for historical recognition; new discovery
+uses `skills` and `agents_md`.
 `tau_web_content` remains registered only for historical recognition and scanning.
 New typed web results use canonical headers and payload through
 [`ToolResponse`](../crates/tau-harness/specs/SPEC-context-output-formatting.md#canonical-tool-text),

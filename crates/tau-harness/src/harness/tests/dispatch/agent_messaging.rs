@@ -3622,11 +3622,14 @@ fn rendered_prompt_with_seeded_agents_md_includes_discovery_preview_without_infe
     let delivery = result.discovery_context.expect("initial discovery preview");
     assert!(prompt.contains(&delivery.render()));
     assert!(
-        prompt.contains("`<discovery>`"),
+        prompt.contains("`<agents_md>`"),
         "preview includes provenance guidance"
     );
     assert_eq!(
-        prompt.lines().filter(|line| *line == "<discovery>").count(),
+        prompt
+            .lines()
+            .filter(|line| line.starts_with("<agents_md "))
+            .count(),
         1
     );
     assert!(prompt.contains("seeded AGENTS instructions"));
