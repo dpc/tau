@@ -57,21 +57,33 @@ expiration, or automatic deletion. This externally meaningful persistence
 choice was approved under
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
-`tau serve --session ID --create|--existing|--create-or-existing` is the
+`tau serve [--session ID] --create|--existing|--create-or-existing` is the
 supported foreground owner for one fixed session. Exactly one mode is mandatory.
-`--create` atomically
-requires complete session-directory absence; valid state and every partial,
-malformed, locked, or diagnostic-only directory fail unchanged.
-`--existing` retains strict resume: missing, locked, or malformed state fails
-without creation or repair. `--create-or-existing` atomically claims a completely
-absent canonical path or strictly resumes valid exact-ID state; malformed,
-partial (including torn journal tails), symlinked, or locked state fails
-unchanged without deletion, repair, truncation, replacement, or overwrite.
-`--create` likewise leaves every rejected pre-existing directory unchanged.
-All modes start no UI, hold the session-keyed runtime claim, expose the
-session-keyed socket for `tau session list` and `tau attach ID`, and remain
-alive across zero or many UI connections. Every daemon incarnation is
-permanently bound to its construction session.
+Only `--create` allows an omitted ID. It uses the ordinary project-basename plus
+six-base36-character allocator at the process workdir, then follows the same
+exclusive creation path; it never attaches to a colliding ID.
+
+`--create` atomically requires complete session-directory absence. It leaves
+valid state and partial, malformed, locked, or diagnostic-only directories
+unchanged on failure. `--existing` strictly resumes an existing session: missing,
+locked, or malformed state fails without creation or repair. `--create-or-existing`
+atomically claims a completely absent canonical path or strictly resumes valid
+exact-ID state. Malformed, partial (including torn journal tails), symlinked, or
+locked state fails unchanged, without deletion, repair, truncation, replacement,
+or overwrite.
+
+All modes start no UI, hold the session-keyed runtime claim, and expose the
+session-keyed socket for `tau session list` and `tau attach ID`. The daemon stays
+alive across zero or many UI connections, and each incarnation remains bound to
+its construction session.
+
+The opt-in `--ready-json` handoff writes and flushes exactly one stdout JSON line
+with `session_id` and canonical `project_root` after startup readiness and listener
+publication. Startup readiness does not mean bootstrap completion. The line is
+bounded to 64 KiB including its newline; unrepresentable identity paths fail
+before startup publication, and output errors abort startup. Diagnostics remain on
+stderr, and extension stdout remains private protocol transport. The handoff
+grants no filesystem mounts or inherited descriptors.
 The explicit `tau session list` command prints every exact-admitted compatible
 responder even when another contended claim is incompatible or unresponsive,
 then warns once on stderr with the number of omitted claims. Its plain and JSON

@@ -25,6 +25,8 @@ use tau_proto::{
 
 use crate::extension_stderr_mirror::ExtensionStderrMirror;
 
+mod ready_record;
+
 /// Validated durable identity for one serve bootstrap generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapId(String);
@@ -1687,6 +1689,8 @@ fn next_render_request_id(prefix: &str) -> String {
 
 /// Runtime-path identity and optional initial-client transport for one daemon.
 struct RuntimeHarnessLaunch<'a> {
+    /// Whether foreground startup emits its identity on stdout after readiness.
+    ready_json: bool,
     /// Initial UI accepted directly over inherited stdio when present.
     initial_client: Option<InitialClient>,
     /// Best-effort startup error transport for the initial UI.
@@ -1719,6 +1723,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     launch: RuntimeHarnessLaunch<'_>,
 ) -> Result<(), HarnessError> {
     let RuntimeHarnessLaunch {
+        ready_json,
         initial_client,
         mut initial_client_error_stream,
         introduction_notice_eligible,
@@ -1734,6 +1739,9 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
     let session_id = tau_proto::SessionId::parse(eager_session_id)
         .map_err(|error| HarnessError::Participant(error.to_string()))?;
+    let ready_record = ready_json
+        .then(|| ready_record::ReadyRecord::encode(&session_id, &project_root))
+        .transpose()?;
     let (mut session_claim, listener) =
         claim_session_listener(&project_root, &session_id, &mut initial_client_error_stream)?;
     let socket_path = session_claim.socket_path().to_path_buf();
@@ -1808,6 +1816,14 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         },
         None => None,
     };
+    if let Some(record) = ready_record
+        && let Err(error) = record.write_to(io::stdout().lock())
+    {
+        drop(forwarder);
+        drop(listener_handle);
+        let _ = harness.shutdown();
+        return Err(error.into());
+    }
     if introduction_notice_eligible {
         harness.send_introduction_notice_to_initial_client(initial_client_id.as_ref());
     }
@@ -1920,6 +1936,8 @@ pub fn run_component_with_internal_tools_and_extension_cli_overrides(
 pub struct FixedSessionServeOptions<'a> {
     /// Exact session to create or resume and pin.
     pub session_id: &'a tau_proto::SessionId,
+    /// Emit one bounded, flushed identity JSON line on stdout after readiness.
+    pub ready_json: bool,
     /// Ordered selected configuration profiles.
     pub profile_selection: Option<&'a tau_config::settings::ProfileSelection>,
     /// Optional startup role override.
@@ -2000,6 +2018,7 @@ fn run_fixed_session_component_with_internal_tools(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let FixedSessionServeOptions {
         session_id,
+        ready_json,
         profile_selection,
         startup_role,
         environment_extension_names,
@@ -2032,6 +2051,7 @@ fn run_fixed_session_component_with_internal_tools(
         session_launch_mode,
         internal_tool_handlers,
         RuntimeHarnessLaunch {
+            ready_json,
             initial_client: None,
             initial_client_error_stream: None,
             introduction_notice_eligible: false,
@@ -2150,6 +2170,7 @@ fn run_component_with_internal_tools_and_initial_client(
             HarnessSessionLaunchMode::from_status(session_status),
             internal_tool_handlers,
             RuntimeHarnessLaunch {
+                ready_json: false,
                 initial_client,
                 initial_client_error_stream: initial_client_error_output.take(),
                 introduction_notice_eligible: std::env::var_os(INITIAL_UI_INTRODUCTION_NOTICE_ENV)

@@ -16,6 +16,8 @@ use rustix_v1::process::{Pid, Signal, kill_process};
 
 #[path = "detach_attach_cli/owned_process_group.rs"]
 mod owned_process_group;
+#[path = "detach_attach_cli/serve_ready.rs"]
+mod serve_ready;
 #[path = "detach_attach_cli/sigterm_worker_action.rs"]
 mod sigterm_worker_action;
 #[path = "detach_attach_cli/subreaper_controller.rs"]
@@ -393,11 +395,11 @@ fn fixed_session_serve_mirrors_extension_stderr_only_when_enabled() {
         let mut command = environment.command();
         command.args(["serve", "--session", &session_id, "--create"]);
         if enabled {
-            command.arg("--mirror-extension-stderr");
+            command.args(["--mirror-extension-stderr", "--ready-json"]);
         }
         let server = command
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn stderr mirror server");
@@ -419,6 +421,14 @@ fn fixed_session_serve_mirrors_extension_stderr_only_when_enabled() {
             .wait_with_output()
             .expect("wait for stderr mirror server");
         assert!(output.status.success(), "serve exited unsuccessfully");
+        if enabled {
+            let identity: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .expect("stdout contains only ready identity");
+            assert_eq!(identity["session_id"], session_id);
+            assert_eq!(output.stdout.iter().filter(|b| **b == b'\n').count(), 1);
+        } else {
+            assert!(output.stdout.is_empty(), "readiness is opt-in");
+        }
         let stderr = String::from_utf8(output.stderr).expect("serve stderr is UTF-8");
         assert_eq!(
             stderr.matches(&canary).count(),

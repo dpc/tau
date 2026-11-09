@@ -710,6 +710,7 @@ fn claim_publication_failure_precedes_initial_ui_introduction() {
                 HarnessSessionLaunchMode::New,
                 Vec::new(),
                 RuntimeHarnessLaunch {
+                    ready_json: false,
                     initial_client: Some(InitialClient::Stream(server_end)),
                     initial_client_error_stream: Some(InitialClientStartupErrorOutput::Stream(
                         startup_error_end,

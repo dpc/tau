@@ -135,12 +135,23 @@ fn attach_and_resume_are_subcommands_only() {
     ));
 }
 
-/// The foreground server requires a fixed id and exactly one explicit lifecycle
-/// mode so omission or contradictory provisioning intent cannot reach startup.
+/// Foreground service requires one lifecycle mode and an exact id except when
+/// creating a new session, so ambiguous resume intent cannot reach startup.
 #[test]
 fn serve_requires_exactly_one_explicit_session_mode() {
     assert!(Cli::try_parse_from(["tau", "serve", "--session", "s1"]).is_err());
     assert!(Cli::try_parse_from(["tau", "serve", "--existing"]).is_err());
+    assert!(Cli::try_parse_from(["tau", "serve", "--create-or-existing"]).is_err());
+    let parsed = Cli::parse_from(["tau", "serve", "--create", "--ready-json"]);
+    assert!(matches!(
+        parsed.command,
+        Some(super::Command::Serve {
+            session: None,
+            ready_json: true,
+            create: true,
+            ..
+        })
+    ));
     assert!(
         Cli::try_parse_from(["tau", "serve", "--session", "s1", "--create", "--existing",])
             .is_err()
@@ -171,7 +182,8 @@ fn serve_requires_exactly_one_explicit_session_mode() {
     assert!(matches!(
         parsed.command,
         Some(super::Command::Serve {
-            session,
+            session: Some(session),
+            ready_json: false,
             create: false,
             existing: true,
             create_or_existing: false,
@@ -184,7 +196,8 @@ fn serve_requires_exactly_one_explicit_session_mode() {
     assert!(matches!(
         parsed.command,
         Some(super::Command::Serve {
-            session,
+            session: Some(session),
+            ready_json: false,
             create: true,
             existing: false,
             create_or_existing: false,
@@ -197,7 +210,8 @@ fn serve_requires_exactly_one_explicit_session_mode() {
     assert!(matches!(
         parsed.command,
         Some(super::Command::Serve {
-            session,
+            session: Some(session),
+            ready_json: false,
             create: false,
             existing: false,
             create_or_existing: true,

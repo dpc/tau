@@ -173,9 +173,15 @@ pub enum Command {
 
     /// Serve one fixed session in the foreground without an initial UI.
     Serve {
-        /// Exact session id to create or resume.
+        /// Exact session id to create or resume. With --create, omission uses
+        /// the ordinary project-basename session allocator.
+        #[arg(long, required_unless_present = "create")]
+        session: Option<SessionId>,
+
+        /// Write one flushed JSON line containing session_id and canonical
+        /// project_root to stdout after readiness (at most 64 KiB).
         #[arg(long)]
-        session: SessionId,
+        ready_json: bool,
 
         /// Require the session directory to be completely absent, then create
         /// it.

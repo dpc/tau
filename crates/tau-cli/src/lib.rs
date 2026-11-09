@@ -1401,6 +1401,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             }
             DispatchCommand::Other(cli::Command::Serve {
                 session,
+                ready_json,
                 create,
                 existing,
                 create_or_existing: _,
@@ -1409,8 +1410,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 mirror_extension_stderr,
             }) => {
                 ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info,warn");
+                let session = match session {
+                    Some(session) => session,
+                    None => crate::daemon::mint_session_id(&std::env::current_dir()?),
+                };
                 let options = tau_harness::FixedSessionServeOptions {
                     session_id: &session,
+                    ready_json,
                     profile_selection: selected_profile.as_ref(),
                     startup_role: harness.role.as_deref(),
                     environment_extension_names: &environment_extension_names,
