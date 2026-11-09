@@ -98,7 +98,8 @@ templates or a replaceable provider prefix. Before the first already-authorized
 inference, the harness appends a passive canonical `agent.user_message_injected`
 with typed discovery content, rendered in user-role context as one `skills`
 envelope for advertisements and a separate `agents_md` envelope per instruction
-file.
+file, following
+[SPEC-discovery-context-presentation](SPEC-discovery-context-presentation.md).
 The empty `text` field avoids storing the rendered body twice. Discovery alone
 does not activate inference or start an outer turn.
 
