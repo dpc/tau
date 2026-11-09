@@ -1,8 +1,9 @@
 //! Content-free, process-local prompt-materialization diagnostics.
 //!
-//! The diagnostic is enabled only when its tracing target is active. It owns no
-//! prompt data and records only fixed-cardinality durations and bounded scalar
-//! counts. It never participates in dispatch, persistence, or retry decisions.
+//! The diagnostic is enabled only when its tracing target is active at DEBUG.
+//! It owns no prompt data and records only fixed-cardinality durations and
+//! bounded scalar counts. It never participates in dispatch, persistence, or
+//! retry decisions.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -85,7 +86,7 @@ impl PrecheckpointMaterializationTiming {
     pub(crate) fn enabled() -> Option<Self> {
         tracing::enabled!(
             target: "tau_harness::prompt_materialization",
-            tracing::Level::INFO
+            tracing::Level::DEBUG
         )
         .then(Self::default)
     }
@@ -148,7 +149,7 @@ impl PromptMaterializationTiming {
     ) -> Option<Self> {
         tracing::enabled!(
             target: "tau_harness::prompt_materialization",
-            tracing::Level::INFO
+            tracing::Level::DEBUG
         )
         .then(|| Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -213,7 +214,7 @@ impl PromptMaterializationTiming {
         let precheckpoint = inner.precheckpoint.clone();
         tracing::event!(
             target: "tau_harness::prompt_materialization",
-            tracing::Level::INFO,
+            tracing::Level::DEBUG,
             result_class,
             checkpoint_to_bus_stage_total_us = duration_us(measured),
             checkpoint_to_bus_elapsed_us = duration_us(total),

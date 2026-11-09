@@ -176,7 +176,7 @@ fn provider_materialization_trace_is_lazy_and_content_free_on_live_dispatch() {
     let trace = Arc::new(Mutex::new(Vec::new()));
     let writer = Arc::clone(&trace);
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .without_time()
         .with_ansi(false)
         .with_writer(move || MaterializationTraceWriter(Arc::clone(&writer)))

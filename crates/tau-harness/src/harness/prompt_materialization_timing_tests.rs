@@ -25,6 +25,28 @@ fn disabled_target_constructs_no_timing_owner() {
     assert!(PrecheckpointMaterializationTiming::enabled().is_none());
 }
 
+/// Normal INFO logging must not collect timing data or emit per-prompt
+/// diagnostics.
+#[test]
+fn info_logging_does_not_collect_or_emit_timing() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&bytes);
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || TraceWriter(Arc::clone(&writer)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        reset_diagnostic_work();
+        let pre = PrecheckpointMaterializationTiming::enabled();
+        assert!(pre.is_none());
+        let timing = PromptMaterializationTiming::after_checkpoint(pre);
+        assert!(timing.is_none());
+        assert!(stage_start(timing.as_ref()).is_none());
+        assert_eq!(diagnostic_work(), 0);
+    });
+    assert!(bytes.lock().expect("trace lock").is_empty());
+}
+
 /// The fixed stage enum must remain contiguous and ordered so trace
 /// dimensions cannot gain dynamic cardinality.
 #[test]
@@ -48,7 +70,7 @@ fn enabled_trace_is_content_free_and_post_checkpoint_total_is_disjoint() {
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let writer = Arc::clone(&bytes);
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .without_time()
         .with_ansi(false)
         .with_writer(move || TraceWriter(Arc::clone(&writer)))
@@ -115,7 +137,7 @@ fn incomplete_attempt_emits_one_failure_without_timing_thresholds() {
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let writer = Arc::clone(&bytes);
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .without_time()
         .with_ansi(false)
         .with_writer(move || TraceWriter(Arc::clone(&writer)))
