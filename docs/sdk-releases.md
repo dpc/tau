@@ -20,9 +20,9 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### SDK 0.30.0: canonical message acceptance
+### Published SDK 0.30.0: canonical message acceptance
 
-Unpublished proto and client 0.30.0 use protocol **23.2**.
+Published proto and client 0.30.0 use protocol **23.2**.
 `MessageAcceptanceClient` provides an opt-in, bounded, nonblocking request sender. The extension's receive loop
 handles correlated `MessageAcceptanceResult` outcomes. A successful enqueue does
 not mean the message was accepted. `Accepted { duplicate }` identifies canonical
@@ -46,9 +46,27 @@ including after replay. Acceptance does not guarantee fsync, crash-tail survival
 execution, or exactly-once effects. Ordinary message reports keep their existing
 behavior. The API neither creates agents automatically nor adds an envelope.
 
-Publish proto first, then client, which pins proto at `=0.30.0`. The unchanged
-actions and blocking-notify-channel packages remain at 0.1.0. This SDK-only release
-does not advance trunk, publish the application, or activate any runtime.
+Proto and then client were published on November 10, 2026 from
+`d433f67ec5b9ae2e33a03c3aacbd537b51c777de`. Full SelfCI and locked, verified
+publish dry-runs passed before publication. Both official sparse-index entries
+are unyanked; downloaded registry archives match the regenerated candidate
+archives byte-for-byte and contain clean Cargo VCS metadata for that source.
+The client pins proto at `=0.30.0`.
+
+| Package | Registry archive SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `fb005facd5389d7c87ab346002b00ad5f3bcc5039ac73f2797a56f36ada04aed` |
+| `dpc-tau-client` | `ea69790b3895d8a2721940debb388ab3090639782dd7e751df1d6a0d73c6d011` |
+
+The registry-only consumer passed all 22 tests on Rust 1.91 with an initially
+empty `CARGO_HOME` and no local dependency patches. After registry verification,
+`dpc-tau-proto-v0.30.0` and `dpc-tau-client-v0.30.0` were pushed and verified at
+the exact source on GitHub and the Radicle publishing namespace. This acceptance
+record does not change the tagged source or registry bytes.
+
+The unchanged actions and blocking-notify-channel packages remain at 0.1.0.
+This SDK-only release does not advance trunk, publish the application, or activate
+any runtime.
 
 ### Published SDK 0.29.1: artifact tool-input domain type
 
