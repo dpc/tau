@@ -9,10 +9,6 @@
       url = "github:dpc/flakebox?rev=105902c66930a9e6a874d27ea8430e8f8db864d7";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    dpc-public-skills = {
-      url = "git+https://radicle.dpc.pw/z2HR882B4c4mTdAgdt4SozpdeTuMf.git";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     tau-ext-rostra.url = "git+https://radicle.dpc.pw/z4LrrRivcgNjJii5wzbjTvA8ttt6o.git?ref=main";
     tau-ext-slack.url = "git+https://radicle.dpc.pw/z3NJhEtKWCbHPa28wDQSYJ8eEfBjg.git?ref=master";
     tau-ext-telegram.url = "git+https://radicle.dpc.pw/z3sPdSePnxtBvP9pTLwUwVgpMU68r.git?ref=main";
@@ -35,7 +31,6 @@
       nixpkgs,
       flake-utils,
       flakebox,
-      dpc-public-skills,
       tau-ext-pim,
       tau-ext-rostra,
       tau-ext-slack,
@@ -675,9 +670,6 @@
             pkgs.python3
             selfciPkg
           ];
-          shellHook = ''
-            ${dpc-public-skills.packages.${system}.install}/bin/install-dpc-public-skills
-          '';
         };
       }
     );
