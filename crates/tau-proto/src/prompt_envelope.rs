@@ -423,6 +423,16 @@ pub const TAU_INTERNAL_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredP
     carrier: PayloadEnvelopeCarrier::GenericUserText,
 };
 
+/// Registered local advisory guidance, separate from external message bodies.
+pub const NOTICE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
+    name: "notice",
+    opening: PayloadEnvelopeOpening::Attributed("<notice "),
+    ordered_attributes: &["publisher", "authority"],
+    exact_close: "</notice>",
+    visible_close: "&lt;/notice&gt;",
+    carrier: PayloadEnvelopeCarrier::GenericUserText,
+};
+
 /// Registered attributed envelope for canonical external message facts.
 pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloadEnvelope {
     name: "message",
@@ -430,8 +440,6 @@ pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloa
     ordered_attributes: &[
         "event",
         "publisher",
-        "origin",
-        "authority",
         "message_ref_publisher",
         "message_ref",
         "sender_ref",
@@ -568,6 +576,7 @@ pub const fn registered_payload_envelopes() -> &'static [RegisteredPayloadEnvelo
         TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE,
         TAU_INTERNAL_PAYLOAD_ENVELOPE,
         MESSAGE_PAYLOAD_ENVELOPE,
+        NOTICE_PAYLOAD_ENVELOPE,
         QUOTED_MESSAGE_PAYLOAD_ENVELOPE,
         TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
         TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,

@@ -3973,7 +3973,7 @@ fn resumed_peer_messages_use_persisted_notice_snapshots() {
     assert_eq!(
         peer_messages,
         [
-            "<peer_message sender_session=\"sender-session\" sender_agent=\"sender-agent\"><notice origin=\"sender_config\" authority=\"advisory\">\npersisted sender guidance\n</notice>\n<message>\nnotice body\n</message>\n<notice origin=\"recipient_config\" authority=\"advisory\">\npersisted recipient guidance\n</notice></peer_message>",
+            "<peer_message sender_session=\"sender-session\" sender_agent=\"sender-agent\"><notice origin=\"sender_config\" authority=\"advisory\">\npersisted sender guidance\n</notice>\n<message>\nnotice body\n</message>\n<notice authority=\"advisory\">\npersisted recipient guidance\n</notice></peer_message>",
             "<peer_message sender_session=\"sender-session\" sender_agent=\"sender-agent\">legacy body</peer_message>",
         ]
     );

@@ -165,7 +165,7 @@ prompt text:
   `sender_session` and `sender_agent` attributes;
 - when either configured notice is present, the same peer frame contains
   optional ordered `<notice origin="sender_config" authority="advisory">` and
-  `<notice origin="recipient_config" authority="advisory">` nodes around one
+  `<notice authority="advisory">` nodes around one
   `<message>` body node. Each dynamic value escapes its own exact close before
   the complete peer frame receives its exact-close handling;
 - `WatchResponse` and `WatchPrompt` use `agent_update` with distinct `kind`

@@ -869,20 +869,6 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         }
         rendered.push(text.clone());
     }
-    // The same family also carries local guidance, selected separately from the
-    // unconditional remote-body projection by the active-context walk.
-    let notice = crate::MessageIncomingNotice::new("endpoint".to_owned(), "guidance".to_owned())
-        .expect("notice")
-        .render(&"bridge-main".parse().expect("publisher"));
-    rendered_attributes.extend(
-        notice
-            .split_once('>')
-            .expect("notice opening")
-            .0
-            .split_whitespace()
-            .skip(1)
-            .filter_map(|field| field.split_once('=').map(|(name, _)| name.to_owned())),
-    );
     assert_eq!(
         rendered_attributes,
         crate::MESSAGE_PAYLOAD_ENVELOPE

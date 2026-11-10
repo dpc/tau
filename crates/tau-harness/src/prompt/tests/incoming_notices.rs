@@ -112,6 +112,13 @@ fn incoming_notices_share_context_scoping_and_rearm_after_compaction() {
         external("publisher", "other", "a", "endpoint-first"),
     );
     let text = rendered(&live, &records);
+    assert_eq!(
+        text.matches(
+            r#"<notice publisher=\"gccp\" authority=\"advisory\">endpoint-first</notice>"#
+        )
+        .count(),
+        2
+    );
     assert_eq!(text.matches("endpoint-first").count(), 3);
     assert_eq!(text.matches("session-first").count(), 1);
     assert!(!text.contains("endpoint-later"));

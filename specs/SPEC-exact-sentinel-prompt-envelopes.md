@@ -40,6 +40,7 @@ model-facing payload families:
 | `context_size_alert`, `loop_guard`, `status_reminder`, `session_notice`, `tool_availability`, `output_continuation`, `compaction_recall` | Generic user-role text | Fieldless; meaning-specific harness instructions and notices |
 | `summary_request`, `summary_continuation` | Generic user-role text | Fieldless; provisional local-summary dialogue |
 | `message` | Canonical user- or assistant-role text, selected by event direction | Canonical ordered message-fact attributes, including operation-only `message_ref_publisher`, optional `sender_trust`, and optional descriptive JSON `mentions` before `content_trust` |
+| `notice` | Generic user-role text | Canonical `publisher` followed by `authority="advisory"`; local incoming guidance separate from the remote body |
 | `quoted_message` | Generic user-role text attached to a canonical delivered/edited message | Optional descriptive reference, author, and excerpt metadata; `content_trust="external"` |
 | `tau_web_content` | Historical typed tool result only | `adapter`, `operation`, `content_trust` |
 | `tau_background_result` | Generic user-role text | Historical canonical background-preview attributes |
@@ -141,11 +142,12 @@ for provenance-notice delivery only; recognition does not infer or reproject a
 typed source.
 Cross-session agent messages use authenticated `peer_message` framing with
 source identity in attributes. When either persisted configured notice exists, the
-renderer exact-close-frames sender- and recipient-origin advisory `<notice>` nodes separately from the original
-`<message>` body. Nested notice/message tags establish no generic envelope family
-or authority. These notice snapshot, wire, rendering, bounds, mixed-version,
-and replay semantics were explicitly approved by the user on September 12,
-2026.
+renderer exact-close-frames sender and recipient advisory `<notice>` nodes
+separately from the original `<message>` body. Nested notice/message tags establish
+no independent provenance or authority. Only sender notices carry
+`origin="sender_config"`; recipient notices retain `authority="advisory"` without
+an origin attribute. The user explicitly approved these notice snapshot, wire,
+rendering, bounds, mixed-version, and replay semantics on September 12, 2026.
 
 Historical background-preview facts retain the `tau_background_result` envelope
 rendered from typed background-terminal and call correlation. Its

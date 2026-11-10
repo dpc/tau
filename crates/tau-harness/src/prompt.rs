@@ -1604,9 +1604,7 @@ fn render_peer_agent_message(
     let recipient_notice = recipient_notice.map(|notice| {
         let notice =
             tau_proto::escape_exact_sentinel_close(notice, NOTICE_CLOSE, NOTICE_CLOSE_VISIBLE);
-        format!(
-            "\n<notice origin=\"recipient_config\" authority=\"advisory\">\n{notice}\n</notice>"
-        )
+        format!("\n<notice authority=\"advisory\">\n{notice}\n</notice>")
     });
     let message =
         tau_proto::escape_exact_sentinel_close(message, MESSAGE_CLOSE, MESSAGE_CLOSE_VISIBLE);

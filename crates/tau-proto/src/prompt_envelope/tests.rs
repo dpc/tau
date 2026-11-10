@@ -115,6 +115,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
             TAU_EXTENSION_OUTPUT_PAYLOAD_ENVELOPE,
             TAU_INTERNAL_PAYLOAD_ENVELOPE,
             MESSAGE_PAYLOAD_ENVELOPE,
+            super::NOTICE_PAYLOAD_ENVELOPE,
             super::QUOTED_MESSAGE_PAYLOAD_ENVELOPE,
             TAU_WEB_CONTENT_PAYLOAD_ENVELOPE,
             TAU_BACKGROUND_RESULT_PAYLOAD_ENVELOPE,
@@ -152,8 +153,6 @@ fn registered_families_have_unique_complete_lexical_contracts() {
             ordered_attributes: &[
                 "event",
                 "publisher",
-                "origin",
-                "authority",
                 "message_ref_publisher",
                 "message_ref",
                 "sender_ref",

@@ -1,7 +1,7 @@
 use super::*;
 
 /// Wire validation counts UTF-8 bytes, preserves absence/empty, and cannot let
-/// local guidance or endpoint metadata escape the registered message envelope.
+/// local guidance or endpoint metadata escape the registered notice envelope.
 #[test]
 fn incoming_notice_bounds_roundtrip_and_advisory_escaping() {
     assert!(MessageIncomingNotice::new(String::new(), String::new()).is_err());
@@ -28,9 +28,10 @@ fn incoming_notice_bounds_roundtrip_and_advisory_escaping() {
     let rendered = notice.render(&"bridge".parse().expect("publisher"));
     assert_eq!(
         rendered,
-        "<message publisher=\"bridge\" origin=\"recipient_config\" authority=\"advisory\">local </notice> &lt;/message&gt; advice</message>"
+        "<notice publisher=\"bridge\" authority=\"advisory\">local &lt;/notice&gt; </message> advice</notice>"
     );
     assert!(!rendered.contains("endpoint"));
-    assert!(!rendered.contains("<notice"));
-    assert_eq!(rendered.matches("</message>").count(), 1);
+    assert!(!rendered.contains("<message"));
+    assert_eq!(rendered.matches("</notice>").count(), 1);
+    assert!(crate::NOTICE_PAYLOAD_ENVELOPE.matches_whole(&rendered));
 }

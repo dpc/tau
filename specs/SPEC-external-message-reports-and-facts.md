@@ -431,11 +431,10 @@ same selection without a separate durable seen set. Later snapshots within a
 scope do not replace the first visible notice until the next context.
 
 The delivered message's existing item contains visible guidance as a separate
-text part before the unchanged remote-body projection. Its registered `message`
-envelope has canonical `publisher`, `origin="recipient_config"`, and
-`authority="advisory"` attributes, with the guidance as its direct body and no
-nested notice. Scope stays internal to acceptance and context deduplication; it
-is not shown in the prompt. The guidance is local advisory content, not remote
+text part before the unchanged remote-body projection. Its registered `notice`
+envelope has canonical `publisher` followed by `authority="advisory"`, with the
+guidance as its direct body and no nested notice. Scope stays internal to
+acceptance and context deduplication; it is not shown in the prompt. The guidance is local advisory content, not remote
 content or system authority. Remote sender, trust, reply, mention, and body
 projections retain their existing boundaries.
 SDK acceptance with this field requires protocol 23.3; notice-free acceptance

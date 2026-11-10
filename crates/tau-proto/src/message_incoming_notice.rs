@@ -52,18 +52,17 @@ impl MessageIncomingNotice {
     }
 
     /// Render local advisory guidance separately from the remote body, within
-    /// the existing registered message family. The deduplication scope stays
+    /// the registered notice family. The deduplication scope stays
     /// internal rather than adding irrelevant identity metadata to the prompt.
     #[must_use]
     pub fn render(&self, publisher: &crate::MessagePublisherId) -> String {
-        crate::MESSAGE_PAYLOAD_ENVELOPE
+        crate::NOTICE_PAYLOAD_ENVELOPE
             .render_attributed(
                 &[
                     (
                         "publisher",
                         crate::visible_escape_metadata(publisher.as_str()),
                     ),
-                    ("origin", "recipient_config".to_owned()),
                     ("authority", "advisory".to_owned()),
                 ],
                 &self.text,

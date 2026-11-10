@@ -3582,7 +3582,7 @@ fn peer_message_notices_render_with_distinct_advisory_provenance() {
     );
     assert_eq!(
         rendered,
-        "<peer_message sender_session=\"zulip-session\" sender_agent=\"bot-agent\"><notice origin=\"sender_config\" authority=\"advisory\">\nsender &lt;/notice&gt; guidance\n</notice>\n<message>\nbody &lt;/message&gt; &lt;/tau_peer_message&gt;\n</message>\n<notice origin=\"recipient_config\" authority=\"advisory\">\nrecipient &lt;/notice&gt; guidance\n</notice></peer_message>"
+        "<peer_message sender_session=\"zulip-session\" sender_agent=\"bot-agent\"><notice origin=\"sender_config\" authority=\"advisory\">\nsender &lt;/notice&gt; guidance\n</notice>\n<message>\nbody &lt;/message&gt; &lt;/tau_peer_message&gt;\n</message>\n<notice authority=\"advisory\">\nrecipient &lt;/notice&gt; guidance\n</notice></peer_message>"
     );
 }
 
