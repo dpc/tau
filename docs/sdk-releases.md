@@ -22,13 +22,24 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ### SDK 0.30.0: canonical message acceptance
 
-Proto and client 0.30.0 use protocol **23.2**. `MessageAcceptanceClient` provides
-an opt-in, bounded, nonblocking request sender. The extension's receive loop
+Unpublished proto and client 0.30.0 use protocol **23.2**.
+`MessageAcceptanceClient` provides an opt-in, bounded, nonblocking request sender. The extension's receive loop
 handles correlated `MessageAcceptanceResult` outcomes. A successful enqueue does
 not mean the message was accepted. `Accepted { duplicate }` identifies canonical
-acceptance within retained history; `Rejected` is a definite refusal, and `Unknown`
-leaves completion uncertain. Missing or incompatible harness versions fail locally
-before sending.
+acceptance within retained history; `Rejected` refuses the current RPC, not every
+earlier attempt with that ID. `Unknown` leaves completion uncertain, including
+when authoritative recipient history is unavailable. Missing or incompatible
+harness versions fail locally before sending.
+
+`start_request` uses `MessageAcceptanceMode::AcceptNew`; `start_existing_request`
+uses `ExistingOnly` through the same version guard, correlation and serialized
+core admission. Existing-only returns matching retained acceptance or refuses
+authoritative absence without appending. Rate-limited bridges can therefore
+re-ACK valid, identical, currently authorized retries without accepting new input.
+Current consent/authority still applies; changed-content ID reuse is not a valid
+retry, and refusal never claims that the ID was historically unaccepted. Both
+modes first ship in protocol 23.2. Both methods require 23.2 or later in major 23;
+an older runtime could ignore the mode field and admit new input.
 
 For an identical retry, the harness retains one marked canonical message fact,
 including after replay. Acceptance does not guarantee fsync, crash-tail survival,

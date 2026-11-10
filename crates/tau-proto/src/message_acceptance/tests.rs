@@ -26,6 +26,7 @@ fn message_acceptance_wire_roundtrip_and_legacy_marker_default() {
         crate::HarnessInputMessage::MessageAcceptanceRequest(Box::new(MessageAcceptanceRequest {
             request_id: "attempt".to_owned(),
             session_id: "session".parse().expect("session"),
+            mode: MessageAcceptanceMode::AcceptNew,
             report: message,
         }));
     let mut bytes = Vec::new();
@@ -34,6 +35,25 @@ fn message_acceptance_wire_roundtrip_and_legacy_marker_default() {
         ciborium::from_reader::<crate::HarnessInputMessage, _>(bytes.as_slice())
             .expect("request decode"),
         request
+    );
+    let crate::HarnessInputMessage::MessageAcceptanceRequest(mut request) = request else {
+        unreachable!("acceptance request");
+    };
+    let mut legacy = serde_json::to_value(&request).expect("request JSON");
+    legacy
+        .as_object_mut()
+        .expect("request object")
+        .remove("mode");
+    let legacy: MessageAcceptanceRequest = serde_json::from_value(legacy).expect("omitted mode");
+    assert_eq!(legacy.mode, MessageAcceptanceMode::AcceptNew);
+    request.mode = MessageAcceptanceMode::ExistingOnly;
+    let existing = crate::HarnessInputMessage::MessageAcceptanceRequest(request);
+    bytes.clear();
+    ciborium::into_writer(&existing, &mut bytes).expect("existing-only encode");
+    assert_eq!(
+        ciborium::from_reader::<crate::HarnessInputMessage, _>(bytes.as_slice())
+            .expect("existing-only decode"),
+        existing
     );
     for outcome in [
         MessageAcceptanceOutcome::Accepted { duplicate: false },

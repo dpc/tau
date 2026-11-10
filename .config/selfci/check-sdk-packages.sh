@@ -200,6 +200,13 @@ fn packaged_sdk_exposes_canonical_message_acceptance() {
         Option<ProtocolVersion>,
     ) -> Result<String, tau_client::ClientError> =
         tau_client::MessageAcceptanceClient::start_request;
+    let _existing: fn(
+        &tau_client::MessageAcceptanceClient,
+        SessionId,
+        MessageDelivered<RawMessagePublisherId>,
+        Option<ProtocolVersion>,
+    ) -> Result<String, tau_client::ClientError> =
+        tau_client::MessageAcceptanceClient::start_existing_request;
     let report = MessageDelivered::new(
         RawMessagePublisherId::new("consumer"),
         MessageAgentTarget::new("agent"),
@@ -218,6 +225,7 @@ fn packaged_sdk_exposes_canonical_message_acceptance() {
         MessageAcceptanceRequest {
             request_id: "attempt".into(),
             session_id: "session".parse().expect("session"),
+            mode: MessageAcceptanceMode::ExistingOnly,
             report,
         },
     ));

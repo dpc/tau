@@ -3,8 +3,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tau_proto::{
-    HarnessInputMessage, MessageAcceptanceRequest, MessageDelivered, ProtocolVersion,
-    RawMessagePublisherId, SessionId,
+    HarnessInputMessage, MessageAcceptanceMode, MessageAcceptanceRequest, MessageDelivered,
+    ProtocolVersion, RawMessagePublisherId, SessionId,
 };
 
 use crate::{ClientError, ClientHandle};
@@ -41,6 +41,44 @@ impl MessageAcceptanceClient {
         report: MessageDelivered<RawMessagePublisherId>,
         harness_protocol_version: Option<ProtocolVersion>,
     ) -> Result<String, ClientError> {
+        self.start_request_with_mode(
+            session_id,
+            report,
+            harness_protocol_version,
+            MessageAcceptanceMode::AcceptNew,
+        )
+    }
+
+    /// Consult retained acceptance without admitting new input.
+    ///
+    /// Use after local policy declines new traffic while still allowing a
+    /// matching retry. The same serialized core admission point waits behind
+    /// earlier pending submissions; this is not a separate lookup followed by
+    /// an emit. Unavailable authoritative history produces `Unknown`, never an
+    /// inferred absence. Rejection refuses this RPC, not every earlier attempt.
+    /// As with `start_request`, unsupported runtimes fail before enqueueing.
+    pub fn start_existing_request(
+        &self,
+        session_id: SessionId,
+        report: MessageDelivered<RawMessagePublisherId>,
+        harness_protocol_version: Option<ProtocolVersion>,
+    ) -> Result<String, ClientError> {
+        self.start_request_with_mode(
+            session_id,
+            report,
+            harness_protocol_version,
+            MessageAcceptanceMode::ExistingOnly,
+        )
+    }
+
+    /// Share version gating, correlation and bounded enqueue for both policies.
+    fn start_request_with_mode(
+        &self,
+        session_id: SessionId,
+        report: MessageDelivered<RawMessagePublisherId>,
+        harness_protocol_version: Option<ProtocolVersion>,
+        mode: MessageAcceptanceMode,
+    ) -> Result<String, ClientError> {
         validate_version(harness_protocol_version)?;
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let request_id = format!(
@@ -52,6 +90,7 @@ impl MessageAcceptanceClient {
                 MessageAcceptanceRequest {
                     request_id: request_id.clone(),
                     session_id,
+                    mode,
                     report,
                 },
             )))?;

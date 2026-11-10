@@ -5,6 +5,9 @@ correlated replies in the manual receive loop. It checks Configure protocol
 support before sending and never falls back to ordinary report emission. Only the
 directed accepted result establishes canonical input ownership; a lost result leaves
 its outcome unknown. Acceptance does not promise filesystem durability.
+`start_request` allows new acceptance; `start_existing_request` uses the same
+correlation and protocol guard but can only confirm retained input. This lets
+bridges decline new traffic while accepting a valid, authorized duplicate.
 
 `BridgeReceiverClient` shares the bounded detached writer and leaves correlated
 results in the manual receive loop. Shared opt-in config and versioned snapshot

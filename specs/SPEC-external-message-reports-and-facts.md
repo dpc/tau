@@ -62,21 +62,39 @@ The index is reconstructed from the surviving fact, not a separate marker,
 and survives provider compaction and history-cache eviction. Ordinary reports
 cannot acquire this mode by supplying the marker.
 
+Requests select `MessageAcceptanceMode::AcceptNew` (the default) or
+`ExistingOnly`. Both use the same serialized publication queue and final identity
+check. `ExistingOnly` accepts an identical retained submission as a duplicate
+without another wake, but refuses authoritative absence without appending. The
+mode belongs to the request and runtime, not the fact or digest. A bridge can use
+it to re-ACK valid, identical, currently authorized retries after exhausting its
+new-input quota. The check waits for earlier intercepted attempts: acceptance
+yields a duplicate, while definite precommit refusal leaves absence. If the
+existing-only absence check linearizes first, a later accept-new request can
+still succeed.
+
 The directed result distinguishes `Accepted`, `Rejected`, and `Unknown`.
 Acceptance means recipient input ownership after ordinary publication, including
 input waiting behind an open tool round; it does not mean filesystem durability,
-agent execution, or delivery to every subscriber. Rejection is definite only for
-the current attempt before acceptance. A missing completion leaves the result
-unknown and permits an identical retry. A crash can lose accepted input; a retry is suppressed when
-the canonical fact survives and may be accepted anew otherwise. If a sender never
-retries after success, that loss remains possible. Effects performed before a
+agent execution, or delivery to every subscriber. `Rejected` refuses the current
+RPC; it does not assert that its ID was never accepted. Invalid requests,
+changed-content ID reuse and revoked current authority can be refused without
+undoing an earlier acceptance. Neither mode bypasses current permission or
+recipient-lifecycle checks. Unavailable authoritative recipient history returns
+`Unknown` in both modes, not an inferred absence or refusal of a valid duplicate;
+it does not trigger recipient loading. A missing completion also leaves the result
+unknown and permits an identical retry. A crash can lose accepted input; a retry
+is suppressed when the canonical fact survives and may be accepted anew
+otherwise. If a sender never retries after success, that loss remains possible. Effects performed before a
 lost journal tail can repeat. No fsync acknowledgement, independent incoming
 tombstone, or exactly-once execution promise is introduced.
 
 Admission captures the configured instance and session generation and rechecks
 them after interception. Replies go only to the requesting connection. The SDK
 requires Configure protocol 23.2 or later in major 23 before sending; unknown or
-unsupported runtimes never receive a fallback ordinary report.
+unsupported runtimes never receive a fallback ordinary report. Both modes first
+ship together in 23.2; an older host must not receive an existing-only field it
+could ignore and thereby admit new input.
 
 ### Shared fact schema
 

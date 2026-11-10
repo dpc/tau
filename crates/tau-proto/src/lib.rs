@@ -22,7 +22,8 @@ mod artifact;
 mod bridge_receiver;
 mod message_acceptance;
 pub use message_acceptance::{
-    MessageAcceptanceOutcome, MessageAcceptanceRequest, MessageAcceptanceResult,
+    MessageAcceptanceMode, MessageAcceptanceOutcome, MessageAcceptanceRequest,
+    MessageAcceptanceResult,
 };
 mod build_identity;
 pub use build_identity::BuildIdentity;

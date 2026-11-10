@@ -24,6 +24,7 @@ fn request(h: &Harness, target: &AgentId, attempt: &str) -> MessageAcceptanceReq
     MessageAcceptanceRequest {
         request_id: attempt.to_owned(),
         session_id: h.session_runtime.current_session_id.clone(),
+        mode: tau_proto::MessageAcceptanceMode::AcceptNew,
         report: tau_proto::MessageDelivered::new(
             tau_proto::RawMessagePublisherId::new("untrusted-claim"),
             tau_proto::MessageAgentTarget::new(target.as_str()),
@@ -104,6 +105,7 @@ fn message_acceptance_deduplicates_retained_input_and_preserves_ordinary_reports
         .expect("evict history cache");
     let mut retry = first.clone();
     retry.request_id = "retry".to_owned();
+    retry.mode = tau_proto::MessageAcceptanceMode::ExistingOnly;
     submit(&mut h, retry.clone());
     assert_eq!(
         outcome(&frames, "retry"),
@@ -238,7 +240,7 @@ fn message_acceptance_respects_nonblocking_persistence_admission() {
 /// Invalid input, unavailable targets and missing bridge authority cannot
 /// become fallback journal facts or create recipient agents.
 #[test]
-fn message_acceptance_rejects_unprojectable_unloaded_and_unauthorized_input() {
+fn message_acceptance_does_not_append_unprojectable_unloaded_or_unauthorized_input() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let target = ensure_test_user_agent(&mut h);
@@ -255,7 +257,7 @@ fn message_acceptance_rejects_unprojectable_unloaded_and_unauthorized_input() {
     submit(&mut h, input);
     assert!(matches!(
         outcome(&frames, "missing"),
-        Some(Outcome::Rejected { .. })
+        Some(Outcome::Unknown { .. })
     ));
     let input = request(&h, &target, "unauthorized");
     h.extensions
@@ -338,6 +340,7 @@ fn message_acceptance_restart_rebuilds_dedup_and_ephemeral_targets_are_supported
         let frames = bridge(&mut h);
         let mut retry = saved;
         retry.request_id = "restored".to_owned();
+        retry.mode = tau_proto::MessageAcceptanceMode::ExistingOnly;
         submit(&mut h, retry);
         assert_eq!(
             outcome(&frames, "restored"),
@@ -362,4 +365,181 @@ fn message_acceptance_restart_rebuilds_dedup_and_ephemeral_targets_are_supported
         outcome(&frames, "ephemeral-retry"),
         Some(Outcome::Accepted { duplicate: true })
     );
+}
+
+/// Existing-only refusal is local to one attempt: it creates no input, but a
+/// later admitted attempt may accept the same identity. Authority still applies
+/// to retained duplicates, and unavailable history is not authoritative
+/// absence.
+#[test]
+fn message_acceptance_existing_only_never_admits_new_input() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let target = ensure_test_user_agent(&mut h);
+    let frames = bridge(&mut h);
+    let mut input = request(&h, &target, "absent");
+    input.mode = tau_proto::MessageAcceptanceMode::ExistingOnly;
+    let baseline = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(target.as_str())
+        .expect("history");
+    let wakes = h.agent_runtime.agent_registry.agents[&target]
+        .dispatch
+        .pending_message_wakes
+        .len();
+    submit(&mut h, input.clone());
+    assert!(matches!(
+        outcome(&frames, "absent"),
+        Some(Outcome::Rejected { .. })
+    ));
+    assert_eq!(canonical_count(&h), 0);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&target]
+            .dispatch
+            .pending_message_wakes
+            .len(),
+        wakes
+    );
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(target.as_str())
+            .expect("history"),
+        baseline
+    );
+
+    input.mode = tau_proto::MessageAcceptanceMode::AcceptNew;
+    input.request_id = "later-admitted".to_owned();
+    submit(&mut h, input.clone());
+    assert_eq!(
+        outcome(&frames, "later-admitted"),
+        Some(Outcome::Accepted { duplicate: false })
+    );
+    input.mode = tau_proto::MessageAcceptanceMode::ExistingOnly;
+    input.request_id = "quota-retry".to_owned();
+    submit(&mut h, input.clone());
+    assert_eq!(
+        outcome(&frames, "quota-retry"),
+        Some(Outcome::Accepted { duplicate: true })
+    );
+    let accepted_count = canonical_count(&h);
+    let route = h
+        .agent_runtime
+        .agent_registry
+        .agent_routes
+        .remove(&target)
+        .expect("loaded route");
+    for mode in [
+        tau_proto::MessageAcceptanceMode::AcceptNew,
+        tau_proto::MessageAcceptanceMode::ExistingOnly,
+    ] {
+        let mut unavailable = input.clone();
+        unavailable.mode = mode;
+        unavailable.request_id = format!("unavailable-{mode:?}");
+        let correlation = unavailable.request_id.clone();
+        submit(&mut h, unavailable);
+        assert!(matches!(
+            outcome(&frames, &correlation),
+            Some(Outcome::Unknown { .. })
+        ));
+    }
+    h.agent_runtime
+        .agent_registry
+        .agent_routes
+        .insert(target.clone(), route);
+    input.request_id = "revoked".to_owned();
+    h.extensions
+        .entries
+        .get_mut("accept-bridge")
+        .expect("bridge")
+        .peer_capabilities
+        .clear();
+    submit(&mut h, input);
+    assert!(matches!(
+        outcome(&frames, "revoked"),
+        Some(Outcome::Rejected { .. })
+    ));
+    assert_eq!(canonical_count(&h), accepted_count);
+}
+
+/// Existing-only lookup must observe earlier intercepted acceptance or its
+/// definitive failure. Reversing request order may refuse first, then accept;
+/// an earlier refusal never reserves an ID or constrains a future attempt.
+#[test]
+fn message_acceptance_existing_only_observes_serialized_pending_outcomes() {
+    use tau_proto::MessageAcceptanceMode::{AcceptNew, ExistingOnly};
+    for (first_mode, reject_first) in [(AcceptNew, false), (AcceptNew, true), (ExistingOnly, false)]
+    {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+        let target = ensure_test_user_agent(&mut h);
+        let frames = bridge(&mut h);
+        connect_test_tool(&mut h, "accept-interceptor");
+        h.handle_extension_event(
+            "accept-interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::MESSAGE_DELIVERED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("intercept");
+        let mut first = request(&h, &target, "first");
+        first.mode = first_mode;
+        let mut second = first.clone();
+        second.request_id = "second".to_owned();
+        second.mode = if first_mode == AcceptNew {
+            ExistingOnly
+        } else {
+            AcceptNew
+        };
+        submit(&mut h, first);
+        submit(&mut h, second);
+        assert_eq!(outcome(&frames, "first"), None);
+        assert_eq!(outcome(&frames, "second"), None);
+        assert_eq!(canonical_count(&h), 0);
+        if reject_first {
+            reject_next_semantic_admission(&h);
+        }
+        for _ in 0..2 {
+            h.handle_extension_event(
+                "accept-interceptor",
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("release queued attempt");
+        }
+        if first_mode == ExistingOnly {
+            assert!(matches!(
+                outcome(&frames, "first"),
+                Some(Outcome::Rejected { .. })
+            ));
+            assert_eq!(
+                outcome(&frames, "second"),
+                Some(Outcome::Accepted { duplicate: false })
+            );
+        } else if reject_first {
+            assert!(matches!(
+                outcome(&frames, "first"),
+                Some(Outcome::Rejected { .. })
+            ));
+            assert!(matches!(
+                outcome(&frames, "second"),
+                Some(Outcome::Rejected { .. })
+            ));
+        } else {
+            assert_eq!(
+                outcome(&frames, "first"),
+                Some(Outcome::Accepted { duplicate: false })
+            );
+            assert_eq!(
+                outcome(&frames, "second"),
+                Some(Outcome::Accepted { duplicate: true })
+            );
+        }
+        assert_eq!(canonical_count(&h), usize::from(!reject_first));
+    }
 }

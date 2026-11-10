@@ -15,8 +15,26 @@ pub struct MessageAcceptanceRequest {
     pub request_id: String,
     /// Exact currently attached session.
     pub session_id: SessionId,
+    /// Whether this attempt may accept absent input. This control does not
+    /// participate in the immutable message identity.
+    #[serde(default)]
+    pub mode: MessageAcceptanceMode,
     /// Semantic message content; publisher authority comes from the connection.
     pub report: MessageDelivered<RawMessagePublisherId>,
+}
+
+/// Policy applied atomically with retained identity lookup at final admission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageAcceptanceMode {
+    /// Accept an absent message, or return the matching retained acceptance.
+    #[default]
+    AcceptNew,
+    /// Return matching retained acceptance, but never append absent input.
+    ///
+    /// Bridges can use this after declining new traffic without falsely
+    /// refusing a retry whose earlier acceptance response was lost.
+    ExistingOnly,
 }
 
 /// Directed reply to the exact requesting connection.
@@ -42,8 +60,9 @@ pub enum MessageAcceptanceOutcome {
         /// occurs.
         duplicate: bool,
     },
-    /// This attempt did not accept new input; an older accepted ID stays
-    /// accepted.
+    /// Explicit refusal of this RPC, not proof that its ID was never accepted.
+    /// An older accepted identity is not undone by policy or conflict
+    /// rejection.
     Rejected {
         /// Bounded diagnostic, never the submitted body.
         reason: String,

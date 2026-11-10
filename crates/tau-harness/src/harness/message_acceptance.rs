@@ -1,7 +1,8 @@
 //! Directed canonical acceptance; no journal barrier or independent tombstone.
 
 use tau_proto::{
-    MessageAcceptanceOutcome as Outcome, MessageAcceptanceRequest, MessageAcceptanceResult,
+    MessageAcceptanceMode, MessageAcceptanceOutcome as Outcome, MessageAcceptanceRequest,
+    MessageAcceptanceResult,
 };
 
 use super::*;
@@ -9,6 +10,8 @@ use super::*;
 /// Private attempt authority captured before asynchronous interception.
 #[derive(Clone)]
 pub(crate) struct PendingMessageAcceptance {
+    /// Attempt policy, deliberately absent from the canonical fact and digest.
+    mode: MessageAcceptanceMode,
     /// Exact requesting connection, never a publisher-wide broadcast address.
     source: tau_proto::ConnectionId,
     /// Fresh caller-owned correlation for this attempt.
@@ -54,6 +57,7 @@ impl Harness {
             return;
         }
         let pending = PendingMessageAcceptance {
+            mode: request.mode,
             source: source.clone(),
             request_id: request.request_id,
             instance_id: entry.instance_id,
@@ -114,7 +118,13 @@ impl Harness {
                     && !registry.pending_operator_unloads.contains_key(target)
                     && self.session_runtime.agent_store.agent(target).is_some()
             }) {
-                Some("recipient is not loaded")
+                self.finish_message_acceptance(
+                    pending,
+                    Outcome::Unknown {
+                        reason: "authoritative recipient history is unavailable".to_owned(),
+                    },
+                );
+                return false;
             } else if let Some((matches, _)) = target
                 .as_ref()
                 .and_then(|target| self.session_runtime.agent_store.agent(target))
@@ -129,6 +139,8 @@ impl Harness {
                 };
                 self.finish_message_acceptance(pending, outcome);
                 return false;
+            } else if pending.mode == MessageAcceptanceMode::ExistingOnly {
+                Some("no matching retained acceptance; new input is disabled for this attempt")
             } else {
                 None
             }
