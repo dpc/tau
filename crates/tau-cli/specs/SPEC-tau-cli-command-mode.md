@@ -34,13 +34,14 @@ transport retain best-effort cleanup rather than the normal interactive guarante
 
 Quit decisions serialize at the harness: an acknowledged quitter no longer
 participates in the last-UI count even while its transport drains. Explicit
-detach cannot undo already-selected shutdown. Following terminal cleanup, normal
-exit prints exactly one stderr line, `Session detached` after an authoritative
-survival decision or `Session terminated` after confirming the original daemon
-has exited. A request write, shutdown fact, or socket EOF alone is not termination
-confirmation. Failed or unconfirmed termination produces an explicit diagnostic
-instead, never a successful termination line. Process exit does not certify
-successful persistence cleanup.
+detach cannot undo already-selected shutdown. After terminal cleanup, normal exit
+prints exactly one stderr line: `Session detached: <session-id>` after an
+authoritative survival decision, or `Session terminated: <session-id>` after
+confirming the original daemon has exited. A request write, shutdown fact, or
+socket EOF alone does not confirm termination. Failed or unconfirmed termination
+instead produces an explicit diagnostic including the session ID, never a
+successful termination line. Process exit does not certify successful
+persistence cleanup.
 If explicit detach receives no acknowledgment while its connection remains live,
 the input loop stays connected and reports that detach was not confirmed. It
 must not turn an unconfirmed policy clear into automatic shutdown by closing

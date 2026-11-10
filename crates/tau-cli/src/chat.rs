@@ -1771,8 +1771,8 @@ fn run_chat_session(
     // Renderer joins and raw-terminal cleanup precede the sole final status
     // line.
     match outcome {
-        Ok(message) => eprintln!("{message}"),
-        Err(message) => eprintln!("Session exit unconfirmed: {message}"),
+        Ok(message) => eprintln!("{message}: {session_id}"),
+        Err(message) => eprintln!("Session exit unconfirmed: {session_id}: {message}"),
     }
 
     tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");

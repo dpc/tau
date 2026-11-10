@@ -2074,8 +2074,9 @@ impl PtyChild {
     /// Require exactly one final status after terminal cleanup, rather than a
     /// status rendered inside the alternate screen or followed by cleanup
     /// bytes.
-    fn assert_final_session_status(&mut self, expected: &str) {
-        self.wait_for_text(expected);
+    fn assert_final_session_status(&mut self, expected: &str, session_id: &str) {
+        let expected = format!("{expected}: {session_id}");
+        self.wait_for_text(&expected);
         while let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(50)) {
             self.accumulated_output.extend(bytes);
         }
@@ -2089,7 +2090,7 @@ impl PtyChild {
         // Terminal feature-reset controls may precede the stderr line without
         // moving the cursor. Nothing, including cleanup controls, may follow
         // it.
-        assert!(output.trim_end().ends_with(expected), "{output}");
+        assert!(output.trim_end().ends_with(&expected), "{output}");
         assert!(!output.contains("Session exit unconfirmed"), "{output}");
     }
 
@@ -2193,7 +2194,7 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
 
     owner.line(":detach");
     owner.wait_success(&environment.state_home);
-    owner.assert_final_session_status("Session detached");
+    owner.assert_final_session_status("Session detached", &session_id);
     assert!(metadata.exists(), "detach removed live metadata");
     assert!(socket.exists(), "detach removed live socket");
 
@@ -2221,7 +2222,7 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
         environment.wait_for_ready_uis(cycle + 2);
         attached.line([":quit", ":q", ":detach"][cycle]);
         attached.wait_success(&environment.state_home);
-        attached.assert_final_session_status("Session detached");
+        attached.assert_final_session_status("Session detached", &session_id);
         assert!(metadata.exists(), "reattach cycle replaced daemon metadata");
         assert!(socket.exists(), "reattach cycle removed daemon socket");
     }
@@ -2233,7 +2234,7 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
     environment.wait_for_ready_uis(5);
     shutdown.line(":quit-session");
     shutdown.wait_success(&environment.state_home);
-    shutdown.assert_final_session_status("Session terminated");
+    shutdown.assert_final_session_status("Session terminated", &session_id);
     environment.wait_for_runtime_pair_gone(&metadata, &socket);
 }
 
@@ -2318,6 +2319,9 @@ fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
     let environment = TestEnvironment::new();
     let mut owner = PtyChild::spawn(environment.command());
     let claim = environment.wait_for_metadata();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&claim).expect("claim")).expect("claim JSON");
+    let session_id = value["session_id"].as_str().expect("session");
     environment.wait_for_ready_uis(1);
     let socket = environment.socket_for_claim(&claim);
 
@@ -2327,7 +2331,7 @@ fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
         .expect("write terminal EOF");
     owner.controller.flush().expect("flush terminal EOF");
     owner.wait_success(&environment.state_home);
-    owner.assert_final_session_status("Session terminated");
+    owner.assert_final_session_status("Session terminated", session_id);
     environment.wait_for_runtime_pair_gone(&claim, &socket);
 }
 
@@ -2339,11 +2343,14 @@ fn owned_cli_quit_and_q_stop_the_session() {
         let environment = TestEnvironment::new();
         let mut owner = PtyChild::spawn(environment.command());
         let claim = environment.wait_for_metadata();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&claim).expect("claim")).expect("claim JSON");
+        let session_id = value["session_id"].as_str().expect("session");
         let socket = environment.socket_for_claim(&claim);
         environment.wait_for_ready_uis(1);
         owner.line(command);
         owner.wait_success(&environment.state_home);
-        owner.assert_final_session_status("Session terminated");
+        owner.assert_final_session_status("Session terminated", session_id);
         environment.wait_for_runtime_pair_gone(&claim, &socket);
     }
 }
@@ -2366,11 +2373,11 @@ fn creator_quit_survives_until_last_attached_ui_quits() {
     environment.wait_for_ready_uis(2);
     owner.line(":quit");
     owner.wait_success(&environment.state_home);
-    owner.assert_final_session_status("Session detached");
+    owner.assert_final_session_status("Session detached", session_id);
     assert!(claim.exists());
     attached.line(":q");
     attached.wait_success(&environment.state_home);
-    attached.assert_final_session_status("Session terminated");
+    attached.assert_final_session_status("Session terminated", session_id);
     environment.wait_for_runtime_pair_gone(&claim, &socket);
 }
 

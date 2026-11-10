@@ -25,9 +25,10 @@ survives every later reconnection and ordinary quit for this daemon's lifetime.
 An attached UI never rearms the policy. With multiple UIs, ordinary quit leaves
 the daemon alive until the last UI leaves, unless detach already disabled the
 policy. `:quit-session` always requests shutdown, including every attached UI.
-After terminal cleanup the UI prints `Session detached` or `Session terminated`
-to stderr according to the actual outcome. Failed or unconfirmed termination
-gets a diagnostic instead of a success line.
+After terminal cleanup, the UI prints `Session detached: <session-id>` or
+`Session terminated: <session-id>` to stderr according to the actual outcome.
+For failed or unconfirmed termination, it prints a diagnostic with the session ID
+instead of a success line.
 
 To shut down an otherwise idle daemon after a configurable period, opt in via
 `harness.yaml`:
