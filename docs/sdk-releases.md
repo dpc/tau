@@ -20,9 +20,9 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
-### Source SDK 0.31.0: context-scoped incoming guidance (not published)
+### Published SDK 0.31.0: context-scoped incoming guidance
 
-Proto and client source 0.31.0 use protocol **23.3**. `MessageDelivered` adds
+Published proto and client 0.31.0 use protocol **23.3**. `MessageDelivered` adds
 optional `incoming_notice: Option<MessageIncomingNotice>`; initialize it to
 `None` in existing struct literals. Constructors leave it absent by default.
 `MessageIncomingNotice::new(scope, text)` validates a nonempty scope of at most
@@ -30,12 +30,12 @@ optional `incoming_notice: Option<MessageIncomingNotice>`; initialize it to
 those values.
 
 Bridges must derive scope from their authenticated/configured endpoint, not a
-remote claimed sender or transient connection, and attach their local snapshot
+remotely claimed sender or transient connection, and attach their local snapshot
 to each report. The harness namespaces scope by canonical publisher, shows the
 first nonempty notice per selected agent context, and rearms after compaction.
-The harness preserves empty text but neither displays nor counts it. Later text changes
-wait for the next context. Remote bodies and sender-configured notices are not
-deduplicated.
+The harness preserves empty text but neither displays nor counts it. Changes to
+notice text wait for the next context. Remote bodies and sender-configured
+notices are not deduplicated.
 
 Acceptance includes the immutable notice snapshot in content matching. Retrying
 an accepted ID after changing the notice is a conflict, not a configuration
@@ -44,8 +44,34 @@ update. Both SDK acceptance entry points reject notice-bearing requests below
 that require guidance must check Configure themselves rather than assume older
 hosts will retain the field.
 
-The client source pins proto at `=0.31.0`. This source preparation does not
-publish either crate or activate a runtime.
+Proto and then client were published on November 10, 2026 from
+`b970ba0031d18044ce01127757221efdb98d1634`. A release-preparation change
+corrected stale package checks to require proto `=0.31.0` and protocol 23.3,
+and added external-consumer wire coverage for both acceptance methods.
+Independent review, full SelfCI, archive-consumer checks on Rust 1.91, and
+locked, verified publish dry-runs passed before publication.
+
+Both official sparse-index entries are unyanked. Downloaded registry archives
+match the candidate archives byte-for-byte and carry clean Cargo VCS metadata for
+that exact source. Every packaged source file matches that source. The client
+pins proto at `=0.31.0`; actions and blocking-notify-channel remain at `=0.1.0`.
+
+| Package | Registry archive SHA-256 |
+| --- | --- |
+| `dpc-tau-proto` | `62997b4dea1b59bbbf3b1d17f1d5ba5611bd6c21dcbdb60f288fe2500abfce5b` |
+| `dpc-tau-client` | `ca6745c872793e824088ff762df0de3563d4bce4d01406ba5da4905cea4ccb75` |
+
+The registry-only consumer passed all 23 tests on Rust 1.91 with an initially
+empty `CARGO_HOME` and no local dependency patches. Its wire checks verify that
+both acceptance methods reject notice-bearing requests on 23.2 without output,
+accept them on 23.3, and retain notice-free acceptance on 23.2.
+After registry verification, `dpc-tau-proto-v0.31.0` and
+`dpc-tau-client-v0.31.0` were pushed and verified at the exact source on GitHub
+and the Radicle publishing namespace.
+
+This acceptance record does not alter the tagged source or registry bytes.
+The SDK-only release does not advance trunk, publish the application, or
+activate a runtime.
 
 ### Published SDK 0.30.0: canonical message acceptance
 
