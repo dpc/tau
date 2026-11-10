@@ -1264,6 +1264,8 @@ fn test_action_invocation_id(value: impl AsRef<str>) -> tau_proto::ActionInvocat
         .expect("test identifier must satisfy its grammar")
 }
 
+use crate::display::ErrorExplanation;
+
 mod agent_discovery;
 mod argument_and_output_helpers;
 mod deadline_reader;

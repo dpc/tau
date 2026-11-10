@@ -698,8 +698,11 @@ fn report_error(started: &ToolStarted, message: &str, handle: &ClientHandle) -> 
         call_id: started.call_id.clone(),
         tool_name: started.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,
-        message: message.to_owned(),
-        details: None,
+        message: "image-generation-failed".to_owned(),
+        details: Some(tau_proto::CborValue::Map(vec![(
+            tau_proto::CborValue::Text("output".to_owned()),
+            tau_proto::CborValue::Text(message.to_owned()),
+        )])),
         presentation: Default::default(),
         display: request_display(started, tau_proto::ToolUseStatus::Error, message),
         originator: started.originator.clone(),

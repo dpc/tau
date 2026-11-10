@@ -85,6 +85,10 @@ also reach `on_event`; replayed starts do not execute handlers.
 
 After `init`:
 
+Host-reported tool failures use `rhai-tool-failed` with diagnostic and recovery
+text in the semantic `output` payload. The host leaves successful script values and generic script-authored emits
+unchanged. Scripts are responsible for the conformance of events they construct.
+
 - `shell_spawn(command, opts)` returns a `ShellJob`. Options: `timeout`, `cwd`,
   `on_complete`, `tag`. Completion callbacks receive `(result, job)`. Returning a
   job from a tool handler defers its result: the callback return becomes

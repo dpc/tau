@@ -1091,13 +1091,12 @@ impl WaitTracker {
         let target = match parse_wait_args_with_bounds(arguments, self.input_wait_timeout_bounds) {
             Ok(target) => target,
             Err(message) => {
-                let reply = wait_error_reply(call_id, tool_name, message, Some(arguments.clone()))
-                    .with_settlement(
-                        &wait,
-                        tau_proto::ToolWaitOutcome::Rejected {
-                            reason: tau_proto::WaitRejectionReason::InvalidArguments,
-                        },
-                    );
+                let reply = wait_error_reply(call_id, tool_name, message, None).with_settlement(
+                    &wait,
+                    tau_proto::ToolWaitOutcome::Rejected {
+                        reason: tau_proto::WaitRejectionReason::InvalidArguments,
+                    },
+                );
                 return WaitStart::reply(reply);
             }
         };
@@ -1115,7 +1114,7 @@ impl WaitTracker {
                         call_id,
                         tool_name,
                         "input wait deadline exceeds monotonic clock range".to_owned(),
-                        Some(arguments.clone()),
+                        None,
                     )
                     .with_settlement(
                         &wait,
@@ -1239,7 +1238,7 @@ impl WaitTracker {
                 self.record_terminal_state(target.clone(), WaitCallState::Consumed);
                 self.remove_completed(&target);
                 let source_tool_name = Some(error.tool_name.clone());
-                let reply = wait_error_reply(
+                let reply = wait_source_error_reply(
                     wait.call_id.clone(),
                     wait.tool_name.clone(),
                     error.message,
@@ -1278,7 +1277,7 @@ impl WaitTracker {
             Some(WaitCallState::ReservedError(error, outcome)) => {
                 self.record_terminal_state(target.clone(), WaitCallState::Consumed);
                 let source_tool_name = Some(error.tool_name.clone());
-                let reply = wait_error_reply(
+                let reply = wait_source_error_reply(
                     wait.call_id.clone(),
                     wait.tool_name.clone(),
                     error.message,
@@ -1296,7 +1295,7 @@ impl WaitTracker {
             }
             Some(WaitCallState::Consumed) => {
                 let source_tool_name = self.call_tool_names.get(&target).cloned();
-                let reply = wait_error_reply(
+                let reply = wait_source_error_reply(
                     wait.call_id.clone(),
                     wait.tool_name.clone(),
                     "already-consumed".to_owned(),
@@ -1424,7 +1423,7 @@ impl WaitTracker {
                 }
                 WaitCallState::Consumed => {
                     return WaitStart::reply(
-                        wait_error_reply(
+                        wait_source_error_reply(
                             wait.call_id.clone(),
                             wait.tool_name.clone(),
                             "already-consumed".to_owned(),
@@ -2023,7 +2022,7 @@ impl WaitTracker {
             WaitCallState::BackgroundError(error, outcome) => {
                 self.record_terminal_state(target.clone(), WaitCallState::Consumed);
                 let source_tool_name = Some(error.tool_name.clone());
-                let reply = wait_error_reply(
+                let reply = wait_source_error_reply(
                     wait.call_id.clone(),
                     wait.tool_name.clone(),
                     error.message,
@@ -2156,7 +2155,7 @@ impl WaitTracker {
         if let Some(wait) = self.waiters.remove(&call_id) {
             self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
             let source_tool_name = Some(error.tool_name.clone());
-            let reply = wait_error_reply(
+            let reply = wait_source_error_reply(
                 wait.call_id.clone(),
                 wait.tool_name.clone(),
                 error.message.clone(),
@@ -2320,7 +2319,7 @@ impl WaitTracker {
             self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
             self.remove_completed(&call_id);
             let source_tool_name = Some(error.tool_name.clone());
-            let reply = wait_error_reply(
+            let reply = wait_source_error_reply(
                 wait.call_id.clone(),
                 wait.tool_name.clone(),
                 error.message,
@@ -2343,7 +2342,7 @@ impl WaitTracker {
             self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
             self.remove_completed(&call_id);
             let source_tool_name = Some(error.tool_name.clone());
-            let reply = wait_error_reply(
+            let reply = wait_source_error_reply(
                 wait.call_id.clone(),
                 wait.tool_name.clone(),
                 error.message,
@@ -3300,6 +3299,29 @@ fn wait_error_status_text(message: &str) -> String {
 
 /// Construct a wait error reply without durable settlement metadata.
 pub(super) fn wait_error_reply(
+    wait_call_id: ToolCallId,
+    wait_tool_name: ToolName,
+    message: String,
+    details: Option<CborValue>,
+) -> WaitReply {
+    let mut details = match details {
+        Some(CborValue::Map(entries)) => entries,
+        _ => Vec::new(),
+    };
+    details.push((
+        CborValue::Text("output".to_owned()),
+        CborValue::Text(message),
+    ));
+    wait_source_error_reply(
+        wait_call_id,
+        wait_tool_name,
+        "wait-failed".to_owned(),
+        Some(CborValue::Map(details)),
+    )
+}
+
+/// Forward a source tool's semantic failure without reclassifying its outcome.
+fn wait_source_error_reply(
     wait_call_id: ToolCallId,
     wait_tool_name: ToolName,
     message: String,

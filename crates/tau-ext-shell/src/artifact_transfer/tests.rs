@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::display::ErrorExplanation;
 
 /// Every accepted tool spelling normalizes before any transfer is scheduled.
 #[test]
@@ -538,7 +539,7 @@ fn fifo_export_rejection_subprocess_helper() {
         panic!("expected preparation error");
     };
     assert_eq!(
-        error.message,
+        error.explanation(),
         "export path is not a regular file or directory"
     );
 
@@ -574,7 +575,7 @@ fn fifo_export_rejection_subprocess_helper() {
         if let Event::ToolErrorReported(error) = *emit.event {
             assert_eq!(error.call_id.as_str(), "scheduled-fifo-export");
             assert_eq!(
-                error.message,
+                error.explanation(),
                 "export path is not a regular file or directory"
             );
             break;
@@ -895,7 +896,7 @@ fn correlated_upload_error_aborts_known_upload_once() {
     assert!(manager.transfers.is_empty());
     assert!(manager.requests.is_empty());
     assert_eq!(
-        expect_tool_error(&rx).message,
+        expect_tool_error(&rx).explanation(),
         "artifact storage is busy; retry this tool call"
     );
     manager.handle_result(
@@ -971,7 +972,7 @@ fn correlated_download_error_closes_known_read_once() {
         |op| matches!(op, tau_proto::ArtifactOp::Close { read } if read.as_str() == "known-read"),
     );
     assert_eq!(
-        expect_tool_error(&rx).message,
+        expect_tool_error(&rx).explanation(),
         "artifact storage I/O failed"
     );
     assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
@@ -1017,7 +1018,7 @@ fn local_request_failure_releases_only_known_transfer_identity() {
     );
     assert!(manager.transfers.is_empty());
     assert_eq!(
-        expect_tool_error(&rx).message,
+        expect_tool_error(&rx).explanation(),
         "artifact request failed: tau client detached FIFO or frame byte limit is exhausted"
     );
 
@@ -1036,7 +1037,7 @@ fn local_request_failure_releases_only_known_transfer_identity() {
     manager.reject_next_request = true;
     manager.start_next(&initial.call_id, &initial_output);
     assert_eq!(
-        expect_tool_error(&initial_rx).message,
+        expect_tool_error(&initial_rx).explanation(),
         "artifact request failed: tau client detached FIFO or frame byte limit is exhausted"
     );
     runtime.finish().expect("finish client fixture");
@@ -1107,7 +1108,7 @@ fn cleanup_admission_failure_preserves_original_terminal() {
     );
 
     assert_eq!(
-        expect_tool_error(&rx).message,
+        expect_tool_error(&rx).explanation(),
         "artifact size or digest verification failed"
     );
     assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());

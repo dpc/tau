@@ -24,7 +24,7 @@ const MAX_GREP_CONTEXT: usize = 20;
 pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     match run_grep_cancellable(arguments, None)? {
         CancellableToolRun::Finished(output) => Ok(*output),
-        CancellableToolRun::Cancelled => Err(ToolFailure::new("cancelled")),
+        CancellableToolRun::Cancelled => Err(ToolFailure::identifier("cancelled")),
     }
 }
 

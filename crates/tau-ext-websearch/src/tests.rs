@@ -18,6 +18,23 @@ use super::composite::{
 };
 use super::*;
 
+/// Inspect the semantic explanation independently of the stable identifier.
+fn error_body(error: &tau_proto::ToolError) -> String {
+    assert_eq!(error.message, "web-request-failed");
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_ref().unwrap_or(&CborValue::Null),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("shared renderer");
+    text.strip_prefix("error: web-request-failed\n\n")
+        .expect("explanation payload")
+        .to_owned()
+}
+
 fn read_http_fixture_request(stream: &std::net::TcpStream) -> String {
     let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
     let mut request = Vec::new();
@@ -156,7 +173,7 @@ fn restricted_default_search_pool_fails_without_network_attempt() {
         panic!("expected pre-contact error")
     };
     assert_eq!(
-        error.message,
+        error_body(&error),
         "no configured web search provider can enforce allowed domains"
     );
 }
@@ -944,10 +961,10 @@ fn hybrid_search_all_provider_failure_is_normalized() {
         panic!("expected error");
     };
     assert_eq!(
-        error.message,
+        error_body(&error),
         "web_search failed after 3 attempts: exa=rate_limited, parallel=transport, you=provider"
     );
-    assert!(!error.message.contains("secret"));
+    assert!(!error_body(&error).contains("secret"));
     assert_eq!(
         error.display.expect("display").info_chips,
         vec!["✗ Exa* → ✗ Parallel* → ✗ You.com*"]
@@ -1192,7 +1209,7 @@ fn busy_hybrid_runtime_rejection_preserves_next_primary() {
     let Event::ToolErrorReported(error) = read_terminal_including_progress(&mut reader) else {
         panic!("expected busy error");
     };
-    assert!(error.message.contains("busy"));
+    assert!(error_body(&error).contains("busy"));
 
     *gate.released.lock().expect("released") = true;
     gate.wake.notify_all();
@@ -1260,7 +1277,7 @@ fn composite_scheduler_handles_third_provider_and_max_three() {
         panic!("expected error");
     };
     assert_eq!(
-        error.message,
+        error_body(&error),
         "web_search failed after 3 attempts: exa=provider, parallel=provider, third=provider"
     );
     assert_eq!(
@@ -2526,7 +2543,7 @@ fn missing_query_returns_tool_error() {
     let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
-    assert!(err.message.contains("query"), "message: {}", err.message);
+    assert!(error_body(&err).contains("query"), "error: {err:?}");
 }
 
 /// Ensures an upstream Exa failure retains its query through progress and the
@@ -2573,7 +2590,8 @@ fn searcher_error_surfaces_as_tool_error() {
     let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
-    assert_eq!(err.message, "upstream timed out");
+    assert_eq!(err.message, "web-request-failed");
+    assert_eq!(error_body(&err), "upstream timed out");
     assert_eq!(err.originator, originator);
     assert_eq!(err.display.expect("display").args, "query: anything");
 }
@@ -2644,7 +2662,7 @@ fn rejects_num_results_out_of_range() {
     let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
-    assert!(err.message.contains(">= 1"), "message: {}", err.message);
+    assert!(error_body(&err).contains(">= 1"), "error: {err:?}");
 }
 
 /// Ensures a busy terminal retains its submitted query instead of blocking the
@@ -2676,7 +2694,7 @@ fn returns_busy_error_when_in_flight_limit_is_full() {
         panic!("expected ToolError, got {event:?}");
     };
     assert_eq!(err.call_id.as_str(), "busy-call");
-    assert!(err.message.contains("busy"), "message: {}", err.message);
+    assert!(error_body(&err).contains("busy"), "error: {err:?}");
     assert_eq!(err.display.expect("display").args, "query: blocked");
     searcher.release();
     for _ in 0..MAX_IN_FLIGHT {
@@ -2842,7 +2860,7 @@ fn worker_terminals_survive_production_fifo_saturation() {
                 assert_eq!(result.tool_name.as_str(), EXA_TOOL_NAME);
             }
             Event::ToolErrorReported(error) => {
-                assert_eq!(error.message, "saturated error");
+                assert_eq!(error_body(&error), "saturated error");
                 assert_eq!(error.tool_name.as_str(), EXA_TOOL_NAME);
             }
             _ => unreachable!("only correlated tool terminals are collected"),
@@ -3217,7 +3235,7 @@ fn parallel_fetch_error_retains_safe_target_display() {
     let Event::ToolErrorReported(error) = event else {
         panic!("expected ToolError, got {event:?}");
     };
-    assert_eq!(error.message, "upstream fetch failed");
+    assert_eq!(error_body(&error), "upstream fetch failed");
     assert_eq!(
         error.display.expect("display").args,
         "fetch: not a URL\\u{000A}with controls"
@@ -3249,7 +3267,7 @@ fn parallel_missing_required_argument_is_rejected_before_forwarding() {
     let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
-    assert!(err.message.contains("query"), "message: {}", err.message);
+    assert!(error_body(&err).contains("query"), "error: {err:?}");
     assert!(parallel.calls.lock().expect("lock").is_empty());
 }
 
@@ -3300,7 +3318,7 @@ fn parallel_fetch_invalid_url_is_rejected_before_forwarding() {
         let Event::ToolError(error) = event else {
             panic!("expected ToolError, got {event:?}");
         };
-        assert!(error.message.contains("url"), "message: {}", error.message);
+        assert!(error_body(&error).contains("url"), "error: {error:?}");
     }
     assert!(parallel.calls.lock().expect("lock").is_empty());
 }
@@ -3334,7 +3352,7 @@ fn parallel_non_string_argument_keys_are_rejected_before_forwarding() {
         panic!("expected ToolError, got {event:?}");
     };
     assert!(
-        err.message.contains("keys must be strings"),
+        error_body(&err).contains("keys must be strings"),
         "message: {}",
         err.message
     );
@@ -3568,10 +3586,10 @@ fn post_escape_oversize_result_is_rejected_without_truncation() {
         panic!("expected ToolError, got {event:?}");
     };
     assert_eq!(
-        error.message,
+        error_body(&error),
         format!("exa MCP projected web content exceeded {TOOL_OUTPUT_MAX_BYTES} bytes")
     );
-    assert!(!error.message.contains("truncated"));
+    assert!(!error_body(&error).contains("truncated"));
 }
 
 /// Ensures oversized JSON-RPC error messages are rejected with a compact error
@@ -3718,14 +3736,14 @@ fn hosted_mcp_rate_limits_ignore_untrusted_bodies() {
     let Event::ToolError(parallel_error) = parallel_event else {
         panic!("expected ToolError, got {parallel_event:?}");
     };
-    assert_eq!(parallel_error.message, RATE_LIMITED_ERROR);
+    assert_eq!(error_body(&parallel_error), RATE_LIMITED_ERROR);
 
     let exa_error = HttpExaSearcher::new(endpoint)
         .search("rate limit test", 1)
         .expect_err("server returned HTTP 429");
     server.join().expect("join");
     assert_eq!(exa_error, RATE_LIMITED_ERROR);
-    for error in [&parallel_error.message, &exa_error] {
+    for error in [&error_body(&parallel_error), &exa_error] {
         assert!(
             error.len() <= TOOL_OUTPUT_MAX_BYTES,
             "error length: {}",

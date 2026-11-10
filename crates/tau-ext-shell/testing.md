@@ -18,6 +18,13 @@ by [SPEC-streamed-tool-output](../../specs/SPEC-streamed-tool-output.md).
 
 ## Protocol and UI
 
+`dispatched_failures_render_identifiers_and_explanations` drives real dispatch
+through the shared model renderer. It checks malformed types and control-bearing
+rejected arguments, stable error identifiers, payload explanations, and separate
+UI labels. Existing partial-patch, saved-output, cancellation, lock-progress and
+terminal-budget fixtures retain their outcome and UI evidence while error
+diagnostics move from headers into payloads.
+
 Artifact round-trip lifecycle coverage requires export's `artifact` field and
 rendered header to contain a bare key. Import accepts that key, a plain URI, or
 a Markdown autolink through shared `ArtifactReference` deserialization.

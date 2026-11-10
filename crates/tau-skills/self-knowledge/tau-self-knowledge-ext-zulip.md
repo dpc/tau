@@ -311,8 +311,9 @@ timestamps may be stale or fall back to join date. Account activation does not
 mean online. Missing data means unavailable, not offline.
 
 Eligible avatars import unchanged, up to 2 MiB. `avatar.state="imported"` returns
-reference, size and MIME hint; other states include `none`, `blocked_origin`,
-`unsupported_url`, `unavailable`, `too_large`, `unsupported_media_type`.
+the bare artifact key in `avatar.artifact`, size and MIME hint. Other states
+include `none`, `blocked_origin`, `unsupported_url`, `unavailable`, `too_large`,
+`unsupported_media_type`.
 Server-trusted builds accept the exact avatar destination from the configured
 server's authenticated selected-profile response. External destinations must use
 HTTPS on the default port (443); storage/CDN hosts, custom percent-encoded paths

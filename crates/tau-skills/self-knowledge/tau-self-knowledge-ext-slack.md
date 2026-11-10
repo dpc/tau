@@ -210,11 +210,11 @@ subscription or SDK change.
 
 Supported avatars import automatically as original bytes through Artifact RPC.
 `avatar.status` is `available`, `not_provided`, `unsupported_origin` or
-`unavailable`. Available results include canonical `artifact`, bare `key`,
-`size` and unverified `mime_type`; inspect via a separately authorized image
-tool. The tool prefers the provider's original, otherwise its largest standard
-rendition. Transfers are credential-free, limited to 4 MiB/10 seconds, share the
-single binary slot with attachments, and reject redirects and encoded responses.
+`unavailable`. Available results include a bare key in `artifact`, `size`
+and an unverified `mime_type`. Inspect the avatar with a separately authorized
+image tool. The tool prefers the provider's original, otherwise its largest
+standard rendition. Transfers are credential-free, limited to 4 MiB/10 seconds,
+share the single binary slot with attachments, and reject redirects and encoded responses.
 Supported HTTPS origins are exact `avatars.slack-edge.com` and narrow
 `secure.gravatar.com/avatar/<hash>` paths with bounded size/default queries.
 Other CDN hosts and default-avatar redirects are unavailable, not arbitrary-fetch
@@ -455,9 +455,9 @@ List again with the durable message ID after expiry or restart.
 
 Download checks fresh source membership and current metadata before transfer,
 after transfer and after artifact import. It imports the original bytes and
-returns `key`, canonical `artifact`, `size`, `name` and an unverified `mime_type`
-hint. Use separately authorized artifact import or image inspection tools to
-consume the original. Content stays untrusted.
+returns a bare key in `artifact`, plus `size`, `name` and an unverified
+`mime_type` hint. Use separately authorized artifact import or image inspection
+tools to consume the original. Content stays untrusted.
 Artifacts persist independently of ephemeral transcripts; retirement may leave
 undisclosed imported bytes.
 
@@ -798,3 +798,6 @@ Successful text-only `slack_send` results use
 (replacing the former plain-text success). The ref remains inert after the local
 sent-report/result write and flush; only the matching canonical `message.sent` downpath echo
 activates it.
+
+Tool failures use the stable `slack_error` identifier. The payload retains the
+safe explanation and recovery guidance without copying tool arguments.

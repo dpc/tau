@@ -10,6 +10,38 @@ use tau_proto::{
     CborValue, ToolResultContentPart, ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 
+/// Diagnostic assertions inspect the payload independently of the error
+/// identity.
+#[cfg(test)]
+pub(crate) trait ErrorExplanation {
+    /// Diagnostic and recovery payload, without metadata headers.
+    fn explanation(&self) -> String;
+}
+
+#[cfg(test)]
+impl ErrorExplanation for tau_proto::ToolError {
+    fn explanation(&self) -> String {
+        diagnostic_output(self.details.as_ref())
+    }
+}
+
+/// Read the diagnostic payload without conflating it with metadata headers.
+#[cfg(test)]
+fn diagnostic_output(details: Option<&CborValue>) -> String {
+    let Some(CborValue::Map(entries)) = details else {
+        return String::new();
+    };
+    entries
+        .iter()
+        .find_map(|(key, value)| match (key, value) {
+            (CborValue::Text(key), CborValue::Text(value)) if key == "output" => {
+                Some(value.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// Success bundle: the CBOR result the agent consumes and the display
 /// descriptor the UI consumes.
 #[derive(Debug)]
@@ -26,24 +58,47 @@ pub(crate) struct ToolOutput {
 /// details (e.g. shell stdout/stderr), and the display descriptor.
 #[derive(Debug)]
 pub(crate) struct ToolFailure {
+    /// Stable model-visible error identifier.
     pub message: String,
+    /// Semantic diagnostic headers and explanatory payload.
     pub details: Option<Box<CborValue>>,
+    /// Independent UI presentation, including any mutation diffs.
     pub display: Box<ToolUseState>,
 }
 
 impl ToolFailure {
+    /// Recover explanatory body text for diagnostic-focused regression
+    /// assertions.
+    #[cfg(test)]
+    pub(crate) fn explanation(&self) -> String {
+        diagnostic_output(self.details.as_deref())
+    }
+
+    /// Report a shell-tool failure with the diagnostic in the payload.
     pub fn new(message: impl Into<String>) -> Self {
         let message = message.into();
         let status_text = error_chip_text(&message);
         Self {
-            message,
-            details: None,
+            message: "shell-tool-failed".to_owned(),
+            details: Some(Box::new(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(message),
+            )]))),
             display: Box::new(ToolUseState {
                 status: ToolUseStatus::Error,
                 status_text,
                 ..Default::default()
             }),
         }
+    }
+
+    /// Report an already classified failure without manufacturing a payload.
+    pub fn identifier(identifier: impl Into<String>) -> Self {
+        let identifier = identifier.into();
+        let mut failure = Self::new(&identifier);
+        failure.message = identifier;
+        failure.details = None;
+        failure
     }
 
     pub fn with_args(mut self, args: impl Into<String>) -> Self {
@@ -56,7 +111,29 @@ impl ToolFailure {
         self
     }
 
+    /// Retain the diagnostic while adding structured evidence and recovery
+    /// text.
     pub fn with_details(mut self, details: CborValue) -> Self {
+        let mut details = details;
+        if let (Some(previous), CborValue::Map(entries)) = (&self.details, &mut details)
+            && let CborValue::Map(previous) = previous.as_ref()
+        {
+            for (key, value) in previous {
+                if let Some((_, existing)) = entries.iter_mut().find(|(k, _)| k == key) {
+                    if matches!(key, CborValue::Text(key) if key == "output")
+                        && let (CborValue::Text(before), CborValue::Text(after)) = (value, existing)
+                    {
+                        if after.is_empty() {
+                            *after = before.clone();
+                        } else if !before.is_empty() {
+                            *after = format!("{before}\n\n{after}");
+                        }
+                    }
+                } else {
+                    entries.push((key.clone(), value.clone()));
+                }
+            }
+        }
         self.details = Some(Box::new(details));
         self
     }

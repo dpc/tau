@@ -432,7 +432,7 @@ fn replay_rejects_legacy_gpt_cwd_without_consuming_outcome() {
     )
     .expect_err("legacy cwd must fail before replay");
     assert_eq!(
-        error.message,
+        error.explanation(),
         "argument `cwd` is not supported by `shell_command`; use call-local `workdir`"
     );
     assert!(
@@ -911,7 +911,7 @@ fn shell_vcr_cancelled_replay_errors_without_cancel_request() {
     )
     .expect_err("missing cancel should fail");
 
-    assert!(error.message.contains("expected shell cancellation"));
+    assert!(error.explanation().contains("expected shell cancellation"));
 }
 
 /// Ensures VCR stores truncated shell rendering in its bounded side

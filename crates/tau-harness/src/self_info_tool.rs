@@ -62,8 +62,11 @@ impl SelfInfoTool {
                 call.id.clone(),
                 visible_tool_name,
                 call.tool_type,
-                message.to_owned(),
-                None,
+                "self-info-failed".to_owned(),
+                Some(CborValue::Map(vec![(
+                    CborValue::Text("output".to_owned()),
+                    CborValue::Text(message.to_owned()),
+                )])),
             ),
         }
     }
@@ -127,8 +130,11 @@ impl InternalToolHandler for SelfInfoTool {
                 call.id,
                 visible_tool_name,
                 call.tool_type,
-                "configured extensions cannot invoke `self_info`".to_owned(),
-                Some(call.arguments),
+                "unsupported-caller".to_owned(),
+                Some(CborValue::Map(vec![(
+                    CborValue::Text("output".to_owned()),
+                    CborValue::Text("configured extensions cannot invoke `self_info`".to_owned()),
+                )])),
             );
             return Ok(());
         };

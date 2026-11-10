@@ -9,6 +9,7 @@ use super::fs::{
 };
 use super::*;
 use crate::argument::optional_argument_bool;
+use crate::display::ErrorExplanation;
 use crate::tool_lifecycle::ToolLifecycleRegistry;
 
 fn path(value: &str) -> PathBuf {
@@ -573,8 +574,9 @@ fn dir_lock_request_retains_only_valid_commands_after_existing_directory_checks(
         let Event::ToolError(error) = *error else {
             panic!("expected tool error");
         };
-        assert_eq!(error.message, expected_message);
-        assert_eq!(error.details, Some(arguments));
+        assert_eq!(error.message, "shell-tool-failed");
+        assert_eq!(error.explanation(), expected_message);
+        assert!(matches!(error.details, Some(CborValue::Map(ref entries)) if entries.len() == 1));
         let display = error.display.expect("error display");
         assert_eq!(display.args, expected_args.unwrap_or_default());
         assert_eq!(display.status, ToolUseStatus::Error);

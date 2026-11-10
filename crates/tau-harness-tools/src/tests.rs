@@ -2,6 +2,55 @@ use std::path as path_std_path;
 
 use super::*;
 
+/// Native validation diagnostics share the semantic payload constructor; the
+/// shared renderer must not turn rejected arguments into model-visible headers.
+#[test]
+fn native_validation_explanations_render_without_argument_echoes() {
+    let arguments = CborValue::Map(vec![
+        (CborValue::Text("prompt".into()), CborValue::Bool(false)),
+        (CborValue::Text("query".into()), CborValue::Bool(false)),
+        (
+            CborValue::Text("tool_call_id".into()),
+            CborValue::Bool(false),
+        ),
+        (CborValue::Text("agent_id".into()), CborValue::Bool(false)),
+        (
+            CborValue::Text("private".into()),
+            CborValue::Text("do not echo\n\u{1b}".into()),
+        ),
+    ]);
+    let diagnostics = [
+        parse_delegate_args(&arguments)
+            .err()
+            .expect("delegate error"),
+        parse_discovery_args(&arguments, false)
+            .err()
+            .expect("session list error"),
+        parse_discovery_args(&arguments, true)
+            .err()
+            .expect("agent list error"),
+        parse_cancel_args(&arguments).err().expect("cancel error"),
+        parse_compaction_args(AGENT_COMPACT_TOOL_NAME, &arguments)
+            .err()
+            .expect("compact error"),
+    ];
+    for diagnostic in diagnostics {
+        let details = error_output(diagnostic.clone()).expect("explanation");
+        let mut text = String::new();
+        tau_proto::write_provider_tool_result_text(
+            &details,
+            tau_proto::ProviderToolResultStatus::Error {
+                message: "invalid-arguments",
+            },
+            &mut text,
+        )
+        .expect("shared renderer");
+        assert_eq!(text, format!("error: invalid-arguments\n\n{diagnostic}"));
+        assert!(!text.contains("do not echo"));
+        assert!(matches!(details, CborValue::Map(entries) if entries.len() == 1));
+    }
+}
+
 /// Retried release must expose retained receipt authority and no new append,
 /// without a payload or a false claim that the original worker is still live.
 #[test]

@@ -8,6 +8,7 @@ use tau_proto::{
 
 use super::{IMAGE_TOO_LARGE_MESSAGE, budget_terminal_report, frame_fits};
 use crate::Output;
+use crate::display::ErrorExplanation;
 
 /// Return the reported event from the measured terminal envelope.
 fn budgeted_event(event: Event) -> Event {
@@ -168,8 +169,8 @@ fn oversized_typed_image_becomes_byte_free_local_error() {
     let Event::ToolErrorReported(error) = event else {
         panic!("expected reported tool error");
     };
-    assert_eq!(error.message, IMAGE_TOO_LARGE_MESSAGE);
-    assert!(error.details.is_none());
+    assert_eq!(error.message, "image-limit-exceeded");
+    assert_eq!(error.explanation(), IMAGE_TOO_LARGE_MESSAGE);
     assert!(frame_fits(&Event::ToolErrorReported(error)).expect("measure local error"));
 }
 

@@ -66,6 +66,14 @@ Do not inspect harness State paths or treat the digest as provenance or safety.
 
 ## Goal
 
+Tool failures must use short, stable error identifiers. Verify that model-rendered explanations and recovery guidance appear in the
+payload rather than the error header, and that malformed requests do not repeat
+their original argument maps.
+For shell failures, retain partial mutation evidence and UI-only diffs. Preserve
+existing header-only classified errors and empty successes; do not manufacture a
+payload or separator when no new information exists. Use actual producer events
+through the shared renderer, not a second local text formatter.
+
 For directory-lock contention, check that the one-time waiting message identifies
 a blocking agent, the lock kind (or earlier queued request), and the overlapping
 path. Use this best-effort snapshot as a contact hint; it may become stale and

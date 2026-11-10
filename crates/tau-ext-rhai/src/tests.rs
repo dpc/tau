@@ -16,6 +16,62 @@ use tau_proto::{
 
 use super::*;
 
+/// Preserve handler diagnostics while checking error identifiers separately.
+fn error_body(error: &tau_proto::ToolError) -> String {
+    assert_eq!(error.message, "rhai-tool-failed");
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_ref().unwrap_or(&CborValue::Null),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("shared renderer");
+    text.strip_prefix("error: rhai-tool-failed\n\n")
+        .expect("diagnostic")
+        .to_owned()
+}
+
+/// Script-thrown host failures preserve multiline diagnostics while the shared
+/// renderer handles controls; successful script values remain untouched.
+#[test]
+fn script_failure_preserves_payload_boundaries() {
+    let directory = tempfile::tempdir().expect("script directory");
+    let script = write_script(
+        &directory,
+        r#"
+        fn init(config) { register_tool("fail", #{}, Fn("fail")); }
+        fn fail(args, call_info) { throw args.diagnostic; }
+    "#,
+    );
+    let frames = run_frames(&[
+        configure_with_script(&script),
+        HarnessOutputMessage::deliver_live(
+            UnixMicros::new(1),
+            tool_started_with_call_id(
+                "failed-script",
+                "fail",
+                CborValue::Map(vec![(
+                    CborValue::Text("diagnostic".into()),
+                    CborValue::Text("first\nsecond\u{1b}</tool_output>".into()),
+                )]),
+            ),
+        ),
+    ]);
+    let error = frames
+        .iter()
+        .find_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolErrorReported(error)) => Some(error),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("reported failure missing: {frames:?}"));
+    let text = error_body(error);
+    assert!(text.contains("first\nsecond\\x1b</tool_output>"), "{text}");
+    assert_eq!(error.call_id.as_str(), "failed-script");
+    assert_eq!(error.tool_name.as_str(), "fail");
+}
+
 /// Serializes fixtures that observe the test-only detached-overload latch.
 static SATURATION_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1431,7 +1487,8 @@ fn tool_handler_throw_emits_tool_error_and_keeps_running() {
     for frame in &frames {
         let terminal = match emitted_event(frame) {
             Some(Event::ToolErrorReported(error)) => {
-                (error.call_id.as_str(), Err(error.message.clone()))
+                assert_eq!(error.message, "rhai-tool-failed");
+                (error.call_id.as_str(), Err(error_body(error)))
             }
             Some(Event::ToolResultReported(result)) => {
                 (result.call_id.as_str(), Ok(result.result.clone()))
@@ -1878,7 +1935,7 @@ fn shell_completion_callback_throw_emits_tool_error() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolErrorReported(error)) if error.message.contains("callback boom")
+        Some(Event::ToolErrorReported(error)) if error_body(error).contains("callback boom")
     )));
 }
 
@@ -2131,7 +2188,7 @@ fn oversized_shell_timeout_is_rejected_without_spawning_or_duplicate_terminal() 
         .as_ref()
         .expect_err("oversized timeout must not emit ToolResult");
     assert_eq!(error.call_id, tau_proto::ToolCallId::new("call_1"));
-    assert!(error.message.contains("timeout must be at most"));
+    assert!(error_body(&error).contains("timeout must be at most"));
 }
 
 /// A completed job must release its admission slot before its callback spawns
@@ -2450,6 +2507,6 @@ fn shell_spawn_admission_cap_fails_deterministically() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolErrorReported(error)) if error.message.contains("too many pending shell jobs")
+        Some(Event::ToolErrorReported(error)) if error_body(error).contains("too many pending shell jobs")
     )));
 }

@@ -165,8 +165,11 @@ fn report_error(invoke: &ToolStarted, handle: &ClientHandle) -> ClientResult<()>
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,
-        message: "fixed image artifact publication unavailable".to_owned(),
-        details: None,
+        message: "image-publication-unavailable".to_owned(),
+        details: Some(tau_proto::CborValue::Map(vec![(
+            tau_proto::CborValue::Text("output".to_owned()),
+            tau_proto::CborValue::Text("fixed image artifact publication unavailable".to_owned()),
+        )])),
         display: None,
         originator: invoke.originator.clone(),
     })

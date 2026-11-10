@@ -531,11 +531,14 @@ impl ShellRuntime {
                     call_id: pending_workdir.identity.call_id,
                     tool_name: pending_workdir.identity.wire_tool_name,
                     tool_type: tau_proto::ToolType::Function,
-                    message: format!(
-                        "committed cwd metadata did not match requested cwd; cwd changed to {}",
-                        cwd.display()
-                    ),
-                    details: None,
+                    message: "workdir-commit-mismatch".to_owned(),
+                    details: Some(tau_proto::CborValue::Map(vec![(
+                        tau_proto::CborValue::Text("output".to_owned()),
+                        tau_proto::CborValue::Text(format!(
+                            "committed cwd metadata did not match requested cwd; cwd changed to {}",
+                            cwd.display()
+                        )),
+                    )])),
                     display: None,
                     originator: pending_workdir.identity.originator,
                 })
@@ -634,8 +637,11 @@ impl ShellRuntime {
                 call_id: pending.identity.call_id,
                 tool_name: pending.identity.wire_tool_name,
                 tool_type: tau_proto::ToolType::Function,
-                message: message.to_owned(),
-                details: None,
+                message: "workdir-commit-failed".to_owned(),
+                details: Some(tau_proto::CborValue::Map(vec![(
+                    tau_proto::CborValue::Text("output".to_owned()),
+                    tau_proto::CborValue::Text(message.to_owned()),
+                )])),
                 display: None,
                 originator: pending.identity.originator,
             })

@@ -15,6 +15,11 @@ use tau_proto::{
 
 use super::*;
 
+/// Inspect useful diagnostics independently of fixture error identifiers.
+fn error_body(error: &tau_proto::ToolError) -> String {
+    tau_proto::ToolResponse::from_cbor(error.details.as_ref().unwrap_or(&CborValue::Null)).body
+}
+
 /// Exact no-side-effect readiness text used to synchronize its disconnect
 /// fixture.
 const NO_SIDE_EFFECT_READY_MARKER: &[u8] = b"hold_no_side_effect ready";
@@ -683,7 +688,7 @@ fn restart_tool_can_return_error() {
     let Some(Event::ToolErrorReported(error)) = frames.get(5).and_then(emitted_event) else {
         panic!("expected tool error");
     };
-    assert_eq!(error.message, "restarting failed");
+    assert_eq!(error.message, "restart-failed");
     assert_eq!(frames.len(), 6);
 }
 
@@ -1103,7 +1108,7 @@ fn restart_tool_config_error_overrides_random_exit() {
         })
         .expect("configured error should return a tool error");
     assert_eq!(error.call_id.as_str(), "call-1");
-    assert_eq!(error.message, "restarting failed");
+    assert_eq!(error.message, "restart-failed");
     assert!(
         frames
             .iter()
@@ -1529,7 +1534,7 @@ fn hold_no_side_effect_rejects_wrong_cancel_and_concurrent_call() {
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].call_id.as_str(), "call-2");
     assert_eq!(
-        errors[0].message,
+        error_body(errors[0]),
         "hold_no_side_effect already has an active invocation"
     );
     assert_eq!(cancellations.len(), 1);
@@ -1562,7 +1567,7 @@ fn hold_no_side_effect_deadline_is_terminal() {
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].call_id.as_str(), "call-1");
     assert_eq!(
-        errors[0].message,
+        error_body(errors[0]),
         "hold_no_side_effect reached its 10 second deadline"
     );
 }
@@ -1671,7 +1676,7 @@ fn no_side_effect_terminals_survive_production_fifo_saturation() {
             }
             Event::ToolErrorReported(error) => {
                 assert_eq!(
-                    error.message,
+                    error_body(&error),
                     "hold_no_side_effect reached its 10 second deadline"
                 );
                 assert_eq!(error.tool_name.as_str(), RESTART_TEST_DUMMY_TOOL_NAME);

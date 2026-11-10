@@ -17,7 +17,7 @@ fn run_grep_rejects_string_bool_argument() {
     );
     let err = run_grep(&args).expect_err("string bool should fail");
 
-    assert_eq!(err.message, "argument `ignoreCase` must be a boolean");
+    assert_eq!(err.explanation(), "argument `ignoreCase` must be a boolean");
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn read_file_rejects_invalid_line_arguments() {
     assert_eq!(
         read_file(&args)
             .expect_err("start_line=0 should fail")
-            .message,
+            .explanation(),
         "start_line must be >= 1"
     );
 
@@ -52,7 +52,7 @@ fn read_file_rejects_invalid_line_arguments() {
     assert_eq!(
         read_file(&args)
             .expect_err("end_line=0 should fail")
-            .message,
+            .explanation(),
         "end_line must be >= 1"
     );
 
@@ -73,7 +73,7 @@ fn read_file_rejects_invalid_line_arguments() {
     assert_eq!(
         read_file(&args)
             .expect_err("end_line before start_line should fail")
-            .message,
+            .explanation(),
         "end_line must be >= start_line"
     );
 
@@ -90,7 +90,7 @@ fn read_file_rejects_invalid_line_arguments() {
     assert_eq!(
         read_file(&args)
             .expect_err("line_count should be rejected")
-            .message,
+            .explanation(),
         "line_count is no longer supported; use end_line"
     );
 }

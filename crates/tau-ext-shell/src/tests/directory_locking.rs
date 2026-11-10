@@ -401,7 +401,7 @@ fn gpt_shell_does_not_accept_legacy_cwd_as_call_local_workdir() {
     )
     .expect_err("legacy cwd must be rejected");
     assert_eq!(
-        error.message,
+        error.explanation(),
         "argument `cwd` is not supported by `shell_command`; use call-local `workdir`"
     );
 }
@@ -453,7 +453,7 @@ fn malformed_gpt_workdir_fails_without_side_effects_through_full_dispatch() {
                 panic!("malformed call-local workdir emitted notice: {notice:?}")
             }
             Event::ToolError(error) if error.call_id.as_str() == "call-malformed-gpt-workdir" => {
-                assert_eq!(error.message, "argument `workdir` must be a string");
+                assert_eq!(error.explanation(), "argument `workdir` must be a string");
                 break;
             }
             Event::ToolResult(result)
@@ -802,7 +802,11 @@ fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
     loop {
         match reader.read_event().expect("read").expect("event") {
             Event::ToolError(error) if error.call_id.as_str() == "call-cd-two" => {
-                assert!(error.message.contains("workdir change is already pending"));
+                assert!(
+                    error
+                        .explanation()
+                        .contains("workdir change is already pending")
+                );
                 break;
             }
             Event::AgentMetadataSetRequest(metadata) => {
@@ -1811,7 +1815,7 @@ fn dir_lock_tool_can_be_disabled_by_config() {
     loop {
         match reader.read_event().expect("read") {
             Some(Event::ToolError(error)) if error.call_id.as_str() == "lock-disabled" => {
-                assert!(error.message.contains("dir_lock is disabled"));
+                assert!(error.explanation().contains("dir_lock is disabled"));
                 break;
             }
             Some(_) => continue,
@@ -2566,7 +2570,10 @@ fn dir_lock_unlock_rejects_wrong_type_owner_agent_id() {
     loop {
         match reader.read_event().expect("read") {
             Some(Event::ToolError(error)) if error.call_id.as_str() == "unlock-bad-owner-type" => {
-                assert_eq!(error.message, "argument `owner_agent_id` must be a string");
+                assert_eq!(
+                    error.explanation(),
+                    "argument `owner_agent_id` must be a string"
+                );
                 break;
             }
             Some(Event::ToolResult(result))
@@ -3339,7 +3346,7 @@ fn locked_replace_rejects_malformed_request_without_path_disclosure() {
     loop {
         match reader.read_event().expect("read").expect("event") {
             Event::ToolError(error) if error.call_id.as_str() == "replace-malformed" => {
-                assert_eq!(error.message, "request contains an unknown field");
+                assert_eq!(error.explanation(), "request contains an unknown field");
                 assert!(!error.message.contains(path.to_str().expect("UTF-8 path")));
                 break;
             }

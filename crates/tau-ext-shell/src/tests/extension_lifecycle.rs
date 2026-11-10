@@ -585,10 +585,10 @@ fn extension_read_missing_file_reports_error() {
     let Event::ToolError(error) = error else {
         panic!("expected tool error");
     };
-    assert!(!error.message.contains("failed to read"));
-    assert!(error.message.contains("No such file or directory"));
+    assert!(!error.explanation().contains("failed to read"));
+    assert!(error.explanation().contains("No such file or directory"));
     assert!(
-        error.details.is_none(),
+        matches!(error.details.as_ref(), Some(CborValue::Map(entries)) if entries.len() == 1),
         "read errors should not echo arguments"
     );
 
@@ -704,7 +704,11 @@ fn extension_edit_rejects_oversized_existing_file_before_mutation() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert!(error.message.contains("file is too large to read safely"));
+    assert!(
+        error
+            .explanation()
+            .contains("file is too large to read safely")
+    );
     assert_eq!(
         fs::metadata(&file_path).expect("metadata").len(),
         TEST_SAFE_FILE_READ_LIMIT + 1
@@ -743,9 +747,13 @@ fn extension_edit_missing_parent_reports_short_error() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert!(!error.message.contains("failed to create directories"));
-    assert!(!error.message.contains(file_path.to_string_lossy().as_ref()));
-    assert!(error.message.contains("Not a directory"));
+    assert!(!error.explanation().contains("failed to create directories"));
+    assert!(
+        !error
+            .explanation()
+            .contains(file_path.to_string_lossy().as_ref())
+    );
+    assert!(error.explanation().contains("Not a directory"));
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -778,8 +786,8 @@ fn extension_edit_directory_reports_short_error() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert!(!error.message.contains("failed to write"));
-    assert!(error.message.contains("Is a directory"));
+    assert!(!error.explanation().contains("failed to write"));
+    assert!(error.explanation().contains("Is a directory"));
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -912,11 +920,19 @@ fn extension_apply_patch_reports_context_mismatch_without_writing() {
     };
     assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
     assert_eq!(
-        error.message,
+        error
+            .explanation()
+            .split("\n\n")
+            .next()
+            .expect("diagnostic"),
         format!("Failed to find expected lines in {}", file_path.display())
     );
     assert!(!error.message.contains(['\n', '\r']));
-    let expected_output = format!("Expected lines in {}:\nmissing", file_path.display());
+    let expected_output = format!(
+        "Failed to find expected lines in {}\n\nExpected lines in {}:\nmissing",
+        file_path.display(),
+        file_path.display()
+    );
     assert_eq!(
         cbor_map_text(error.details.as_ref().expect("mismatch details"), "output"),
         Some(expected_output.as_str())
@@ -1015,7 +1031,7 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
         panic!("expected tool error");
     };
     assert!(
-        error.message.contains("missing\\tfile.txt"),
+        error.explanation().contains("missing\\tfile.txt"),
         "escaped error path missing: {}",
         error.message
     );
@@ -1071,12 +1087,12 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
         panic!("expected tool error");
     };
     assert!(
-        error.message.contains("dir\\tname"),
+        error.explanation().contains("dir\\tname"),
         "escaped diagnostic path missing: {}",
         error.message
     );
     assert!(
-        !error.message.contains("dir\tname"),
+        !error.explanation().contains("dir\tname"),
         "embedded I/O diagnostic should not keep raw tabs: {}",
         error.message
     );
@@ -1100,12 +1116,12 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
         panic!("expected tool error");
     };
     assert!(
-        error.message.contains("Bad\\tOperation"),
+        error.explanation().contains("Bad\\tOperation"),
         "escaped invalid operation missing: {}",
         error.message
     );
     assert!(
-        !error.message.contains("Bad\tOperation"),
+        !error.explanation().contains("Bad\tOperation"),
         "invalid operation should not keep raw tabs: {}",
         error.message
     );
@@ -1202,7 +1218,11 @@ fn extension_apply_patch_move_rejects_existing_destination() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
-    assert!(error.message.contains("Move destination already exists"));
+    assert!(
+        error
+            .explanation()
+            .contains("Move destination already exists")
+    );
     assert_eq!(fs::read_to_string(&src).expect("read src"), "before\n");
     assert_eq!(fs::read_to_string(&dst).expect("read dst"), "existing\n");
 
@@ -1375,7 +1395,11 @@ fn extension_apply_patch_context_mismatch_after_partial_success_leaves_changes()
     };
     assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
     assert_eq!(
-        error.message,
+        error
+            .explanation()
+            .split("\n\n")
+            .next()
+            .expect("diagnostic"),
         format!(
             "Failed to find expected lines in {}",
             mismatch_path.display()
@@ -1391,7 +1415,11 @@ fn extension_apply_patch_context_mismatch_after_partial_success_leaves_changes()
         2,
         "details must contain only output and partial_changes"
     );
-    let expected_output = format!("Expected lines in {}:\nold", mismatch_path.display());
+    let expected_output = format!(
+        "Failed to find expected lines in {}\n\nExpected lines in {}:\nold",
+        mismatch_path.display(),
+        mismatch_path.display()
+    );
     assert_eq!(
         entries.iter().find_map(|(key, value)| match (key, value) {
             (CborValue::Text(key), CborValue::Text(output)) if key == "output" => {
@@ -1493,7 +1521,11 @@ fn extension_apply_patch_rejects_oversized_update_before_mutation() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
-    assert!(error.message.contains("file is too large to read safely"));
+    assert!(
+        error
+            .explanation()
+            .contains("file is too large to read safely")
+    );
     assert_eq!(
         fs::metadata(&file_path).expect("metadata").len(),
         TEST_SAFE_FILE_READ_LIMIT + 1
@@ -1534,14 +1566,18 @@ fn extension_apply_patch_requires_existing_file_for_update() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
-    assert!(error.message.contains("Failed to read file to update"));
     assert!(
-        error.details.is_none(),
+        error
+            .explanation()
+            .contains("Failed to read file to update")
+    );
+    assert!(
+        matches!(error.details.as_ref(), Some(CborValue::Map(entries)) if entries.len() == 1),
         "apply_patch errors should not echo patch text"
     );
     assert!(
         error
-            .message
+            .explanation()
             .contains(missing_path.to_string_lossy().as_ref())
     );
     assert!(!missing_path.exists());

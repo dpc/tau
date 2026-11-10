@@ -95,8 +95,11 @@ fn image_too_large_error(result: ToolResult) -> ToolError {
         call_id,
         tool_name,
         tool_type,
-        message: IMAGE_TOO_LARGE_MESSAGE.to_owned(),
-        details: None,
+        message: "image-limit-exceeded".to_owned(),
+        details: Some(tau_proto::CborValue::Map(vec![(
+            tau_proto::CborValue::Text("output".to_owned()),
+            tau_proto::CborValue::Text(IMAGE_TOO_LARGE_MESSAGE.to_owned()),
+        )])),
         display,
         originator,
     }

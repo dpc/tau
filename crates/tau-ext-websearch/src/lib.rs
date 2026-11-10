@@ -1356,7 +1356,7 @@ fn dispatch_tool_invoke(
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
             display: Some(error_display("unknown tool", display_args)),
-            message: "unknown tool".to_owned(),
+            message: "unknown-tool".to_owned(),
             details: None,
             originator: invoke.originator,
         }),
@@ -1659,8 +1659,11 @@ fn tool_error(invoke: ToolStarted, message: String, display_args: String) -> Eve
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
         display: Some(error_display(&message, display_args)),
-        message,
-        details: Some(invoke.arguments),
+        message: "web-request-failed".to_owned(),
+        details: Some(CborValue::Map(vec![(
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(message),
+        )])),
         originator: invoke.originator,
     })
 }

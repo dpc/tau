@@ -142,7 +142,7 @@ fn grep_library_regular_file_policy() {
     let socket = td.path().join("socket");
     let _listener = UnixListener::bind(&socket).expect("socket");
     let error = search_dir(&socket, "needle", &[]).expect_err("reject socket");
-    assert!(error.message.contains("regular file or directory"));
+    assert!(error.explanation().contains("regular file or directory"));
 }
 
 /// Keeps fixed-string defaults distinct from opt-in regex and Unicode folding.
@@ -229,7 +229,7 @@ fn grep_library_invalid_glob_and_heap_limit() {
     let enormous = vec![b'x'; 16 * 1024 * 1024 + 1];
     let err = search_file(&enormous, "x", &[]).expect_err("search heap bound");
     assert!(
-        err.message.contains("resource") || err.message.contains("heap"),
+        err.explanation().contains("resource") || err.explanation().contains("heap"),
         "{err:?}"
     );
 }
@@ -265,8 +265,8 @@ fn grep_rejects_wrong_type_optional_strings() {
     let glob_err = run_grep(&args(("glob", CborValue::Integer(1.into()))))
         .expect_err("integer glob should be rejected");
 
-    assert_eq!(path_err.message, "argument `path` must be a string");
-    assert_eq!(glob_err.message, "argument `glob` must be a string");
+    assert_eq!(path_err.explanation(), "argument `path` must be a string");
+    assert_eq!(glob_err.explanation(), "argument `glob` must be a string");
 }
 
 /// Ensures grep rejects wrong-typed optional integers before spawning rg,
@@ -276,7 +276,7 @@ fn grep_rejects_wrong_type_limit() {
     let err = run_grep(&args(("limit", CborValue::Text("10".to_owned()))))
         .expect_err("string limit should be rejected");
 
-    assert_eq!(err.message, "argument `limit` must be an integer");
+    assert_eq!(err.explanation(), "argument `limit` must be an integer");
 }
 
 /// Ensures grep rejects negative context instead of silently coercing it to
@@ -286,7 +286,7 @@ fn grep_rejects_negative_context() {
     let err = run_grep(&args(("context", CborValue::Integer((-1).into()))))
         .expect_err("negative context should be rejected");
 
-    assert_eq!(err.message, "context must be >= 0");
+    assert_eq!(err.explanation(), "context must be >= 0");
 }
 
 /// Ensures grep rejects zero limits instead of silently increasing them to
@@ -296,7 +296,7 @@ fn grep_rejects_zero_limit() {
     let err = run_grep(&args(("limit", CborValue::Integer(0.into()))))
         .expect_err("zero limit should be rejected");
 
-    assert_eq!(err.message, "limit must be >= 1");
+    assert_eq!(err.explanation(), "limit must be >= 1");
 }
 
 /// Ensures large caller limits cannot force large pre-truncation result
@@ -309,7 +309,10 @@ fn grep_rejects_limit_above_output_cap() {
     )))
     .expect_err("limit over cap");
 
-    assert_eq!(err.message, format!("limit must be <= {MAX_GREP_LIMIT}"));
+    assert_eq!(
+        err.explanation(),
+        format!("limit must be <= {MAX_GREP_LIMIT}")
+    );
 }
 
 /// Ensures max-limit notices do not recommend rejected larger limits.
@@ -332,7 +335,7 @@ fn grep_rejects_context_above_cap() {
     .expect_err("context over cap");
 
     assert_eq!(
-        err.message,
+        err.explanation(),
         format!("context must be <= {MAX_GREP_CONTEXT}")
     );
 }

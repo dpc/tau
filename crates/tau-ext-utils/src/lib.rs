@@ -1836,8 +1836,11 @@ fn report_timer_tool(
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
-            message,
-            details: None,
+            message: "timer-failed".to_owned(),
+            details: Some(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text(message),
+            )])),
             display: Some(error_display(display_args)),
             originator: invoke.originator.clone(),
         }),
@@ -1973,8 +1976,11 @@ fn papercut_history_error(invoke: &ToolStarted, message: String) -> ToolError {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,
-        message,
-        details: None,
+        message: "papercut-history-failed".to_owned(),
+        details: Some(CborValue::Map(vec![(
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(message),
+        )])),
         display: Some(error_display(invoke.tool_name.as_str().to_owned())),
         originator: invoke.originator.clone(),
     }

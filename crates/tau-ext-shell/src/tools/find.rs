@@ -23,7 +23,7 @@ const MAX_FIND_LIMIT: usize = MAX_OUTPUT_LINES;
 pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     match run_find_cancellable(arguments, None)? {
         CancellableToolRun::Finished(output) => Ok(*output),
-        CancellableToolRun::Cancelled => Err(ToolFailure::new("cancelled")),
+        CancellableToolRun::Cancelled => Err(ToolFailure::identifier("cancelled")),
     }
 }
 

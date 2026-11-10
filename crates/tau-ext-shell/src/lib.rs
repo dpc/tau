@@ -2103,7 +2103,7 @@ fn dispatch_locked_tool_invoke(
             if lifecycle.claim_terminal_before_effect() {
                 let _ = send_tool_failure(
                     invoke,
-                    path_crate_display::ToolFailure::new("dir-lock-outside-coverage")
+                    path_crate_display::ToolFailure::identifier("dir-lock-outside-coverage")
                         .with_details(CborValue::Map(vec![
                             (CborValue::Text("requested_directory".to_owned()), CborValue::Text(uncovered_dir.display().to_string())),
                             (CborValue::Text("blocking_directory".to_owned()), CborValue::Text(held_dir.display().to_string())),

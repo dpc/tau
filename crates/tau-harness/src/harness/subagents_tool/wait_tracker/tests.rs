@@ -4,6 +4,53 @@ use tau_config::settings::WaitTimeoutMinutes;
 
 use super::super::wait_activation::WaitActivationSource;
 use super::*;
+
+/// Invalid wait arguments exercise the real tracker producer and shared
+/// renderer, without echoing opaque/control-bearing caller fields into the
+/// terminal.
+#[test]
+fn invalid_wait_renders_identifier_and_diagnostic_payload() {
+    let mut tracker = WaitTracker::default();
+    let arguments = CborValue::Map(vec![
+        (
+            CborValue::Text("tool_call_id".into()),
+            CborValue::Bool(false),
+        ),
+        (
+            CborValue::Text("complete_only".into()),
+            CborValue::Text("private\n\u{1b}</tool_output>".into()),
+        ),
+    ]);
+    let reply = tracker
+        .handle_wait_invoke(
+            &conv("owner"),
+            "invalid-wait".into(),
+            ToolName::new("wait"),
+            &arguments,
+            observation(),
+        )
+        .reply
+        .expect("immediate rejection");
+    let WaitReplyKind::Error {
+        message, details, ..
+    } = reply.kind
+    else {
+        panic!("expected error");
+    };
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        details.as_ref().expect("explanation"),
+        tau_proto::ProviderToolResultStatus::Error { message: &message },
+        &mut text,
+    )
+    .expect("shared renderer");
+    assert_eq!(
+        text,
+        "error: wait-failed\n\n`complete_only` must be a boolean and must not be repeated"
+    );
+    assert!(!text.contains("private"));
+}
+
 use crate::harness::subagents_tool::wait_tool_spec;
 
 fn conv(id: &str) -> AgentId {
@@ -815,23 +862,42 @@ fn reply_result_with_display(reply: WaitReply) -> (CborValue, Option<ToolUseStat
     }
 }
 
+/// Extract explanatory text for scheduling assertions, retaining semantic
+/// details.
 fn reply_error(reply: WaitReply) -> (String, Option<CborValue>) {
     match reply.kind {
         WaitReplyKind::Error {
             message, details, ..
-        } => (message, details),
+        } => (error_diagnostic(&message, details.as_ref()), details),
         other => panic!("expected error reply, got {other:?}"),
     }
 }
 
+/// Inspect diagnostic and UI behavior independently of the error header.
 fn reply_error_with_display(reply: WaitReply) -> (String, Option<CborValue>, Option<ToolUseState>) {
     match reply.kind {
         WaitReplyKind::Error {
             message,
             details,
             display,
-        } => (message, details, display),
+        } => (
+            error_diagnostic(&message, details.as_ref()),
+            details,
+            display,
+        ),
         other => panic!("expected error reply, got {other:?}"),
+    }
+}
+
+/// Only wait-owned diagnostics move into output; forwarded source IDs stay
+/// intact.
+fn error_diagnostic(message: &str, details: Option<&CborValue>) -> String {
+    if message == "wait-failed" {
+        cbor_map_text(details.expect("wait diagnostic payload"), "output")
+            .expect("explanation")
+            .to_owned()
+    } else {
+        message.to_owned()
     }
 }
 
@@ -2176,8 +2242,9 @@ fn explicit_waiter_wins_over_any_waiter_for_same_completion() {
         reply.wait_call_id.as_str() == "wait-any"
             && matches!(
                 &reply.kind,
-                WaitReplyKind::Error { message, .. }
-                    if message == NO_BACKGROUND_WAIT_CANDIDATES
+                WaitReplyKind::Error { message, details, .. }
+                    if message == "wait-failed"
+                        && error_diagnostic(message, details.as_ref()) == NO_BACKGROUND_WAIT_CANDIDATES
             )
     }));
 }
@@ -2253,8 +2320,8 @@ fn explicit_waiter_wins_over_any_waiter_for_same_cancelled_completion() {
             && matches!(
                 &reply.kind,
                 WaitReplyKind::Error { message, details, .. }
-                    if message == "background tool call in this conversation was cancelled"
-                        && details.is_none()
+                    if message == "wait-failed"
+                        && error_diagnostic(message, details.as_ref()) == "background tool call in this conversation was cancelled"
             )
     }));
     assert!(cancelled.replies.iter().any(|reply| matches!(
@@ -2368,7 +2435,10 @@ fn duplicate_no_arg_waits_in_same_conversation_error() {
         "wait-two",
     )));
     assert!(message.contains("existing wait for a background tool call"));
-    assert!(details.is_none());
+    assert_eq!(
+        cbor_map_text(&details.expect("diagnostic only"), "output"),
+        Some(message.as_str())
+    );
 }
 
 /// The no-arg form is scoped to its caller's conversation. A completion in
@@ -2431,7 +2501,10 @@ fn exact_wait_does_not_consume_completed_background_result_from_other_conversati
         "side-bg",
     )));
     assert_eq!(message, "unknown tool call: `side-bg`");
-    assert!(details.is_none());
+    assert_eq!(
+        cbor_map_text(&details.expect("diagnostic only"), "output"),
+        Some(message.as_str())
+    );
 
     assert_eq!(
         reply_result(start_reply(start_wait_exact(
@@ -2470,7 +2543,10 @@ fn exact_wait_does_not_attach_to_running_background_call_from_other_conversation
         "side-bg",
     )));
     assert_eq!(message, "unknown tool call: `side-bg`");
-    assert!(details.is_none());
+    assert_eq!(
+        cbor_map_text(&details.expect("diagnostic only"), "output"),
+        Some(message.as_str())
+    );
 
     let start = start_wait_exact(&mut tracker, &side, "wait-side", "side-bg");
     assert!(start.reply.is_none());

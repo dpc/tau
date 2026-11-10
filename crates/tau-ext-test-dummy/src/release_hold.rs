@@ -414,8 +414,11 @@ fn worker_error(invoke: &tau_proto::ToolStarted, message: String) -> ToolError {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,
-        message,
-        details: None,
+        message: "hold-failed".to_owned(),
+        details: Some(tau_proto::CborValue::Map(vec![(
+            tau_proto::CborValue::Text("output".to_owned()),
+            tau_proto::CborValue::Text(message),
+        )])),
         originator: invoke.originator.clone(),
         display: None,
     }

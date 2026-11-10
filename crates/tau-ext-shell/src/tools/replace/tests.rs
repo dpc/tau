@@ -44,7 +44,7 @@ fn replace_is_atomic_when_a_later_target_is_missing() {
     )
     .expect_err("missing target must fail");
 
-    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(error.explanation(), "each oldText must match exactly once");
     assert_eq!(
         std::fs::read_to_string(&path).expect("read source"),
         "one\ntwo\n"
@@ -99,7 +99,7 @@ fn replace_rejects_cross_entry_overlaps_without_writing() {
     let mut world = ShellWorld::real();
     let duplicate = replace_file(&request(&path, &[("a", "A"), ("a", "A")]), &mut world)
         .expect_err("duplicate targets overlap");
-    assert_eq!(duplicate.message, "replacement targets overlap");
+    assert_eq!(duplicate.explanation(), "replacement targets overlap");
     assert_eq!(
         std::fs::read_to_string(&path).expect("read source"),
         "abcdef"
@@ -108,7 +108,7 @@ fn replace_rejects_cross_entry_overlaps_without_writing() {
     let mut world = ShellWorld::real();
     let overlapping = replace_file(&request(&path, &[("abc", "A"), ("bcd", "B")]), &mut world)
         .expect_err("overlapping targets must fail");
-    assert_eq!(overlapping.message, "replacement targets overlap");
+    assert_eq!(overlapping.explanation(), "replacement targets overlap");
     assert_eq!(
         std::fs::read_to_string(&path).expect("read source"),
         "abcdef"
@@ -127,7 +127,7 @@ fn replace_rejects_repeated_source_target_without_writing() {
     let error = replace_file(&request(&path, &[("a", "X")]), &mut world)
         .expect_err("repeated target must fail");
 
-    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(error.explanation(), "each oldText must match exactly once");
     assert_eq!(std::fs::read(&path).expect("read source"), b"aba");
 }
 
@@ -143,7 +143,7 @@ fn replace_rejects_overlapping_ascii_occurrences_without_writing() {
     let error = replace_file(&request(&path, &[("aa", "X")]), &mut world)
         .expect_err("overlapping target occurrences must fail");
 
-    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(error.explanation(), "each oldText must match exactly once");
     assert_eq!(std::fs::read(&path).expect("read source"), b"aaa");
 }
 
@@ -160,7 +160,7 @@ fn replace_rejects_overlapping_multibyte_occurrences_without_writing() {
     let error = replace_file(&request(&path, &[("éé", "X")]), &mut world)
         .expect_err("overlapping multibyte target occurrences must fail");
 
-    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(error.explanation(), "each oldText must match exactly once");
     assert_eq!(std::fs::read(&path).expect("read source"), source);
 }
 
@@ -177,7 +177,7 @@ fn replace_rejects_overlap_after_line_ending_normalization_without_writing() {
     let error = replace_file(&request(&path, &[("\n\n", "X")]), &mut world)
         .expect_err("normalized overlapping target occurrences must fail");
 
-    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(error.explanation(), "each oldText must match exactly once");
     assert_eq!(std::fs::read(&path).expect("read source"), source);
 }
 
@@ -193,7 +193,7 @@ fn replace_is_atomic_when_a_later_target_is_ambiguous() {
     let error = replace_file(&request(&path, &[("one", "ONE"), ("aa", "X")]), &mut world)
         .expect_err("later ambiguous target must fail");
 
-    assert_eq!(error.message, "each oldText must match exactly once");
+    assert_eq!(error.explanation(), "each oldText must match exactly once");
     assert_eq!(std::fs::read(&path).expect("read source"), b"one aaa");
 }
 
@@ -265,7 +265,7 @@ fn replace_rejects_unknown_request_fields() {
 
     let error = ReplaceRequest::parse(&request).expect_err("legacy field must fail");
 
-    assert_eq!(error.message, "request contains an unknown field");
+    assert_eq!(error.explanation(), "request contains an unknown field");
 }
 
 /// Ensures invalid UTF-8 rejects before matching or writing so replacement
@@ -281,7 +281,7 @@ fn replace_rejects_invalid_utf8_without_writing() {
     let error = replace_file(&request(&path, &[("before", "after")]), &mut world)
         .expect_err("invalid UTF-8 must fail");
 
-    assert_eq!(error.message, "file is not valid UTF-8");
+    assert_eq!(error.explanation(), "file is not valid UTF-8");
     assert_eq!(std::fs::read(&path).expect("read source"), source);
 }
 
@@ -298,6 +298,6 @@ fn replace_rejects_oversized_file_without_writing() {
     let error = replace_file(&request(&path, &[("x", "y")]), &mut world)
         .expect_err("oversized file must fail");
 
-    assert_eq!(error.message, "file could not be read");
+    assert_eq!(error.explanation(), "file could not be read");
     assert_eq!(std::fs::read(&path).expect("read source"), source);
 }

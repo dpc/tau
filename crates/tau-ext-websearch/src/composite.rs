@@ -623,11 +623,10 @@ fn aggregate_error(
         message = cap_utf8_with_suffix(message, AGGREGATE_ERROR_MAX_BYTES);
     }
     let mut event = tool_error(invoke, message, display_args);
-    if let Event::ToolError(error) = &mut event {
-        error.details = None;
-        if let Some(display) = &mut error.display {
-            display.info_chips = vec![attempt_chip(&attempts, None)];
-        }
+    if let Event::ToolError(error) = &mut event
+        && let Some(display) = &mut error.display
+    {
+        display.info_chips = vec![attempt_chip(&attempts, None)];
     }
     event
 }

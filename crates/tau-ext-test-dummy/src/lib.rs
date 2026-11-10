@@ -937,8 +937,11 @@ where
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
-            message: "a deterministic hold already has an active invocation".to_owned(),
-            details: None,
+            message: "hold-busy".to_owned(),
+            details: Some(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("a deterministic hold already has an active invocation".to_owned()),
+            )])),
             originator: invoke.originator,
             display: None,
         });
@@ -993,8 +996,11 @@ where
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
-            message: "hold_no_side_effect already has an active invocation".to_owned(),
-            details: None,
+            message: "hold-busy".to_owned(),
+            details: Some(CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("hold_no_side_effect already has an active invocation".to_owned()),
+            )])),
             originator: invoke.originator,
             display: None,
         });
@@ -1037,10 +1043,13 @@ where
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
-                    message: format!(
-                        "hold_no_side_effect reached its {HOLD_TERMINAL_TIMEOUT_SECS} second deadline"
-                    ),
-                    details: None,
+                    message: "hold-deadline".to_owned(),
+                    details: Some(CborValue::Map(vec![(
+                        CborValue::Text("output".to_owned()),
+                        CborValue::Text(format!(
+                            "hold_no_side_effect reached its {HOLD_TERMINAL_TIMEOUT_SECS} second deadline"
+                        )),
+                    )])),
                     originator: invoke.originator,
                     display: None,
                 }.into());
@@ -1119,7 +1128,7 @@ fn restart_error(invoke: tau_proto::ToolStarted) -> ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
-        message: "restarting failed".to_owned(),
+        message: "restart-failed".to_owned(),
         details: None,
         display: None,
         originator: invoke.originator,

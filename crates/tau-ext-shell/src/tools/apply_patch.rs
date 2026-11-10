@@ -28,8 +28,12 @@ pub(crate) fn apply_patch(
         Ok(changes) => changes,
         Err(failure) => {
             let details = failure_details(&failure);
-            let mut tool_failure = ToolFailure::new(failure.message)
-                .with_payload(display_payload_for_failure(&failure.changes));
+            let mut tool_failure = if failure.target_path.is_some() {
+                ToolFailure::identifier(failure.message)
+            } else {
+                ToolFailure::new(failure.message)
+            }
+            .with_payload(display_payload_for_failure(&failure.changes));
             populate_change_display(&mut tool_failure.display, &failure.changes);
             if let Some(details) = details {
                 tool_failure = tool_failure.with_details(details);

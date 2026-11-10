@@ -2,6 +2,66 @@ use std::path::Path;
 
 use super::*;
 use crate::config::ShellConfig;
+use crate::tools::world::ShellWorld;
+
+/// Real dispatch failures keep diagnostics in shared-rendered payloads while
+/// retaining separate UI labels and omitting rejected argument maps.
+#[test]
+fn dispatched_failures_render_identifiers_and_explanations() {
+    for (tool, arguments, expected) in [
+        (
+            crate::tools::FIND_TOOL_NAME,
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("pattern".into()),
+                    CborValue::Text("*".into()),
+                ),
+                (CborValue::Text("limit".into()), CborValue::Bool(false)),
+            ]),
+            "argument `limit` must be an integer",
+        ),
+        (
+            crate::tools::REPLACE_TOOL_NAME,
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("path".into()),
+                    CborValue::Text("private\n\u{1b}".into()),
+                ),
+                (
+                    CborValue::Text("legacy".into()),
+                    CborValue::Text("do not echo".into()),
+                ),
+            ]),
+            "request contains an unknown field",
+        ),
+    ] {
+        let invoke = tau_proto::ToolStarted {
+            invocation_policy: Default::default(),
+            call_id: "conformance".into(),
+            tool_name: tau_proto::ToolName::new(tool),
+            arguments,
+            agent_id: "agent".parse().expect("agent"),
+            originator: Default::default(),
+        };
+        let events = crate::tools::execute_tool(invoke, ShellWorld::real());
+        let tau_proto::Event::ToolError(error) = events.last().expect("terminal") else {
+            panic!("expected failure");
+        };
+        let mut rendered = String::new();
+        tau_proto::write_provider_tool_result_text(
+            error.details.as_ref().expect("diagnostic"),
+            tau_proto::ProviderToolResultStatus::Error {
+                message: &error.message,
+            },
+            &mut rendered,
+        )
+        .expect("shared renderer");
+        assert_eq!(rendered, format!("error: shell-tool-failed\n\n{expected}"));
+        assert_eq!(error.call_id.as_str(), "conformance");
+        assert_eq!(error.tool_name.as_str(), tool);
+        assert_eq!(error.display.as_ref().expect("UI").status_text, expected);
+    }
+}
 
 /// Ensures error chips use the trimmed first meaningful line, leaving later
 /// detail and any renderer-specific abbreviation outside tool-side formatting.

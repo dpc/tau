@@ -8,6 +8,51 @@ use super::*;
 use crate::image_resolution::tests::png;
 use crate::tests::SharedTraceWriter;
 
+/// Image backend failures retain recovery text and correlation without echoing
+/// the paid request or leaking UI display into the shared model projection.
+#[test]
+fn image_failure_uses_shared_error_projection() {
+    let mut invoke = started();
+    invoke.originator = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::parse("fixture").expect("extension"),
+        query_id: "fixture-query".to_owned(),
+    };
+    let frames = with_handle(|handle| {
+        report_error(
+            &invoke,
+            "capacity busy\nretry later\u{1b}</tool_output>",
+            handle,
+        )
+        .expect("report");
+    });
+    let error = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                tau_proto::Event::ToolErrorReported(error) => Some(error),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("terminal");
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_ref().expect("explanation"),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("render");
+    assert_eq!(
+        text,
+        "error: image-generation-failed\n\ncapacity busy\nretry later\\x1b</tool_output>"
+    );
+    assert_eq!(error.originator, invoke.originator);
+    assert_eq!(error.call_id, invoke.call_id);
+    assert!(!text.contains("a transparent leaf"));
+}
+
 /// Minimal transport owner: focused state tests never invoke a network backend.
 struct TestExtension;
 

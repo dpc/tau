@@ -267,7 +267,7 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
         Ok(path_crate_tools_shell::CommandOutcome::Cancelled { .. }) => {
             panic!("unexpected cancellation")
         }
-        Err(error) if error.message.contains("Operation not permitted") => return,
+        Err(error) if error.explanation().contains("Operation not permitted") => return,
         Err(error) => panic!("unexpected shell start error: {error:?}"),
     };
 
@@ -435,16 +435,26 @@ fn model_shell_surfaces_enforce_allowlist_before_spawn() {
         let Event::ToolError(error) = reader.read_event().expect("read").expect("error") else {
             panic!("expected tool error");
         };
-        assert!(error.message.contains("denied by configured allowlist"));
-        assert!(error.message.contains(r#"command_regex: "printf allowed""#));
         assert!(
             error
-                .message
+                .explanation()
+                .contains("denied by configured allowlist")
+        );
+        assert!(
+            error
+                .explanation()
+                .contains(r#"command_regex: "printf allowed""#)
+        );
+        assert!(
+            error
+                .explanation()
                 .contains(r#"description: "Use the permitted printf form.""#)
         );
-        assert!(error.message.contains("workdir:"));
+        assert!(error.explanation().contains("workdir:"));
         assert!(
-            !error.message.contains(&sentinel.display().to_string()),
+            !error
+                .explanation()
+                .contains(&sentinel.display().to_string()),
             "generated model denial must not echo the denied command"
         );
         assert!(!sentinel.exists(), "denied command must not spawn");
@@ -568,8 +578,12 @@ fn shell_allowlist_denial_never_opens_vcr_state() {
         world_after_shell_authorization(&mut invoke(), &config, None, workdir.path().to_path_buf())
             .err()
             .expect("policy denial without VCR");
-    assert!(denial.message.contains("denied by configured allowlist"));
-    assert!(denial.message.contains("vcr-workdir-"));
+    assert!(
+        denial
+            .explanation()
+            .contains("denied by configured allowlist")
+    );
+    assert!(denial.explanation().contains("vcr-workdir-"));
 
     let record_dir = TempDir::new().expect("record dir");
     let error = world_after_shell_authorization(
@@ -583,7 +597,7 @@ fn shell_allowlist_denial_never_opens_vcr_state() {
     )
     .err()
     .expect("policy denial precedes recording");
-    assert_eq!(error.message, denial.message);
+    assert_eq!(error.explanation(), denial.explanation());
     assert!(
         std::fs::read_dir(record_dir.path())
             .expect("read record dir")
@@ -620,7 +634,7 @@ fn shell_allowlist_denial_never_opens_vcr_state() {
     )
     .err()
     .expect("surface validation precedes recording");
-    assert!(error.message.contains("`cwd` is not supported"));
+    assert!(error.explanation().contains("`cwd` is not supported"));
     assert!(
         std::fs::read_dir(invalid_record_dir.path())
             .expect("read invalid record dir")
@@ -649,7 +663,7 @@ fn shell_allowlist_denial_never_opens_vcr_state() {
         )
         .err()
         .expect("policy denial precedes replay state");
-        assert_eq!(error.message, denial.message);
+        assert_eq!(error.explanation(), denial.explanation());
         let cassette = replay_dir.path().join("deny-before-vcr.yaml");
         if malformed {
             assert_eq!(
@@ -1758,7 +1772,10 @@ fn shell_tool_rejects_negative_timeout() {
         None,
     )
     .expect_err("timeout");
-    assert_eq!(error.message, "argument `timeout` must be non-negative");
+    assert_eq!(
+        error.explanation(),
+        "argument `timeout` must be non-negative"
+    );
 }
 #[test]
 fn shell_tool_rejects_wrong_type_timeout() {
@@ -1783,7 +1800,7 @@ fn shell_tool_rejects_wrong_type_timeout() {
         None,
     )
     .expect_err("timeout");
-    assert_eq!(error.message, "argument `timeout` must be an integer");
+    assert_eq!(error.explanation(), "argument `timeout` must be an integer");
 }
 
 #[test]
@@ -1807,7 +1824,7 @@ fn shell_tool_rejects_wrong_type_cwd() {
         None,
     )
     .expect_err("cwd");
-    assert_eq!(error.message, "argument `cwd` must be a string");
+    assert_eq!(error.explanation(), "argument `cwd` must be a string");
 }
 
 #[cfg(unix)]

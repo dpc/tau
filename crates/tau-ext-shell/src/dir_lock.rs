@@ -212,7 +212,7 @@ impl AbandonedLock {
     }
 
     pub(crate) fn tool_failure(&self) -> ToolFailure {
-        ToolFailure::from(self.message())
+        ToolFailure::identifier(self.message())
             .with_args(self.dir.display().to_string())
             .with_details(self.details())
     }
@@ -1430,17 +1430,15 @@ struct DirLockToolRequest {
 
 impl DirLockToolRequest {
     fn parse(invoke: &ToolStarted) -> Result<Self, Box<Event>> {
-        let command = argument_text(&invoke.arguments, "command").map_err(|message| {
-            Box::new(tool_error(invoke, message, Some(invoke.arguments.clone())))
-        })?;
-        let input_directory = argument_text(&invoke.arguments, "directory").map_err(|message| {
-            Box::new(tool_error(invoke, message, Some(invoke.arguments.clone())))
-        })?;
+        let command = argument_text(&invoke.arguments, "command")
+            .map_err(|message| Box::new(tool_error(invoke, message, None)))?;
+        let input_directory = argument_text(&invoke.arguments, "directory")
+            .map_err(|message| Box::new(tool_error(invoke, message, None)))?;
         let dir = canonical_existing_dir(Path::new(&input_directory)).map_err(|message| {
             Box::new(tool_error_with_args(
                 invoke,
                 message,
-                Some(invoke.arguments.clone()),
+                None,
                 Some(input_directory.clone()),
             ))
         })?;
@@ -1561,7 +1559,7 @@ fn dispatch_dir_lock_unlock(
             tool_error_with_args(
                 &invoke,
                 message,
-                Some(invoke.arguments.clone()),
+                None,
                 Some(dir_lock_display_args("unlock", &request.dir)),
             ),
         ),
@@ -1569,16 +1567,15 @@ fn dispatch_dir_lock_unlock(
 }
 
 fn backend_error_event(invoke: &ToolStarted, command: &str, dir: &Path, message: String) -> Event {
-    tool_error_with_args(
+    classified_tool_error_with_args(
         invoke,
-        format!("dir_lock backend error: {message}"),
-        Some(CborValue::Map(vec![
-            cbor_text_entry("error", "dir_lock_backend_error"),
-            cbor_text_entry(
-                "output",
-                "Directory lock backend failed; the requested mutating operation was not run.",
+        "dir_lock_backend_error".to_owned(),
+        Some(CborValue::Map(vec![cbor_text_entry(
+            "output",
+            format!(
+                "Directory lock backend failed: {message}\n\nThe requested mutating operation was not run."
             ),
-        ])),
+        )])),
         Some(dir_lock_display_args(command, dir)),
     )
 }
@@ -1589,7 +1586,7 @@ fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner
             Box::new(tool_error_with_args(
                 invoke,
                 message,
-                Some(invoke.arguments.clone()),
+                None,
                 Some(dir_lock_display_args("unlock", dir)),
             ))
         })?;
@@ -1601,7 +1598,7 @@ fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner
                 Box::new(tool_error_with_args(
                     invoke,
                     format!("invalid owner_agent_id `{owner}`: {error}"),
-                    Some(invoke.arguments.clone()),
+                    None,
                     Some(dir_lock_display_args("unlock", dir)),
                 ))
             })
@@ -1643,7 +1640,7 @@ fn send_duplicate_dir_lock_error(
 ) {
     send_event(
         tx,
-        tool_error_with_args(
+        classified_tool_error_with_args(
             invoke,
             DUPLICATE_LOCK_ERROR.to_owned(),
             Some(duplicate_manual_lock_details(
@@ -1664,7 +1661,7 @@ fn send_abandoned_dir_lock_error(
 ) {
     send_event(
         tx,
-        tool_error_with_args(
+        classified_tool_error_with_args(
             invoke,
             lock.message(),
             Some(lock.details()),
@@ -1677,7 +1674,7 @@ fn invalid_dir_lock_command_error(invoke: &ToolStarted, command: &str, dir: &Pat
     tool_error_with_args(
         invoke,
         "argument `command` must be `update` or `unlock`".to_owned(),
-        Some(invoke.arguments.clone()),
+        None,
         Some(dir_lock_display_args(command, dir)),
     )
 }
@@ -2013,6 +2010,25 @@ fn tool_error(invoke: &ToolStarted, message: String, details: Option<CborValue>)
 }
 
 fn tool_error_with_args(
+    invoke: &ToolStarted,
+    message: String,
+    details: Option<CborValue>,
+    args: Option<String>,
+) -> Event {
+    let mut failure = ToolFailure::new(message);
+    if let Some(details) = details {
+        failure = failure.with_details(details);
+    }
+    classified_tool_error_with_args(
+        invoke,
+        failure.message,
+        failure.details.map(|details| *details),
+        args,
+    )
+}
+
+/// Publish already classified lock failures without replacing their identities.
+fn classified_tool_error_with_args(
     invoke: &ToolStarted,
     message: String,
     details: Option<CborValue>,

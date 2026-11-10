@@ -16,7 +16,10 @@ fn read_rejects_wrong_type_optional_line_arguments() {
     let err = parse_read_request(&map(vec![("start_line", CborValue::Text("2".to_owned()))]))
         .expect_err("string start_line should be rejected");
 
-    assert_eq!(err.message, "argument `start_line` must be an integer");
+    assert_eq!(
+        err.explanation(),
+        "argument `start_line` must be an integer"
+    );
 }
 
 /// Ensures range entries reject wrong CBOR line types instead of reporting
@@ -32,7 +35,10 @@ fn read_ranges_reject_wrong_type_line_arguments() {
     )]))
     .expect_err("string range start_line should be rejected");
 
-    assert_eq!(err.message, "argument `start_line` must be an integer");
+    assert_eq!(
+        err.explanation(),
+        "argument `start_line` must be an integer"
+    );
 }
 
 /// Ensures successful parsing retains validated nonzero coordinates without
@@ -69,7 +75,8 @@ fn read_rejects_files_over_input_cap() {
     .expect_err("huge file should be rejected");
 
     assert!(
-        err.message.contains("file is too large to read safely"),
+        err.explanation()
+            .contains("file is too large to read safely"),
         "unexpected error: {}",
         err.message
     );
@@ -94,7 +101,7 @@ fn read_missing_path_suggestion_is_bounded() {
     .expect_err("misspelled path should fail");
 
     assert!(
-        err.message.contains("did you mean") && err.message.contains("target_file.rs"),
+        err.explanation().contains("did you mean") && err.explanation().contains("target_file.rs"),
         "unexpected error: {}",
         err.message
     );
@@ -113,7 +120,7 @@ fn read_missing_path_suggestion_is_bounded() {
     .expect_err("misspelled path should still fail");
 
     assert!(
-        !err.message.contains("did you mean"),
+        !err.explanation().contains("did you mean"),
         "suggestion should be suppressed past sibling bound: {}",
         err.message
     );
@@ -147,7 +154,7 @@ fn read_rejects_multi_range_render_expansion_over_cap() {
     .expect_err("range expansion should be rejected");
 
     assert!(
-        err.message
+        err.explanation()
             .contains("read ranges expand to too much rendered content"),
         "unexpected error: {}",
         err.message
@@ -280,5 +287,9 @@ fn read_single_range_preserves_validation_and_metadata_presence() {
         assert!(result_field(&output.result, field).is_none(), "{field}");
     }
     let error = read_file(&args(3.into()), &mut ShellWorld::real()).expect_err("reject past EOF");
-    assert!(error.message.contains("past end of file (total_lines: 2)"));
+    assert!(
+        error
+            .explanation()
+            .contains("past end of file (total_lines: 2)")
+    );
 }

@@ -66,7 +66,7 @@ fn find_rejects_wrong_type_limit() {
     let err = run_find(&args(CborValue::Text("10".to_owned())))
         .expect_err("string limit should be rejected");
 
-    assert_eq!(err.message, "argument `limit` must be an integer");
+    assert_eq!(err.explanation(), "argument `limit` must be an integer");
 }
 
 /// Ensures find rejects wrong-typed paths instead of searching the default
@@ -86,7 +86,7 @@ fn find_rejects_wrong_type_path() {
 
     let err = run_find(&args).expect_err("integer path should be rejected");
 
-    assert_eq!(err.message, "argument `path` must be a string");
+    assert_eq!(err.explanation(), "argument `path` must be a string");
 }
 
 /// Ensures find converts the decoded UTF-8 root once, preserving both the
@@ -124,7 +124,7 @@ fn find_rejects_non_positive_limit() {
     let err =
         run_find(&args(CborValue::Integer(0.into()))).expect_err("zero limit should be rejected");
 
-    assert_eq!(err.message, "limit must be >= 1");
+    assert_eq!(err.explanation(), "limit must be >= 1");
 }
 
 /// Ensures find reports only the requested number of matches while still
@@ -202,7 +202,10 @@ fn find_rejects_limit_above_output_cap() {
     )))
     .expect_err("limit over cap");
 
-    assert_eq!(err.message, format!("limit must be <= {MAX_FIND_LIMIT}"));
+    assert_eq!(
+        err.explanation(),
+        format!("limit must be <= {MAX_FIND_LIMIT}")
+    );
 }
 
 /// Ensures max-limit notices do not suggest limits that argument parsing

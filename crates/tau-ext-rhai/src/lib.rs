@@ -1611,8 +1611,11 @@ fn emit_pending_tool_error(
         call_id: call.call_id.clone(),
         tool_name: call.tool_name.clone(),
         tool_type: call.tool_type,
-        message,
-        details: None,
+        message: "rhai-tool-failed".to_owned(),
+        details: Some(CborValue::Map(vec![(
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(message),
+        )])),
         display: None,
         originator: call.originator.clone(),
     })

@@ -94,7 +94,7 @@ pub(crate) fn target_dir(
                 ErrorKind::PermissionDenied => "directory-inaccessible",
                 _ => "directory-resolution-failed",
             };
-            ToolFailure::new(identifier).with_details(CborValue::Map(vec![(
+            ToolFailure::identifier(identifier).with_details(CborValue::Map(vec![(
                 CborValue::Text("output".to_owned()),
                 CborValue::Text(error.to_string()),
             )]))

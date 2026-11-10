@@ -74,12 +74,12 @@ fn escaped_overlong_delete_path_produces_unreportable_terminal() {
     let failure = apply_patch(&arguments, &mut world)
         .expect_err("overlong filesystem path must fail before mutation");
 
-    assert!(failure.message.starts_with("Failed to delete file "));
-    assert!(failure.message.contains("\\u{1}"));
+    assert!(failure.explanation().starts_with("Failed to delete file "));
+    assert!(failure.explanation().contains("\\u{1}"));
     let display = &failure.display;
-    assert_eq!(display.status_text, failure.message);
+    assert_eq!(display.status_text, failure.explanation());
     assert!(
-        failure.message.len() + display.status_text.len()
+        failure.explanation().len() + display.status_text.len()
             > usize::try_from(tau_client::MAX_OUTBOUND_FRAME_BYTES)
                 .expect("frame limit fits usize"),
         "duplicated escaped failure text must exceed the complete frame budget"

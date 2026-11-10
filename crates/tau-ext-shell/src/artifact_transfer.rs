@@ -1000,8 +1000,11 @@ fn report_error(output: &Output, invoke: &ToolStarted, message: String) {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,
-        message,
-        details: None,
+        message: "artifact-transfer-failed".to_owned(),
+        details: Some(CborValue::Map(vec![(
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(message),
+        )])),
         display: Some(*display),
         originator: invoke.originator.clone(),
     }));

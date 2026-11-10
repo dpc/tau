@@ -147,7 +147,7 @@ fn schedule_tool_started_reports_queue_full_error() {
     let (returned, failure) = *error;
 
     assert_eq!(returned.call_id.as_str(), "queue-full-read");
-    assert!(failure.message.contains("queue limit is 0"));
+    assert!(failure.explanation().contains("queue limit is 0"));
 }
 /// Cancellation remains the sole terminal when it races a sleeping shell call
 /// immediately after actual detached FIFO exhaustion.

@@ -3757,7 +3757,9 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
         event,
         Event::ToolError(error)
             if error.call_id.as_str() == wait_call_id.as_str()
-                && error.message == "unknown tool call: `bg-cross-msg-wait`"
+                && error.message == "wait-failed"
+                && tau_proto::ToolResponse::from_cbor(error.details.as_ref().expect("diagnostic")).body
+                    == "unknown tool call: `bg-cross-msg-wait`"
     )));
 
     h.publish_event(

@@ -381,8 +381,8 @@ impl InternalToolHandler for BuiltinTools {
                                     call.id,
                                     visible_tool_name,
                                     call.tool_type,
-                                    message,
-                                    Some(call.arguments),
+                                    "invalid-arguments".to_owned(),
+                                    error_output(message),
                                 );
                                 Ok(())
                             }
@@ -407,8 +407,8 @@ impl InternalToolHandler for BuiltinTools {
                                 call.id.clone(),
                                 visible_tool_name,
                                 call.tool_type,
-                                "configured extensions cannot invoke `status`".to_owned(),
-                                Some(call.arguments.clone()),
+                                "unsupported-caller".to_owned(),
+                                error_output("configured extensions cannot invoke `status`"),
                             );
                             return Ok(());
                         };
@@ -435,8 +435,8 @@ impl InternalToolHandler for BuiltinTools {
                         pending.call_id,
                         pending.tool_name,
                         pending.tool_type,
-                        error.clone(),
-                        None,
+                        "agent-start-failed".to_owned(),
+                        error_output(error.clone()),
                         Some(display),
                     );
                 }
@@ -507,8 +507,8 @@ impl BuiltinTools {
                     call_id,
                     visible_tool_name,
                     call.tool_type,
-                    message,
-                    Some(call.arguments.clone()),
+                    "invalid-arguments".to_owned(),
+                    error_output(message),
                 );
                 return Ok(());
             }
@@ -521,8 +521,8 @@ impl BuiltinTools {
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                message.to_owned(),
-                Some(call.arguments.clone()),
+                "agent-start-failed".to_owned(),
+                error_output(message),
                 Some(agent_start_error_display(display, message)),
             );
             return Ok(());
@@ -555,8 +555,8 @@ impl BuiltinTools {
                     call_id,
                     visible_tool_name,
                     call.tool_type,
-                    message,
-                    Some(call.arguments.clone()),
+                    "agent-start-failed".to_owned(),
+                    error_output(message),
                     Some(display),
                 );
                 return Ok(());
@@ -755,6 +755,14 @@ fn finish_agent_watch_success(
     );
 }
 
+/// Keep diagnostics in the semantic payload rather than the error identifier.
+fn error_output(message: impl Into<String>) -> Option<CborValue> {
+    Some(CborValue::Map(vec![(
+        CborValue::Text("output".to_owned()),
+        CborValue::Text(message.into()),
+    )]))
+}
+
 fn finish_agent_watch_error(
     finisher: &mut impl AgentWatchFinisher,
     conversation_id: &AgentId,
@@ -909,8 +917,8 @@ fn handle_skill_tool_call(
             call_id,
             visible_tool_name,
             call.tool_type,
-            message,
-            None,
+            "skill-failed".to_owned(),
+            error_output(message),
             display,
         ),
     }
@@ -1630,8 +1638,8 @@ impl BuiltinTools {
                     call_id,
                     visible_tool_name,
                     call.tool_type,
-                    message,
-                    None,
+                    "cancel-failed".to_owned(),
+                    error_output(message),
                     Some(display),
                 );
             }
@@ -1758,8 +1766,8 @@ fn handle_session_list_tool_call(
                 call.id.clone(),
                 visible_tool_name,
                 call.tool_type,
-                message,
-                Some(call.arguments.clone()),
+                "invalid-arguments".to_owned(),
+                error_output(message),
             );
         }
     }
@@ -1781,8 +1789,8 @@ fn handle_agent_list_tool_call(
                 call.id.clone(),
                 visible_tool_name,
                 call.tool_type,
-                message,
-                Some(call.arguments.clone()),
+                "invalid-arguments".to_owned(),
+                error_output(message),
             );
             return Ok(());
         }

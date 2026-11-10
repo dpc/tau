@@ -127,7 +127,7 @@ fn edit_rejects_legacy_line_count() {
     .expect_err("line_count should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "line_count is no longer supported; use end_line_exclusive"
     );
     assert_eq!(
@@ -414,7 +414,7 @@ fn edit_rejects_legacy_start_line_and_end_line() {
     .expect_err("legacy edit ranges should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "edit uses end_line_exclusive; to replace read output lines A through B, use start_line A and end_line_exclusive B+1"
     );
 }
@@ -437,7 +437,7 @@ fn edit_rejects_legacy_after_line_and_before_line() {
     .expect_err("legacy boundary edit ranges should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "after_line and before_line are no longer supported; use start_line and end_line_exclusive"
     );
 }
@@ -490,10 +490,10 @@ fn edit_rejects_end_line_exclusive_past_end() {
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
     assert!(
         error
-            .message
+            .explanation()
             .contains("end_line_exclusive 4 is past end of file")
     );
-    assert!(error.message.contains("max_valid_start_line: 2"));
+    assert!(error.explanation().contains("max_valid_start_line: 2"));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\n"
@@ -518,7 +518,7 @@ fn edit_rejects_range_past_end_without_trailing_newline() {
     .expect_err("range should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "end_line_exclusive 3 is past end of file (max_valid_start_line: 2)"
     );
     assert_eq!(fs::read_to_string(&file_path).expect("read back"), "hello");
@@ -561,7 +561,7 @@ fn edit_context_line_rejects_previous_line_for_replacement() {
     .expect_err("previous-line context should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "context_line wrong - must equal current line 2, see current content in the response"
     );
     let details = error.details.as_deref().expect("details");
@@ -599,7 +599,7 @@ fn edit_context_line_rejects_stale_line_number_and_returns_context_line_context(
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(
-        error.message,
+        error.explanation(),
         "context_line wrong - must equal current line 12, see current content in the response"
     );
     let details = error.details.as_deref().expect("details");
@@ -632,7 +632,7 @@ fn edit_rejects_non_empty_context_line_for_missing_file_insertion() {
     .expect_err("non-empty context_line on missing-file insertion should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "context_line wrong - must equal \"\" for missing line 1, see current content in the response"
     );
     assert!(!file_path.exists());
@@ -651,7 +651,7 @@ fn edit_rejects_wrong_context_line_at_file_start_with_recovery_context() {
     .expect_err("wrong context_line at file start should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "context_line wrong - must equal current line 1, see current content in the response"
     );
     let details = error.details.as_deref().expect("details");
@@ -679,7 +679,7 @@ fn edit_empty_insertion_rejects_previous_line_as_context_line() {
     .expect_err("empty insertion should reject previous-line context");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "context_line wrong - must equal current line 2, see current content in the response"
     );
     assert_eq!(
@@ -700,7 +700,10 @@ fn edit_rejects_missing_context_line_without_writing() {
     ))
     .expect_err("missing context_line should fail");
 
-    assert_eq!(error.message, "each edit must have a string context_line");
+    assert_eq!(
+        error.explanation(),
+        "each edit must have a string context_line"
+    );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "alpha\n"
@@ -724,7 +727,7 @@ fn edit_context_line_rejects_non_string_context_line_without_writing() {
     ))
     .expect_err("non-string context_line should fail");
 
-    assert_eq!(error.message, "context_line must be a string");
+    assert_eq!(error.explanation(), "context_line must be a string");
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "alpha\n"
@@ -767,7 +770,7 @@ fn edit_context_line_rejects_embedded_newline_characters_without_writing() {
         .expect_err("context_line with embedded newline should fail");
 
         assert_eq!(
-            error.message,
+            error.explanation(),
             "context_line must not include embedded newline characters"
         );
         assert_eq!(
@@ -1197,7 +1200,10 @@ fn read_file_rejects_range_request_over_cap_before_reading_file() {
     ]);
 
     let error = read_file(&args).expect_err("read should reject arguments first");
-    assert_eq!(error.message, "requested range count exceeds limit of 100");
+    assert_eq!(
+        error.explanation(),
+        "requested range count exceeds limit of 100"
+    );
 }
 
 #[test]
@@ -1219,7 +1225,7 @@ fn read_file_rejects_ranges_combined_with_top_level_range() {
 
     let error = read_file(&args).expect_err("mixed range styles should fail");
     assert_eq!(
-        error.message,
+        error.explanation(),
         "ranges cannot be combined with start_line or end_line"
     );
 }
@@ -1252,7 +1258,7 @@ fn read_file_errors_when_start_line_is_past_eof() {
 
     let error = read_file(&args).expect_err("start_line past EOF should fail");
     assert_eq!(
-        error.message,
+        error.explanation(),
         "start_line 3 is past end of file (total_lines: 2)"
     );
 }
@@ -1297,7 +1303,7 @@ fn read_file_rejects_start_line_after_empty_file() {
 
     let error = read_file(&args).expect_err("start_line after empty file should fail");
     assert_eq!(
-        error.message,
+        error.explanation(),
         "start_line 2 is past end of file (total_lines: 0)"
     );
 }
@@ -1488,7 +1494,7 @@ fn edit_context_line_rejects_invalid_utf8_bytes_without_writing() {
     .expect_err("invalid UTF-8 context_line should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "context_line wrong - current line 1 is not valid UTF-8, so no context_line string can match it; see current content in the response"
     );
     assert_eq!(
@@ -1791,7 +1797,7 @@ fn edit_context_line_rejects_invalid_utf8_original_line() {
     .expect_err("invalid UTF-8 context_line should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "context_line wrong - current line 1 is not valid UTF-8, so no context_line string can match it; see current content in the response"
     );
     let details = error.details.as_deref().expect("details");
@@ -1816,7 +1822,10 @@ fn edit_rejects_edit_request_over_cap() {
     let error = edit_file(&edit_arguments(&file_path, edits))
         .expect_err("edit should reject over-cap request");
 
-    assert_eq!(error.message, "requested edit count exceeds limit of 100");
+    assert_eq!(
+        error.explanation(),
+        "requested edit count exceeds limit of 100"
+    );
     assert!(!file_path.exists());
 }
 
@@ -1835,7 +1844,10 @@ fn edit_rejects_edit_request_over_cap_before_reading_file() {
 
     let error = edit_file(&args).expect_err("edit should reject arguments first");
 
-    assert_eq!(error.message, "requested edit count exceeds limit of 100");
+    assert_eq!(
+        error.explanation(),
+        "requested edit count exceeds limit of 100"
+    );
 }
 
 #[test]
@@ -1853,7 +1865,7 @@ fn edit_rejects_overlapping_ranges_without_partial_write() {
     ))
     .expect_err("overlap should fail");
 
-    assert_eq!(error.message, "overlapping edits");
+    assert_eq!(error.explanation(), "overlapping edits");
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "aa\nbb\ncc\n"
@@ -1892,7 +1904,7 @@ fn edit_rejects_missing_new_text() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "each edit must have a string newText");
+    assert_eq!(error.explanation(), "each edit must have a string newText");
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -1926,9 +1938,11 @@ fn edit_rejects_negative_start_line_with_path_args() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "start_line must be at least 1");
+    assert_eq!(error.explanation(), "start_line must be at least 1");
     assert!(
-        error.details.is_none(),
+        error.details.as_ref().is_some_and(
+            |details| matches!(details, CborValue::Map(entries) if entries.len() == 1)
+        ),
         "edit errors should not echo arguments"
     );
     assert_eq!(
@@ -1959,7 +1973,7 @@ fn edit_rejects_zero_end_line_exclusive() {
     ))
     .expect_err("end_line_exclusive=0 should fail");
 
-    assert_eq!(error.message, "end_line_exclusive must be at least 1");
+    assert_eq!(error.explanation(), "end_line_exclusive must be at least 1");
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\n"
@@ -1979,7 +1993,7 @@ fn edit_rejects_end_line_exclusive_before_start_line() {
     .expect_err("end_line_exclusive before start_line should fail");
 
     assert_eq!(
-        error.message,
+        error.explanation(),
         "end_line_exclusive must be at least start_line"
     );
     assert_eq!(

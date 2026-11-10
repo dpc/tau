@@ -63,7 +63,7 @@ fn ls_rejects_wrong_type_path() {
 
     let err = run_ls(&args, &mut world).expect_err("integer path should be rejected");
 
-    assert_eq!(err.message, "argument `path` must be a string");
+    assert_eq!(err.explanation(), "argument `path` must be a string");
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn ls_rejects_non_positive_limit() {
     let mut world = path_crate_tools_world::ShellWorld::real();
     let failure = run_ls(&args, &mut world).expect_err("limit should fail");
 
-    assert_eq!(failure.message, "limit must be >= 1");
+    assert_eq!(failure.explanation(), "limit must be >= 1");
 }
 
 #[test]
@@ -178,7 +178,10 @@ fn ls_rejects_limit_above_output_cap() {
     let mut world = path_crate_tools_world::ShellWorld::real();
     let failure = run_ls(&args, &mut world).expect_err("limit should fail");
 
-    assert_eq!(failure.message, format!("limit must be <= {MAX_LS_LIMIT}"));
+    assert_eq!(
+        failure.explanation(),
+        format!("limit must be <= {MAX_LS_LIMIT}")
+    );
 }
 
 /// Ensures limit truncation reports an explicit lower-bound marker instead of

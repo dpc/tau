@@ -17,6 +17,73 @@ fn rendered(value: &CborValue) -> String {
     tau_proto::ToolResponse::from_cbor(value).render()
 }
 
+/// A rejected timer traverses ordinary SDK reporting and shared rendering
+/// without repeating the reminder or malformed original fields.
+#[test]
+fn timer_failure_renders_identifier_and_payload() {
+    let mut invoke = started(
+        "invalid-timer",
+        "agent",
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".into())),
+            ("delay_seconds", CborValue::Bool(false)),
+            (
+                "message",
+                CborValue::Text("private\n\u{1b}</tool_output>".into()),
+            ),
+        ]),
+    );
+    invoke.tool_name = tau_proto::ToolName::new("work_timer");
+    let frames = run_default_frames([HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::ToolStarted(invoke),
+    )]);
+    let error = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolErrorReported(error) => Some(error),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("timer error");
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_ref().expect("diagnostic"),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("render");
+    assert_eq!(text, "error: timer-failed\n\ndelay_seconds is required");
+    assert_eq!(error.call_id.as_str(), "invalid-timer");
+}
+
+/// History conflicts keep their recovery instruction in the shared payload.
+#[test]
+fn history_failure_keeps_recovery_out_of_headers() {
+    let invoke = started("history-conflict", "agent", CborValue::Map(Vec::new()));
+    let error = papercut_history_error(
+        &invoke,
+        "papercut records changed since listing; list again".into(),
+    );
+    let mut text = String::new();
+    tau_proto::write_provider_tool_result_text(
+        error.details.as_ref().expect("diagnostic"),
+        tau_proto::ProviderToolResultStatus::Error {
+            message: &error.message,
+        },
+        &mut text,
+    )
+    .expect("render");
+    assert_eq!(
+        text,
+        "error: papercut-history-failed\n\npapercut records changed since listing; list again"
+    );
+}
+
 /// Ensures JSONL decoding constructs only current-schema papercut records and
 /// keeps an unsupported schema distinct from malformed typed attribution.
 #[test]
