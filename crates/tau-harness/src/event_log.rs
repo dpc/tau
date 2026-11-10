@@ -602,6 +602,25 @@ impl EventLog {
         }
     }
 
+    /// Waits at most `timeout` for every active test-fixture consumer to
+    /// inspect the current tail, without requiring future appends to
+    /// finish.
+    #[cfg(test)]
+    pub(crate) fn wait_for_consumers_at_tail(&self, timeout: std::time::Duration) -> bool {
+        let inner = self.inner.lock().expect("event log mutex poisoned");
+        let barrier = inner.next_egress_seq;
+        let (inner, _) = self
+            .cursor_progress
+            .wait_timeout_while(inner, timeout, |inner| {
+                inner.consumers.values().any(|state| state.cursor < barrier)
+            })
+            .expect("event log mutex poisoned while waiting for fixture writers");
+        inner
+            .consumers
+            .values()
+            .all(|state| state.cursor >= barrier)
+    }
+
     /// Returns a maximally lagging active consumer and its cursor distance in
     /// logical stream positions, including positions targeting other consumers.
     pub(crate) fn max_consumer_lag(&self) -> Option<(tau_core::SharedDeliveryTarget, u64)> {

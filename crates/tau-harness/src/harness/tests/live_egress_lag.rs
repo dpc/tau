@@ -42,6 +42,15 @@ fn lag_warning_clears_once_after_progress_or_retirement_without_resetting_thrott
 
         if retire {
             log.retire_consumer(consumer);
+            // The fixture's provider and shell writers also own cursors. Let
+            // them inspect the warning's egress position before asserting an
+            // exact global zero, rather than racing their asynchronous
+            // progress.
+            assert!(
+                log.wait_for_consumers_at_tail(Duration::from_secs(5)),
+                "fixture writer did not reach the egress tail: {:?}",
+                log.max_consumer_lag()
+            );
         } else {
             let pending = log.next_egress(consumer).expect("pending delivery");
             log.acknowledge_egress(consumer, &pending);
