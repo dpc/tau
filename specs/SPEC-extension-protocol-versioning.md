@@ -8,6 +8,13 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 23.3 and source SDK 0.31.0 add optional locally configured endpoint
+incoming-notice snapshots to delivered messages. Older hosts may ignore the
+field, so the SDK refuses notice-bearing acceptance requests unless Configure
+advertises 23.3 or later in major 23. Notice-free requests retain the 23.2 minimum.
+This additive revision changes neither journal framing nor receipt authority,
+and does not publish the SDK or activate a runtime.
+
 Protocol 23.2 adds directed opt-in message acceptance and an optional canonical
 idempotency marker. `AcceptNew` and `ExistingOnly` first ship together; both SDK
 entry points require Configure to advertise 23.2 or later in major 23 before

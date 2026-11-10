@@ -70,7 +70,7 @@ fn semantic_digest(message: &MessageDelivered) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new();
     ciborium::into_writer(
         &(
-            "tau.message-acceptance.v1",
+            "tau.message-acceptance.v2",
             &message.publisher_extension_id,
             &message.agent_id,
             &message.message_id,
@@ -82,6 +82,7 @@ fn semantic_digest(message: &MessageDelivered) -> blake3::Hash {
             &message.conversation,
             &message.text,
             &message.extension_data,
+            &message.incoming_notice,
         ),
         &mut hasher,
     )

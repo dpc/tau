@@ -20,6 +20,33 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Source SDK 0.31.0: context-scoped incoming guidance (not published)
+
+Proto and client source 0.31.0 use protocol **23.3**. `MessageDelivered` adds
+optional `incoming_notice: Option<MessageIncomingNotice>`; initialize it to
+`None` in existing struct literals. Constructors leave it absent by default.
+`MessageIncomingNotice::new(scope, text)` validates a nonempty scope of at most
+256 UTF-8 bytes and text of at most 64 KiB UTF-8. `scope()` and `text()` borrow
+those values.
+
+Bridges must derive scope from their authenticated/configured endpoint, not a
+remote claimed sender or transient connection, and attach their local snapshot
+to each report. The harness namespaces scope by canonical publisher, shows the
+first nonempty notice per selected agent context, and rearms after compaction.
+The harness preserves empty text but neither displays nor counts it. Later text changes
+wait for the next context. Remote bodies and sender-configured notices are not
+deduplicated.
+
+Acceptance includes the immutable notice snapshot in content matching. Retrying
+an accepted ID after changing the notice is a conflict, not a configuration
+update. Both SDK acceptance entry points reject notice-bearing requests below
+23.3; requests without a notice still work with 23.2. Ordinary report producers
+that require guidance must check Configure themselves rather than assume older
+hosts will retain the field.
+
+The client source pins proto at `=0.31.0`. This source preparation does not
+publish either crate or activate a runtime.
+
 ### Published SDK 0.30.0: canonical message acceptance
 
 Published proto and client 0.30.0 use protocol **23.2**.

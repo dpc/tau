@@ -414,6 +414,31 @@ Persist the hint with the fact so live projection and cold replay agree.
 Omitting the hint retains full message metadata, including references used by
 chat tools; older readers may ignore the hint and show that full presentation.
 
+Delivered facts may carry `incoming_notice`, an immutable local-configuration
+snapshot with a nonempty publisher-local endpoint scope (at most 256 UTF-8 bytes)
+and advisory text (at most 64 KiB UTF-8). The publisher derives the scope from
+its authenticated/configured endpoint, not a remote claimed sender or ephemeral
+connection. Canonical publisher identity namespaces the scope. Reports snapshot the notice
+on every delivery. Acceptance content matching includes the snapshot, so a retry
+with changed guidance conflicts rather than changing the accepted fact.
+
+The shared provider-context walk renders only the first nonempty notice for each
+publisher/scope in the selected active transcript window. Empty/absent snapshots,
+unprojectable facts, and rejected or duplicate-only acceptance attempts consume
+nothing. Compaction resets eligibility; retained suffix facts are reconsidered,
+while replacement and opaque provider bytes remain untouched. Replay derives the
+same selection without a separate durable seen set. Later snapshots within a
+scope do not replace the first visible notice until the next context.
+
+Visible guidance is a separate text part within the delivered message's existing
+item, before the unchanged remote-body projection. It uses the registered
+`message` family with canonical `publisher` and `notice_scope` attributes and a
+nested `notice origin="recipient_config" authority="advisory"` body. This is
+local advisory guidance, not remote content or system authority; remote sender,
+trust, reply, mention, and body projections retain their existing boundaries.
+SDK acceptance with this field requires protocol 23.3; notice-free acceptance
+retains the 23.2 minimum.
+
 ### Descriptive native mention evidence
 
 Delivered and edited reports and facts may carry optional `mention_evidence`.

@@ -12,6 +12,7 @@ use handlebars::Renderable as _;
 use tau_core::AgentEntry;
 use tau_proto::{ContextItem, PromptFragment, ToolName};
 
+mod incoming_notices;
 mod provider_context_projection;
 pub(crate) mod provider_switch_warning;
 
@@ -1639,6 +1640,7 @@ fn assemble_prompt_context_window(
     PROMPT_CONTEXT_CONSTRUCTION_COUNT
         .set(PROMPT_CONTEXT_CONSTRUCTION_COUNT.get().saturating_add(1));
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
+    let mut incoming_notices = incoming_notices::IncomingNotices::default();
     let mut contains_payload_envelope_provenance_projection = false;
     let mut active_window = tree.active_provider_window(head);
     if let Some(prefix_through) = prefix_through {
@@ -1882,7 +1884,10 @@ fn assemble_prompt_context_window(
                                 sender_session_id,
                                 sender_id,
                                 sender_notice.as_deref(),
-                                recipient_notice.as_deref(),
+                                incoming_notices.select(
+                                    incoming_notices::Scope::InterSession,
+                                    recipient_notice.as_deref(),
+                                ),
                                 &review_annotation,
                                 message,
                             ),
@@ -2056,11 +2061,31 @@ fn assemble_prompt_context_window(
                     }
                 }
             },
-            AgentEntry::MessageFact { item, .. } => {
+            AgentEntry::MessageFact {
+                item,
+                incoming_notice,
+                ..
+            } => {
                 contains_payload_envelope_provenance_projection = true;
+                let mut item = *item.clone();
+                if let Some((publisher, notice)) = incoming_notice
+                    && incoming_notices
+                        .select(
+                            incoming_notices::Scope::Endpoint(publisher, notice.scope()),
+                            Some(notice.text()),
+                        )
+                        .is_some()
+                {
+                    item.content.insert(
+                        0,
+                        tau_proto::ContentPart::Text {
+                            text: notice.render(publisher),
+                        },
+                    );
+                }
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
-                        items: vec![ContextItem::Message(*item.clone())],
+                        items: vec![ContextItem::Message(item)],
                     },
                 ));
             }

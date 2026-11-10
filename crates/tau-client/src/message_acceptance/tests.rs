@@ -49,11 +49,34 @@ fn acceptance_modes_are_gated_before_transport_and_preserved_on_wire() {
         .start_request(
             session.clone(),
             report.clone(),
-            Some(tau_proto::PROTOCOL_VERSION),
+            Some(ProtocolVersion::new(23, 2)),
         )
         .expect("admit new");
+    let mut noticed = report;
+    noticed.incoming_notice = Some(
+        tau_proto::MessageIncomingNotice::new("endpoint".to_owned(), "local guidance".to_owned())
+            .expect("notice"),
+    );
+    assert!(
+        client
+            .start_request(
+                session.clone(),
+                noticed.clone(),
+                Some(ProtocolVersion::new(23, 2))
+            )
+            .is_err()
+    );
+    assert!(
+        client
+            .start_existing_request(
+                session.clone(),
+                noticed.clone(),
+                Some(ProtocolVersion::new(23, 2))
+            )
+            .is_err()
+    );
     let second = client
-        .start_existing_request(session, report, Some(tau_proto::PROTOCOL_VERSION))
+        .start_existing_request(session, noticed, Some(tau_proto::PROTOCOL_VERSION))
         .expect("existing only");
     assert_ne!(first, second);
     handle.shutdown().expect("shutdown");
@@ -74,6 +97,10 @@ fn acceptance_modes_are_gated_before_transport_and_preserved_on_wire() {
         };
         assert_eq!(request.request_id, request_id);
         assert_eq!(request.mode, mode);
+        assert_eq!(
+            request.report.incoming_notice.is_some(),
+            mode == MessageAcceptanceMode::ExistingOnly
+        );
     }
     assert!(reader.read_message().expect("end").is_none());
 }

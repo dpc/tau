@@ -219,6 +219,16 @@ replay through the prior byte-identical no-notice path; current configuration
 never rewrites replay. Each notice is at most 64 KiB UTF-8, and peer queued-byte
 admission counts body plus both notices against the existing 256 KiB bound.
 
+Provider-context assembly shows the first nonempty recipient-local notice once
+per selected context, across all inter-session senders. Sender-configured notices
+remain per-message. The context walk reconstructs suppression from selected transcript entries; it
+does not persist a separate record. After compaction, it reconsiders retained
+suffix entries. It does not scan or rewrite replacement or opaque provider bytes.
+Missing or empty notices consume nothing. Later configured text for the same
+scope does not replace the first visible snapshot until the next context.
+External endpoint guidance uses the same selection rule with publisher/endpoint
+scopes; see [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
+
 ## Live activation and waits
 
 After a live activating receive occurrence commits, the harness uses the exact

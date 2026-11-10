@@ -251,6 +251,13 @@ pub enum AgentEntry {
     },
     /// Escaped ordinary context message derived from a committed message fact.
     MessageFact {
+        /// Canonical publisher and immutable local endpoint guidance. Prompt
+        /// assembly selects its visibility without changing the remote body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incoming_notice: Option<(
+            tau_proto::MessagePublisherId,
+            tau_proto::MessageIncomingNotice,
+        )>,
         /// Model-facing message with user/assistant role fixed by fact type.
         item: Box<tau_proto::MessageItem>,
         /// Sequence of the canonical raw fact in the owning agent journal.
@@ -3226,7 +3233,19 @@ impl AgentTree {
                     if let Event::MessageDelivered(message) = &record.event {
                         self.record_message_acceptance(message, record.seq);
                     }
-                    self.record_message_fact(self.head, Box::new(projection.item), record.seq)
+                    let incoming_notice = match &record.event {
+                        Event::MessageDelivered(message) => message
+                            .incoming_notice
+                            .clone()
+                            .map(|notice| (message.publisher_extension_id.clone(), notice)),
+                        _ => None,
+                    };
+                    self.record_message_fact(
+                        self.head,
+                        Box::new(projection.item),
+                        incoming_notice,
+                        record.seq,
+                    )
                 })
         } else {
             self.apply_persisted_event_at(
@@ -4371,12 +4390,17 @@ impl AgentTree {
         &mut self,
         parent: Option<NodeId>,
         item: Box<tau_proto::MessageItem>,
+        incoming_notice: Option<(
+            tau_proto::MessagePublisherId,
+            tau_proto::MessageIncomingNotice,
+        )>,
         durable_event_seq: PersistedAgentEventSeq,
     ) -> Option<NodeId> {
         self.record_context_entry(
             parent,
             AgentEntry::MessageFact {
                 item,
+                incoming_notice,
                 durable_event_seq,
             },
             durable_event_seq,

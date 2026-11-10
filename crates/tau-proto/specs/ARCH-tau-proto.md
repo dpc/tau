@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 23.3 and source SDK 0.31.0 add bounded immutable local endpoint guidance
+to delivered facts. Canonical publisher identity namespaces its scope; shared
+prompt assembly selects the first nonempty snapshot per active context, while
+acceptance compares the complete snapshot. See
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
 Protocol 23.2 / source SDK 0.30.0 add directed canonical message acceptance.
 Configured bridges explicitly opt in; ordinary reports remain unchanged. An
 optional canonical marker provides replay-derived idempotency without a durability

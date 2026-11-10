@@ -10,6 +10,13 @@ valid durable prefix.
 
 ## External-message reports and canonical facts
 
+Delivered reports and facts may include an `incoming_notice` snapshot of locally
+configured endpoint guidance. The harness namespaces its scope by authenticated
+publisher and shows the first nonempty snapshot once per recipient context.
+Compaction resets eligibility. The snapshot remains part of immutable acceptance
+content even when provider presentation suppresses a repeat. See
+[SPEC-external-message-reports-and-facts](../specs/SPEC-external-message-reports-and-facts.md).
+
 Message bridges publish transient `message.delivered_reported`,
 `message.edited_reported`, `message.deleted_reported`,
 `message.reaction_added_reported`, `message.reaction_removed_reported`, and

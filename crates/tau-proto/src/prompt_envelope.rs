@@ -430,6 +430,7 @@ pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloa
     ordered_attributes: &[
         "event",
         "publisher",
+        "notice_scope",
         "message_ref_publisher",
         "message_ref",
         "sender_ref",

@@ -18,6 +18,10 @@ fn message() -> tau_proto::MessageDelivered {
         "accepted body",
     );
     message.idempotent_acceptance = true;
+    message.incoming_notice = Some(
+        tau_proto::MessageIncomingNotice::new("endpoint".to_owned(), "local advice".to_owned())
+            .expect("notice"),
+    );
     message
 }
 
@@ -49,13 +53,32 @@ fn message_acceptance_replay_retains_identity_but_lost_tail_does_not() {
     );
     let lost = AgentTree::try_from_events(agent_id(), &[]).expect("lost asynchronous tail");
     assert_eq!(lost.message_acceptance_matches(&message), None);
-    for field in 0..4 {
+    for field in 0..7 {
         let mut changed = message.clone();
         match field {
             0 => changed.text.push_str(" changed"),
             1 => changed.sender.display_name = Some("changed".to_owned()),
             2 => changed.presentation = Some(tau_proto::MessagePresentation::Notification),
-            _ => changed.sender.sender_trust = Some(tau_proto::MessageSenderTrust::Untrusted),
+            3 => changed.sender.sender_trust = Some(tau_proto::MessageSenderTrust::Untrusted),
+            4 => changed.incoming_notice = None,
+            5 => {
+                changed.incoming_notice = Some(
+                    tau_proto::MessageIncomingNotice::new(
+                        "endpoint".to_owned(),
+                        "edited advice".to_owned(),
+                    )
+                    .expect("notice"),
+                )
+            }
+            _ => {
+                changed.incoming_notice = Some(
+                    tau_proto::MessageIncomingNotice::new(
+                        "different-endpoint".to_owned(),
+                        "local advice".to_owned(),
+                    )
+                    .expect("notice"),
+                )
+            }
         }
         assert_eq!(
             replay.message_acceptance_matches(&changed),

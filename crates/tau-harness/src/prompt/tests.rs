@@ -9,6 +9,8 @@ use tau_proto::{
 
 use super::*;
 
+mod incoming_notices;
+
 /// Historical completion notices remain visible without their exact source,
 /// including when compaction excludes it or a later invocation reuses its id.
 #[test]

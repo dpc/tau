@@ -74,6 +74,97 @@ fn canonical_count(h: &Harness) -> usize {
         .count()
 }
 
+/// Refused and duplicate-only attempts cannot consume guidance eligibility.
+/// Maximum-sized bridge input keeps its immutable notice through canonical
+/// stamping, content-conflict handling, live projection and cold
+/// reconstruction.
+#[test]
+fn incoming_notice_acceptance_preserves_snapshot_without_consuming_refused_attempts() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let target = ensure_test_user_agent(&mut h);
+    let frames = bridge(&mut h);
+    let mut input = request(&h, &target, "refused");
+    input.report.text = "b".repeat(65536);
+    input.report.incoming_notice = Some(
+        tau_proto::MessageIncomingNotice::new("endpoint".to_owned(), "refused-advice".to_owned())
+            .expect("notice"),
+    );
+    reject_next_semantic_admission(&h);
+    submit(&mut h, input.clone());
+    assert!(matches!(
+        outcome(&frames, "refused"),
+        Some(Outcome::Rejected { .. })
+    ));
+    assert_eq!(canonical_count(&h), 0);
+
+    let guidance = "g".repeat(65536);
+    input.request_id = "accepted".to_owned();
+    input.report.incoming_notice = Some(
+        tau_proto::MessageIncomingNotice::new("endpoint".to_owned(), guidance.clone())
+            .expect("notice"),
+    );
+    submit(&mut h, input.clone());
+    assert_eq!(
+        outcome(&frames, "accepted"),
+        Some(Outcome::Accepted { duplicate: false })
+    );
+    input.request_id = "duplicate".to_owned();
+    input.mode = tau_proto::MessageAcceptanceMode::ExistingOnly;
+    submit(&mut h, input.clone());
+    assert_eq!(
+        outcome(&frames, "duplicate"),
+        Some(Outcome::Accepted { duplicate: true })
+    );
+    input.request_id = "changed".to_owned();
+    input.report.incoming_notice = Some(
+        tau_proto::MessageIncomingNotice::new("endpoint".to_owned(), "changed-advice".to_owned())
+            .expect("notice"),
+    );
+    submit(&mut h, input.clone());
+    assert!(matches!(
+        outcome(&frames, "changed"),
+        Some(Outcome::Rejected { .. })
+    ));
+    assert_eq!(canonical_count(&h), 1);
+    input.request_id = "new-message".to_owned();
+    input.report.message_id = tau_proto::MessageFactId::new("new-message");
+    input.mode = tau_proto::MessageAcceptanceMode::AcceptNew;
+    submit(&mut h, input);
+    assert_eq!(
+        outcome(&frames, "new-message"),
+        Some(Outcome::Accepted { duplicate: false })
+    );
+
+    let records = h
+        .session_runtime
+        .agent_store
+        .snapshot_agent_events_for_test(target.as_str())
+        .expect("records");
+    let cold = tau_core::AgentTree::try_from_events(target.clone(), &records).expect("replay");
+    let live = h
+        .session_runtime
+        .agent_store
+        .load_agent(target.as_str())
+        .expect("load")
+        .expect("tree");
+    let visible = crate::prompt::assemble_prompt_context_from(live, live.head())
+        .context
+        .flatten();
+    assert_eq!(
+        visible,
+        crate::prompt::assemble_prompt_context_from(&cold, cold.head())
+            .context
+            .flatten()
+    );
+    let text = serde_json::to_string(&visible).expect("context");
+    assert_eq!(text.matches(&guidance).count(), 1);
+    assert!(!text.contains("refused-advice"));
+    assert!(!text.contains("changed-advice"));
+    assert!(!text.contains("untrusted-claim"));
+    assert!(text.contains("gccp"));
+}
+
 /// Lost results, cache eviction and changed content must never produce another
 /// canonical input or activation; ordinary emits retain their old semantics.
 #[test]

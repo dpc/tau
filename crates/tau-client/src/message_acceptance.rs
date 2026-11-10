@@ -80,6 +80,13 @@ impl MessageAcceptanceClient {
         mode: MessageAcceptanceMode,
     ) -> Result<String, ClientError> {
         validate_version(harness_protocol_version)?;
+        if report.incoming_notice.is_some()
+            && !harness_protocol_version.is_some_and(|version| version.minor >= 3)
+        {
+            return Err(ClientError::handler(
+                "incoming notices require harness protocol 23.3 or later in major 23",
+            ));
+        }
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let request_id = format!(
             "message-acceptance-{}",
