@@ -5,6 +5,49 @@ use crate::completion::{
     build_candidates_with_rules,
 };
 
+/// Prose contractions must not swallow later path triggers, regardless of line
+/// wrapping or the byte width of text before the cursor.
+#[test]
+fn prose_apostrophes_do_not_hide_later_path_rules() {
+    let literal = "./README.md looks like shit. It supposed to be a human-facing informative, high level intro to\nproject, and instead it's full of commits and super low level dev details. You can look how ./";
+    let data = CompletionData::new();
+    let calls = path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new()));
+    let observed = calls.clone();
+    data.set_remote_completer(path_std_sync::Arc::new(move |buffer, cursor, mode| {
+        observed
+            .lock()
+            .expect("calls")
+            .push((buffer.to_owned(), cursor, mode));
+        Vec::new()
+    }));
+    for (buffer, cursor) in [
+        (literal, "./README.md".len()),
+        (literal, literal.len()),
+        ("doesn't trigger ./", "doesn't trigger ./".len()),
+        ("l'été\nopen './hé llo' tail", "l'été\nopen './hé".len()),
+        ("it's ./héllo tail", "it's ./hé".len()),
+        ("it's ./README.md", 0),
+    ] {
+        let before = calls.lock().expect("calls").len();
+        build_candidates(&[], &data, buffer, cursor);
+        if cursor == 0 {
+            assert_eq!(calls.lock().expect("calls").len(), before);
+        } else {
+            assert_eq!(
+                calls.lock().expect("calls").last(),
+                Some(&(buffer.to_owned(), cursor, Some(false))),
+                "{buffer:?}"
+            );
+            assert_eq!(calls.lock().expect("calls").len(), before + 1);
+        }
+    }
+    // A cursor inside a UTF-8 scalar must not route a malformed path request.
+    let buffer = "it's ./hé";
+    let before = calls.lock().expect("calls").len();
+    build_candidates(&[], &data, buffer, buffer.len() - 1);
+    assert_eq!(calls.lock().expect("calls").len(), before);
+}
+
 /// Path rules never inspect the terminal host when no remote cache is
 /// installed.
 #[test]

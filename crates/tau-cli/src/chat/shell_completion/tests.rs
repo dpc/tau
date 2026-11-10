@@ -8,6 +8,9 @@ use tau_cli_term_raw::{Event as RawTermEvent, RawEvent};
 use super::super::{DraftSlot, handle_prompt_buffer_changed};
 use super::*;
 
+#[path = "tests/prose_paths.rs"]
+mod prose_paths;
+
 /// Chat's production draft handler must preserve ordinary completion cycling
 /// and Escape restoration; stale endpoint refreshes must not reopen that menu.
 #[test]
@@ -390,6 +393,20 @@ fn remote_completion_token_preserves_ranges_and_utf8() {
             "",
         ),
         ("cat ./a\\\nb", "cat ./a\\\nb".len(), "./ab", "cat ", ""),
+        (
+            "!remote cat ./a'b c' tail",
+            "!remote cat ./a'b".len(),
+            "./ab",
+            "!remote cat ",
+            " tail",
+        ),
+        (
+            "it's ./it's tail",
+            "it's ./it's".len(),
+            "./it's",
+            "it's ",
+            " tail",
+        ),
     ] {
         let parsed = token(buffer, cursor).expect("token");
         assert_eq!(

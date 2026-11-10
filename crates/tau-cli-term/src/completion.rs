@@ -18,6 +18,7 @@ use tau_cli_term_raw::{Candidate, CompletionView, Span, StyledBlock, StyledText}
 use tau_term_screen::{display_width, truncate_to_width};
 use tau_themes::Theme;
 
+use crate::completion_token::{CompletionToken as PathToken, completion_token as word_token};
 use crate::resolve;
 
 /// Nonblocking application callback for extension-backed completion. `None`
@@ -781,48 +782,9 @@ fn build_action_token_candidates(
     })
     .collect()
 }
-struct PathToken<'a> {
-    prefix: &'a str,
-    /// Bytes in the current token after the cursor.
-    suffix: &'a str,
-    before: &'a str,
-    after: &'a str,
-}
-
 fn first_non_whitespace_starts_command(buffer: &str) -> bool {
     let trimmed = buffer.trim_start();
     trimmed.starts_with(':') && !trimmed.starts_with("::")
-}
-
-fn word_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
-    buffer.get(..cursor)?;
-    let mut token_start = 0;
-    let mut token_end = buffer.len();
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in buffer.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else if quote == Some(ch) {
-            quote = None;
-        } else if quote.is_none() && matches!(ch, '\'' | '"') {
-            quote = Some(ch);
-        } else if quote.is_none() && ch.is_whitespace() {
-            if cursor <= index {
-                token_end = index;
-                break;
-            }
-            token_start = index + ch.len_utf8();
-        }
-    }
-    Some(PathToken {
-        prefix: &buffer[token_start..cursor],
-        suffix: &buffer[cursor..token_end],
-        before: &buffer[..token_start],
-        after: &buffer[token_end..],
-    })
 }
 
 fn build_session_candidates(

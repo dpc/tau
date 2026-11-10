@@ -14,6 +14,7 @@ use std::{ffi as path_std_ffi, process as path_std_process, time as path_std_tim
 
 mod bounded_command;
 pub mod completion;
+pub mod completion_token;
 pub mod resolve;
 #[cfg(test)]
 mod tests;

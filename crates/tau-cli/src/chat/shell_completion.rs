@@ -307,49 +307,14 @@ struct Token<'a> {
 
 /// Find a shell-like token without evaluating expansion or substitutions.
 fn token(buffer: &str, cursor: usize) -> Option<Token<'_>> {
-    if !buffer.is_char_boundary(cursor) {
-        return None;
-    }
-    let mut start = 0;
-    let mut end = buffer.len();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut decoded = String::new();
-    for (index, ch) in buffer.char_indices() {
-        if !escaped && quote.is_none() && ch.is_whitespace() {
-            if cursor <= index {
-                end = index;
-                break;
-            }
-            start = index + ch.len_utf8();
-            decoded.clear();
-        } else if escaped {
-            if index < cursor {
-                if quote == Some('"') && !matches!(ch, '$' | '`' | '"' | '\\' | '\n') {
-                    decoded.push('\\');
-                }
-                if ch != '\n' {
-                    decoded.push(ch);
-                }
-            }
-            escaped = false;
-        } else if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else if quote == Some(ch) {
-            quote = None;
-        } else if quote.is_none() && matches!(ch, '\'' | '"') {
-            quote = Some(ch);
-        } else if index < cursor {
-            decoded.push(ch);
-        }
-    }
-    if decoded.len() > tau_shell_interaction::TOKEN_LIMIT {
+    let token = tau_cli_term::completion_token::completion_token(buffer, cursor)?;
+    if token.decoded.len() > tau_shell_interaction::TOKEN_LIMIT {
         return None;
     }
     Some(Token {
-        before: &buffer[..start],
-        after: &buffer[end..],
-        decoded,
+        before: token.before,
+        after: token.after,
+        decoded: token.decoded,
     })
 }
 
