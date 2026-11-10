@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.30.0",
+        "dpc-tau-proto": "=0.31.0",
     },
 }
 
@@ -182,7 +182,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 2));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 3));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 
@@ -243,6 +243,108 @@ fn packaged_sdk_exposes_canonical_message_acceptance() {
         });
         let bytes = encode_message_to_vec(&result).expect("encode outcome");
         assert_eq!(decode_message_from_slice::<HarnessOutputMessage>(&bytes).expect("decode outcome"), result);
+    }
+}
+
+/// Registry consumers must retain notice snapshots and gate both acceptance modes
+/// before transport, while preserving notice-free requests to protocol 23.2.
+#[test]
+fn packaged_sdk_gates_incoming_notices_on_the_wire() {
+    use std::io::{Cursor, Write};
+    use std::sync::{Arc, Mutex};
+    use tau_client::{ExtensionBuilder, MessageAcceptanceClient, TauExtension, TauExtensionRunner};
+    use tau_proto::*;
+
+    /// Minimal external extension exercising the public runtime startup path.
+    struct Consumer;
+    impl TauExtension for Consumer {
+        type State = ();
+        fn name(&self) -> &'static str { "consumer" }
+        fn register(self, builder: &mut ExtensionBuilder<()>) { builder.subscribe_empty(); }
+    }
+
+    /// Captures real framed output until runtime finish flushes the writer.
+    #[derive(Clone, Default)]
+    struct Output(Arc<Mutex<Vec<u8>>>);
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("output lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    for minor in [2, 3] {
+        let version = ProtocolVersion::new(23, minor);
+        let mut input = Vec::new();
+        HarnessOutputWriter::new(&mut input).write_message(
+            &HarnessOutputMessage::Configure(Configure {
+                purpose: ConfigurePurpose::Runtime,
+                artifact_limits: Default::default(),
+                harness_protocol_version: Some(version),
+                tool_prefix: None,
+                config: CborValue::Null,
+                instance_name: "consumer".parse().expect("instance name"),
+                state_dir: None,
+                secrets: Default::default(),
+                absent_optional_secrets: Default::default(),
+                settings_files: Default::default(),
+            }),
+        ).expect("configure");
+        let output = Output::default();
+        let runtime = TauExtensionRunner::new(Consumer)
+            .start_manual_loop(Cursor::new(input), output.clone(), ())
+            .expect("runtime");
+        let client = MessageAcceptanceClient::new(runtime.handle());
+        let mut expected = Vec::new();
+        for noticed in [false, true] {
+            let mut report = MessageDelivered::new(
+                RawMessagePublisherId::new("consumer"),
+                MessageAgentTarget::new("agent"),
+                MessageFactId::new("message"),
+                MessageParty {
+                    stable_id: "sender".into(),
+                    display_name: None,
+                    sender_auth: None,
+                    sender_trust: None,
+                },
+                None,
+                "body",
+            );
+            assert!(report.incoming_notice.is_none());
+            if noticed {
+                let notice = MessageIncomingNotice::new("endpoint".into(), "local guidance".into())
+                    .expect("validated notice");
+                assert_eq!(notice.scope(), "endpoint");
+                assert_eq!(notice.text(), "local guidance");
+                report.incoming_notice = Some(notice);
+            }
+            for mode in [MessageAcceptanceMode::AcceptNew, MessageAcceptanceMode::ExistingOnly] {
+                let session = "session".parse().expect("session");
+                let result = match mode {
+                    MessageAcceptanceMode::AcceptNew =>
+                        client.start_request(session, report.clone(), Some(version)),
+                    MessageAcceptanceMode::ExistingOnly =>
+                        client.start_existing_request(session, report.clone(), Some(version)),
+                };
+                if noticed && minor == 2 {
+                    assert!(result.is_err(), "23.2 must reject notice-bearing requests");
+                } else {
+                    expected.push((result.expect("supported request"), mode, report.clone()));
+                }
+            }
+        }
+        runtime.finish().expect("flush runtime");
+        let mut reader = HarnessInputReader::new(Cursor::new(
+            output.0.lock().expect("output lock").clone(),
+        ));
+        let mut actual = Vec::new();
+        while let Some(message) = reader.read_message().expect("decode output") {
+            if let HarnessInputMessage::MessageAcceptanceRequest(request) = message {
+                actual.push((request.request_id, request.mode, request.report));
+            }
+        }
+        assert_eq!(actual, expected, "unsupported requests must emit no frames");
     }
 }
 
