@@ -1,6 +1,8 @@
 //! Directed acceptance, concurrency, replay and asynchronous persistence
 //! oracles.
 
+use std::num::NonZeroU64;
+
 use tau_proto::{MessageAcceptanceOutcome as Outcome, MessageAcceptanceRequest};
 
 use super::*;
@@ -72,6 +74,100 @@ fn canonical_count(h: &Harness) -> usize {
         .iter()
         .filter(|event| matches!(event, Event::MessageDelivered(_)))
         .count()
+}
+
+/// Reconnect hints never rewrite the first accepted display (even absence),
+/// enqueue another canonical input, or weaken canonical sender/body matching.
+/// Live provider context and journal replay retain the same frozen snapshot.
+#[test]
+fn connection_display_retries_preserve_first_accepted_snapshot() {
+    for initial in [None, NonZeroU64::new(7)] {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+        let target = ensure_test_user_agent(&mut h);
+        let frames = bridge(&mut h);
+        let mut input = request(&h, &target, "first");
+        input.report.connection_id = initial;
+        submit(&mut h, input.clone());
+        assert_eq!(
+            outcome(&frames, "first"),
+            Some(Outcome::Accepted { duplicate: false })
+        );
+        for (attempt, mode, hint) in [
+            (
+                "reconnect",
+                tau_proto::MessageAcceptanceMode::AcceptNew,
+                NonZeroU64::new(8),
+            ),
+            (
+                "existing",
+                tau_proto::MessageAcceptanceMode::ExistingOnly,
+                None,
+            ),
+        ] {
+            input.request_id = attempt.to_owned();
+            input.mode = mode;
+            input.report.connection_id = hint;
+            submit(&mut h, input.clone());
+            assert_eq!(
+                outcome(&frames, attempt),
+                Some(Outcome::Accepted { duplicate: true })
+            );
+        }
+        input.mode = tau_proto::MessageAcceptanceMode::AcceptNew;
+        for field in ["sender", "body"] {
+            let mut changed = input.clone();
+            changed.request_id = field.to_owned();
+            if field == "sender" {
+                changed.report.sender.stable_id.push_str("-changed");
+            } else {
+                changed.report.text.push_str("-changed");
+            }
+            submit(&mut h, changed);
+            assert!(matches!(
+                outcome(&frames, field),
+                Some(Outcome::Rejected { .. })
+            ));
+        }
+        assert_eq!(canonical_count(&h), 1);
+        let records = h
+            .session_runtime
+            .agent_store
+            .snapshot_agent_events_for_test(target.as_str())
+            .expect("records");
+        let accepted = records
+            .iter()
+            .find_map(|record| match &record.event {
+                Event::MessageDelivered(fact) => Some(fact),
+                _ => None,
+            })
+            .expect("canonical message");
+        assert_eq!(accepted.connection_id, initial);
+        assert_eq!(accepted.sender.stable_id, "peer-address");
+        let cold = tau_core::AgentTree::try_from_events(target.clone(), &records).expect("replay");
+        let live = h
+            .session_runtime
+            .agent_store
+            .load_agent(target.as_str())
+            .expect("load")
+            .expect("tree");
+        let context = crate::prompt::assemble_prompt_context_from(live, live.head())
+            .context
+            .flatten();
+        assert_eq!(
+            context,
+            crate::prompt::assemble_prompt_context_from(&cold, cold.head())
+                .context
+                .flatten()
+        );
+        let text = serde_json::to_string(&context).expect("context");
+        assert_eq!(text.contains("connection_id=\\\"7\\\""), initial.is_some());
+        assert_eq!(
+            text.contains("sender_ref=\\\"peer-address\\\""),
+            initial.is_none()
+        );
+        assert!(!text.contains("connection_id=\\\"8\\\""));
+    }
 }
 
 /// Refused and duplicate-only attempts cannot consume guidance eligibility.

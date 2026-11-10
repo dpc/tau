@@ -156,6 +156,7 @@ fn registered_families_have_unique_complete_lexical_contracts() {
                 "message_ref_publisher",
                 "message_ref",
                 "sender_ref",
+                "connection_id",
                 "sender_display",
                 "sender_auth",
                 "sender_trust",

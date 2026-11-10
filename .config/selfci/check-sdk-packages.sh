@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.31.0",
+        "dpc-tau-proto": "=0.32.0",
     },
 }
 
@@ -182,7 +182,7 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 3));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 4));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
 }
 
@@ -246,8 +246,8 @@ fn packaged_sdk_exposes_canonical_message_acceptance() {
     }
 }
 
-/// Registry consumers must retain notice snapshots and gate both acceptance modes
-/// before transport, while preserving notice-free requests to protocol 23.2.
+/// Registry consumers must retain display and notice snapshots and gate both
+/// acceptance modes before transport, preserving plain requests to protocol 23.2.
 #[test]
 fn packaged_sdk_gates_incoming_notices_on_the_wire() {
     use std::io::{Cursor, Write};
@@ -274,7 +274,7 @@ fn packaged_sdk_gates_incoming_notices_on_the_wire() {
         fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
     }
 
-    for minor in [2, 3] {
+    for minor in [2, 3, 4] {
         let version = ProtocolVersion::new(23, minor);
         let mut input = Vec::new();
         HarnessOutputWriter::new(&mut input).write_message(
@@ -297,7 +297,7 @@ fn packaged_sdk_gates_incoming_notices_on_the_wire() {
             .expect("runtime");
         let client = MessageAcceptanceClient::new(runtime.handle());
         let mut expected = Vec::new();
-        for noticed in [false, true] {
+        for (noticed, connection) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut report = MessageDelivered::new(
                 RawMessagePublisherId::new("consumer"),
                 MessageAgentTarget::new("agent"),
@@ -312,6 +312,10 @@ fn packaged_sdk_gates_incoming_notices_on_the_wire() {
                 "body",
             );
             assert!(report.incoming_notice.is_none());
+            assert!(report.connection_id.is_none());
+            if connection {
+                report.connection_id = std::num::NonZeroU64::new(7);
+            }
             if noticed {
                 let notice = MessageIncomingNotice::new("endpoint".into(), "local guidance".into())
                     .expect("validated notice");
@@ -327,8 +331,8 @@ fn packaged_sdk_gates_incoming_notices_on_the_wire() {
                     MessageAcceptanceMode::ExistingOnly =>
                         client.start_existing_request(session, report.clone(), Some(version)),
                 };
-                if noticed && minor == 2 {
-                    assert!(result.is_err(), "23.2 must reject notice-bearing requests");
+                if (noticed && minor < 3) || (connection && minor < 4) {
+                    assert!(result.is_err(), "older hosts must reject unsupported metadata");
                 } else {
                     expected.push((result.expect("supported request"), mode, report.clone()));
                 }

@@ -4013,6 +4013,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
     )
     .expect("subscribe");
     let report = tau_proto::MessageDelivered {
+        connection_id: None,
         incoming_notice: None,
         idempotent_acceptance: false,
         links: None,
@@ -4158,6 +4159,7 @@ fn extension_message_report_requires_exact_authenticated_publisher_claim() {
         "unicode-☃",
     ] {
         let report = tau_proto::MessageDelivered {
+            connection_id: None,
             incoming_notice: None,
             idempotent_acceptance: false,
             links: None,

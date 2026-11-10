@@ -80,6 +80,13 @@ impl MessageAcceptanceClient {
         mode: MessageAcceptanceMode,
     ) -> Result<String, ClientError> {
         validate_version(harness_protocol_version)?;
+        if report.connection_id.is_some()
+            && !harness_protocol_version.is_some_and(|version| version.minor >= 4)
+        {
+            return Err(ClientError::handler(
+                "connection display IDs require harness protocol 23.4 or later in major 23",
+            ));
+        }
         if report.incoming_notice.is_some()
             && !harness_protocol_version.is_some_and(|version| version.minor >= 3)
         {

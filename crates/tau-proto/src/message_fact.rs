@@ -223,6 +223,13 @@ impl MessageAgentTarget {
 /// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageDelivered<Publisher = MessagePublisherId> {
+    /// Optional publisher-local connection handle for compact display only.
+    ///
+    /// Replaces the rendered sender reference, never canonical sender identity
+    /// or routing authority. The first accepted snapshot (including absence)
+    /// stays frozen; changing only this hint does not conflict on retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<std::num::NonZeroU64>,
     /// Immutable local endpoint guidance, deduplicated by the harness within
     /// the recipient's selected context. Never populate from remote text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +283,7 @@ impl<Publisher> MessageDelivered<Publisher> {
         text: impl Into<String>,
     ) -> Self {
         Self {
+            connection_id: None,
             incoming_notice: None,
             idempotent_acceptance: false,
             publisher_extension_id,
@@ -299,6 +307,7 @@ impl<Publisher> MessageDelivered<Publisher> {
         publisher_extension_id: Canonical,
     ) -> MessageDelivered<Canonical> {
         MessageDelivered {
+            connection_id: self.connection_id,
             incoming_notice: self.incoming_notice,
             idempotent_acceptance: false,
             publisher_extension_id,
@@ -967,7 +976,13 @@ fn render_message_fact(view: &MessageFactView<'_>, reply_attributes: Option<&str
             "sender"
         };
         if !view.is_notification() {
-            push_attribute(&mut output, &format!("{party_label}_ref"), &party.stable_id);
+            if let MessageFactView::Delivered(fact) = view
+                && let Some(connection_id) = fact.connection_id
+            {
+                push_attribute(&mut output, "connection_id", &connection_id.to_string());
+            } else {
+                push_attribute(&mut output, &format!("{party_label}_ref"), &party.stable_id);
+            }
             if let Some(display) = &party.display_name {
                 push_attribute(&mut output, &format!("{party_label}_display"), display);
             }

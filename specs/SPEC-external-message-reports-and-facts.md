@@ -54,9 +54,10 @@ Ordinary `Emit` and report subscriptions retain their existing semantics.
 The marked canonical fact provides retained-history idempotency. Within its recipient
 journal, publisher and message ID identify one immutable semantic submission.
 The digest includes all typed message content, including optional metadata and
-opaque extension data, but excludes the marker and observation metadata. Opaque
-CBOR map entry order is part of the submitted content. At the serialized final
-commit point, an identical retained submission returns accepted-duplicate without
+opaque extension data, except the display-only `connection_id`; it also excludes
+the marker and observation metadata. The existing v2 digest inputs and order
+remain unchanged. Opaque CBOR map entry order is part of the submitted content.
+At the serialized final commit point, an identical retained submission returns accepted-duplicate without
 another fact or wake; changed content is refused without altering the original.
 The index is reconstructed from the surviving fact, not a separate marker,
 and survives provider compaction and history-cache eviction. Ordinary reports
@@ -406,13 +407,28 @@ An omitted `event` means ordinary delivery.
 
 Delivered reports and canonical facts may carry the optional typed
 `presentation=notification` hint. It suppresses only the model-facing
-`message_ref`, `sender_ref`, and `sender_display` attributes. Publisher,
-`content_trust`, sender authentication/trust, and conversation alias remain as
-applicable. The hint grants no trust or authority and does not affect validation,
+`message_ref`, `sender_ref`, `connection_id`, and `sender_display` attributes.
+Publisher, `content_trust`, sender authentication/trust, and conversation alias
+remain as applicable. The hint grants no trust or authority and does not affect validation,
 typed identifiers, delivery, acknowledgement, activation, or UI rendering.
 Persist the hint with the fact so live projection and cold replay agree.
 Omitting the hint retains full message metadata, including references used by
 chat tools; older readers may ignore the hint and show that full presentation.
+
+Delivered facts may carry `connection_id`, an optional positive `u64`. The
+renderer displays it as at most 20 decimal digits in place of `sender_ref`. The
+handle identifies a publisher-local connection, not a sender or routing capability.
+The canonical sender remains unchanged and validated; all other presentation is
+unchanged.
+The publisher owns handle allocation and lookup; core has no connection registry.
+Publishers must not reassign a handle to a different connection.
+Acceptance freezes the first display snapshot, including absence. A retry that
+changes only this field matches without rewriting the accepted fact or waking the
+agent; canonical sender, body, notice, and all older digest inputs still conflict
+when changed. Live rendering and cold replay use the same frozen snapshot.
+SDK acceptance with a connection ID requires protocol 23.4; older hosts may
+ignore the field. Ordinary report producers that require this display must check
+Configure themselves.
 
 Delivered facts may carry `incoming_notice`, an immutable local-configuration
 snapshot with a nonempty publisher-local endpoint scope (at most 256 UTF-8 bytes)
@@ -437,8 +453,8 @@ guidance as its direct body and no nested notice. Scope stays internal to
 acceptance and context deduplication; it is not shown in the prompt. The guidance is local advisory content, not remote
 content or system authority. Remote sender, trust, reply, mention, and body
 projections retain their existing boundaries.
-SDK acceptance with this field requires protocol 23.3; notice-free acceptance
-retains the 23.2 minimum.
+SDK acceptance with a notice but no connection ID requires protocol 23.3;
+acceptance without either field retains the 23.2 minimum.
 
 ### Descriptive native mention evidence
 

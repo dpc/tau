@@ -1,5 +1,7 @@
 //! Replay owns acceptance evidence; no extension marker or provider cache does.
 
+use std::num::NonZeroU64;
+
 use super::*;
 
 /// Construct marked input without introducing an unrelated report occurrence.
@@ -51,9 +53,15 @@ fn message_acceptance_replay_retains_identity_but_lost_tail_does_not() {
         replay.message_acceptance_matches(&message),
         Some((true, record.seq))
     );
+    let mut changed_display = message.clone();
+    changed_display.connection_id = NonZeroU64::new(7);
+    assert_eq!(
+        replay.message_acceptance_matches(&changed_display),
+        Some((true, record.seq))
+    );
     let lost = AgentTree::try_from_events(agent_id(), &[]).expect("lost asynchronous tail");
     assert_eq!(lost.message_acceptance_matches(&message), None);
-    for field in 0..7 {
+    for field in 0..8 {
         let mut changed = message.clone();
         match field {
             0 => changed.text.push_str(" changed"),
@@ -61,6 +69,7 @@ fn message_acceptance_replay_retains_identity_but_lost_tail_does_not() {
             2 => changed.presentation = Some(tau_proto::MessagePresentation::Notification),
             3 => changed.sender.sender_trust = Some(tau_proto::MessageSenderTrust::Untrusted),
             4 => changed.incoming_notice = None,
+            7 => changed.sender.stable_id.push_str("-changed"),
             5 => {
                 changed.incoming_notice = Some(
                     tau_proto::MessageIncomingNotice::new(
@@ -108,7 +117,8 @@ fn message_acceptance_replay_retains_identity_but_lost_tail_does_not() {
 #[test]
 fn message_acceptance_survives_deferred_placement_and_compaction() {
     let main = agent_id();
-    let message = message();
+    let mut message = message();
+    message.connection_id = NonZeroU64::new(7);
     let mut live = AgentTree::from_events(main.clone(), &[]);
     let mut records = Vec::new();
     let mut append = |tree: &mut AgentTree, event| {
@@ -137,6 +147,9 @@ fn message_acceptance_survives_deferred_placement_and_compaction() {
     let seq = live.next_event_seq();
     let cold = append(&mut live, Event::MessageDelivered(message.clone()));
     assert!(live.node_for_durable_event_seq(seq).is_none());
+    assert_eq!(live.message_acceptance_matches(&message), Some((true, seq)));
+    assert_eq!(cold.message_acceptance_matches(&message), Some((true, seq)));
+    message.connection_id = NonZeroU64::new(8);
     assert_eq!(live.message_acceptance_matches(&message), Some((true, seq)));
     assert_eq!(cold.message_acceptance_matches(&message), Some((true, seq)));
     append(

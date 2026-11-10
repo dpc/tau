@@ -443,6 +443,7 @@ pub const MESSAGE_PAYLOAD_ENVELOPE: RegisteredPayloadEnvelope = RegisteredPayloa
         "message_ref_publisher",
         "message_ref",
         "sender_ref",
+        "connection_id",
         "sender_display",
         "sender_auth",
         "sender_trust",

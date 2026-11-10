@@ -1,10 +1,72 @@
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 
 use super::*;
 use crate::{
     CborValue, EXTENSION_NAME_MAX_BYTES, Event, HarnessInputMessage, MessageExtensionData,
     decode_harness_input_from_slice, encode_message_to_vec,
 };
+
+/// A compact connection handle replaces only presentation, survives wire
+/// stamping, and cannot hide invalid canonical identity or introduce markup.
+#[test]
+fn connection_display_is_bounded_optional_and_preserves_canonical_sender() {
+    let mut report = MessageDelivered::new(
+        RawMessagePublisherId::new("bridge"),
+        MessageAgentTarget::new("agent"),
+        MessageFactId::new("message"),
+        MessageParty {
+            stable_id: "full-canonical-sender".to_owned(),
+            display_name: None,
+            sender_auth: None,
+            sender_trust: None,
+        },
+        None,
+        "body",
+    );
+    let legacy = serde_json::to_value(&report).expect("legacy");
+    assert!(legacy.get("connection_id").is_none());
+    assert_eq!(
+        serde_json::from_value::<MessageDelivered<RawMessagePublisherId>>(legacy.clone())
+            .expect("old report")
+            .connection_id,
+        None
+    );
+    for invalid in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!("7"),
+    ] {
+        let mut wire = legacy.clone();
+        wire["connection_id"] = invalid;
+        assert!(serde_json::from_value::<MessageDelivered<RawMessagePublisherId>>(wire).is_err());
+    }
+    for id in [1, 7, u64::MAX] {
+        report.connection_id = NonZeroU64::new(id);
+        let wire = encode_message_to_vec(&report).expect("encode");
+        let decoded: MessageDelivered<RawMessagePublisherId> =
+            crate::decode_message_from_slice(&wire).expect("decode");
+        let mut canonical =
+            decoded.with_publisher(MessagePublisherId::parse("bridge").expect("publisher"));
+        assert_eq!(canonical.sender.stable_id, "full-canonical-sender");
+        let projection = project_message_fact(&Event::MessageDelivered(canonical.clone()))
+            .expect("fact")
+            .expect("valid");
+        assert_eq!(
+            projection.item.content,
+            vec![ContentPart::Text {
+                text: format!(
+                    "<message publisher=\"bridge\" message_ref=\"message\" connection_id=\"{id}\" content_trust=\"external\">body</message>"
+                ),
+            }]
+        );
+        canonical.sender.stable_id.clear();
+        assert_eq!(
+            project_message_fact(&Event::MessageDelivered(canonical)),
+            Some(Err(MessageProjectionFailure::InvalidParty))
+        );
+    }
+}
 
 /// Links survive report stamping and replay while edits without links do not
 /// inherit an older version's traversal metadata.
@@ -759,6 +821,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         mentions_self: Some(false),
         people: Vec::new(),
     });
+    delivered.connection_id = NonZeroU64::new(7);
     delivered.reply_context = Some(crate::MessageReplyContext {
         relation: crate::MessageReplyRelation::Reply,
         reference: Some(crate::MessageReplyReference::Canonical(target.clone())),
@@ -880,7 +943,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     assert_eq!(
         rendered,
         vec![
-            "<message publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" mentions=\"{&quot;mentions_self&quot;:false}\" reply_relation=\"reply\" reply_to_publisher=\"bridge-main\" reply_to=\"m&lt;&amp;1\" content_trust=\"external\"><hello></message>",
+            "<message publisher=\"bridge-main\" message_ref=\"m1\" connection_id=\"7\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" mentions=\"{&quot;mentions_self&quot;:false}\" reply_relation=\"reply\" reply_to_publisher=\"bridge-main\" reply_to=\"m&lt;&amp;1\" content_trust=\"external\"><hello></message>",
             "<message event=\"edited\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
             "<message event=\"deleted\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\"/>",
             "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref_publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" sender_trust=\"untrusted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
@@ -1028,6 +1091,7 @@ fn notification_presentation_preserves_identity_and_validation() {
     assert_eq!(prior_cbor.presentation, None);
 
     report.presentation = Some(MessagePresentation::Notification);
+    report.connection_id = NonZeroU64::new(7);
     let wire = HarnessInputMessage::emit(Event::MessageDeliveredReported(report.clone()));
     let encoded = encode_message_to_vec(&wire).expect("encode notification report");
     assert_eq!(
@@ -1282,6 +1346,7 @@ fn publisher_id_grammar_is_bounded_ascii() {
 fn telegram_and_xmpp_fit_delivered_schema() {
     for fact in [
         MessageDelivered {
+            connection_id: None,
             incoming_notice: None,
             idempotent_acceptance: false,
             links: None,
@@ -1307,6 +1372,7 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             extension_data: MessageExtensionData::default(),
         },
         MessageDelivered {
+            connection_id: None,
             incoming_notice: None,
             idempotent_acceptance: false,
             links: None,

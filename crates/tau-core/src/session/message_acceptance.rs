@@ -66,6 +66,8 @@ impl AgentTree {
 /// Explicit versioned field order; transport correlation, marker, timestamp and
 /// sequence never enter identity. Opaque CBOR retains its exact typed value,
 /// including map entry order, rather than silently normalizing bridge content.
+/// The display-only connection ID is deliberately excluded; all preexisting
+/// v2 inputs remain unchanged, including canonical sender and incoming notice.
 fn semantic_digest(message: &MessageDelivered) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new();
     ciborium::into_writer(

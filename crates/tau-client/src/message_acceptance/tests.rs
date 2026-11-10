@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::num::NonZeroU64;
 
 use super::*;
 
@@ -76,8 +77,29 @@ fn acceptance_modes_are_gated_before_transport_and_preserved_on_wire() {
             .is_err()
     );
     let second = client
-        .start_existing_request(session, noticed, Some(tau_proto::PROTOCOL_VERSION))
+        .start_existing_request(
+            session.clone(),
+            noticed.clone(),
+            Some(ProtocolVersion::new(23, 3)),
+        )
         .expect("existing only");
+    noticed.connection_id = NonZeroU64::new(7);
+    for minor in [2, 3] {
+        let version = Some(ProtocolVersion::new(23, minor));
+        assert!(
+            client
+                .start_request(session.clone(), noticed.clone(), version)
+                .is_err()
+        );
+        assert!(
+            client
+                .start_existing_request(session.clone(), noticed.clone(), version)
+                .is_err()
+        );
+    }
+    let third = client
+        .start_request(session, noticed, Some(tau_proto::PROTOCOL_VERSION))
+        .expect("connection display");
     assert_ne!(first, second);
     handle.shutdown().expect("shutdown");
     let mut reader =
@@ -89,6 +111,7 @@ fn acceptance_modes_are_gated_before_transport_and_preserved_on_wire() {
     for (request_id, mode) in [
         (first, MessageAcceptanceMode::AcceptNew),
         (second, MessageAcceptanceMode::ExistingOnly),
+        (third, MessageAcceptanceMode::AcceptNew),
     ] {
         let Some(HarnessInputMessage::MessageAcceptanceRequest(request)) =
             reader.read_message().expect("request")
@@ -99,7 +122,7 @@ fn acceptance_modes_are_gated_before_transport_and_preserved_on_wire() {
         assert_eq!(request.mode, mode);
         assert_eq!(
             request.report.incoming_notice.is_some(),
-            mode == MessageAcceptanceMode::ExistingOnly
+            request.report.connection_id.is_some() || mode == MessageAcceptanceMode::ExistingOnly
         );
     }
     assert!(reader.read_message().expect("end").is_none());

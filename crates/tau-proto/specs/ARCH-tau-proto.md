@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 23.4 and source SDK 0.32.0 add optional positive integer connection
+display IDs to delivered facts. The shared renderer substitutes this compact
+handle for the sender reference without changing canonical sender identity.
+Acceptance excludes only this new display metadata from the digest and freezes
+the first accepted snapshot, including absence. See
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
 Protocol 23.3 and source SDK 0.31.0 add bounded immutable local endpoint guidance
 to delivered facts. Canonical publisher identity namespaces its scope; shared
 prompt assembly selects the first nonempty snapshot per active context, while

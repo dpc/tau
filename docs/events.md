@@ -10,6 +10,11 @@ valid durable prefix.
 
 ## External-message reports and canonical facts
 
+Delivered reports and facts may include a positive integer `connection_id` for
+compact display instead of `sender_ref`. It grants no routing or sender authority.
+Acceptance freezes the first display snapshot, including absence. Retry matching
+ignores only this new field. Canonical sender identity stays intact.
+
 Delivered reports and facts may include an `incoming_notice` snapshot of locally
 configured endpoint guidance. The harness namespaces its scope by authenticated
 publisher and shows the first nonempty snapshot once per recipient context.

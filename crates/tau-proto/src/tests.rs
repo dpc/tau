@@ -1557,6 +1557,7 @@ fn representative_events() -> Vec<Event> {
             details: None,
         }),
         Event::MessageDelivered(MessageDelivered {
+            connection_id: None,
             incoming_notice: None,
             idempotent_acceptance: false,
             links: None,

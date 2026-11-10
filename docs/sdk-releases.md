@@ -20,6 +20,27 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### Source SDK 0.32.0: compact connection display
+
+Proto and client 0.32.0 use protocol **23.4**. `MessageDelivered` adds optional
+`connection_id: Option<std::num::NonZeroU64>`; constructors default it to `None`.
+The wire value is a positive integer, rendered as a decimal `connection_id`
+attribute of at most 20 digits instead of `sender_ref`. Canonical sender identity
+remains internal and unchanged. This handle identifies a connection, not a
+sender, and grants no routing authority. Its publisher owns allocation and
+lookup and must never reassign it to a different connection.
+
+Acceptance freezes the first display snapshot, including absence. A retry that
+changes only this field matches without another fact or wake. All previous v2
+digest inputs remain unchanged; canonical sender, body, notice, and other
+content still participate. Both SDK acceptance methods reject connection-bearing
+requests below 23.4, retain notice-only support on 23.3, and plain acceptance on
+23.2 within major 23. Ordinary report producers must check Configure themselves
+if they require the compact display.
+
+This is source release preparation, not a registry publication or runtime
+activation record. Published 0.31.0 artifacts and tags remain immutable.
+
 ### Published SDK 0.31.0: context-scoped incoming guidance
 
 Published proto and client 0.31.0 use protocol **23.3**. `MessageDelivered` adds

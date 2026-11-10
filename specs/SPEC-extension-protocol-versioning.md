@@ -8,6 +8,15 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 23.4 and source SDK 0.32.0 add optional display-only connection IDs to
+delivered messages. Both SDK acceptance methods require major 23, minor 4 or
+later when the field is present, because older hosts may silently ignore it.
+Notice-only requests retain the 23.3 minimum and plain requests retain 23.2.
+The canonical sender and all previous acceptance digest inputs stay unchanged;
+only the new display field is excluded. Acceptance freezes the first display
+snapshot, including absence. This additive revision does not change routing or
+journal framing.
+
 Protocol 23.3 and source SDK 0.31.0 add optional locally configured endpoint
 incoming-notice snapshots to delivered messages. Older hosts may ignore the
 field, so the SDK refuses notice-bearing acceptance requests unless Configure
