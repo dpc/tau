@@ -430,12 +430,14 @@ while replacement and opaque provider bytes remain untouched. Replay derives the
 same selection without a separate durable seen set. Later snapshots within a
 scope do not replace the first visible notice until the next context.
 
-Visible guidance is a separate text part within the delivered message's existing
-item, before the unchanged remote-body projection. It uses the registered
-`message` family with canonical `publisher` and `notice_scope` attributes and a
-nested `notice origin="recipient_config" authority="advisory"` body. This is
-local advisory guidance, not remote content or system authority; remote sender,
-trust, reply, mention, and body projections retain their existing boundaries.
+The delivered message's existing item contains visible guidance as a separate
+text part before the unchanged remote-body projection. Its registered `message`
+envelope has canonical `publisher`, `origin="recipient_config"`, and
+`authority="advisory"` attributes, with the guidance as its direct body and no
+nested notice. Scope stays internal to acceptance and context deduplication; it
+is not shown in the prompt. The guidance is local advisory content, not remote
+content or system authority. Remote sender, trust, reply, mention, and body
+projections retain their existing boundaries.
 SDK acceptance with this field requires protocol 23.3; notice-free acceptance
 retains the 23.2 minimum.
 

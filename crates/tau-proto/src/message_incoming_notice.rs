@@ -52,10 +52,10 @@ impl MessageIncomingNotice {
     }
 
     /// Render local advisory guidance separately from the remote body, within
-    /// the existing registered message family.
+    /// the existing registered message family. The deduplication scope stays
+    /// internal rather than adding irrelevant identity metadata to the prompt.
     #[must_use]
     pub fn render(&self, publisher: &crate::MessagePublisherId) -> String {
-        let text = crate::escape_exact_sentinel_close(&self.text, "</notice>", "&lt;/notice&gt;");
         crate::MESSAGE_PAYLOAD_ENVELOPE
             .render_attributed(
                 &[
@@ -63,11 +63,10 @@ impl MessageIncomingNotice {
                         "publisher",
                         crate::visible_escape_metadata(publisher.as_str()),
                     ),
-                    ("notice_scope", crate::visible_escape_metadata(&self.scope)),
+                    ("origin", "recipient_config".to_owned()),
+                    ("authority", "advisory".to_owned()),
                 ],
-                &format!(
-                    "<notice origin=\"recipient_config\" authority=\"advisory\">\n{text}\n</notice>"
-                ),
+                &self.text,
             )
             .expect("incoming notice attributes follow the shared registry")
     }

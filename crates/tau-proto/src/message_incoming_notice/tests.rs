@@ -26,9 +26,11 @@ fn incoming_notice_bounds_roundtrip_and_advisory_escaping() {
     )
     .expect("notice");
     let rendered = notice.render(&"bridge".parse().expect("publisher"));
-    assert!(rendered.contains("notice_scope=\"endpoint&quot;&lt;&amp;\""));
-    assert!(rendered.contains("origin=\"recipient_config\" authority=\"advisory\""));
-    assert!(rendered.contains("local &lt;/notice&gt; &lt;/message&gt; advice"));
+    assert_eq!(
+        rendered,
+        "<message publisher=\"bridge\" origin=\"recipient_config\" authority=\"advisory\">local </notice> &lt;/message&gt; advice</message>"
+    );
+    assert!(!rendered.contains("endpoint"));
+    assert!(!rendered.contains("<notice"));
     assert_eq!(rendered.matches("</message>").count(), 1);
-    assert_eq!(rendered.matches("</notice>").count(), 1);
 }
