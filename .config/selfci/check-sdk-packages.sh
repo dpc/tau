@@ -76,7 +76,7 @@ expected_internal_dependencies = {
     },
     "dpc-tau-client": {
         "dpc-tau-blocking-notify-channel": "=0.1.0",
-        "dpc-tau-proto": "=0.29.1",
+        "dpc-tau-proto": "=0.30.0",
     },
 }
 
@@ -182,8 +182,60 @@ fn packaged_sdk_round_trips_the_advertised_protocol_version() {
     let decoded: tau_proto::ProtocolVersion =
         tau_proto::decode_message_from_slice(&encoded).expect("protocol version should decode");
 
-    assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 1));
+    assert_eq!(decoded, tau_proto::ProtocolVersion::new(23, 2));
     let _logging_initializer: fn(&'static str) = tau_client::init_logging_for;
+}
+
+/// External consumers can submit canonical acceptance requests and distinguish
+/// accepted duplicates, definite rejection, and uncertain completion.
+#[test]
+fn packaged_sdk_exposes_canonical_message_acceptance() {
+    use tau_proto::*;
+    let _new: fn(tau_client::ClientHandle) -> tau_client::MessageAcceptanceClient =
+        tau_client::MessageAcceptanceClient::new;
+    let _start: fn(
+        &tau_client::MessageAcceptanceClient,
+        SessionId,
+        MessageDelivered<RawMessagePublisherId>,
+        Option<ProtocolVersion>,
+    ) -> Result<String, tau_client::ClientError> =
+        tau_client::MessageAcceptanceClient::start_request;
+    let report = MessageDelivered::new(
+        RawMessagePublisherId::new("consumer"),
+        MessageAgentTarget::new("agent"),
+        MessageFactId::new("message"),
+        MessageParty {
+            stable_id: "sender".into(),
+            display_name: None,
+            sender_auth: None,
+            sender_trust: None,
+        },
+        None,
+        "body",
+    );
+    assert!(!report.idempotent_acceptance);
+    let request = HarnessInputMessage::MessageAcceptanceRequest(Box::new(
+        MessageAcceptanceRequest {
+            request_id: "attempt".into(),
+            session_id: "session".parse().expect("session"),
+            report,
+        },
+    ));
+    let bytes = encode_message_to_vec(&request).expect("encode acceptance");
+    assert_eq!(decode_message_from_slice::<HarnessInputMessage>(&bytes).expect("decode acceptance"), request);
+    for outcome in [
+        MessageAcceptanceOutcome::Accepted { duplicate: false },
+        MessageAcceptanceOutcome::Accepted { duplicate: true },
+        MessageAcceptanceOutcome::Rejected { reason: "refused".into() },
+        MessageAcceptanceOutcome::Unknown { reason: "uncertain".into() },
+    ] {
+        let result = HarnessOutputMessage::MessageAcceptanceResult(MessageAcceptanceResult {
+            request_id: "attempt".into(),
+            outcome,
+        });
+        let bytes = encode_message_to_vec(&result).expect("encode outcome");
+        assert_eq!(decode_message_from_slice::<HarnessOutputMessage>(&bytes).expect("decode outcome"), result);
+    }
 }
 
 /// Packaged tool input accepts copied references without widening stored identities.

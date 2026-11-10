@@ -20,6 +20,25 @@ When a release changes the complete closure, publish `dpc-tau-actions` and
 
 ## Package and protocol versions
 
+### SDK 0.30.0: canonical message acceptance
+
+Proto and client 0.30.0 use protocol **23.2**. `MessageAcceptanceClient` provides
+an opt-in, bounded, nonblocking request sender. The extension's receive loop
+handles correlated `MessageAcceptanceResult` outcomes. A successful enqueue does
+not mean the message was accepted. `Accepted { duplicate }` identifies canonical
+acceptance within retained history; `Rejected` is a definite refusal, and `Unknown`
+leaves completion uncertain. Missing or incompatible harness versions fail locally
+before sending.
+
+For an identical retry, the harness retains one marked canonical message fact,
+including after replay. Acceptance does not guarantee fsync, crash-tail survival,
+execution, or exactly-once effects. Ordinary message reports keep their existing
+behavior. The API neither creates agents automatically nor adds an envelope.
+
+Publish proto first, then client, which pins proto at `=0.30.0`. The unchanged
+actions and blocking-notify-channel packages remain at 0.1.0. This SDK-only release
+does not advance trunk, publish the application, or activate any runtime.
+
 ### Published SDK 0.29.1: artifact tool-input domain type
 
 Published proto/client 0.29.1 retain protocol 23.1.
