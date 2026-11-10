@@ -1557,6 +1557,7 @@ fn representative_events() -> Vec<Event> {
             details: None,
         }),
         Event::MessageDelivered(MessageDelivered {
+            idempotent_acceptance: false,
             links: None,
             reply_context: None,
             mention_evidence: None,

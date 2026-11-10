@@ -432,6 +432,7 @@ pub(crate) fn dispatch_message<State>(
         | tau_proto::HarnessOutputMessage::UnloadSessionAgentResult(_)
         | tau_proto::HarnessOutputMessage::ExtensionDataResult(_)
         | tau_proto::HarnessOutputMessage::BridgeReceiverResult(_)
+        | tau_proto::HarnessOutputMessage::MessageAcceptanceResult(_)
         | tau_proto::HarnessOutputMessage::ArtifactResult(_)
         | tau_proto::HarnessOutputMessage::CliMessageResult(_)
         | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_)

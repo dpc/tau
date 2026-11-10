@@ -119,6 +119,7 @@ impl DebugEventLog {
                     // Recipient selection has not happened yet. The canonical
                     // receive fact owns content logging and ephemeral policy.
                     tau_proto::HarnessInputMessage::CliMessage(_) => return Ok(()),
+                    tau_proto::HarnessInputMessage::MessageAcceptanceRequest(_) => return Ok(()),
                     _ => "<message>".to_owned(),
                 };
                 let mut frame_json = debug_harness_input_json(message.as_ref());
@@ -686,6 +687,9 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
     match message {
         tau_proto::HarnessInputMessage::CliMessage(_) => {
             return serde_json::json!({"message": "cli_message", "payload": "<omitted>"});
+        }
+        tau_proto::HarnessInputMessage::MessageAcceptanceRequest(_) => {
+            return serde_json::json!({"message": "message_acceptance_request", "payload": "<omitted>"});
         }
         tau_proto::HarnessInputMessage::ArtifactRequest(_) => {
             return serde_json::json!({"message": "artifact_request", "payload": "<omitted>"});

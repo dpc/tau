@@ -1710,6 +1710,7 @@ impl Harness {
                         | HarnessInputMessage::ProviderDebugCapture(_)
                         | HarnessInputMessage::ArtifactRequest(_)
                         | HarnessInputMessage::BridgeReceiverRequest(_)
+                        | HarnessInputMessage::MessageAcceptanceRequest(_)
                         | HarnessInputMessage::ExtensionDataRequest(_)
                         | HarnessInputMessage::UiDebugEventStatsRequest(_)
                         | HarnessInputMessage::UiShutdownRequest(_)
@@ -1730,6 +1731,10 @@ impl Harness {
                         )
                         | (
                             HarnessInputMessage::BridgeReceiverRequest(_),
+                            ExtensionState::Ready,
+                        )
+                        | (
+                            HarnessInputMessage::MessageAcceptanceRequest(_),
                             ExtensionState::Ready,
                         )
                         | (
@@ -1999,6 +2004,9 @@ impl Harness {
             }
             HarnessInputMessage::BridgeReceiverRequest(request) => {
                 self.handle_bridge_receiver_request(source_id, request, admission);
+            }
+            HarnessInputMessage::MessageAcceptanceRequest(request) => {
+                self.handle_message_acceptance_request(source_id, *request, admission);
             }
             HarnessInputMessage::ArtifactRequest(request) => {
                 self.handle_artifact_request(source_id, request, admission);

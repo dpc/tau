@@ -208,6 +208,9 @@ impl TestProtocolItem {
             HarnessOutputMessage::BridgeReceiverResult(message) => {
                 Self::Message(TestMessage::BridgeReceiverResult(message))
             }
+            HarnessOutputMessage::MessageAcceptanceResult(_) => {
+                panic!("message acceptance tests inspect directed frames")
+            }
             HarnessOutputMessage::ArtifactResult(message) => {
                 Self::Message(TestMessage::ArtifactResult(message))
             }
@@ -2908,6 +2911,7 @@ mod live_egress_lag;
 mod main_agent;
 mod main_bootstrap;
 mod main_startup;
+mod message_acceptance;
 mod mode;
 mod model;
 mod protocol_items;

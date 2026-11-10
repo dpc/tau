@@ -20,7 +20,7 @@ For changes to this report-to-fact contract, follow the approval requirements in
 The underlying publication contract is specified by
 [SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 
-Message bridges publish six transient report event types through ordinary
+By default, message bridges publish six transient report event types through ordinary
 `Emit`: `message.delivered_reported`, `message.edited_reported`,
 `message.deleted_reported`, `message.reaction_added_reported`,
 `message.reaction_removed_reported`, and `message.sent_reported`. The harness
@@ -40,6 +40,45 @@ data, delivery/read receipts are not inferred, and this internal interface
 provides no backward wire or journal compatibility.
 
 ## Protocol schema
+
+### Opt-in canonical acceptance
+
+The directed `MessageAcceptanceRequest` is a separate opt-in operation for an
+authenticated configured `MessageBridge`. It validates an exact, currently loaded
+recipient and projectable input, stamps the configured publisher, and submits one
+immutable `message.delivered` fact through ordinary canonical interception,
+nonblocking persistence admission, fold, broadcast, and activation. It neither
+creates nor loads recipients and publishes no `message.delivered_reported` event.
+Ordinary `Emit` and report subscriptions retain their existing semantics.
+
+The marked canonical fact provides retained-history idempotency. Within its recipient
+journal, publisher and message ID identify one immutable semantic submission.
+The digest includes all typed message content, including optional metadata and
+opaque extension data, but excludes the marker and observation metadata. Opaque
+CBOR map entry order is part of the submitted content. At the serialized final
+commit point, an identical retained submission returns accepted-duplicate without
+another fact or wake; changed content is refused without altering the original.
+The index is reconstructed from the surviving fact, not a separate marker,
+and survives provider compaction and history-cache eviction. Ordinary reports
+cannot acquire this mode by supplying the marker.
+
+The directed result distinguishes `Accepted`, `Rejected`, and `Unknown`.
+Acceptance means recipient input ownership after ordinary publication, including
+input waiting behind an open tool round; it does not mean filesystem durability,
+agent execution, or delivery to every subscriber. Rejection is definite only for
+the current attempt before acceptance. A missing completion leaves the result
+unknown and permits an identical retry. A crash can lose accepted input; a retry is suppressed when
+the canonical fact survives and may be accepted anew otherwise. If a sender never
+retries after success, that loss remains possible. Effects performed before a
+lost journal tail can repeat. No fsync acknowledgement, independent incoming
+tombstone, or exactly-once execution promise is introduced.
+
+Admission captures the configured instance and session generation and rechecks
+them after interception. Replies go only to the requesting connection. The SDK
+requires Configure protocol 23.2 or later in major 23 before sending; unknown or
+unsupported runtimes never receive a fallback ordinary report.
+
+### Shared fact schema
 
 The protocol uses `EventCategory::Message` and one `Event` variant per wire
 name, with no operation enum or envelope wrapper. Each report/canonical pair

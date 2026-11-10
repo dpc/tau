@@ -1674,6 +1674,7 @@ mod idle_session;
 mod image_admission;
 mod local_summary_continuation;
 mod main_agent;
+mod message_acceptance;
 mod notification_delivery;
 mod operator_agent_unload;
 mod output_length_continuation_reducer;
@@ -3392,6 +3393,10 @@ impl Harness {
             }
             HarnessInputMessage::ArtifactRequest(request) => {
                 self.handle_ui_artifact_request(client_id, request);
+                Ok(ClientMessageDisposition::Continue)
+            }
+            HarnessInputMessage::MessageAcceptanceRequest(_) => {
+                // Only configured extensions possess MessageBridge authority.
                 Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::UiDebugEventStatsRequest(request) => {

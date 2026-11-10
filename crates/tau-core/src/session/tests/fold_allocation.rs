@@ -3,8 +3,50 @@
 //!
 //! These are requested-allocation oracles, not RSS tests.
 
+use super::super::message_acceptance::{AcceptedMessage, AcceptedMessageKey};
 use super::*;
 use crate::semantic_persistence::fold_memory::{serialization_scratch, validation_scratch};
+
+/// An otherwise identical marked message must reserve its retained dedup map
+/// and owned key before fold, including the first map-growth boundary.
+#[test]
+fn message_acceptance_index_is_charged_before_message_projection_returns() {
+    let mut trace = AllocationTrace::new();
+    let mut message = tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::parse("gccp").expect("publisher"),
+        tau_proto::MessageAgentTarget::new(agent_id().as_str()),
+        tau_proto::MessageFactId::new("i".repeat(128)),
+        tau_proto::MessageParty {
+            stable_id: "sender".to_owned(),
+            display_name: None,
+            sender_auth: None,
+            sender_trust: None,
+        },
+        None,
+        "same projected input",
+    );
+    let ordinary = trace.candidate(
+        Event::MessageDelivered(message.clone()),
+        AgentEventParent::InheritHead,
+    );
+    message.idempotent_acceptance = true;
+    let marked = trace.candidate(
+        Event::MessageDelivered(message.clone()),
+        AgentEventParent::InheritHead,
+    );
+    let ordinary_charge = trace.tree.fold_allocation_charge(&ordinary);
+    let marked_charge = trace.tree.fold_allocation_charge(&marked);
+    let minimum_index_charge = size_of::<(AcceptedMessageKey, AcceptedMessage)>()
+        + message.publisher_extension_id.as_str().len()
+        + message.message_id.as_str().len();
+    assert!(
+        marked_charge >= ordinary_charge.saturating_add(minimum_index_charge),
+        "initial map storage and owned identity must be reserved in addition to identical projection"
+    );
+    trace.append(marked);
+    assert!(trace.tree.message_acceptance_matches(&message).is_some());
+    trace.assert_cold_equivalent();
+}
 
 /// One canonical event trace retained so each allocation scenario can be
 /// replayed.

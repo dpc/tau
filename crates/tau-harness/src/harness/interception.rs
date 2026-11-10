@@ -301,6 +301,9 @@ pub(crate) enum ActivationDeclarationFamily {
 /// Immutable authenticated metadata carried beside one generic peer publish.
 #[derive(Clone, Default)]
 pub(crate) struct PeerPublicationContext {
+    /// Exact directed acceptance attempt retained through canonical
+    /// publication.
+    pub(crate) message_acceptance: Option<Box<super::message_acceptance::PendingMessageAcceptance>>,
     /// Authenticated original publisher, frozen before interception.
     pub(crate) publisher: Option<tau_proto::EventPublisher>,
     /// Original generic privacy scope suppresses diagnostic payload capture.
@@ -2288,6 +2291,14 @@ impl Harness {
             sync_head_for,
         } = deferred;
         self.fail_passive_context_append(&event, reason);
+        if let Some(pending) = source.peer_context.message_acceptance.as_deref() {
+            self.finish_message_acceptance(
+                pending,
+                tau_proto::MessageAcceptanceOutcome::Rejected {
+                    reason: "canonical message publication was discarded before commit".to_owned(),
+                },
+            );
+        }
         if let Some(prompt_id) = sync_head_for
             .as_ref()
             .and_then(ConversationHeadSync::prompt_dispatch)
@@ -3013,6 +3024,41 @@ impl Harness {
         event: Event,
         options: EnqueuePublishOptions,
     ) {
+        self.enqueue_publish_inner_with_message_acceptance(source, event, options, None);
+    }
+
+    /// Carry directed request ownership through the normal canonical chain.
+    pub(super) fn enqueue_message_acceptance(
+        &mut self,
+        event: Event,
+        pending: super::message_acceptance::PendingMessageAcceptance,
+    ) {
+        self.enqueue_publish_inner_with_message_acceptance(
+            Some(super::harness_connection_id()),
+            event,
+            EnqueuePublishOptions {
+                ui_interaction: None,
+                persist: true,
+                must_pass: true,
+                sync_head_for: None,
+                admission: None,
+                prompt_acceptance: None,
+                debug_sensitivity: DebugEventSensitivity::Ordinary,
+                start_owner: None,
+            },
+            Some(Box::new(pending)),
+        );
+    }
+
+    /// Common enqueue implementation with optional private acceptance
+    /// correlation.
+    fn enqueue_publish_inner_with_message_acceptance(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+        options: EnqueuePublishOptions,
+        message_acceptance: Option<Box<super::message_acceptance::PendingMessageAcceptance>>,
+    ) {
         let EnqueuePublishOptions {
             ui_interaction,
             persist,
@@ -3071,6 +3117,7 @@ impl Harness {
             None
         };
         let peer_context = PeerPublicationContext {
+            message_acceptance,
             publisher,
             suppress_debug: self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref()),
             extension: extension.map(|entry| AuthenticatedExtensionPublication {
@@ -3658,6 +3705,15 @@ impl Harness {
         };
 
         let Some(event) = next_event else {
+            if let Some(pending) = source.peer_context.message_acceptance.as_deref() {
+                self.finish_message_acceptance(
+                    pending,
+                    tau_proto::MessageAcceptanceOutcome::Rejected {
+                        reason: "canonical message publication was discarded before commit"
+                            .to_owned(),
+                    },
+                );
+            }
             if let Some(appended) = passive_context_append.as_ref() {
                 self.passive_context_append_result(
                     appended,

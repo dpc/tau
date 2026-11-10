@@ -6,6 +6,13 @@ harness stamps the authenticated extension's stable configured publisher ID
 and publishes the corresponding immutable durable `message.*` fact. It does not
 own transport registration, admission, routing, reply authority, or send
 completion.
+For an opt-in directed canonical acceptance request, the harness authenticates,
+validates, and stamps the incoming message before submitting its sole canonical
+fact through the same ordinary publication path. It publishes no raw report.
+Retained identity is folded from that fact and shares its asynchronous crash-loss
+risk; the private
+result acknowledges semantic acceptance, not filesystem durability or execution.
+It neither provisions recipients nor changes the default report path.
 The exact shared behavior is specified by
 [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md);
 the underlying publication contract is

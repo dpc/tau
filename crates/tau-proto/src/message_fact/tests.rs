@@ -1282,6 +1282,7 @@ fn publisher_id_grammar_is_bounded_ascii() {
 fn telegram_and_xmpp_fit_delivered_schema() {
     for fact in [
         MessageDelivered {
+            idempotent_acceptance: false,
             links: None,
             reply_context: None,
             mention_evidence: None,
@@ -1305,6 +1306,7 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             extension_data: MessageExtensionData::default(),
         },
         MessageDelivered {
+            idempotent_acceptance: false,
             links: None,
             reply_context: None,
             mention_evidence: None,

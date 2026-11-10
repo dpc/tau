@@ -43,6 +43,8 @@ mod inspection;
 mod intercept_decision;
 mod logging;
 mod manual_runtime;
+mod message_acceptance;
+pub use message_acceptance::MessageAcceptanceClient;
 mod output_cost;
 mod peer_output;
 mod protocol_io;

@@ -223,6 +223,10 @@ impl MessageAgentTarget {
 /// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageDelivered<Publisher = MessagePublisherId> {
+    /// Harness-owned retained-history idempotency marker. Ordinary reports do
+    /// not acquire idempotency by setting this field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent_acceptance: bool,
     /// Raw report claim or harness-stamped canonical publisher identity.
     pub publisher_extension_id: Publisher,
     /// Raw claimed Tau transcript target.
@@ -268,6 +272,7 @@ impl<Publisher> MessageDelivered<Publisher> {
         text: impl Into<String>,
     ) -> Self {
         Self {
+            idempotent_acceptance: false,
             publisher_extension_id,
             agent_id,
             message_id,
@@ -282,12 +287,14 @@ impl<Publisher> MessageDelivered<Publisher> {
         }
     }
 
-    /// Replace the publisher field while preserving the report payload exactly.
+    /// Replace the publisher while preserving semantic content. Clear the
+    /// harness-owned acceptance marker so ordinary reports cannot opt into it.
     pub fn with_publisher<Canonical>(
         self,
         publisher_extension_id: Canonical,
     ) -> MessageDelivered<Canonical> {
         MessageDelivered {
+            idempotent_acceptance: false,
             publisher_extension_id,
             agent_id: self.agent_id,
             message_id: self.message_id,

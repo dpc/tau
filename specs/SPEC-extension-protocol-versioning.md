@@ -8,6 +8,13 @@ extension-visible event behavior.
 
 ## Revision scope
 
+Protocol 23.2 adds directed opt-in message acceptance and an optional canonical
+idempotency marker. SDK 0.30.0 sends the new request only when Configure advertises
+23.2 or later in major 23. Older peers ignore the optional fact field and continue
+ordinary message behavior; newer callers refuse unsupported runtimes locally,
+without falling back to reports. This minor additive revision does not publish the
+SDK or activate a runtime.
+
 Protocol 23.1 adds optional updated-item identities to discovery deliveries.
 Older peers ignore the markers; newer peers default their absence to an empty
 list. Mixed versions retain workable discovery behavior without changing journal

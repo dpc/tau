@@ -51,6 +51,14 @@ impl AgentTree {
         }
 
         if event.name().category() == &tau_proto::EventCategory::Message {
+            if let Event::MessageDelivered(message) = event
+                && message.idempotent_acceptance
+            {
+                charge = charge
+                    .saturating_add(map_growth(&self.indexes.accepted_messages, 1))
+                    .saturating_add(owned_value(&message.publisher_extension_id))
+                    .saturating_add(owned_value(&message.message_id));
+            }
             charge = charge.saturating_add(message_projection_charge(event));
             charge = charge.saturating_add(self.context_allocation_charge(
                 self.head,

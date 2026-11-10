@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Protocol 23.2 / source SDK 0.30.0 add directed canonical message acceptance.
+Configured bridges explicitly opt in; ordinary reports remain unchanged. An
+optional canonical marker provides replay-derived idempotency without a durability
+acknowledgement. The SDK withholds the new request from unsupported runtimes.
+See [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
 Injected-user presentation uses a harness-selected optional `SemanticEnvelope`
 on trusted spans and their context parts. Missing fields retain historical
 internal framing; configured extensions cannot assert span authority. Optional

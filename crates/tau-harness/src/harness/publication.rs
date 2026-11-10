@@ -2356,6 +2356,23 @@ impl Harness {
         sync_head_for: Option<ConversationHeadSync>,
         owners: interception::PublicationOutcomeOwners,
     ) {
+        if let Some(pending) = peer_context.message_acceptance.as_deref() {
+            if !self.admit_message_acceptance(pending, &event) {
+                return;
+            }
+            let accepted_event = event.clone();
+            if self.commit_message_fact(source, event) {
+                self.complete_message_acceptance(pending, &accepted_event);
+            } else {
+                self.finish_message_acceptance(
+                    pending,
+                    tau_proto::MessageAcceptanceOutcome::Rejected {
+                        reason: "canonical message admission failed".to_owned(),
+                    },
+                );
+            }
+            return;
+        }
         let passive = match &event {
             Event::AgentPassiveContextAppended(appended) => {
                 if !self.admit_passive_context_commit(appended) {

@@ -1,5 +1,11 @@
 # ARCH-tau-client: tau-client architecture
 
+`MessageAcceptanceClient` uses the existing bounded detached writer and leaves
+correlated replies in the manual receive loop. It checks Configure protocol
+support before sending and never falls back to ordinary report emission. Only the
+directed accepted result establishes canonical input ownership; a lost result leaves
+its outcome unknown. Acceptance does not promise filesystem durability.
+
 `BridgeReceiverClient` shares the bounded detached writer and leaves correlated
 results in the manual receive loop. Shared opt-in config and versioned snapshot
 types do not own storage, retries or designation changes. Each bridge serializes

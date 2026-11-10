@@ -335,6 +335,9 @@ struct AgentTreeIndexes {
     /// Publisher-scoped passive operations, retained independently of history
     /// cache residency and rebuilt from every accepted journal occurrence.
     passive_context_operations: HashMap<(tau_proto::ExtensionName, String), blake3::Hash>,
+    /// Opt-in incoming message identity retained independently of node caches.
+    accepted_messages:
+        HashMap<message_acceptance::AcceptedMessageKey, message_acceptance::AcceptedMessage>,
     /// Producing model from canonical prompt/boundary facts, never item JSON.
     provider_models_by_node: HashMap<NodeId, tau_proto::ModelId>,
     /// Materialized provider-context input nodes keyed by journal occurrence.
@@ -3220,6 +3223,9 @@ impl AgentTree {
             tau_proto::project_message_fact(&record.event)
                 .and_then(Result::ok)
                 .and_then(|projection| {
+                    if let Event::MessageDelivered(message) = &record.event {
+                        self.record_message_acceptance(message, record.seq);
+                    }
                     self.record_message_fact(self.head, Box::new(projection.item), record.seq)
                 })
         } else {
@@ -8127,6 +8133,7 @@ pub struct SessionMeta {
 }
 
 mod fold_allocation;
+mod message_acceptance;
 mod response_continuation;
 #[cfg(test)]
 mod tests;

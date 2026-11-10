@@ -1703,6 +1703,9 @@ pub enum HarnessInputMessage {
     ExtensionDataRequest(ExtensionDataRequest),
     /// Private ordinary receiver selection for configured message bridges.
     BridgeReceiverRequest(crate::BridgeReceiverRequest),
+    /// Opt-in canonical acceptance with retained-history message ID
+    /// deduplication.
+    MessageAcceptanceRequest(Box<crate::MessageAcceptanceRequest>),
     /// Directed shared original-byte artifact transfer, never a journal event.
     ArtifactRequest(crate::ArtifactRequest),
     /// Local CLI ingress without peer callback authentication.
@@ -1741,6 +1744,8 @@ impl HarnessInputMessage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "message", content = "payload", rename_all = "snake_case")]
 pub enum HarnessOutputMessage {
+    /// Directed completion of an opt-in canonical message acceptance attempt.
+    MessageAcceptanceResult(crate::MessageAcceptanceResult),
     Configure(Configure),
     SessionAccepted(SessionAccepted),
     Disconnect(Disconnect),

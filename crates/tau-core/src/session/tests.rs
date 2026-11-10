@@ -6,6 +6,7 @@ mod compaction_guards;
 mod cross_model_recovery;
 mod discovery_context;
 mod fold_allocation;
+mod message_acceptance;
 mod partial_provider_error;
 mod tool_output;
 
